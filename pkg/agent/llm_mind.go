@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.comcom/google/uuid"
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/pkg/config"
