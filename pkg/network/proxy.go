@@ -1,4 +1,4 @@
-// pkg/network/proxy.go
+// -- pkg/network/proxy.go --
 package network
 
 import (
@@ -19,6 +19,9 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 )
 
+// Global lock for protecting global goproxy state modification.
+var mitmConfigMutex sync.Mutex
+
 // RequestHandler defines the signature for functions that inspect or modify requests.
 type RequestHandler func(*http.Request, *goproxy.ProxyCtx) (*http.Request, *http.Response)
 
@@ -29,6 +32,7 @@ type ResponseHandler func(*http.Response, *goproxy.ProxyCtx) *http.Response
 type InterceptionProxy struct {
 	proxy         *goproxy.ProxyHttpServer
 	server        *http.Server
+	serverMutex   sync.Mutex // Add mutex for server state management
 	clientConfig  *ClientConfig
 	requestHooks  []RequestHandler
 	responseHooks []ResponseHandler
@@ -41,18 +45,15 @@ func NewInterceptionProxy(caCert, caKey []byte, clientConfig *ClientConfig, logg
 	proxy := goproxy.NewProxyHttpServer()
 
 	if logger == nil {
-		// Fallback to the standardized Nop logger.
 		logger = observability.NewNopLogger()
 	}
 	log := logger.Named("interception_proxy")
 
 	if clientConfig == nil {
 		clientConfig = NewDefaultClientConfig()
-		// Defaulting to ignore TLS errors is appropriate for security proxies analyzing upstream traffic.
 		clientConfig.IgnoreTLSErrors = true
 		log.Info("Using default client config with IgnoreTLSErrors enabled for upstream connections.")
 	}
-	// Ensure the proxy uses our robust, standardized HTTP transport for upstream connections.
 	proxy.Tr = NewHTTPTransport(clientConfig)
 
 	if caCert != nil && caKey != nil {
@@ -91,58 +92,47 @@ func (ip *InterceptionProxy) AddResponseHook(handler ResponseHandler) {
 
 // setupHandlers configures the core interception logic.
 func (ip *InterceptionProxy) setupHandlers() {
-	// Handle CONNECT requests (used for HTTPS).
 	ip.proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-		// Check if the global CA is configured.
 		if goproxy.GoproxyCa.PrivateKey != nil {
-			// If we have a CA key, perform MITM.
 			return goproxy.MitmConnect, host
 		}
-		// Otherwise, tunnel the traffic (no interception of TLS content).
 		return goproxy.OkConnect, host
 	})
 
-	// Request interception point (HTTP and decrypted HTTPS).
 	ip.proxy.OnRequest().DoFunc(ip.handleRequest)
-
-	// Response interception point.
 	ip.proxy.OnResponse().DoFunc(ip.handleResponse)
 }
 
 // handleRequest processes the incoming request through the registered hooks.
 func (ip *InterceptionProxy) handleRequest(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 	ip.logger.Debug("Proxy intercepted request", zap.String("method", r.Method), zap.String("url", r.URL.String()))
-	
-	// Use RLock for concurrent access to hooks.
+
+	// Acquire RLock just long enough to copy the slice reference.
 	ip.hooksMutex.RLock()
-	defer ip.hooksMutex.RUnlock()
+	hooks := ip.requestHooks
+	ip.hooksMutex.RUnlock()
 
 	currentReq := r
-	for _, hook := range ip.requestHooks {
+	for _, hook := range hooks {
 		newReq, resp := hook(currentReq, ctx)
-		
-		// If a hook returns a response, the request processing is short-circuited.
+
 		if resp != nil {
 			ip.logger.Debug("Request short-circuited by hook", zap.String("url", r.URL.String()))
 			return newReq, resp
 		}
-		
-		// Robustness check. A hook must return a valid request if it doesn't return a response.
+
 		if newReq == nil {
 			ip.logger.Error("Request hook returned nil request without a response, breaking chain", zap.String("url", r.URL.String()))
-			// Return an error response to the client.
 			return currentReq, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusInternalServerError, "Proxy error: request hook malfunction")
 		}
 		currentReq = newReq
 	}
 
-	// Proceed with the (potentially modified) request to the upstream server.
 	return currentReq, nil
 }
 
 // handleResponse processes the upstream response through the registered hooks.
 func (ip *InterceptionProxy) handleResponse(r *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
-	// Handle cases where upstream fails to respond (e.g., connection error, timeout).
 	if r == nil {
 		errorMsg := "unknown error"
 		if ctx.Error != nil {
@@ -156,10 +146,8 @@ func (ip *InterceptionProxy) handleResponse(r *http.Response, ctx *goproxy.Proxy
 
 		ip.logger.Warn("Proxy received nil response from upstream", zap.String("url", reqURL), zap.Error(ctx.Error))
 
-		// Robustness Fix: If ctx.Req is nil (which can happen in edge cases), goproxy.NewResponse may panic.
 		if ctx.Req == nil {
 			ip.logger.Error("Critical proxy error: ctx.Req is nil during upstream failure handling.")
-			// Constructing a minimal response manually as a last resort to prevent a crash and inform the client.
 			return &http.Response{
 				StatusCode: http.StatusBadGateway,
 				ProtoMajor: 1,
@@ -168,12 +156,10 @@ func (ip *InterceptionProxy) handleResponse(r *http.Response, ctx *goproxy.Proxy
 				Body:       io.NopCloser(bytes.NewBufferString(fmt.Sprintf("Proxy error: upstream connection failed and request context lost: %v", errorMsg))),
 			}
 		}
-		
-		// We must return an error response to the client, not nil.
+
 		return goproxy.NewResponse(ctx.Req, goproxy.ContentTypeText, http.StatusBadGateway, fmt.Sprintf("Proxy error: upstream connection failed: %v", errorMsg))
 	}
 
-	// Determine the request URL safely for logging.
 	reqURL := "unknown"
 	if ctx.Req != nil && ctx.Req.URL != nil {
 		reqURL = ctx.Req.URL.String()
@@ -184,16 +170,15 @@ func (ip *InterceptionProxy) handleResponse(r *http.Response, ctx *goproxy.Proxy
 	ip.logger.Debug("Proxy received response", zap.Int("status", r.StatusCode), zap.String("url", reqURL))
 
 	ip.hooksMutex.RLock()
-	defer ip.hooksMutex.RUnlock()
+	hooks := ip.responseHooks
+	ip.hooksMutex.RUnlock()
 
 	currentResp := r
-	for _, hook := range ip.responseHooks {
+	for _, hook := range hooks {
 		currentResp = hook(currentResp, ctx)
-		
-		// Robustness check. A hook must return a valid response.
+
 		if currentResp == nil {
 			ip.logger.Error("Response hook returned nil response, breaking chain", zap.String("url", reqURL))
-			// Return the original response rather than potentially crashing the proxy or returning nil downstream.
 			return r
 		}
 	}
@@ -204,19 +189,31 @@ func (ip *InterceptionProxy) handleResponse(r *http.Response, ctx *goproxy.Proxy
 func (ip *InterceptionProxy) Start(addr string) error {
 	ip.logger.Info("Starting interception proxy", zap.String("address", addr))
 
-	// Configuring timeouts on the HTTP server prevents resource exhaustion (e.g., Slowloris defense).
-	ip.server = &http.Server{
+	ip.serverMutex.Lock()
+	if ip.server != nil {
+		ip.serverMutex.Unlock()
+		return errors.New("proxy server already started")
+	}
+
+	server := &http.Server{
 		Addr:         addr,
 		Handler:      ip.proxy,
 		ReadTimeout:  30 * time.Second,
 		WriteTimeout: 60 * time.Second,
 		IdleTimeout:  120 * time.Second,
-		// Pass the Zap logger to the underlying HTTP server for internal error logging.
 		ErrorLog:     zap.NewStdLog(ip.logger.Named("http_server")),
 	}
+	ip.server = server
+	ip.serverMutex.Unlock()
 
-	err := ip.server.ListenAndServe()
-	// http.ErrServerClosed is expected during graceful shutdown.
+	err := server.ListenAndServe()
+
+	ip.serverMutex.Lock()
+	if ip.server == server {
+		ip.server = nil
+	}
+	ip.serverMutex.Unlock()
+
 	if err != nil && !errors.Is(err, http.ErrServerClosed) {
 		ip.logger.Error("Proxy server error", zap.Error(err))
 		return fmt.Errorf("proxy server failed: %w", err)
@@ -228,16 +225,25 @@ func (ip *InterceptionProxy) Start(addr string) error {
 
 // Stop gracefully shuts down the proxy server.
 func (ip *InterceptionProxy) Stop(ctx context.Context) error {
-	if ip.server == nil {
-		return errors.New("proxy server not started")
+	ip.serverMutex.Lock()
+	server := ip.server
+	ip.serverMutex.Unlock()
+
+	if server == nil {
+		return errors.New("proxy server not started or already stopped")
 	}
 	ip.logger.Info("Stopping interception proxy...")
-	return ip.server.Shutdown(ctx)
+	return server.Shutdown(ctx)
 }
 
 // configureMITM sets up the certificate authority for the proxy.
-// Note: This modifies global state within the goproxy library.
+// CRITICAL: This function modifies global state within the goproxy library.
+// Due to library limitations, only one MITM CA configuration can be active per Go process.
+// Calling this function overrides any previous configuration globally.
 func configureMITM(caCert, caKey []byte) error {
+	mitmConfigMutex.Lock()
+	defer mitmConfigMutex.Unlock()
+
 	ca, err := tls.X509KeyPair(caCert, caKey)
 	if err != nil {
 		return fmt.Errorf("invalid CA certificate/key pair: %w", err)
@@ -249,9 +255,7 @@ func configureMITM(caCert, caKey []byte) error {
 		return fmt.Errorf("failed to parse CA certificate leaf: %w", err)
 	}
 
-	// The library requires setting this global variable.
 	goproxy.GoproxyCa = ca
-	// Configure the connection actions explicitly for robustness.
 	tlsConfig := goproxy.TLSConfigFromCA(&ca)
 	goproxy.OkConnect = &goproxy.ConnectAction{Action: goproxy.ConnectAccept, TLSConfig: tlsConfig}
 	goproxy.MitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: tlsConfig}

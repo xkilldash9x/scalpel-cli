@@ -1,9 +1,11 @@
-// -- pkg/observability/logging.go --
+// -- pkg/observability/logger.go --
 package observability
 
 import (
+	"fmt"
 	"os"
 	"sync"
+	"sync/atomic" // Import atomic
 
 	"github.com/xkilldash9x/scalpel-cli/pkg/config"
 	"go.uber.org/zap"
@@ -12,8 +14,9 @@ import (
 )
 
 var (
-	logger *zap.Logger
-	once   sync.Once
+	// Use an atomic pointer for safe concurrent access
+	globalLogger atomic.Pointer[zap.Logger]
+	once         sync.Once
 )
 
 // InitializeLogger sets up the global Zap logger based on the configuration.
@@ -47,7 +50,9 @@ func InitializeLogger(cfg config.LoggerConfig) {
 			options = append(options, zap.AddCaller())
 		}
 
-		logger = zap.New(core, options...).Named(cfg.ServiceName)
+		logger := zap.New(core, options...).Named(cfg.ServiceName)
+		globalLogger.Store(logger) // Atomic store
+
 		zap.ReplaceGlobals(logger)
 		zap.RedirectStdLog(logger)
 	})
@@ -67,8 +72,14 @@ func getEncoder(format string) zapcore.Encoder {
 
 // GetLogger returns the initialized global logger instance.
 func GetLogger() *zap.Logger {
+	logger := globalLogger.Load() // Atomic load
 	if logger == nil {
-		l, _ := zap.NewDevelopment()
+		// Fallback mechanism
+		l, err := zap.NewDevelopment()
+		if err != nil {
+			// Return NewNop() to prevent panic if development logger fails
+			return zap.NewNop()
+		}
 		return l.Named("fallback")
 	}
 	return logger
@@ -76,7 +87,12 @@ func GetLogger() *zap.Logger {
 
 // Sync flushes any buffered log entries.
 func Sync() {
+	logger := globalLogger.Load() // Atomic load
 	if logger != nil {
-		_ = logger.Sync()
+		// Error is commonly ignored during shutdown, but log to stderr if critical.
+		if err := logger.Sync(); err != nil {
+			// Cannot rely on the logger itself, so print to stderr.
+			fmt.Fprintln(os.Stderr, "Error: failed to sync logger:", err)
+		}
 	}
 }

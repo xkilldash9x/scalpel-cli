@@ -1,3 +1,4 @@
+// -- pkg/reporting/sarif/sarif.go --
 package sarif
 
 // This file defines the Go structs for the SARIF 2.1.0 standard.
@@ -26,7 +27,7 @@ type ToolComponent struct {
 }
 
 type ReportingDescriptor struct {
-	ID               *string                   `json:"id"`
+	ID               string                    `json:"id"` // Required, changed to value type
 	Name             *string                   `json:"name,omitempty"`
 	ShortDescription *MultiformatMessageString `json:"shortDescription,omitempty"`
 	FullDescription  *MultiformatMessageString `json:"fullDescription,omitempty"`
@@ -35,7 +36,7 @@ type ReportingDescriptor struct {
 }
 
 type Result struct {
-	RuleID    *string     `json:"ruleId"`
+	RuleID    string      `json:"ruleId"` // Required, changed to value type
 	Message   *Message    `json:"message"`
 	Level     Level       `json:"level,omitempty"`
 	Locations []*Location `json:"locations,omitempty"`

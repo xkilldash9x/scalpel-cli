@@ -13,10 +13,11 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.uber.org/zap"
+
 	"github.com/xkilldash9x/scalpel-cli/pkg/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/pkg/browser"
 	"github.com/xkilldash9x/scalpel-cli/pkg/schemas"
-	"go.uber.org/zap"
 )
 
 // JWTAnalyzer implements the core.Analyzer interface for static analysis of JWTs.
@@ -47,17 +48,24 @@ func (a *JWTAnalyzer) Analyze(ctx context.Context, analysisCtx *core.AnalysisCon
 
 	// Use a map to track analyzed tokens to avoid redundancy.
 	analyzedTokens := make(map[string]bool)
+	// Use a map to track requests that have already been processed with their response.
+	processedRequests := make(map[*http.Request]bool)
 
-	// 1. Analyze HTTP Requests
-	for _, req := range analysisCtx.Artifacts.Requests {
-		a.extractAndAnalyze(analysisCtx, req, nil, analyzedTokens)
-	}
-
-	// 2. Analyze HTTP Responses
+	// 1. Analyze HTTP Responses and their associated Requests together.
+	// This ensures we process a request and its response in a single pass.
 	for _, resp := range analysisCtx.Artifacts.Responses {
-		// Ensure the request context is available for the response.
 		if resp.Request != nil {
 			a.extractAndAnalyze(analysisCtx, resp.Request, resp, analyzedTokens)
+			processedRequests[resp.Request] = true // Mark this request as handled.
+		}
+	}
+
+	// 2. Analyze any remaining HTTP Requests that did not have a response.
+	// This handles cases like requests that timed out or are still in-flight.
+	for _, req := range analysisCtx.Artifacts.Requests {
+		if !processedRequests[req] {
+			// The response is nil here, which is correctly handled by extractAndAnalyze.
+			a.extractAndAnalyze(analysisCtx, req, nil, analyzedTokens)
 		}
 	}
 
@@ -81,30 +89,22 @@ func (a *JWTAnalyzer) extractAndAnalyze(analysisCtx *core.AnalysisContext, req *
 
 	// C. Request Body
 	if req.Body != nil {
-		// Handle JSON bodies specifically for robust extraction
-		if strings.Contains(req.Header.Get("Content-Type"), "application/json") {
-			bodyBytes, err := io.ReadAll(req.Body)
-			if err == nil {
+		// REFACTORED: Read body once to prevent consuming it prematurely.
+		bodyBytes, err := io.ReadAll(req.Body)
+		if err != nil {
+			a.logger.Warn("Could not read request body", zap.Error(err), zap.String("url", targetURL))
+		}
+		// Restore the body so other analyzers can read it.
+		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
+		if len(bodyBytes) > 0 {
+			if strings.Contains(req.Header.Get("Content-Type"), "application/json") {
 				extractFromJSONBody(bodyBytes, tokens, "Request Body")
-			}
-		} else {
-			// Fallback for other body types (e.g., form data)
-			if req.GetBody != nil {
-				bodyReader, err := req.GetBody()
-				if err != nil {
-					a.logger.Warn("Could not get request body handle", zap.Error(err), zap.String("url", targetURL))
-				} else {
-					defer bodyReader.Close()
-					bodyBytes, err := io.ReadAll(bodyReader)
-					if err != nil {
-						a.logger.Warn("Could not read request body content", zap.Error(err), zap.String("url", targetURL))
-					} else if len(bodyBytes) > 0 {
-						// Optimization: Use FindAll on bytes directly (avoids string conversion)
-						byteMatches := jwtRegex.FindAll(bodyBytes, -1)
-						for _, match := range byteMatches {
-							tokens[string(match)] = "Request Body"
-						}
-					}
+			} else {
+				// Fallback for other body types (e.g., form data)
+				byteMatches := jwtRegex.FindAll(bodyBytes, -1)
+				for _, match := range byteMatches {
+					tokens[string(match)] = "Request Body"
 				}
 			}
 		}
@@ -197,7 +197,6 @@ func extractFromJSONBody(body []byte, tokens map[string]string, location string)
 				tokens[str] = location
 			}
 		}
-		// decoder.Token() naturally streams through nested structures.
 	}
 }
 
@@ -209,16 +208,23 @@ func (a *JWTAnalyzer) reportFinding(analysisCtx *core.AnalysisContext, targetURL
 		"severity":     finding.Severity,
 	}
 
-	evidence, _ := json.Marshal(evidenceData)
+	evidence, err := json.Marshal(evidenceData)
+	if err != nil {
+		a.logger.Error("Failed to marshal JWT evidence", zap.Error(err))
+		evidence = []byte(fmt.Sprintf(`{"error": "failed to marshal evidence: %v"}`, err))
+	}
 
-	// Determine CWE based on the finding type
-	cwe := "CWE-345" // Insufficient Verification of Data Authenticity
-	if strings.Contains(finding.Description, "alg: none") {
+	// Determine CWE based on the finding type in a robust way
+	var cwe string
+	switch finding.Type {
+	case AlgNoneVulnerability:
 		cwe = "CWE-347" // Improper Verification of Cryptographic Signature
-	} else if strings.Contains(finding.Description, "Weak secret") {
+	case WeakSecretVulnerability:
 		cwe = "CWE-326" // Inadequate Encryption Strength
-	} else if strings.Contains(finding.Description, "sensitive information") {
+	case SensitiveInfoExposure:
 		cwe = "CWE-200" // Exposure of Sensitive Information
+	default:
+		cwe = "CWE-345" // Insufficient Verification of Data Authenticity
 	}
 
 	schemaFinding := schemas.Finding{
@@ -227,7 +233,7 @@ func (a *JWTAnalyzer) reportFinding(analysisCtx *core.AnalysisContext, targetURL
 		Target:         targetURL,
 		Module:         a.Name(),
 		Vulnerability:  "JWT Misconfiguration",
-		Severity:       string(finding.Severity),
+		Severity:       schemas.Severity(finding.Severity),
 		Description:    finding.Description,
 		Evidence:       evidence,
 		Recommendation: "Review JWT implementation: enforce strong algorithms (e.g., RS256), use strong secrets, ensure expiration is set, and avoid including sensitive data in claims.",
