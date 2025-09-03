@@ -102,8 +102,9 @@ Follow these steps to get the `scalpel-cli` scanner up and running.
 
 Clone the repository and build the binary:
 
-```bash
+
 # Clone the repository
+```bash
 git clone [https://github.com/xkilldash9x/scalpel-cli.git](https://github.com/xkilldash9x/scalpel-cli.git)
 cd scalpel-cli
 # Tidy dependencies and build the executable
