@@ -12,13 +12,12 @@ This tool is intended for educational purposes and for use in authorized securit
 
 ## Table of Contents
 
-- [Key Features](#key-features-)
-- [Architecture Overview](#architecture-overview-%FF%FF%FF)
-- [Technology Stack](#technology-stack-)
-- [Getting Started](#getting-started-)
-- [Usage](#usage-)
-- [License](#license-)
-
+- [Key Features](#key-features)
+- [Architecture Overview](#architecture-overview)
+- [Technology Stack](#technology-stack)
+- [Getting Started](#getting-started)
+- [Usage](#usage)
+- [License](#license)
 ---
 
 ## Key Features 
