@@ -1,5 +1,5 @@
-// pkg/browser/cdp/discovery.go
-package cdp
+// pkg/browser/discovery.go
+package browser
 
 import (
 	"context"

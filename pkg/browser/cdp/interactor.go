@@ -1,5 +1,5 @@
-// pkg/browser/cdp/interactor.go
-package cdp
+// pkg/browser/interactor.go
+package browser
 
 import (
 	"context"

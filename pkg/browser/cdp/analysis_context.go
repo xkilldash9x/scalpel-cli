@@ -1,5 +1,5 @@
-// pkg/browser/cdp/analysis_context.go
-package cdp
+// pkg/browser/analysis_context.go
+package browser
 
 import (
 	"context"

@@ -1,4 +1,4 @@
-/ File:         pkg/llmclient/router.go
+// File:         pkg/llmclient/router.go
 // Description:  This file introduces the LLMRouter, which intelligently dispatches
 //               requests to different LLM clients based on the requested capability tier.
 //
