@@ -152,8 +152,9 @@ The primary command is `scan`, which runs the full discovery and analysis pipeli
 
 ```sh
 ./scalpel-cli scan [target...] [flags]
+```
 **Flags**
-
+```
 * `-c, --config`: Path to a custom config file (e.g., `config.local.yaml`).
 * `-o, --output`: File to write the final report to (default: `stdout`).
 * `-f, --format`: Output format (`sarif`, `json`, `text`).
