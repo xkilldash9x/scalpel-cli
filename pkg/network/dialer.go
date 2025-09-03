@@ -1,4 +1,4 @@
-// pkg/network/dialer.go
+// -- pkg/network/dialer.go --
 package network
 
 import (
@@ -44,8 +44,9 @@ func NewDialerConfig() *DialerConfig {
 	}
 }
 
-// DialContext is the project standard function for creating secure and resilient TCP connections manually.
-func DialContext(ctx context.Context, network, address string, config *DialerConfig) (net.Conn, error) {
+// DialTCPContext establishes a raw TCP connection and applies standardized configurations.
+// It does NOT handle TLS upgrades. This is suitable for use in http.Transport.DialContext.
+func DialTCPContext(ctx context.Context, network, address string, config *DialerConfig) (net.Conn, error) {
 	if config == nil {
 		config = NewDialerConfig()
 	}
@@ -60,6 +61,7 @@ func DialContext(ctx context.Context, network, address string, config *DialerCon
 	// Step 1: Establish the raw TCP connection.
 	rawConn, err := dialer.DialContext(ctx, network, address)
 	if err != nil {
+		// We wrap here for clarity, although http.Transport often adds its own context.
 		return nil, fmt.Errorf("tcp dial failed: %w", err)
 	}
 
@@ -67,9 +69,26 @@ func DialContext(ctx context.Context, network, address string, config *DialerCon
 	if tcpConn, ok := rawConn.(*net.TCPConn); ok {
 		if err := configureTCP(tcpConn, config); err != nil {
 			// Ensure no connection leak if configuration fails.
-			tcpConn.Close()
+			_ = tcpConn.Close()
 			return nil, err
 		}
+	}
+	return rawConn, nil
+}
+
+// DialContext is the project standard function for creating secure and resilient connections manually.
+// It now uses DialTCPContext internally.
+func DialContext(ctx context.Context, network, address string, config *DialerConfig) (net.Conn, error) {
+	// Establish and configure the raw TCP connection.
+	rawConn, err := DialTCPContext(ctx, network, address, config)
+	if err != nil {
+		// Error is already wrapped by DialTCPContext.
+		return nil, err
+	}
+
+	// Defense in depth: ensure config is not nil for the TLS check.
+	if config == nil {
+		config = NewDialerConfig()
 	}
 
 	// Step 3: Handle TLS upgrade if configured.
@@ -91,7 +110,7 @@ func configureTCP(conn *net.TCPConn, config *DialerConfig) error {
 			return fmt.Errorf("failed to set keep-alive period: %w", err)
 		}
 	}
-	
+
 	// Disabling Nagle's algorithm (SetNoDelay) when requested.
 	if config.ForceNoDelay {
 		if err := conn.SetNoDelay(true); err != nil {
@@ -122,7 +141,7 @@ func wrapTLS(ctx context.Context, conn net.Conn, address string, config *DialerC
 	defer cancel()
 
 	if err := tlsConn.HandshakeContext(handshakeCtx); err != nil {
-		conn.Close() // Close the underlying connection on handshake failure.
+		_ = conn.Close() // Close the underlying connection on handshake failure.
 		return nil, fmt.Errorf("tls handshake failed: %w", err)
 	}
 	return tlsConn, nil

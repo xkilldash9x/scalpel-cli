@@ -3,6 +3,7 @@ package results
 
 import (
 	"encoding/json"
+	"io"
 	"time"
 )
 
@@ -29,11 +30,16 @@ func GenerateReport(findings []PrioritizedFinding, scanID string) (*Report, erro
 	}, nil
 }
 
-// ToJSON converts the report to a JSON string.
-func (r *Report) ToJSON() (string, error) {
-	b, err := json.MarshalIndent(r, "", "  ")
-	if err != nil {
-		return "", err
-	}
-	return string(b), nil
+// REFACTORED (Performance): WriteJSON streams the report to an io.Writer.
+// This is significantly more memory-efficient for large reports than marshaling to a string.
+func (r *Report) WriteJSON(w io.Writer) error {
+	encoder := json.NewEncoder(w)
+	encoder.SetIndent("", "  ")
+	return encoder.Encode(r)
+}
+
+// ToJSONBytes marshals the report to a byte slice. Use this when the full
+// payload must be held in memory.
+func (r *Report) ToJSONBytes() ([]byte, error) {
+	return json.MarshalIndent(r, "", "  ")
 }

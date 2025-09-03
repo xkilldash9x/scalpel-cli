@@ -32,23 +32,32 @@ func New(cfg *config.Config, logger *zap.Logger) (*Orchestrator, error) {
 // It now returns the unique scanID for reporting purposes.
 func (o *Orchestrator) StartScan(ctx context.Context, targets []string) (string, error) {
 	scanID := uuid.New().String()
+
+	// Create a derived context for this specific scan execution.
+	scanCtx, cancelScan := context.WithCancel(ctx)
+	defer cancelScan() // Ensure cancellation happens when StartScan exits for any reason.
+
 	o.logger.Info("Initializing services for scan", zap.Strings("targets", targets), zap.String("scanID", scanID))
 
 	// Initialize Store (PostgreSQL)
-	storeService, err := store.New(ctx, o.cfg.Postgres.URL, o.logger)
+	storeService, err := store.New(scanCtx, o.cfg.Postgres.URL, o.logger)
 	if err != nil {
 		return scanID, fmt.Errorf("failed to initialize store: %w", err)
 	}
-	defer storeService.Close()
+	defer func() {
+		if err := storeService.Close(); err != nil {
+			o.logger.Error("Failed to close store service cleanly", zap.Error(err))
+		}
+	}()
 
 	// Initialize Knowledge Graph (PostgreSQL-backed)
-	kg, err := knowledgegraph.NewPostgresKG(ctx, storeService.GetPool(), o.logger)
+	kg, err := knowledgegraph.NewPostgresKG(scanCtx, storeService.GetPool(), o.logger)
 	if err != nil {
 		return scanID, fmt.Errorf("failed to initialize knowledge graph: %w", err)
 	}
 
 	// Initialize Browser Manager
-	browserManager, err := browser.NewManager(ctx, o.logger, o.cfg)
+	browserManager, err := browser.NewManager(scanCtx, o.logger, o.cfg)
 	if err != nil {
 		return scanID, fmt.Errorf("failed to initialize browser manager: %w", err)
 	}
@@ -66,30 +75,25 @@ func (o *Orchestrator) StartScan(ctx context.Context, targets []string) (string,
 		return scanID, fmt.Errorf("failed to initialize task engine: %w", err)
 	}
 
-	// Start Engine Workers
-	var wg sync.WaitGroup
-	wg.Add(1)
-	go func() {
-		defer wg.Done()
-		taskEngine.Start(ctx)
-		<-ctx.Done() // Wait for cancellation signal
-		taskEngine.Stop()
-	}()
-
 	// Initialize Discovery Engine
 	discoveryEngine, err := discovery.New(o.cfg, taskEngine, browserManager, kg, o.logger)
 	if err != nil {
 		return scanID, fmt.Errorf("failed to initialize discovery engine: %w", err)
 	}
+	
+	// 1. Start Engine Workers (launches background workers and returns immediately)
+	taskEngine.Start(scanCtx)
 
-	// Start Discovery, passing the scanID down
-	if err := discoveryEngine.Start(ctx, targets, scanID); err != nil {
-		return scanID, fmt.Errorf("discovery phase failed: %w", err)
+	// 2. Start Discovery (This blocks until discovery is complete)
+	discoveryErr := discoveryEngine.Start(scanCtx, targets, scanID)
+
+	// 3. Discovery is finished. Signal the engine to stop and wait for it to drain.
+	o.logger.Info("Discovery phase ended, waiting for task engine to drain...")
+	taskEngine.Stop() // Stop signals workers to stop and blocks until drained.
+
+	if discoveryErr != nil {
+		return scanID, fmt.Errorf("discovery phase failed: %w", discoveryErr)
 	}
-
-	// Wait for engine to finish processing all tasks
-	o.logger.Info("Discovery complete, waiting for task engine to drain...")
-	wg.Wait()
 
 	o.logger.Info("Orchestration complete.", zap.String("scanID", scanID))
 	return scanID, nil

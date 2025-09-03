@@ -1,4 +1,4 @@
-// pkg/network/httpclient.go
+// -- pkg/network/httpclient.go --
 package network
 
 import (
@@ -9,8 +9,8 @@ import (
 	"net/url"
 	"time"
 
-	"golang.org/x/net/http2"
 	"go.uber.org/zap"
+	"golang.org/x/net/http2"
 
 	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 )
@@ -38,10 +38,11 @@ type ClientConfig struct {
 
 	// Timeout settings
 	RequestTimeout        time.Duration // Overall client timeout
-	DialTimeout           time.Duration
-	KeepAliveInterval     time.Duration
 	TLSHandshakeTimeout   time.Duration
 	ResponseHeaderTimeout time.Duration
+
+	// Dialer configuration (TCP Layer) - Centralized configuration
+	DialerConfig *DialerConfig
 
 	// Connection pool settings
 	MaxIdleConns        int
@@ -50,8 +51,8 @@ type ClientConfig struct {
 	IdleConnTimeout     time.Duration
 
 	// Protocol settings
-	ForceHTTP2        bool
-	DisableKeepAlives bool
+	ForceHTTP2         bool
+	DisableKeepAlives  bool
 	DisableCompression bool
 
 	// Proxy settings
@@ -63,11 +64,17 @@ type ClientConfig struct {
 
 // NewDefaultClientConfig creates a configuration optimized for general-purpose scanning.
 func NewDefaultClientConfig() *ClientConfig {
+	// Configure the standardized dialer with HTTP-specific defaults
+	dialerCfg := NewDialerConfig()
+	dialerCfg.Timeout = DefaultDialTimeout
+	dialerCfg.KeepAlive = DefaultKeepAliveInterval
+	// Crucial: Enable ForceNoDelay (TCP_NODELAY) by default for HTTP clients to reduce latency.
+	dialerCfg.ForceNoDelay = true
+
 	return &ClientConfig{
+		DialerConfig:          dialerCfg,
 		IgnoreTLSErrors:       false,
 		RequestTimeout:        DefaultRequestTimeout,
-		DialTimeout:           DefaultDialTimeout,
-		KeepAliveInterval:     DefaultKeepAliveInterval,
 		TLSHandshakeTimeout:   DefaultTLSHandshakeTimeout,
 		ResponseHeaderTimeout: DefaultResponseHeaderTimeout,
 		MaxIdleConns:          DefaultMaxIdleConns,
@@ -87,25 +94,35 @@ func NewHTTPTransport(config *ClientConfig) *http.Transport {
 		config = NewDefaultClientConfig()
 	}
 
-	// 1. Configure the Dialer (TCP Layer)
-	dialer := &net.Dialer{
-		Timeout:   config.DialTimeout,
-		KeepAlive: config.KeepAliveInterval,
-		// Enable dual-stack (IPv4/IPv6) with Happy Eyeballs (RFC 8305) for faster connection establishment.
-		FallbackDelay: 300 * time.Millisecond,
+	// Ensure logger is never nil
+	if config.Logger == nil {
+		config.Logger = observability.NewNopLogger()
 	}
 
-	// 2. Configure TLS (Security Layer)
+	// Ensure DialerConfig is initialized
+	if config.DialerConfig == nil {
+		config.DialerConfig = NewDefaultClientConfig().DialerConfig
+	}
+
+	// 1. Configure TLS (Security Layer)
 	tlsConfig := configureTLS(config)
+
+	// 2. Prepare the Dialer Configuration for the Transport
+	// We make a shallow copy of the DialerConfig to safely modify it for the transport's needs.
+	transportDialerConfig := *config.DialerConfig
+	// Crucial: Ensure TLSConfig is nil for DialTCPContext.
+	// The HTTP transport handles the TLS layer itself using the tlsConfig variable above.
+	transportDialerConfig.TLSConfig = nil
 
 	// 3. Configure HTTP Transport (Application Layer)
 	transport := &http.Transport{
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return dialer.DialContext(ctx, network, addr)
+			// Use the standardized, optimized TCP dialer function.
+			return DialTCPContext(ctx, network, addr, &transportDialerConfig)
 		},
 		TLSClientConfig:     tlsConfig,
 		TLSHandshakeTimeout: config.TLSHandshakeTimeout,
-		
+
 		// Connection Pooling and Management
 		MaxIdleConns:        config.MaxIdleConns,
 		MaxIdleConnsPerHost: config.MaxIdleConnsPerHost,
@@ -127,17 +144,15 @@ func NewHTTPTransport(config *ClientConfig) *http.Transport {
 
 	// 4. Explicitly configure HTTP/2 if enabled
 	if config.ForceHTTP2 {
-		// Attempt to configure H2 transport. 
 		if err := http2.ConfigureTransport(transport); err != nil {
-			// If configuration fails, log it and proceed (graceful fallback to H1.1).
 			config.Logger.Warn("Failed to configure HTTP/2 transport, falling back to HTTP/1.1", zap.Error(err))
 		}
 	} else {
-        // If H2 is disabled, ensure ALPN only advertises HTTP/1.1 if NextProtos hasn't been customized.
-        if len(tlsConfig.NextProtos) == 0 {
-            tlsConfig.NextProtos = []string{"http/1.1"}
-        }
-    }
+		// If H2 is disabled, ensure ALPN only advertises HTTP/1.1 if NextProtos hasn't been customized.
+		if len(tlsConfig.NextProtos) == 0 {
+			tlsConfig.NextProtos = []string{"http/1.1"}
+		}
+	}
 
 	return transport
 }
@@ -147,7 +162,7 @@ func NewClient(config *ClientConfig) *http.Client {
 	if config == nil {
 		config = NewDefaultClientConfig()
 	}
-	
+
 	transport := NewHTTPTransport(config)
 
 	client := &http.Client{
@@ -183,13 +198,14 @@ func configureTLS(config *ClientConfig) *tls.Config {
 				tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
 				tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
 			},
-			// Optimization: Cache TLS session tickets for resumption
-			ClientSessionCache: tls.NewLRUClientSessionCache(64),
+			// Optimization: Cache TLS session tickets for resumption.
+			// Increased size for high-volume scanning workloads.
+			ClientSessionCache: tls.NewLRUClientSessionCache(512),
 		}
 	}
-	
+
 	// Apply the override for TLS verification.
 	tlsConfig.InsecureSkipVerify = config.IgnoreTLSErrors
-	
+
 	return tlsConfig
 }

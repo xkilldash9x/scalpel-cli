@@ -1,10 +1,11 @@
+// -- pkg/reporting/sarif_reporter.go --
 package reporting
 
 import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"strings" // Added missing import
+	"strings"
 	"sync"
 
 	"github.com/xkilldash9x/scalpel-cli/pkg/reporting/sarif"
@@ -13,9 +14,10 @@ import (
 
 // SARIFReporter implements the Reporter interface for the SARIF 2.1.0 format.
 type SARIFReporter struct {
-	writer io.WriteCloser
-	log    *sarif.Log
-	mu     sync.Mutex
+	writer    io.WriteCloser
+	log       *sarif.Log
+	mu        sync.Mutex
+	rulesSeen map[string]struct{} // Add cache for rule IDs
 }
 
 // NewSARIFReporter creates a new reporter that writes SARIF output.
@@ -43,8 +45,9 @@ func NewSARIFReporter(writer io.WriteCloser) *SARIFReporter {
 	}
 
 	return &SARIFReporter{
-		writer: writer,
-		log:    log,
+		writer:    writer,
+		log:       log,
+		rulesSeen: make(map[string]struct{}), // Initialize the cache
 	}
 }
 
@@ -61,9 +64,9 @@ func (r *SARIFReporter) Write(result *schemas.ResultEnvelope) error {
 
 		// Create string pointers for fields that require them
 		descPtr := &finding.Description
-		
+
 		sarifResult := &sarif.Result{
-			RuleID:    &ruleID,
+			RuleID:    ruleID, // Use value type directly
 			Message:   &sarif.Message{Text: descPtr},
 			Level:     sarif.Level(mapSeverityToSARIFLevel(finding.Severity)),
 			Locations: r.createLocations(finding),
@@ -80,42 +83,49 @@ func (r *SARIFReporter) Close() error {
 	defer r.mu.Unlock()
 
 	encoder := json.NewEncoder(r.writer)
-	encoder.SetIndent("", "  ") // Pretty-print the JSON output.
-	if err := encoder.Encode(r.log); err != nil {
-		return err
+	encoder.SetIndent("", "  ")
+
+	encodeErr := encoder.Encode(r.log)
+	// Always attempt to close the writer.
+	closeErr := r.writer.Close()
+
+	if encodeErr != nil {
+		// Prioritize the encoding error.
+		return encodeErr
 	}
-	return r.writer.Close()
+
+	return closeErr
 }
 
 // ensureRule checks if a rule for the finding's vulnerability type already exists.
+// NOTE: Must be called while holding the mutex.
 func (r *SARIFReporter) ensureRule(finding schemas.Finding) string {
-	// Assuming there's only one run.
-	driver := r.log.Runs[0].Tool.Driver
-
 	// Use a sanitized version of the vulnerability name as the rule ID.
 	ruleID := "SCALPEL-" + strings.ToUpper(strings.ReplaceAll(finding.Vulnerability, " ", "-"))
 
-	for _, rule := range driver.Rules {
-		if *rule.ID == ruleID {
-			return ruleID // Rule already exists.
-		}
+	// O(1) Lookup
+	if _, exists := r.rulesSeen[ruleID]; exists {
+		return ruleID
 	}
+
+	// Assuming there's only one run.
+	driver := r.log.Runs[0].Tool.Driver
 
 	// Create pointers for string fields
 	vulnPtr := &finding.Vulnerability
 	recPtr := &finding.Recommendation
-	
+
 	// Create a new rule.
 	newRule := &sarif.ReportingDescriptor{
-		ID:               &ruleID,
+		ID:               ruleID, // Use value type directly
 		Name:             vulnPtr,
 		ShortDescription: &sarif.MultiformatMessageString{Text: vulnPtr},
 		FullDescription:  &sarif.MultiformatMessageString{Text: recPtr},
 		Help: &sarif.MultiformatMessageString{
 			Text: recPtr,
-			Markdown: func() *string { 
+			Markdown: func() *string {
 				s := fmt.Sprintf("**Recommendation:**\n%s", finding.Recommendation)
-				return &s 
+				return &s
 			}(),
 		},
 		Properties: &sarif.PropertyBag{
@@ -125,13 +135,15 @@ func (r *SARIFReporter) ensureRule(finding schemas.Finding) string {
 		},
 	}
 	driver.Rules = append(driver.Rules, newRule)
+	r.rulesSeen[ruleID] = struct{}{} // Add to cache
 	return ruleID
 }
 
 // createLocations converts finding details into SARIF location objects.
 func (r *SARIFReporter) createLocations(finding schemas.Finding) []*sarif.Location {
 	uriPtr := &finding.Target
-	msgPtr := fmt.Sprintf("Vulnerability found at %s", finding.Target)
+	msgText := fmt.Sprintf("Vulnerability found at %s", finding.Target)
+	msgPtr := &msgText
 
 	location := &sarif.Location{
 		PhysicalLocation: &sarif.PhysicalLocation{
@@ -140,7 +152,7 @@ func (r *SARIFReporter) createLocations(finding schemas.Finding) []*sarif.Locati
 			},
 		},
 		Message: &sarif.Message{
-			Text: &msgPtr,
+			Text: msgPtr,
 		},
 	}
 	// Correctly return a slice of pointers to location
@@ -148,8 +160,8 @@ func (r *SARIFReporter) createLocations(finding schemas.Finding) []*sarif.Locati
 }
 
 // mapSeverityToSARIFLevel converts Scalpel's severity to the SARIF standard.
-func mapSeverityToSARIFLevel(severity string) string {
-	switch strings.ToLower(severity) {
+func mapSeverityToSARIFLevel(severity schemas.Severity) string {
+	switch strings.ToLower(string(severity)) {
 	case "critical":
 		return "error"
 	case "high":

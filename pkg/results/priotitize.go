@@ -9,24 +9,25 @@ type PrioritizedFinding struct {
 	Score float64
 }
 
-// Prioritize scores and sorts findings based on their attributes.
-func Prioritize(findings []NormalizedFinding) []PrioritizedFinding {
+// REFACTORED (Architecture): ScoreConfig holds the injectable parameters for scoring findings.
+type ScoreConfig struct {
+	SeverityWeights        map[string]float64
+	ConfirmedBonusMultiplier float64
+}
+
+// Prioritize scores and sorts findings based on the provided configuration.
+// REFACTORED: The function now accepts a ScoreConfig struct for flexibility and testability.
+func Prioritize(findings []NormalizedFinding, config ScoreConfig) []PrioritizedFinding {
 	prioritized := make([]PrioritizedFinding, len(findings))
 
-	severityScores := map[string]float64{
-		"Critical": 100.0,
-		"High":     80.0,
-		"Medium":   50.0,
-		"Low":      20.0,
-		"Info":     5.0,
-	}
-
 	for i, f := range findings {
-		score := severityScores[f.Severity]
+		// Use the injected severity weights. Default to 0 if severity is unknown.
+		score := config.SeverityWeights[f.Severity]
 
-		// Add bonus points for confirmed findings (e.g., from taint analysis).
-		if strings.Contains(f.Description, "[CONFIRMED EXECUTION]") {
-			score *= 1.5
+		// REFACTORED (Architecture): Use the structured 'IsConfirmed' field instead of string matching.
+		if f.IsConfirmed {
+			// Use the injected multiplier.
+			score *= config.ConfirmedBonusMultiplier
 		}
 
 		prioritized[i] = PrioritizedFinding{
@@ -35,8 +36,9 @@ func Prioritize(findings []NormalizedFinding) []PrioritizedFinding {
 		}
 	}
 
-	// Sort findings from highest score to lowest.
-	sort.Slice(prioritized, func(i, j int) bool {
+	// REFACTORED (Readability/Determinism): Use a stable sort to ensure consistent ordering
+	// for findings with the same score.
+	sort.SliceStable(prioritized, func(i, j int) bool {
 		return prioritized[i].Score > prioritized[j].Score
 	})
 

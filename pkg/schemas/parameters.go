@@ -1,6 +1,8 @@
 // -- pkg/schemas/parameters.go --
 package schemas
 
+import "net/http"
+
 // This file defines the specific parameter structures for each task type.
 // Using distinct structs provides compile-time type safety and code clarity.
 
@@ -35,9 +37,10 @@ type IDORTaskParams struct {
 	// The HTTP method of the request to be tested (e.g., "GET", "POST").
 	HTTPMethod string `json:"http_method"`
 	// The request body, if any.
-	HTTPBody string `json:"http_body,omitempty"`
+	HTTPBody []byte `json:"http_body,omitempty"`
 	// A map of HTTP headers representing an authenticated session.
-	HTTPHeaders map[string]string `json:"http_headers"`
+	// http.Header correctly handles multiple values per key.
+	HTTPHeaders http.Header `json:"http_headers"`
 }
 
 // JWTTaskParams defines the parameters for a TaskAnalyzeJWT.
@@ -53,7 +56,7 @@ type RaceConditionTaskParams struct {
 	// The HTTP method of the request to be tested.
 	HTTPMethod string `json:"http_method"`
 	// The request body.
-	HTTPBody string `json:"http_body,omitempty"`
+	HTTPBody []byte `json:"http_body,omitempty"`
 	// The number of concurrent requests to send.
 	Concurrency int `json:"concurrency"`
 }

@@ -41,91 +41,73 @@ const (
 
 // Task defines the unit of work to be performed by a worker.
 type Task struct {
-	ScanID     string      `json:"scan_id"` // CRITICAL FIX: Added to track which scan this task belongs to.
+	// ScanID identifies the overall scan operation this task belongs to.
+	ScanID     string      `json:"scan_id"`
 	TaskID     string      `json:"task_id"`
 	Type       TaskType    `json:"type"`
 	TargetURL  string      `json:"target_url"`
 	Parameters interface{} `json:"parameters,omitempty"`
 }
 
-// UnmarshalJSON provides custom deserialization logic for the Task struct,
-// enabling the 'Parameters' field to be unmarshalled into the correct concrete struct
-// based on the 'Type' field.
+// paramsFactory is a function type that returns a pointer to a new instance of a parameter struct.
+type paramsFactory func() interface{}
+
+// paramsRegistry maps TaskTypes to their corresponding factory functions.
+// This centralizes the mapping and enables dynamic unmarshalling.
+var paramsRegistry = map[TaskType]paramsFactory{
+	TaskAgentMission:          func() interface{} { return &AgentMissionParams{} },
+	TaskAnalyzeWebPageTaint:   func() interface{} { return &TaintTaskParams{} },
+	TaskAnalyzeWebPageProtoPP: func() interface{} { return &ProtoPollutionTaskParams{} },
+	TaskTestAuthATO:           func() interface{} { return &ATOTaskParams{} },
+	TaskTestAuthIDOR:          func() interface{} { return &IDORTaskParams{} },
+	TaskAnalyzeJWT:            func() interface{} { return &JWTTaskParams{} },
+	TaskTestRaceCondition:     func() interface{} { return &RaceConditionTaskParams{} },
+	TaskAnalyzeHeaders:        func() interface{} { return &HeadersTaskParams{} },
+}
+
+// UnmarshalJSON provides custom deserialization logic for the Task struct.
 func (t *Task) UnmarshalJSON(data []byte) error {
-	// Step 1: Unmarshal into a temporary struct to read the 'type' field.
-	type temporaryTask struct {
-		ScanID     string          `json:"scan_id"`
-		TaskID     string          `json:"task_id"`
-		Type       TaskType        `json:"type"`
-		TargetURL  string          `json:"target_url"`
-		Parameters json.RawMessage `json:"parameters"`
+	// Step 1: Use an optimized technique to avoid recursion and boilerplate.
+	// Define an Alias of the Task type.
+	type TaskAlias Task
+	// Define an auxiliary struct that embeds a pointer to the alias (*TaskAlias)
+	// and overrides the Parameters field to capture it as json.RawMessage.
+	aux := struct {
+		*TaskAlias
+		Parameters json.RawMessage `json:"parameters,omitempty"`
+	}{
+		TaskAlias: (*TaskAlias)(t), // Point the embedded field to the receiver 't'.
 	}
 
-	var temp temporaryTask
-	if err := json.Unmarshal(data, &temp); err != nil {
-		return fmt.Errorf("failed to unmarshal temporary task: %w", err)
+	// Unmarshal the data. This populates 't' directly (via the embedded pointer)
+	// and captures the raw parameters, eliminating the need for manual field copying.
+	if err := json.Unmarshal(data, &aux); err != nil {
+		return fmt.Errorf("failed to unmarshal base task structure: %w", err)
 	}
 
-	// Step 2: Assign the known fields to the main struct.
-	t.ScanID = temp.ScanID
-	t.TaskID = temp.TaskID
-	t.Type = temp.Type
-	t.TargetURL = temp.TargetURL
-
-	// Step 3: Switch on the task type to unmarshal parameters into the correct struct.
-	switch t.Type {
-	case TaskAgentMission:
-		var params AgentMissionParams
-		if err := json.Unmarshal(temp.Parameters, &params); err != nil {
-			return fmt.Errorf("unmarshalling AgentMissionParams: %w", err)
-		}
-		t.Parameters = params
-	case TaskAnalyzeWebPageTaint:
-		var params TaintTaskParams
-		if err := json.Unmarshal(temp.Parameters, &params); err != nil {
-			return fmt.Errorf("unmarshalling TaintTaskParams: %w", err)
-		}
-		t.Parameters = params
-	case TaskAnalyzeWebPageProtoPP:
-		var params ProtoPollutionTaskParams
-		if err := json.Unmarshal(temp.Parameters, &params); err != nil {
-			return fmt.Errorf("unmarshalling ProtoPollutionTaskParams: %w", err)
-		}
-		t.Parameters = params
-	case TaskTestAuthATO:
-		var params ATOTaskParams
-		if err := json.Unmarshal(temp.Parameters, &params); err != nil {
-			return fmt.Errorf("unmarshalling ATOTaskParams: %w", err)
-		}
-		t.Parameters = params
-	case TaskTestAuthIDOR:
-		var params IDORTaskParams
-		if err := json.Unmarshal(temp.Parameters, &params); err != nil {
-			return fmt.Errorf("unmarshalling IDORTaskParams: %w", err)
-		}
-		t.Parameters = params
-	case TaskAnalyzeJWT:
-		var params JWTTaskParams
-		if err := json.Unmarshal(temp.Parameters, &params); err != nil {
-			return fmt.Errorf("unmarshalling JWTTaskParams: %w", err)
-		}
-		t.Parameters = params
-	case TaskTestRaceCondition:
-		var params RaceConditionTaskParams
-		if err := json.Unmarshal(temp.Parameters, &params); err != nil {
-			return fmt.Errorf("unmarshalling RaceConditionTaskParams: %w", err)
-		}
-		t.Parameters = params
-	case TaskAnalyzeHeaders:
-		var params HeadersTaskParams
-		if err := json.Unmarshal(temp.Parameters, &params); err != nil {
-			return fmt.Errorf("unmarshalling HeadersTaskParams: %w", err)
-		}
-		t.Parameters = params
-	default:
-		// If the type is unknown or has no parameters, leave them as nil.
-		t.Parameters = nil
+	// Step 2: Handle cases where parameters are missing or explicitly null.
+	if len(aux.Parameters) == 0 || string(aux.Parameters) == "null" {
+		// No parameters provided. t.Parameters remains nil.
+		return nil
 	}
+
+	// Step 3: Use the registry to find the constructor for the specific TaskType.
+	factory, ok := paramsRegistry[t.Type]
+	if !ok {
+		// Error Handling: Fail fast if the task type is unknown.
+		return fmt.Errorf("unknown or unsupported task type encountered: %s", t.Type)
+	}
+
+	// Step 4: Create the parameter struct instance (as a pointer) and unmarshal.
+	params := factory()
+	if err := json.Unmarshal(aux.Parameters, params); err != nil {
+		// Provide specific context about which type failed.
+		return fmt.Errorf("failed to unmarshal parameters for task type %s: %w", t.Type, err)
+	}
+
+	// Step 5: Assign the pointer to the interface field.
+	// This is efficient (no boxing/copying).
+	t.Parameters = params
 
 	return nil
 }
@@ -164,16 +146,18 @@ type KGUpdates struct {
 
 // KGNode represents an entity for serialization.
 type KGNode struct {
-	ID         string                 `json:"id"`
-	Type       string                 `json:"type"`
-	Properties map[string]interface{} `json:"properties"`
+	ID   string `json:"id"`
+	Type string `json:"type"`
+	// Use RawMessage to defer parsing of dynamic properties.
+	Properties json.RawMessage `json:"properties"`
 }
 
 // KGEdge represents a relationship between two nodes for serialization.
 type KGEdge struct {
-	SourceID     string                 `json:"source_id"`
-	TargetID     string                 `json:"target_id"`
-	Relationship string                 `json:"relationship"`
-	Properties   map[string]interface{} `json:"properties"`
-	Timestamp    time.Time              `json:"timestamp"`
+	SourceID     string `json:"source_id"`
+	TargetID     string `json:"target_id"`
+	Relationship string `json:"relationship"`
+	// Use RawMessage to defer parsing of dynamic properties.
+	Properties json.RawMessage `json:"properties"`
+	Timestamp  time.Time       `json:"timestamp"`
 }

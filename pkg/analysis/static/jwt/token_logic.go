@@ -10,6 +10,22 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/pkg/analysis/core"
 )
 
+// FindingType defines the specific kind of JWT vulnerability found.
+type FindingType int
+
+const (
+	// UnknownFinding is a default or unknown finding type
+	UnknownFinding FindingType = iota
+	// AlgNoneVulnerability indicates the token uses the 'none' algorithm.
+	AlgNoneVulnerability
+	// WeakSecretVulnerability indicates a weak, guessable secret was used for the signature.
+	WeakSecretVulnerability
+	// SensitiveInfoExposure indicates sensitive keywords were found in the claims.
+	SensitiveInfoExposure
+	// MissingExpiration indicates the 'exp' claim is not present.
+	MissingExpiration
+)
+
 // TokenAnalysisResult holds the results of analyzing a single JWT.
 type TokenAnalysisResult struct {
 	TokenString string
@@ -20,6 +36,7 @@ type TokenAnalysisResult struct {
 
 // Finding describes a specific security issue found in a JWT.
 type Finding struct {
+	Type        FindingType // Use the new type here
 	Description string
 	Severity    core.SeverityLevel
 }
@@ -63,6 +80,7 @@ func AnalyzeToken(tokenString string, bruteForceEnabled bool) (TokenAnalysisResu
 	alg, algOk := result.Header["alg"].(string)
 	if algOk && strings.EqualFold(alg, "none") {
 		result.Findings = append(result.Findings, Finding{
+			Type:        AlgNoneVulnerability,
 			Description: "JWT uses 'alg: none'. This allows an attacker to forge valid tokens by bypassing signature verification.",
 			Severity:    core.SeverityCritical,
 		})
@@ -71,6 +89,7 @@ func AnalyzeToken(tokenString string, bruteForceEnabled bool) (TokenAnalysisResu
 	// 3. Check for sensitive information in claims (Heuristic).
 	if containsSensitiveData(result.Claims) {
 		result.Findings = append(result.Findings, Finding{
+			Type:        SensitiveInfoExposure,
 			Description: "JWT payload contains potentially sensitive information (based on claim keywords). JWTs are typically only encoded, not encrypted.",
 			Severity:    core.SeverityMedium,
 		})
@@ -79,6 +98,7 @@ func AnalyzeToken(tokenString string, bruteForceEnabled bool) (TokenAnalysisResu
 	// 4. Check for missing expiration (exp claim).
 	if _, exists := result.Claims["exp"]; !exists {
 		result.Findings = append(result.Findings, Finding{
+			Type:        MissingExpiration,
 			Description: "JWT does not have an expiration time ('exp' claim). Tokens should have a limited lifetime.",
 			Severity:    core.SeverityLow,
 		})
@@ -89,6 +109,7 @@ func AnalyzeToken(tokenString string, bruteForceEnabled bool) (TokenAnalysisResu
 		if strings.HasPrefix(alg, "HS") { // HS256, HS384, HS512
 			if secret := bruteForceSecret(tokenString); secret != "" {
 				result.Findings = append(result.Findings, Finding{
+					Type:        WeakSecretVulnerability,
 					Description: fmt.Sprintf("Weak secret found: '%s'. The token signature is valid using this common secret.", secret),
 					Severity:    core.SeverityHigh,
 				})
