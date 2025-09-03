@@ -1,0 +1,204 @@
+// pkg/config/config.go
+package config
+
+import (
+	"fmt"
+	"strings"
+	"sync"
+	"time"
+
+	"github.com/spf13/viper"
+)
+
+var (
+	instance *Config
+	once     sync.Once
+)
+
+// Config is the root configuration structure for the entire application.
+type Config struct {
+	Logger   LoggerConfig   `mapstructure:"logger"`
+	Postgres PostgresConfig `mapstructure:"postgres"`
+	Engine   EngineConfig   `mapstructure:"engine"`
+	Browser  BrowserConfig  `mapstructure:"browser"`
+	Network  NetworkConfig  `mapstructure:"network"`
+	Scanners ScannersConfig `mapstructure:"scanners"`
+	Scan     ScanConfig     `mapstructure:"scan"`
+	Agent    AgentConfig    `mapstructure:"agent"`
+}
+
+// LoggerConfig holds settings for the logging system.
+type LoggerConfig struct {
+	ServiceName string `mapstructure:"service_name"`
+	LogFile     string `mapstructure:"log_file"`
+	Level       string `mapstructure:"level"`
+	Format      string `mapstructure:"format"`
+	AddSource   bool   `mapstructure:"add_source"`
+	MaxSize     int    `mapstructure:"max_size"`
+	MaxBackups  int    `mapstructure:"max_backups"`
+	MaxAge      int    `mapstructure:"max_age"`
+	Compress    bool   `mapstructure:"compress"`
+}
+
+// PostgresConfig holds settings for the database connection.
+type PostgresConfig struct {
+	URL string `mapstructure:"url"`
+}
+
+// EngineConfig holds settings for the task execution engine.
+type EngineConfig struct {
+	QueueSize          int           `mapstructure:"queue_size"`
+	WorkerConcurrency  int           `mapstructure:"worker_concurrency"`
+	DefaultTaskTimeout time.Duration `mapstructure:"default_task_timeout"`
+}
+
+// BrowserConfig holds settings for the headless browser.
+type BrowserConfig struct {
+	Headless        bool             `mapstructure:"headless"`
+	IgnoreTLSErrors bool             `mapstructure:"ignore_tls_errors"`
+	Args            []string         `mapstructure:"args"`
+	Viewport        map[string]int   `mapstructure:"viewport"`
+	DisableCache    bool             `mapstructure:"disable_cache"`
+}
+
+// NetworkConfig holds settings for HTTP requests.
+type NetworkConfig struct {
+	Timeout      time.Duration     `mapstructure:"timeout"`
+	PostLoadWait time.Duration     `mapstructure:"post_load_wait"`
+	Headers      map[string]string `mapstructure:"headers"`
+}
+
+// ScannersConfig holds settings for all analysis modules.
+type ScannersConfig struct {
+	Passive PassiveScannersConfig `mapstructure:"passive"`
+	Static  StaticScannersConfig  `mapstructure:"static"`
+	Active  ActiveScannersConfig  `mapstructure:"active"`
+}
+
+// PassiveScannersConfig holds settings for passive analysis.
+type PassiveScannersConfig struct {
+	Headers HeadersConfig `mapstructure:"headers"`
+}
+type HeadersConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+}
+
+// StaticScannersConfig holds settings for static analysis.
+type StaticScannersConfig struct {
+	JWT JWTConfig `mapstructure:"jwt"`
+}
+type JWTConfig struct {
+	Enabled           bool     `mapstructure:"enabled"`
+	KnownSecrets      []string `mapstructure:"known_secrets"`
+	BruteForceEnabled bool     `mapstructure:"brute_force_enabled"`
+	DictionaryFile    string   `mapstructure:"dictionary_file"`
+}
+
+// ActiveScannersConfig holds settings for active analysis.
+type ActiveScannersConfig struct {
+	Taint          TaintConfig          `mapstructure:"taint"`
+	ProtoPollution ProtoPollutionConfig `mapstructure:"protopollution"`
+	TimeSlip       TimeSlipConfig       `mapstructure:"timeslip"`
+	Auth           AuthConfig           `mapstructure:"auth"`
+}
+
+type TaintConfig struct {
+	Enabled     bool `mapstructure:"enabled"`
+	Depth       int  `mapstructure:"depth"`
+	Concurrency int  `mapstructure:"concurrency"`
+}
+
+type ProtoPollutionConfig struct {
+	Enabled bool `mapstructure:"enabled"`
+}
+
+type TimeSlipConfig struct {
+	Enabled        bool `mapstructure:"enabled"`
+	RequestCount   int  `mapstructure:"request_count"`
+	MaxConcurrency int  `mapstructure:"max_concurrency"`
+	ThresholdMs    int  `mapstructure:"threshold_ms"`
+}
+
+type AuthConfig struct {
+	ATO  ATOConfig  `mapstructure:"ato"`
+	IDOR IDORConfig `mapstructure:"idor"`
+}
+
+type ATOConfig struct {
+	Enabled               bool     `mapstructure:"enabled"`
+	UsernameFields        []string `mapstructure:"username_fields"`
+	PasswordFields        []string `mapstructure:"password_fields"`
+	UsernameWordlist      string   `mapstructure:"username_wordlist"`
+	PasswordSprayWordlist string   `mapstructure:"password_spray_wordlist"`
+	SuccessRegex          string   `mapstructure:"success_regex"`
+	FailureRegex          string   `mapstructure:"failure_regex"`
+	LockoutRegex          string   `mapstructure:"lockout_regex"`
+	DelayBetweenAttemptsMs int      `mapstructure:"delay_between_attempts_ms"`
+}
+
+type IDORConfig struct {
+	Enabled        bool                `mapstructure:"enabled"`
+	IgnoreList     []string            `mapstructure:"ignore_list"`
+	TestStrategies map[string][]string `mapstructure:"test_strategies"`
+}
+
+// ScanConfig holds settings specific to a scan execution (populated by CLI flags).
+type ScanConfig struct {
+	Targets     []string
+	Output      string
+	Format      string
+	Concurrency int
+	Depth       int
+	Scope       string
+}
+
+// AgentConfig holds settings for the autonomous agent.
+type AgentConfig struct {
+	Enabled bool      `mapstructure:"enabled"`
+	LLM     LLMConfig `mapstructure:"llm"`
+}
+
+// LLMProvider defines the supported LLM providers.
+type LLMProvider string
+
+const (
+	ProviderGemini LLMProvider = "gemini"
+	ProviderOpenAI LLMProvider = "openai"
+)
+
+// LLMConfig holds settings for the Language Model integration.
+type LLMConfig struct {
+	Provider      LLMProvider       `mapstructure:"provider"`
+	Model         string            `mapstructure:"model"`
+	APIKey        string            `mapstructure:"api_key"`
+	APITimeout    time.Duration     `mapstructure:"api_timeout"`
+	Temperature   float64           `mapstructure:"temperature"`
+	TopP          float64           `mapstructure:"top_p"`
+	TopK          int               `mapstructure:"top_k"`
+	MaxTokens     int               `mapstructure:"max_tokens"`
+	SafetyFilters map[string]string `mapstructure:"safety_filters"`
+}
+
+// Load initializes the configuration singleton from Viper.
+func Load(v *viper.Viper) error {
+	var loadErr error
+	once.Do(func() {
+		var cfg Config
+		if err := v.Unmarshal(&cfg); err != nil {
+			loadErr = fmt.Errorf("error unmarshaling config: %w", err)
+			return
+		}
+		instance = &cfg
+	})
+	return loadErr
+}
+
+// Get returns the loaded configuration instance.
+func Get() *Config {
+	if instance == nil {
+		// This can happen if Get() is called before the root command's PersistentPreRunE.
+		// We can panic here because it's a programmer error.
+		panic("Configuration not initialized. Call config.Load() in the root command.")
+	}
+	return instance
+}

@@ -1,0 +1,138 @@
+// pkg/analysis/active/timeslip/oracle.go
+package timeslip
+
+import (
+	"bytes"
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"regexp"
+)
+
+// SuccessOracle determines if a response indicates a successful operation based on configuration.
+type SuccessOracle struct {
+	config    *Config
+	isGraphQL bool
+}
+
+// NewSuccessOracle initializes the oracle with the validated configuration.
+func NewSuccessOracle(config *Config, isGraphQL bool) (*SuccessOracle, error) {
+	// Compile regexes during initialization for performance.
+	if config.Success.BodyRegex != "" {
+		rx, err := regexp.Compile(config.Success.BodyRegex)
+		if err != nil {
+			return nil, fmt.Errorf("invalid BodyRegex: %w", err)
+		}
+		config.Success.bodyRx = rx
+	}
+
+	if config.Success.HeaderRegex != "" {
+		rx, err := regexp.Compile(config.Success.HeaderRegex)
+		if err != nil {
+			return nil, fmt.Errorf("invalid HeaderRegex: %w", err)
+		}
+		config.Success.headerRx = rx
+	}
+
+	return &SuccessOracle{
+		config:    config,
+		isGraphQL: isGraphQL,
+	}, nil
+}
+
+// IsSuccess evaluates the RaceResponse against the configured success conditions.
+func (o *SuccessOracle) IsSuccess(resp *RaceResponse) bool {
+	if resp.Error != nil || resp.ParsedResponse == nil {
+		return false
+	}
+
+	// 1. Check HTTP Status Code.
+	if !o.checkStatusCode(resp.StatusCode) {
+		return false
+	}
+
+	// 2. Check Body Regex.
+	if o.config.Success.bodyRx != nil {
+		if !o.config.Success.bodyRx.Match(resp.SpecificBody) {
+			return false
+		}
+	}
+
+	// 3. Check Header Regex.
+	if o.config.Success.headerRx != nil {
+		if !o.checkHeaderRegex(resp.Headers) {
+			return false
+		}
+	}
+
+	// 4. If GraphQL, check application-layer success (even if HTTP status is 200 OK).
+	if o.isGraphQL {
+		if !isGraphQLSpecSuccess(resp.SpecificBody) {
+			return false
+		}
+	}
+
+	// If all configured checks pass, it's a success.
+	return true
+}
+
+func (o *SuccessOracle) checkStatusCode(statusCode int) bool {
+	configuredCodes := o.config.Success.StatusCodes
+	if len(configuredCodes) > 0 {
+		for _, code := range configuredCodes {
+			if statusCode == code {
+				return true
+			}
+		}
+		return false
+	}
+
+	// Default behavior if no codes are configured (2xx and 3xx).
+	// Note: For GraphQL, 200 OK is standard transport, but we rely on isGraphQLSpecSuccess for operation success.
+	return (statusCode >= 200 && statusCode < 400)
+}
+
+func (o *SuccessOracle) checkHeaderRegex(headers http.Header) bool {
+	rx := o.config.Success.headerRx
+	if rx == nil {
+		return true
+	}
+
+	// Must match at least one header line (Key: Value).
+	for key, values := range headers {
+		for _, value := range values {
+			headerLine := fmt.Sprintf("%s: %s", key, value)
+			if rx.MatchString(headerLine) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// isGraphQLSpecSuccess analyzes a GraphQL response body according to the spec (absence of "errors" key).
+func isGraphQLSpecSuccess(responseBody []byte) bool {
+	// Ensure it's a JSON object before attempting to parse.
+	trimmedBody := bytes.TrimSpace(responseBody)
+	if len(trimmedBody) == 0 || trimmedBody[0] != '{' {
+		// If it's not a JSON object, it might not be a standard GraphQL response, rely on other indicators.
+		// However, if we expect GraphQL, a non-JSON object is usually a failure.
+		return false
+	}
+
+	// We only need to parse the top-level structure to check for the "errors" key.
+	var gqlResp struct {
+		// Use RawMessage to avoid parsing the potentially complex structure.
+		Errors json.RawMessage `json:"errors"`
+	}
+
+	if err := json.Unmarshal(responseBody, &gqlResp); err != nil {
+		// If we can't parse it as a GraphQL response object, assume failure.
+		return false
+	}
+
+	// Success criteria: The "errors" key must be absent or explicitly null.
+	hasErrors := len(gqlResp.Errors) > 0 && string(gqlResp.Errors) != "null"
+
+	return !hasErrors
+}
