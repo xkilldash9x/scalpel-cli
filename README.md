@@ -35,7 +35,6 @@ This tool is intended for educational purposes and for use in authorized securit
 * **Professional Reporting:** Generates reports in standard formats like SARIF.
 
 ---
-
 ## Architecture Overview 
 
 Scalpel is built on a modular, event-driven architecture that separates concerns for scalability and maintainability.
@@ -72,7 +71,7 @@ graph TD
     D <--> F
 
 
-**Orchestrator:** The top-level component that initializes all services and manages the scan lifecycle.
+1. **Orchestrator:** The top-level component that initializes all services and manages the scan lifecycle.
 2.  **Task Engine:** A worker pool that processes analysis tasks concurrently.
 3.  **Knowledge Graph:** A central PostgreSQL-backed graph that stores all discovered assets and their relationships.
 4.  **Browser Manager:** Manages a pool of headless browser instances, applying stealth and instrumentation.
@@ -87,7 +86,7 @@ graph TD
 * **Rod**: Used for browser automation and management.
 * **Mermaid**: For rendering diagrams in documentation.
 * **Gemini / OpenAI**: Pluggable LLM providers for the AI Agent.
----
+
 ---
 
 ## Getting Started 
@@ -142,7 +141,7 @@ go build -o scalpel-cli ./cmd/main.go```
     ```bash
     export SCALPEL_POSTGRES_URL="postgres://user:password@host:5432/scalpeldb"
     ```
-    ---
+---
 
 ## Usage 
 
