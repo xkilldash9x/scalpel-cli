@@ -1,5 +1,5 @@
 // -- pkg/worker/adapters/agent_adapter.go --
-package adapters
+package agent
 
 import (
 	"context"

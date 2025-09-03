@@ -1,4 +1,4 @@
-package knowledgegraph
+package graphmodel
 
 import (
 	"context"

@@ -1,5 +1,5 @@
 // -- cmd/scalpel-cli/report.go --
-package main
+package cmd
 
 import (
 	"fmt"

@@ -1,4 +1,4 @@
-// pkg/analysis/auth/ato/ato.go
+// -- pkg/analysis/auth/ato/ato.go --
 package ato
 
 import (
@@ -16,9 +16,7 @@ import (
 )
 
 // ATOAnalyzer performs passive analysis for ATO risks on observed traffic.
-type ATOAnalyzer struct {
-	// Configuration can be added here if needed.
-}
+type ATOAnalyzer struct{}
 
 // NewATOAnalyzer creates a new ATOAnalyzer.
 func NewATOAnalyzer() *ATOAnalyzer {
@@ -29,7 +27,6 @@ func NewATOAnalyzer() *ATOAnalyzer {
 func (a *ATOAnalyzer) Analyze(req *http.Request, resp *http.Response) ([]schemas.Finding, error) {
 	var vulnerabilities []schemas.Finding
 
-	// A helper function to create findings consistently.
 	createFinding := func(vulnType, severity, description, cwe string) schemas.Finding {
 		targetURL := "unknown"
 		if req != nil && req.URL != nil {
@@ -47,33 +44,29 @@ func (a *ATOAnalyzer) Analyze(req *http.Request, resp *http.Response) ([]schemas
 		}
 	}
 
-	// Check for weak credentials (Passive observation)
+	// Check for weak credentials in transit (Passive observation)
 	if req != nil && req.Method == "POST" && isLoginEndpoint(req.URL.Path) {
-		// Completed placeholder logic: Read the request body safely.
 		bodyBytes, err := readRequestBody(req)
+		// We proceed even if there was a partial read error.
 		if err == nil && len(bodyBytes) > 0 {
 			body := string(bodyBytes)
-			// Basic checks for common weak credentials.
+			// TODO: This is a fragile heuristic. For better accuracy, this should
+			// parse the body based on Content-Type (JSON, form-urlencoded) and
+			// inspect the values of specific known password fields.
 			weakPasswords := []string{"password", "123456", "admin", "qwerty"}
 			for _, weakPass := range weakPasswords {
 				if strings.Contains(body, "password="+weakPass) || strings.Contains(body, `"`+weakPass+`"`) {
 					vulnerabilities = append(vulnerabilities, createFinding(
 						"Weak Credentials Observed in Transit",
-						"Low", // Severity is low because we don't know if they were accepted.
+						"Low",
 						"The application transmitted common or weak credentials during an authentication attempt.",
-						"CWE-521", // Weak Password Requirements
+						"CWE-521",
 					))
 					break
 				}
 			}
 		}
 	}
-
-	/*
-	 * REVISION: Removed Passive Rate Limiting Check.
-	 * Observing a single failed login (4xx) without a 429 status is unreliable for detecting missing rate limiting 
-	 * in a passive context and generates excessive noise. Active testing handles this better.
-	 */
 
 	// Check for predictable password recovery tokens
 	if req != nil && isPasswordResetEndpoint(req.URL.Path) {
@@ -83,19 +76,16 @@ func (a *ATOAnalyzer) Analyze(req *http.Request, resp *http.Response) ([]schemas
 		}
 
 		if len(token) > 0 {
-			// Check 1: Length
 			if len(token) < 20 {
 				vulnerabilities = append(vulnerabilities, createFinding(
 					"Potentially Predictable Password Recovery Token (Short Length)",
 					"Medium",
 					"The password recovery token is short (less than 20 characters) and may be susceptible to brute-force attacks.",
-					"CWE-330", // Insufficient Entropy
+					"CWE-330",
 				))
 			}
 
-			// Check 2: Entropy (REVISION: Added entropy check)
 			entropy := calculateShannonEntropy(token)
-			// A threshold of 3.0 is often used as a minimum for secure tokens.
 			if entropy < 3.0 {
 				vulnerabilities = append(vulnerabilities, createFinding(
 					"Potentially Predictable Password Recovery Token (Low Entropy)",
@@ -126,21 +116,25 @@ func isPasswordResetEndpoint(path string) bool {
 	return strings.Contains(p, "reset-password") || strings.Contains(p, "forgotpassword") || strings.Contains(p, "recover")
 }
 
-// Helper to safely read the request body without consuming it permanently.
+// readRequestBody safely reads the request body without consuming it permanently.
 func readRequestBody(req *http.Request) ([]byte, error) {
 	if req.Body == nil {
 		return nil, nil
 	}
-	// Limit reading to prevent excessive memory usage
+
+	originalBody := req.Body
+	// Defer closing the original body to ensure it's always cleaned up.
+	defer originalBody.Close()
+
 	const maxBodySize = 1024 * 1024 // 1MB
-	bodyBytes, err := io.ReadAll(io.LimitReader(req.Body, maxBodySize))
-	if err != nil {
-		return nil, err
-	}
-	// Restore the body so it can be read again by other components.
-	req.Body.Close() // Close the original body
-	req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes))
-	return bodyBytes, nil
+	bodyBytes, err := io.ReadAll(io.LimitReader(originalBody, maxBodySize))
+
+	// Immediately restore the body with whatever we managed to read.
+	// This ensures subsequent components in the chain can still read the request.
+	req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
+
+	// Return the bytes read along with any error that occurred.
+	return bodyBytes, err
 }
 
 // calculateShannonEntropy calculates the Shannon entropy of a string.
@@ -148,18 +142,17 @@ func calculateShannonEntropy(s string) float64 {
 	if s == "" {
 		return 0
 	}
-	
-	// Count frequency of each character
+
 	freqMap := make(map[rune]float64)
 	for _, char := range s {
-		// Assuming case-sensitive tokens.
-		freqMap[unicode.ToLower(char)]++
+		// Tokens must be treated as case-sensitive for accurate security analysis.
+		// Removing unicode.ToLower for correct entropy calculation.
+		freqMap[char]++
 	}
 
 	var entropy float64
 	length := float64(len(s))
 
-	// Calculate entropy: H = -sum(p_i * log2(p_i))
 	for _, count := range freqMap {
 		probability := count / length
 		entropy -= probability * math.Log2(probability)
