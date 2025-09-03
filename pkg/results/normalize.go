@@ -4,7 +4,7 @@ package results
 import (
 	"strings"
 
-	"github.com/xkilldashx/scalpel-cli/pkg/schemas"
+	"github.com/xkilldash9x/scalpel-cli/pkg/schemas"
 )
 
 // NormalizedFinding is the common internal structure for processing.
