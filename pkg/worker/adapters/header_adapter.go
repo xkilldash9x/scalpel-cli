@@ -5,7 +5,7 @@ import (
 	"context"
 
 	"github.com/xkilldash9x/scalpel-cli/pkg/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/pkg/analysis/passive"
+	"github.com/xkilldash9x/scalpel-cli/pkg/analysis/passive/headers"
 )
 
 // HeadersAdapter adapts the passive HeadersAnalyzer to be used by a generic worker.
