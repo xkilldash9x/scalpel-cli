@@ -1,0 +1,35 @@
+# Compiled executable
+scalpel-cli
+scalpel-cli.exe
+
+# Go module vendor directory
+vendor/
+
+# ## Project Specific ##
+# Log files and directory as defined in config.yaml
+logs/
+*.log
+
+# Cache directory used by the discovery engine
+.scalpel_cache/
+
+# Local configuration overrides
+# It's good practice to commit config.yaml as a template,
+# but ignore local versions with secrets.
+config.local.yaml
+*.local.yaml
+
+# ## Common ##
+# IDE and editor directories
+.vscode/
+.idea/
+*.swp
+
+# OS-generated files
+.DS_Store
+Thumbs.db
+
+# Archives
+*.zip
+*.tar.gz
+*.rar
