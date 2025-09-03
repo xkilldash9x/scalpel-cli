@@ -12,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
-	"github.comcom/xkilldash9x/scalpel-cli/pkg/schemas"
+    "github.com/xkilldash9x/scalpel-cli/pkg/schemas"
 )
 
 // Define custom error types for better error handling.

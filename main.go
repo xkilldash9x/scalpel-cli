@@ -2,7 +2,7 @@
 package main
 
 import (
-	"github.com/xkilldash9x/scalpel-cli/cmd"
+	"github.com/xkilldash9x/scalpel-cli/cmd/"
 )
 
 // main is the entry point for the Scalpel CLI application.

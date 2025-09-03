@@ -1,5 +1,5 @@
-// pkg/browser/cdp/harvester.go
-package cdp // Changed package name from harvester to cdp for consistency
+// pkg/browser/harvester.go
+package browser
 
 import (
 	"context"
