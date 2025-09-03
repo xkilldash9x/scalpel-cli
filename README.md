@@ -72,6 +72,7 @@ graph TD
     G --> E
     D <--> F
 
+
 **Orchestrator:** The top-level component that initializes all services and manages the scan lifecycle.
 2.  **Task Engine:** A worker pool that processes analysis tasks concurrently.
 3.  **Knowledge Graph:** A central PostgreSQL-backed graph that stores all discovered assets and their relationships.
