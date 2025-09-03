@@ -69,7 +69,7 @@ graph TD
     J --> E
     G --> E
     D <--> F
-
+```
 
 1. **Orchestrator:** The top-level component that initializes all services and manages the scan lifecycle.
 2.  **Task Engine:** A worker pool that processes analysis tasks concurrently.
