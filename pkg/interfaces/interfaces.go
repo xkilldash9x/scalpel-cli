@@ -1,216 +1,100 @@
-// pkg/config/config.go
-package config
+// -- pkg/interfaces/interfaces.go --
+package interfaces
 
 import (
-	"fmt"
-	"strings"
-	"sync"
-	"time"
+	"context"
+	"net/http"
+	"net/url"
 
-	"github.com/spf13/viper"
+	"github.com/xkilldash9x/scalpel-cli/pkg/browser"
+	"github.com/xkilldash9x/scalpel-cli/pkg/graphmodel"
+	"github.com/xkilldash9x/scalpel-cli/pkg/schemas"
 )
 
-var (
-	instance *Config
-	once     sync.Once
-)
+// -- KnowledgeGraph Interface --
 
-// Config is the root configuration structure for the entire application.
-type Config struct {
-	Logger   LoggerConfig   `mapstructure:"logger"`
-	Postgres PostgresConfig `mapstructure:"postgres"`
-	Engine   EngineConfig   `mapstructure:"engine"`
-	Browser  BrowserConfig  `mapstructure:"browser"`
-	Network  NetworkConfig  `mapstructure:"network"`
-	Scanners ScannersConfig `mapstructure:"scanners"`
-	Scan     ScanConfig     `mapstructure:"scan"`
-	Agent    AgentConfig    `mapstructure:"agent"`
+// KnowledgeGraph defines the complete set of operations for interacting with the knowledge graph.
+// It abstracts the underlying storage implementation (e.g., in-memory, Postgres), allowing
+// different parts of the application to interact with the graph via a stable contract.
+type KnowledgeGraph interface {
+	// -- Write Operations --
+	AddNode(input graphmodel.NodeInput) (*graphmodel.Node, error)
+	AddEdge(input graphmodel.EdgeInput) (*graphmodel.Edge, error)
+
+	// -- Atomic Write Operations --
+	// These are convenience methods that handle transactional or multi-step logic.
+	RecordTechnology(assetId string, technologyName string, version string, source string, confidence float64, assetType graphmodel.NodeType) error
+	RecordLink(sourceUrl string, targetUrl string, method string, depth int) error
+
+	// -- Read Operations --
+	GetNodeByID(id string) (*graphmodel.Node, error)
+	FindNodes(query graphmodel.Query) ([]*graphmodel.Node, error)
+	GetNeighbors(nodeId string) (graphmodel.NeighborsResult, error)
+
+	// -- Export and Contextualization --
+	ExportGraph() graphmodel.GraphExport
+	//  retrieves a localized subgraph relevant to a specific mission,
+	// which is critical for managing context windows for AI agents.
+	ExtractMissionSubgraph(ctx context.Context, missionID string, lookbackSteps int) (graphmodel.GraphExport, error)
+
+	// -- Utility Methods --
+	InferAssetType(assetId string) graphmodel.NodeType
 }
 
-// LoggerConfig holds settings for the logging system.
-type LoggerConfig struct {
-	ServiceName string `mapstructure:"service_name"`
-	LogFile     string `mapstructure:"log_file"`
-	Level       string `mapstructure:"level"`
-	Format      string `mapstructure:"format"`
-	AddSource   bool   `mapstructure:"add_source"`
-	MaxSize     int    `mapstructure:"max_size"`
-	MaxBackups  int    `mapstructure:"max_backups"`
-	MaxAge      int    `mapstructure:"max_age"`
-	Compress    bool   `mapstructure:"compress"`
+// -- Other Core Interfaces --
+
+//  defines a standardized interface for making HTTP requests.
+type HTTPClient interface {
+	Get(ctx context.Context, url string) (body []byte, statusCode int, err error)
+	Do(req *http.Request) (*http.Response, error)
 }
 
-// PostgresConfig holds settings for the database connection.
-type PostgresConfig struct {
-	URL string `mapstructure:"url"`
+//  defines the contract for determining if a URL is in scope.
+type ScopeManager interface {
+	IsInScope(u *url.URL) bool
+	GetRootDomain() string
 }
 
-// EngineConfig holds settings for the task execution engine.
-type EngineConfig struct {
-	QueueSize          int           `mapstructure:"queue_size"`
-	WorkerConcurrency  int           `mapstructure:"worker_concurrency"`
-	DefaultTaskTimeout time.Duration `mapstructure:"default_task_timeout"`
+//  provides a way for components to submit new tasks to the engine.
+type TaskSubmitter interface {
+	SubmitTask(task schemas.Task) error
 }
 
-// BrowserConfig holds settings for the headless browser.
-type BrowserConfig struct {
-	Headless        bool           `mapstructure:"headless"`
-	IgnoreTLSErrors bool           `mapstructure:"ignore_tls_errors"`
-	Args            []string       `mapstructure:"args"`
-	Viewport        map[string]int `mapstructure:"viewport"`
-	DisableCache    bool           `mapstructure:"disable_cache"`
+//  provides a generic pub/sub mechanism with robust error handling.
+type EventBus interface {
+	Publish(ctx context.Context, topic string, payload []byte) error
+	// Subscribe registers a handler for a topic. The handler must return an error
+	// to signal a processing failure, or nil for success.
+	Subscribe(ctx context.Context, topic string, handler func(payload []byte) error) error
 }
 
-// NetworkConfig holds settings for HTTP requests.
-type NetworkConfig struct {
-	Timeout      time.Duration     `mapstructure:"timeout"`
-	PostLoadWait time.Duration     `mapstructure:"post_load_wait"`
-	Headers      map[string]string `mapstructure:"headers"`
+// GenerationOptions holds parameters for controlling LLM generation.
+type GenerationOptions struct {
+	// Temperature controls the creativity of the response. Lower is more deterministic.
+	Temperature float32
+	// MaxTokens sets the maximum length of the generated response.
+	MaxTokens int
+	// ForceJSONFormat indicates to the LLM provider to enforce JSON output mode if available.
+	ForceJSONFormat bool
 }
 
-// ScannersConfig holds settings for all analysis modules.
-type ScannersConfig struct {
-	Passive PassiveScannersConfig `mapstructure:"passive"`
-	Static  StaticScannersConfig  `mapstructure:"static"`
-	Active  ActiveScannersConfig  `mapstructure:"active"`
+// GenerationRequest encapsulates all inputs for a single LLM API call.
+type GenerationRequest struct {
+	SystemPrompt string
+	UserPrompt   string
+	Options      GenerationOptions
 }
 
-// PassiveScannersConfig holds settings for passive analysis.
-type PassiveScannersConfig struct {
-	Headers HeadersConfig `mapstructure:"headers"`
-}
-type HeadersConfig struct {
-	Enabled bool `mapstructure:"enabled"`
-}
-
-// StaticScannersConfig holds settings for static analysis.
-type StaticScannersConfig struct {
-	JWT JWTConfig `mapstructure:"jwt"`
-}
-type JWTConfig struct {
-	Enabled           bool     `mapstructure:"enabled"`
-	KnownSecrets      []string `mapstructure:"known_secrets"`
-	BruteForceEnabled bool     `mapstructure:"brute_force_enabled"`
-	DictionaryFile    string   `mapstructure:"dictionary_file"`
+// LLMClient defines the interface for interacting with a Large Language Model.
+// It abstracts the specific provider (e.g., Gemini, OpenAI) away from the agent logic.
+type LLMClient interface {
+	// GenerateResponse sends a structured request to the LLM and returns the text content.
+	GenerateResponse(ctx context.Context, req GenerationRequest) (string, error)
 }
 
-// ActiveScannersConfig holds settings for active analysis.
-type ActiveScannersConfig struct {
-	Taint          TaintConfig          `mapstructure:"taint"`
-	ProtoPollution ProtoPollutionConfig `mapstructure:"protopollution"`
-	TimeSlip       TimeSlipConfig       `mapstructure:"timeslip"`
-	Auth           AuthConfig           `mapstructure:"auth"`
+// defines the interface for the headless browser pool.
+type SessionManager interface {
+	InitializeSession(ctx context.Context) (browser.SessionContext, error)
+	Shutdown(ctx context.Context) error
 }
 
-type TaintConfig struct {
-	Enabled     bool `mapstructure:"enabled"`
-	Depth       int  `mapstructure:"depth"`
-	Concurrency int  `mapstructure:"concurrency"`
-}
-
-type ProtoPollutionConfig struct {
-	Enabled bool `mapstructure:"enabled"`
-}
-
-type TimeSlipConfig struct {
-	Enabled        bool `mapstructure:"enabled"`
-	RequestCount   int  `mapstructure:"request_count"`
-	MaxConcurrency int  `mapstructure:"max_concurrency"`
-	ThresholdMs    int  `mapstructure:"threshold_ms"`
-}
-
-type AuthConfig struct {
-	ATO  ATOConfig  `mapstructure:"ato"`
-	IDOR IDORConfig `mapstructure:"idor"`
-}
-
-type ATOConfig struct {
-	Enabled                bool     `mapstructure:"enabled"`
-	UsernameFields         []string `mapstructure:"username_fields"`
-	PasswordFields         []string `mapstructure:"password_fields"`
-	UsernameWordlist       string   `mapstructure:"username_wordlist"`
-	PasswordSprayWordlist  string   `mapstructure:"password_spray_wordlist"`
-	SuccessRegex           string   `mapstructure:"success_regex"`
-	FailureRegex           string   `mapstructure:"failure_regex"`
-	LockoutRegex           string   `mapstructure:"lockout_regex"`
-	DelayBetweenAttemptsMs int      `mapstructure:"delay_between_attempts_ms"`
-}
-
-type IDORConfig struct {
-	Enabled        bool                `mapstructure:"enabled"`
-	IgnoreList     []string            `mapstructure:"ignore_list"`
-	TestStrategies map[string][]string `mapstructure:"test_strategies"`
-}
-
-// ScanConfig holds settings specific to a scan execution (populated by CLI flags).
-type ScanConfig struct {
-	Targets     []string
-	Output      string
-	Format      string
-	Concurrency int
-	Depth       int
-	Scope       string
-}
-
-// --- Agent and LLM Configuration ---
-
-// AgentConfig holds settings for the autonomous agent.
-type AgentConfig struct {
-	Enabled              bool                        `mapstructure:"enabled"`
-	LLM                  LLMConfig                   `mapstructure:"llm"`
-}
-
-// LLMProvider defines the supported LLM providers.
-type LLMProvider string
-
-const (
-	ProviderGemini    LLMProvider = "gemini"
-	ProviderOpenAI    LLMProvider = "openai"
-	ProviderAnthropic LLMProvider = "anthropic"
-	ProviderOllama    LLMProvider = "ollama"
-)
-
-// LLMConfig holds the high-level selection and the detailed configurations for all available models.
-type LLMConfig struct {
-	DefaultFastModel     string                      `mapstructure:"default_fast_model"`
-	DefaultPowerfulModel string                      `mapstructure:"default_powerful_model"`
-	Models               map[string]LLMModelConfig `mapstructure:"models"`
-}
-
-// LLMModelConfig holds the specific settings for a single Language Model configuration.
-type LLMModelConfig struct {
-	Provider      LLMProvider       `mapstructure:"provider"`
-	Model         string            `mapstructure:"model"`
-	APIKey        string            `mapstructure:"api_key"`
-	Endpoint      string            `mapstructure:"endpoint,omitempty"` // Optional endpoint override
-	APITimeout    time.Duration     `mapstructure:"api_timeout"`
-	Temperature   float32           `mapstructure:"temperature"`
-	TopP          float32           `mapstructure:"top_p"`
-	TopK          int               `mapstructure:"top_k"`
-	MaxTokens     int               `mapstructure:"max_tokens"`
-	SafetyFilters map[string]string `mapstructure:"safety_filters,omitempty"`
-}
-
-// Load initializes the configuration singleton from Viper.
-func Load(v *viper.Viper) error {
-	var loadErr error
-	once.Do(func() {
-		var cfg Config
-		if err := v.Unmarshal(&cfg); err != nil {
-			loadErr = fmt.Errorf("error unmarshaling config: %w", err)
-			return
-		}
-		instance = &cfg
-	})
-	return loadErr
-}
-
-// Get returns the loaded configuration instance.
-func Get() *Config {
-	if instance == nil {
-		// This can happen if Get() is called before the root command's PersistentPreRunE.
-		// We panic here because it indicates a programmer error in command setup.
-		panic("Configuration not initialized. Call config.Load() in the root command.")
-	}
-	return instance
-}
