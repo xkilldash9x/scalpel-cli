@@ -10,10 +10,10 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
+	"github.comcom/google/uuid"
 	"go.uber.org/zap"
 
-	"github.comcom/xkilldash9x/scalpel-cli/pkg/config"
+	"github.com/xkilldash9x/scalpel-cli/pkg/config"
 	"github.com/xkilldash9x/scalpel-cli/pkg/graphmodel"
 	"github.com/xkilldash9x/scalpel-cli/pkg/knowledgegraph"
 )
@@ -21,11 +21,11 @@ import (
 // LLMMind implements the Mind interface using an LLM for orientation and decision-making.
 // It operates an event-driven OODA loop.
 type LLMMind struct {
-	cfg    config.AgentConfig
+	cfg   config.AgentConfig
 	logger *zap.Logger
 	// kg now uses the GraphStore interface.
-	kg        knowledgegraph.GraphStore
-	bus       *CognitiveBus
+	kg      knowledgegraph.GraphStore
+	bus     *CognitiveBus
 	llmClient LLMClient
 
 	currentMission Mission
@@ -40,13 +40,13 @@ type LLMMind struct {
 }
 
 // NewLLMMind creates a new LLMMind instance.
-func NewLLMMind(logger *zap.Logger, client LLMClient) *LLMMind {
+func NewLLMMLMind(logger *zap.Logger, client LLMClient) *LLMMind {
 	return &LLMMind{
 		logger:               logger.Named("llm_mind"),
 		llmClient:            client,
 		stopChan:             make(chan struct{}),
 		stateReadyChan:       make(chan struct{}, 1), // Buffered channel to prevent blocking the observer.
-		contextLookbackSteps: 10,                     // Default lookback
+		contextLookbackSteps: 10,                      // Default lookback
 	}
 }
 
@@ -237,8 +237,8 @@ func (m *LLMMind) decideNextAction(ctx context.Context, contextSnapshot *graphmo
 func (m *LLMMind) generateSystemPrompt() string {
 	// Prompt engineering is critical.
 	// The prompt establishes the agent's identity, objectives, available actions, and output format constraints.
-	return `You are the Mind of 'evolution-scalpel', an advanced, autonomous security analysis and hardening agent.
-Your purpose is to navigate environments, identify potential vulnerabilities, or execute hardening operations (like TAO policy generation).
+	return `You are the Mind of 'scalpel-cli', an advanced, autonomous security analysis agent.
+Your purpose is to navigate web environments and identify potential vulnerabilities.
 You operate within a strict OODA loop. You receive the current localized state (Knowledge Graph) and the Mission Objective.
 You must respond ONLY with a single JSON object representing the next Action to take.
 Available Action Types:
@@ -248,10 +248,6 @@ Interaction:
 - INPUT_TEXT: {"type": "INPUT_TEXT", "selector": "<CSS_SELECTOR>", "value": "<TEXT/PAYLOAD>", "rationale": "..."}
 - WAIT_FOR_ASYNC: {"type": "WAIT_FOR_ASYNC", "metadata": {"duration_ms": 1000}, "rationale": "..."}
 
-Hardening (TAO):
-- GENERATE_TAO_POLICY: {"type": "GENERATE_TAO_POLICY", "metadata": {"target_binary": "<TARGET>"}, "rationale": "..."} (Target can be omitted if defined in Mission)
-- TRIGGER_REMOTE_BUILD: {"type": "TRIGGER_REMOTE_BUILD", "metadata": {"policy_node_id": "<ID>", "build_server_host": "...", "remote_policy_path": "...", "build_command": "..."}, "rationale": "..."}
-
 Mission Control:
 - CONCLUDE: {"type": "CONCLUDE", "rationale": "Mission objective achieved or unachievable."}
 
@@ -260,8 +256,7 @@ Rules:
 2. Prioritize actions that directly progress towards the Mission Objective.
 3. If analyzing a web application, be methodical: explore forms, input fields, and dynamic content.
 Use precise CSS selectors based on the graph.
-4. If hardening a binary, ensure policies cover identified data flows before triggering builds.
-5. Maintain the core identity: surgically precise and devastatingly effective.
+4. Maintain the core identity: surgically precise and devastatingly effective.
 `
 }
 
@@ -287,8 +282,8 @@ Current Localized State (Knowledge Graph JSON):
 Determine the next Action. Respond with a single JSON object.`, objective, targetURL, string(contextJSON)), nil
 }
 
-// Regex to find JSON blocks wrapped in markdown (```json ... ```) or plain JSON objects ({...}).
-var jsonBlockRegex = regexp.MustCompile(`(?s)(?:` + "```" + `json\s*)?(\{.*?\})(?:\s*` + "```" + `)?`)
+// Regex to find JSON blocks wrapped in markdown (` + "```" + `json ... ` + "```" + `) or plain JSON objects ({...}).
+var jsonBlockRegex = regexp.MustCompile("(?s)(?:```json\\s*|)(\\{.*\\})(?:```|)")
 
 // parseActionResponse attempts to unmarshal the LLM's JSON response into an Action struct using robust extraction.
 func (m *LLMMind) parseActionResponse(response string) (Action, error) {
@@ -353,7 +348,6 @@ func (m *LLMMind) updateActionStatusFromObservation(obs Observation) {
 
 	m.updateActionStatus(obs.SourceActionID, result.Status, result.Error)
 }
-
 
 // updateActionStatus updates the KG node for the action.
 func (m *LLMMind) updateActionStatus(actionID string, status string, errMsg string) {

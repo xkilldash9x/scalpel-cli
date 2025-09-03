@@ -43,9 +43,6 @@ const (
 	NodeTypeMission     NodeType = "Mission"
 	NodeTypeAction      NodeType = "Action"
 	NodeTypeObservation NodeType = "Observation"
-
-	// Agent Artifacts
-	NodeTypeTAOPolicyArtifact NodeType = "TAO_PolicyArtifact"
 )
 
 // Constants for Relationship Types (Edges)
@@ -70,10 +67,6 @@ const (
 	RelationshipTypeGeneratesObservation RelationshipType = "GENERATES_OBSERVATION"
 	RelationshipTypeInformsMission       RelationshipType = "INFORMS_MISSION"
 	RelationshipTypeNextAction           RelationshipType = "NEXT_ACTION"
-
-	// Agent Artifact Relationships
-	RelationshipTypeGeneratesArtifact RelationshipType = "GENERATES_ARTIFACT"
-	RelationshipTypeAppliesTo         RelationshipType = "APPLIES_TO"
 )
 
 // Properties is a generic map for storing attributes.

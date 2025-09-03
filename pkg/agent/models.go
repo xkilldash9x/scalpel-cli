@@ -46,10 +46,6 @@ const (
 	ActionAnalyzeElement ActionType = "ANALYZE_ELEMENT"
 	ActionInjectPayload  ActionType = "INJECT_PAYLOAD"
 
-	// Taint-Aware Obfuscation (TAO) Actions
-	ActionGeneratePolicy ActionType = "GENERATE_TAO_POLICY"
-	ActionTriggerBuild   ActionType = "TRIGGER_REMOTE_BUILD"
-
 	// Mission Control
 	ActionConclude ActionType = "CONCLUDE"
 )
@@ -77,10 +73,6 @@ const (
 	ObservedTaintFlow       ObservationType = "TAINT_FLOW"
 	ObservedVulnerability   ObservationType = "VULNERABILITY"
 	ObservedSystemState     ObservationType = "SYSTEM_STATE"
-	// Specific observation for the outcome of a remote build.
-	ObservedBuildResult     ObservationType = "BUILD_RESULT"
-	// Specific observation for TAO policy generation results.
-	ObservedPolicyGenerated ObservationType = "POLICY_GENERATED"
 )
 
 // Observation represents data collected from the environment after an action.
@@ -102,18 +94,6 @@ type ExecutionResult struct {
 	Error string `json:"error,omitempty"`
 	// ObservationType provides a hint to the Mind about how to categorize the resulting observation.
 	ObservationType ObservationType `json:"observation_type"`
-
-	// Fields for GeneratePolicy results
-	Event        string `json:"event,omitempty"`
-	PolicyNodeID string `json:"policy_node_id,omitempty"`
-	TargetBinary string `json:"target_binary,omitempty"`
-
-	// Fields for TriggerBuild results
-	Host       string `json:"host,omitempty"`
-	Command    string `json:"command,omitempty"`
-	ExitCode   int    `json:"exit_code"`
-	StdOut     string `json:"stdout,omitempty"`
-	StdErr     string `json:"stderr,omitempty"`
 }
 
 
