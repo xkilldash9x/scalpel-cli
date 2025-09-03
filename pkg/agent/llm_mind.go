@@ -16,6 +16,7 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/pkg/config"
 	"github.com/xkilldash9x/scalpel-cli/pkg/graphmodel"
+	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces" // Import from central interfaces package
 	"github.com/xkilldash9x/scalpel-cli/pkg/knowledgegraph"
 )
 
@@ -26,7 +27,7 @@ type LLMMind struct {
 	logger    *zap.Logger
 	kg        knowledgegraph.GraphStore
 	bus       *CognitiveBus
-	llmClient LLMClient
+	llmClient interfaces.LLMClient // Use the interface type
 
 	currentMission Mission
 	currentState   AgentState
@@ -42,7 +43,7 @@ type LLMMind struct {
 // NewLLMMind creates a new, fully initialized LLMMind instance.
 func NewLLMMind(
 	logger *zap.Logger,
-	client LLMClient,
+	client interfaces.LLMClient, // Use the interface type
 	cfg config.AgentConfig,
 	kg knowledgegraph.GraphStore,
 	bus *CognitiveBus,
@@ -222,13 +223,13 @@ func (m *LLMMind) decideNextAction(ctx context.Context, contextSnapshot *graphmo
 
 	apiCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	
-	// Create the request object for the new LLMClient interface.
-	req := GenerationRequest{
+
+	// Create the request object for the LLMClient interface.
+	req := interfaces.GenerationRequest{
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,
-		Options: GenerationOptions{
-			ForceJSONFormat: true, // Example of using the new options
+		Options: interfaces.GenerationOptions{
+			ForceJSONFormat: true,
 			Temperature:     0.2,
 		},
 	}
@@ -268,8 +269,7 @@ Mission Control:
 Rules:
 1. Analyze the provided Knowledge Graph (Nodes and Edges) to understand the environment structure and history of actions/observations.
 2. Prioritize actions that directly progress towards the Mission Objective.
-3. If analyzing a web application, be methodical: explore forms, input fields, and dynamic content.
-Use precise CSS selectors based on the graph.
+3. If analyzing a web application, be methodical: explore forms, input fields, and dynamic content. Use precise CSS selectors based on the graph.
 4. Maintain the core identity: surgically precise and devastatingly effective.
 `
 }
@@ -295,7 +295,8 @@ Current Localized State (Knowledge Graph JSON):
 Determine the next Action. Respond with a single JSON object.`, objective, targetURL, string(contextJSON)), nil
 }
 
-var jsonBlockRegex = regexp.MustCompile("(?s)(?:```json\\s*|)(\\{.*\\})(?:```|)")
+// jsonBlockRegex is used to extract a JSON object from a markdown code block.
+var jsonBlockRegex = regexp.MustCompile("(?s)```(?:json)?\\s*(.*?)```")
 
 // parseActionResponse attempts to unmarshal the LLM's JSON response into an Action struct.
 func (m *LLMMind) parseActionResponse(response string) (Action, error) {
@@ -373,9 +374,9 @@ func (m *LLMMind) updateActionStatus(actionID string, status string, errMsg stri
 // recordObservationKG persists the observation in the KG and returns an error on failure.
 func (m *LLMMind) recordObservationKG(obs Observation) error {
 	props := graphmodel.Properties{
-		"type":      obs.Type,
-		"timestamp": obs.Timestamp,
-		"data_raw":  obs.Data,
+		"type":       obs.Type,
+		"timestamp":  obs.Timestamp,
+		"data_raw":   obs.Data,
 	}
 
 	_, err := m.kg.AddNode(graphmodel.NodeInput{

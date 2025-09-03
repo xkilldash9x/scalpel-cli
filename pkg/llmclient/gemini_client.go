@@ -1,22 +1,19 @@
-// -- pkg/llmclient/gemini_client.go --
+// -- pkg/llmclient/gemini.go --
 package llmclient
 
 import (
 	"bytes"
 	"context"
 	"encoding/json"
-	"errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
-	"go.uber.org/zap"
-
-	"github.com/xkilldash9x/scalpel-cli/pkg/agent"
 	"github.com/xkilldash9x/scalpel-cli/pkg/config"
-	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces"
+	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces" // Import from central interfaces package
+	"go.uber.org/zap"
 )
 
 // GeminiClient implements the interfaces.LLMClient interface for Google Gemini APIs.
@@ -26,31 +23,28 @@ type GeminiClient struct {
 	model      string
 	httpClient *http.Client
 	logger     *zap.Logger
-	config     config.LLMModelConfig
+	config     config.LLMConfig
 }
 
-// NewGeminiClient initializes the client from a specific model configuration.
-// It now returns the abstract `interfaces.LLMClient` for better decoupling.
-func NewGeminiClient(cfg config.LLMModelConfig, logger *zap.Logger) (interfaces.LLMClient, error) {
-	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("Gemini API Key is required for model '%s'", cfg.Model)
+// NewGeminiClient initializes the client.
+func NewGeminiClient(cfg config.AgentConfig, logger *zap.Logger) (*GeminiClient, error) {
+	llmCfg := cfg.LLM
+	if llmCfg.APIKey == "" {
+		return nil, fmt.Errorf("Gemini API Key is required (SCALPEL_AGENT_LLM_API_KEY)")
 	}
 
-	endpoint := cfg.Endpoint
-	if endpoint == "" {
-		// Default to the v1beta endpoint which supports JSON mode and advanced features.
-		endpoint = fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", cfg.Model)
-	}
+	// Default to the v1beta endpoint which supports JSON mode and advanced features.
+	endpoint := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", llmCfg.Model)
 
 	return &GeminiClient{
-		apiKey:   cfg.APIKey,
+		apiKey:   llmCfg.APIKey,
 		endpoint: endpoint,
-		model:    cfg.Model,
-		config:   cfg,
+		model:    llmCfg.Model,
+		config:   llmCfg,
 		httpClient: &http.Client{
-			Timeout: cfg.APITimeout,
+			Timeout: llmCfg.APITimeout,
 		},
-		logger: logger.Named("llm_client.gemini").With(zap.String("model", cfg.Model)),
+		logger: logger.Named("llm_client.gemini"),
 	}, nil
 }
 
@@ -75,9 +69,9 @@ type GeminiSafetySetting struct {
 }
 
 type GeminiGenerationConfig struct {
-	Temperature      float32 `json:"temperature"`
+	Temperature      float64 `json:"temperature"`
 	ResponseMimeType string  `json:"response_mime_type,omitempty"`
-	TopP             float32 `json:"topP,omitempty"`
+	TopP             float64 `json:"topP,omitempty"`
 	TopK             int     `json:"topK,omitempty"`
 	MaxOutputTokens  int     `json:"maxOutputTokens,omitempty"`
 }
@@ -101,8 +95,9 @@ type GeminiResponsePayload struct {
 	} `json:"usageMetadata"`
 }
 
-// GenerateResponse sends the structured request to the Gemini API and returns the generated content with retries.
-func (c *GeminiClient) GenerateResponse(ctx context.Context, req agent.GenerationRequest) (string, error) {
+// GenerateResponse sends the prompts to the Gemini API and returns the generated content with retries.
+// The signature now matches the interfaces.LLMClient interface.
+func (c *GeminiClient) GenerateResponse(ctx context.Context, req interfaces.GenerationRequest) (string, error) {
 	payload := c.buildRequestPayload(req)
 
 	body, err := json.Marshal(payload)
@@ -110,6 +105,7 @@ func (c *GeminiClient) GenerateResponse(ctx context.Context, req agent.Generatio
 		return "", fmt.Errorf("failed to marshal request payload: %w", err)
 	}
 
+	// Configure exponential backoff strategy.
 	b := backoff.NewExponentialBackOff()
 	b.MaxElapsedTime = 2 * time.Minute
 	b.MaxInterval = 30 * time.Second
@@ -117,11 +113,8 @@ func (c *GeminiClient) GenerateResponse(ctx context.Context, req agent.Generatio
 	var responseContent string
 
 	operation := func() error {
-		// PERFORMANCE: Use bytes.NewReader which reads from the underlying slice without copying.
-		// It also implements io.ReadSeeker, allowing the http client to retry requests safely.
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewReader(body))
+		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewBuffer(body))
 		if err != nil {
-			// This is a permanent error as request creation should not fail.
 			return backoff.Permanent(fmt.Errorf("failed to create HTTP request: %w", err))
 		}
 
@@ -138,37 +131,33 @@ func (c *GeminiClient) GenerateResponse(ctx context.Context, req agent.Generatio
 		}
 		defer resp.Body.Close()
 
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			return fmt.Errorf("failed to read response body: %w", err)
+		}
+
 		if resp.StatusCode != http.StatusOK {
-			// Safely read the error response body with a limit.
-			const maxErrorBodyBytes = 1 * 1024 * 1024 // 1MB
-			limitedReader := io.LimitReader(resp.Body, maxErrorBodyBytes)
-			errorBody, _ := io.ReadAll(limitedReader) // Best-effort read
-			return c.handleAPIError(resp.StatusCode, errorBody)
+			return c.handleAPIError(resp.StatusCode, respBody)
 		}
 
 		var responsePayload GeminiResponsePayload
-		// PERFORMANCE: Decode the JSON response directly from the stream to avoid allocating memory for the full body.
-		if err := json.NewDecoder(resp.Body).Decode(&responsePayload); err != nil {
+		if err := json.Unmarshal(respBody, &responsePayload); err != nil {
 			return backoff.Permanent(fmt.Errorf("failed to decode response payload: %w", err))
 		}
 
 		if len(responsePayload.Candidates) == 0 {
-			// This can happen if all candidates were filtered.
-			return backoff.Permanent(errors.New("gemini API returned no candidates"))
+			return backoff.Permanent(fmt.Errorf("gemini API returned no candidates"))
 		}
 
 		candidate := responsePayload.Candidates[0]
 		if len(candidate.Content.Parts) == 0 {
-			// If content is empty, check the finish reason. Safety filtering is a permanent failure for this prompt.
 			if candidate.FinishReason == "SAFETY" || candidate.FinishReason == "BLOCKLIST" {
-				return backoff.Permanent(fmt.Errorf("gemini API blocked the request or response due to safety filters (Reason: %s)", candidate.FinishReason))
+				return backoff.Permanent(fmt.Errorf("gemini API blocked the request (Reason: %s)", candidate.FinishReason))
 			}
-			// Other reasons might be transient (e.g., MAX_TOKENS).
 			return fmt.Errorf("gemini API returned empty content parts (Reason: %s)", candidate.FinishReason)
 		}
 
-		c.logger.Info("LLM generation complete",
-			zap.String("model", c.model),
+		c.logger.Info("LLM generation complete (Gemini)",
 			zap.Duration("duration", duration),
 			zap.Int("prompt_tokens", responsePayload.UsageMetadata.PromptTokenCount),
 			zap.Int("completion_tokens", responsePayload.UsageMetadata.CandidatesTokenCount),
@@ -179,34 +168,28 @@ func (c *GeminiClient) GenerateResponse(ctx context.Context, req agent.Generatio
 		return nil
 	}
 
-	if err = backoff.Retry(operation, backoff.WithContext(b, ctx)); err != nil {
-		return "", fmt.Errorf("llm request for model %s failed after retries: %w", c.model, err)
+	err = backoff.Retry(operation, backoff.WithContext(b, ctx))
+	if err != nil {
+		return "", err
 	}
 
 	return responseContent, nil
 }
 
-// buildRequestPayload constructs the Gemini API payload from the abstract GenerationRequest.
-func (c *GeminiClient) buildRequestPayload(req agent.GenerationRequest) GeminiRequestPayload {
+func (c *GeminiClient) buildRequestPayload(req interfaces.GenerationRequest) GeminiRequestPayload {
 	genConfig := GeminiGenerationConfig{
-		Temperature:     c.config.Temperature,
+		Temperature: float64(req.Options.Temperature),
+		// Assuming these fields exist in config.LLMConfig
 		TopP:            c.config.TopP,
 		TopK:            c.config.TopK,
 		MaxOutputTokens: c.config.MaxTokens,
 	}
 
-	// Override with request-specific options if provided.
-	if req.Options.Temperature > 0 {
-		genConfig.Temperature = req.Options.Temperature
-	}
-	if req.Options.MaxTokens > 0 {
-		genConfig.MaxOutputTokens = req.Options.MaxTokens
-	}
 	if req.Options.ForceJSONFormat {
 		genConfig.ResponseMimeType = "application/json"
 	}
 
-	return GeminiRequestPayload{
+	payload := GeminiRequestPayload{
 		Contents: []GeminiContent{
 			{
 				Role: "user",
@@ -223,6 +206,7 @@ func (c *GeminiClient) buildRequestPayload(req agent.GenerationRequest) GeminiRe
 		GenerationConfig: genConfig,
 		SafetySettings:   c.getSafetySettings(),
 	}
+	return payload
 }
 
 // handleAPIError interprets the HTTP status code to determine if the error is transient or permanent.
@@ -231,18 +215,16 @@ func (c *GeminiClient) handleAPIError(statusCode int, body []byte) error {
 	err := fmt.Errorf("gemini API error: status %d, body: %s", statusCode, string(body))
 
 	switch statusCode {
-	case http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusInternalServerError:
+	case http.StatusTooManyRequests, // 429
+		http.StatusServiceUnavailable,   // 503
+		http.StatusInternalServerError:  // 500
 		return err // Transient errors, retry.
 	default:
-		return backoff.Permanent(err) // Permanent errors (e.g., 400 Bad Request, 401 Unauthorized, 403 Forbidden).
+		return backoff.Permanent(err) // Permanent errors (e.g., 400, 401, 403).
 	}
 }
 
-// getSafetySettings constructs the safety settings payload from the configuration.
 func (c *GeminiClient) getSafetySettings() []GeminiSafetySetting {
-	if len(c.config.SafetyFilters) == 0 {
-		return nil
-	}
 	settings := make([]GeminiSafetySetting, 0, len(c.config.SafetyFilters))
 	for category, threshold := range c.config.SafetyFilters {
 		settings = append(settings, GeminiSafetySetting{

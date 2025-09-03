@@ -33,7 +33,7 @@ type KnowledgeGraph interface {
 
 	// -- Export and Contextualization --
 	ExportGraph() graphmodel.GraphExport
-	//  retrieves a localized subgraph relevant to a specific mission,
+	// ExtractMissionSubgraph retrieves a localized subgraph relevant to a specific mission,
 	// which is critical for managing context windows for AI agents.
 	ExtractMissionSubgraph(ctx context.Context, missionID string, lookbackSteps int) (graphmodel.GraphExport, error)
 
@@ -43,24 +43,24 @@ type KnowledgeGraph interface {
 
 // -- Other Core Interfaces --
 
-//  defines a standardized interface for making HTTP requests.
+// HTTPClient defines a standardized interface for making HTTP requests.
 type HTTPClient interface {
 	Get(ctx context.Context, url string) (body []byte, statusCode int, err error)
 	Do(req *http.Request) (*http.Response, error)
 }
 
-//  defines the contract for determining if a URL is in scope.
+// ScopeManager defines the contract for determining if a URL is in scope.
 type ScopeManager interface {
 	IsInScope(u *url.URL) bool
 	GetRootDomain() string
 }
 
-//  provides a way for components to submit new tasks to the engine.
+// TaskSubmitter provides a way for components to submit new tasks to the engine.
 type TaskSubmitter interface {
 	SubmitTask(task schemas.Task) error
 }
 
-//  provides a generic pub/sub mechanism with robust error handling.
+// EventBus provides a generic pub/sub mechanism with robust error handling.
 type EventBus interface {
 	Publish(ctx context.Context, topic string, payload []byte) error
 	// Subscribe registers a handler for a topic. The handler must return an error
@@ -92,9 +92,8 @@ type LLMClient interface {
 	GenerateResponse(ctx context.Context, req GenerationRequest) (string, error)
 }
 
-// defines the interface for the headless browser pool.
+// SessionManager defines the interface for the headless browser pool.
 type SessionManager interface {
 	InitializeSession(ctx context.Context) (browser.SessionContext, error)
 	Shutdown(ctx context.Context) error
 }
-
