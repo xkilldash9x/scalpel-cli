@@ -152,19 +152,21 @@ The primary command is `scan`, which runs the full discovery and analysis pipeli
 
 ```sh
 ./scalpel-cli scan [target...] [flags]
-### Flags
+**Flags**
 
 * `-c, --config`: Path to a custom config file (e.g., `config.local.yaml`).
 * `-o, --output`: File to write the final report to (default: `stdout`).
 * `-f, --format`: Output format (`sarif`, `json`, `text`).
 * `-d, --depth`: Maximum depth for the crawler.
 * `--scope`: Scope of the scan (`root`, `subdomain`, `strict`).
+``` 
 ### Example
 
 Run a scan against a target, limit the crawl depth to 2, and save the results to a SARIF file.
 
 ```sh
 ./scalpel-cli scan [https://example.com](https://example.com) -c config.local.yaml -d 2 -o report.sarif -f sarif
+```
 ---
 
 ## License 
