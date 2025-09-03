@@ -8,6 +8,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/url"
+	"regexp"
 	"strings"
 	"sync"
 	"text/template"
@@ -21,6 +22,9 @@ import (
 var taintShimFS embed.FS
 
 const taintShimFilename = "taint_shim.js"
+
+// Canary format: SCALPEL_{Prefix}_{Type}_{UUID_Short}
+var canaryRegex = regexp.MustCompile(`SCALPEL_[A-Z]+_[A-Z_]+_[a-f0-9]{8}`)
 
 // Analyzer is the brains of the whole IAST operation.
 type Analyzer struct {
@@ -36,10 +40,12 @@ type Analyzer struct {
 	probesMutex  sync.RWMutex
 
 	// Channel for SinkEvents, ExecutionProofEvents, ShimErrorEvents, and OASTInteractions.
-	eventsChan chan interface{}
+	eventsChan chan Event
 
-	// CONCURRENCY: WaitGroup to manage background goroutines (correlation, cleanup, OAST polling).
+	// wg tracks the correlation engine (consumer).
 	wg sync.WaitGroup
+	// producersWG tracks background tasks that produce events (OAST, Cleanup).
+	producersWG sync.WaitGroup
 
 	// Context and cancel function for background tasks.
 	backgroundCtx    context.Context
@@ -85,7 +91,7 @@ func NewAnalyzer(config Config, browser BrowserInteractor, reporter ResultsRepor
 		oastProvider: oastProvider,
 		logger:       taskLogger,
 		activeProbes: make(map[string]ActiveProbe),
-		eventsChan:   make(chan interface{}, config.EventChannelBuffer),
+		eventsChan:   make(chan Event, config.EventChannelBuffer),
 		shimTemplate: tmpl,
 	}, nil
 }
@@ -106,7 +112,11 @@ func (a *Analyzer) Analyze(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("failed to initialize browser session: %w", err)
 	}
-	defer session.Close()
+	defer func() {
+		if closeErr := session.Close(); closeErr != nil {
+			a.logger.Error("Failed to close browser session cleanly", zap.Error(closeErr))
+		}
+	}()
 
 	// 2. Instrument the browser.
 	if err := a.instrument(analysisCtx, session); err != nil {
@@ -133,36 +143,40 @@ func (a *Analyzer) Analyze(ctx context.Context) error {
 		a.logger.Warn("Analysis timeout reached during finalization grace period.")
 	}
 
-	// Signal background workers (OAST/Cleanup) to stop accepting new tasks.
+	// Signal background workers (producers) to stop their main loops.
 	a.backgroundCancel()
 
-	// Signal the correlation engine that no new events will arrive by closing the channel.
-	// This must happen AFTER backgroundCancel() to ensure OAST/cleanup routines finish their final cycle and potentially send final events.
+	// Wait for background producers to finish their final cycles (e.g., final OAST poll).
+	a.producersWG.Wait()
+
+	// Now that all producers are done, safely close the events channel.
 	close(a.eventsChan)
 
-	// Wait for all background goroutines to finish processing.
+	// Wait for the correlation engine (consumer) to finish processing the channel.
 	a.wg.Wait()
 
 	a.logger.Info("IAST analysis completed")
 	return nil
 }
 
+
 // startBackgroundWorkers launches the necessary background goroutines.
 func (a *Analyzer) startBackgroundWorkers() {
-	// Correlation Engine
+	// Correlation Engine (Consumer)
 	a.wg.Add(1)
 	go a.correlate()
 
-	// Probe Expiration Cleaner
-	a.wg.Add(1)
+	// Probe Expiration Cleaner (Producer)
+	a.producersWG.Add(1)
 	go a.cleanupExpiredProbes()
 
-	// OAST Poller
+	// OAST Poller (Producer)
 	if a.oastProvider != nil {
-		a.wg.Add(1)
+		a.producersWG.Add(1)
 		go a.pollOASTInteractions()
 	}
 }
+
 
 // instrument hooks into the client side.
 func (a *Analyzer) instrument(ctx context.Context, session SessionContext) error {
@@ -227,16 +241,17 @@ func (a *Analyzer) generateShim() (string, error) {
 
 // -- Callbacks Handlers (Browser -> Go) --
 
-// genericHandlerRecover provides panic recovery for callbacks to prevent crashing on closed channels during shutdown.
-func (a *Analyzer) genericHandlerRecover(eventType string) {
-	if r := recover(); r != nil {
-		a.logger.Warn("Attempted to send event on closed channel (analysis finalizing).", zap.String("event_type", eventType))
-	}
-}
-
 // handleSinkEvent is the callback from the JS shim.
 func (a *Analyzer) handleSinkEvent(event SinkEvent) {
-	defer a.genericHandlerRecover("SinkEvent")
+	// Check if analysis is finalizing before attempting to send.
+	select {
+	case <-a.backgroundCtx.Done():
+		// Context is cancelled, system is shutting down. Drop event.
+		a.logger.Debug("Dropping sink event during shutdown.", zap.String("sink", string(event.Type)))
+		return
+	default:
+		// Proceed as normal.
+	}
 
 	select {
 	case a.eventsChan <- event:
@@ -249,7 +264,13 @@ func (a *Analyzer) handleSinkEvent(event SinkEvent) {
 
 // handleExecutionProof is the callback when an XSS payload executes.
 func (a *Analyzer) handleExecutionProof(event ExecutionProofEvent) {
-	defer a.genericHandlerRecover("ExecutionProofEvent")
+	// Check if analysis is finalizing before attempting to send.
+	select {
+	case <-a.backgroundCtx.Done():
+		a.logger.Debug("Dropping execution proof during shutdown.", zap.String("canary", event.Canary))
+		return
+	default:
+	}
 
 	select {
 	case a.eventsChan <- event:
@@ -258,6 +279,7 @@ func (a *Analyzer) handleExecutionProof(event ExecutionProofEvent) {
 		a.logger.Warn("Event channel full, dropping execution proof.")
 	}
 }
+
 
 // handleShimError is the callback for internal errors within the JavaScript instrumentation.
 func (a *Analyzer) handleShimError(event ShimErrorEvent) {
@@ -308,21 +330,25 @@ func (a *Analyzer) generateCanary(prefix string, probeType ProbeType) string {
 
 // preparePayload replaces placeholders (Canary, OASTServer) in the probe definition.
 func (a *Analyzer) preparePayload(probeDef ProbeDefinition, canary string) string {
-	payload := strings.Replace(probeDef.Payload, "{{.Canary}}", canary, -1)
-
-	// OAST Integration: Replace the OAST server placeholder if the provider is available.
-	if strings.Contains(payload, "{{.OASTServer}}") {
-		if a.oastProvider != nil {
-			oastURL := a.oastProvider.GetServerURL()
-			payload = strings.Replace(payload, "{{.OASTServer}}", oastURL, -1)
-		} else {
-			// If OAST is required but not configured, this probe is invalid.
-			a.logger.Warn("OAST probe defined but no OAST provider configured. Skipping probe.", zap.String("canary", canary))
-			return ""
-		}
+	// Check if OAST replacement is needed and valid before starting replacements.
+	requiresOAST := strings.Contains(probeDef.Payload, "{{.OASTServer}}")
+	if requiresOAST && a.oastProvider == nil {
+		a.logger.Warn("OAST probe defined but no OAST provider configured. Skipping probe.", zap.String("canary", canary))
+		return ""
 	}
-	return payload
+
+	// Efficiently replace placeholders using strings.NewReplacer
+	replacements := []string{"{{.Canary}}", canary}
+
+	if requiresOAST {
+		oastURL := a.oastProvider.GetServerURL()
+		replacements = append(replacements, "{{.OASTServer}}", oastURL)
+	}
+
+	replacer := strings.NewReplacer(replacements...)
+	return replacer.Replace(probeDef.Payload)
 }
+
 
 // probePersistentSources injects probes into Cookies, LocalStorage, and SessionStorage.
 func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionContext) error {
@@ -331,8 +357,7 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 	storageKeyPrefix := "sc_store_"
 	cookieNamePrefix := "sc_cookie_"
 
-	// Generate the script to inject everything simultaneously
-	var injectionCommands []string
+	var injectionScriptBuilder strings.Builder
 
 	// Determine if 'Secure' flag should be used for cookies.
 	secureFlag := ""
@@ -359,7 +384,7 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 
 		// 1. LocalStorage
 		lsKey := fmt.Sprintf("%s%d", storageKeyPrefix, i)
-		injectionCommands = append(injectionCommands, fmt.Sprintf("localStorage.setItem(%q, %s);", lsKey, jsPayload))
+		fmt.Fprintf(&injectionScriptBuilder, "localStorage.setItem(%q, %s);\n", lsKey, jsPayload)
 		a.registerProbe(ActiveProbe{
 			Type:      probeDef.Type,
 			Key:       lsKey,
@@ -371,7 +396,7 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 
 		// 2. SessionStorage
 		ssKey := fmt.Sprintf("%s%d_s", storageKeyPrefix, i)
-		injectionCommands = append(injectionCommands, fmt.Sprintf("sessionStorage.setItem(%q, %s);", ssKey, jsPayload))
+		fmt.Fprintf(&injectionScriptBuilder, "sessionStorage.setItem(%q, %s);\n", ssKey, jsPayload)
 		a.registerProbe(ActiveProbe{
 			Type:      probeDef.Type,
 			Key:       ssKey,
@@ -384,8 +409,8 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 		// 3. Cookies
 		cookieName := fmt.Sprintf("%s%d", cookieNamePrefix, i)
 		// Set cookie via JS. Ensure SameSite=Lax.
-		cookieCommand := fmt.Sprintf("document.cookie = `${%q}=${encodeURIComponent(%s)}; path=/; max-age=3600; samesite=Lax;%s`;", cookieName, jsPayload, secureFlag)
-		injectionCommands = append(injectionCommands, cookieCommand)
+		cookieCommand := fmt.Sprintf("document.cookie = `${%q}=${encodeURIComponent(%s)}; path=/; max-age=3600; samesite=Lax;%s`;\n", cookieName, jsPayload, secureFlag)
+		injectionScriptBuilder.WriteString(cookieCommand)
 
 		a.registerProbe(ActiveProbe{
 			Type:      probeDef.Type,
@@ -397,11 +422,10 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 		})
 	}
 
-	if len(injectionCommands) == 0 {
+	injectionScript := injectionScriptBuilder.String()
+	if injectionScript == "" {
 		return nil
 	}
-
-	injectionScript := strings.Join(injectionCommands, "\n")
 
 	// Execute the injection script
 	if err := session.ExecuteScript(ctx, injectionScript); err != nil {
@@ -418,6 +442,7 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 
 	return nil
 }
+
 
 // probeURLSources throws probes into URL query params and the hash.
 func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext) error {
@@ -529,7 +554,7 @@ func (a *Analyzer) correlate() {
 
 // cleanupExpiredProbes periodically removes old probes to manage state in SPAs.
 func (a *Analyzer) cleanupExpiredProbes() {
-	defer a.wg.Done()
+	defer a.producersWG.Done()
 	ticker := time.NewTicker(a.config.CleanupInterval)
 	defer ticker.Stop()
 
@@ -547,25 +572,39 @@ func (a *Analyzer) cleanupExpiredProbes() {
 }
 
 func (a *Analyzer) executeCleanup() {
-	a.probesMutex.Lock()
-	defer a.probesMutex.Unlock()
-
+	// 1. Identify expired probes under a Read Lock.
 	expirationTime := time.Now().Add(-a.config.ProbeExpirationDuration)
-	count := 0
+	var expiredCanaries []string
+
+	a.probesMutex.RLock()
 	for canary, probe := range a.activeProbes {
 		if probe.CreatedAt.Before(expirationTime) {
-			delete(a.activeProbes, canary)
-			count++
+			expiredCanaries = append(expiredCanaries, canary)
 		}
 	}
-	if count > 0 {
-		a.logger.Debug("Cleaned up expired probes.", zap.Int("count", count))
+	a.probesMutex.RUnlock()
+
+	if len(expiredCanaries) == 0 {
+		return
 	}
+
+	// 2. Acquire Write Lock and delete the identified probes.
+	a.probesMutex.Lock()
+	for _, canary := range expiredCanaries {
+		// Re-check existence in case state changed, although less critical for cleanup.
+		if _, exists := a.activeProbes[canary]; exists {
+			delete(a.activeProbes, canary)
+		}
+	}
+	a.probesMutex.Unlock()
+
+	a.logger.Debug("Cleaned up expired probes.", zap.Int("count", len(expiredCanaries)))
 }
+
 
 // pollOASTInteractions periodically checks the OAST provider for callbacks.
 func (a *Analyzer) pollOASTInteractions() {
-	defer a.wg.Done()
+	defer a.producersWG.Done()
 	ticker := time.NewTicker(a.config.OASTPollingInterval)
 	defer ticker.Stop()
 
@@ -620,22 +659,26 @@ func (a *Analyzer) fetchAndEnqueueOAST() {
 
 	// 3. Enqueue interactions for correlation.
 	for _, interaction := range interactions {
-		// Use recover in case the channel is closed during shutdown (race condition).
-		func(i OASTInteraction) {
-			defer a.genericHandlerRecover("OASTInteraction")
-			select {
-			case a.eventsChan <- i:
-			default:
-				a.logger.Warn("Event channel full, dropping OAST interaction.")
-			}
-		}(interaction)
+		// Check context before sending to avoid panics on closed channels.
+		select {
+		case <-a.backgroundCtx.Done():
+			a.logger.Debug("Dropping OAST interaction during shutdown.", zap.String("canary", interaction.Canary))
+			return // Stop trying to send if shutdown has started.
+		default:
+		}
+
+		select {
+		case a.eventsChan <- interaction:
+		default:
+			a.logger.Warn("Event channel full, dropping OAST interaction.")
+		}
 	}
 }
 
 // -- Event Processing --
 
 // processEvent handles incoming events from the channel.
-func (a *Analyzer) processEvent(event interface{}) {
+func (a *Analyzer) processEvent(event Event) {
 	switch e := event.(type) {
 	case SinkEvent:
 		a.processSinkEvent(e)
@@ -648,6 +691,7 @@ func (a *Analyzer) processEvent(event interface{}) {
 		a.logger.Warn("Received unknown event type in correlation engine", zap.Any("event", event))
 	}
 }
+
 
 // processOASTInteraction handles confirmed out of band callbacks. This is high confidence.
 func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
@@ -746,58 +790,61 @@ func (a *Analyzer) processSinkEvent(event SinkEvent) {
 		return
 	}
 
-	// Optimization: Quick check for prefix before locking.
-	if !strings.Contains(event.Value, "SCALPEL") {
+	// Optimization: Use regex to find specific canaries before locking.
+	potentialCanaries := canaryRegex.FindAllString(event.Value, -1)
+	if len(potentialCanaries) == 0 {
 		return
 	}
 
+	// Acquire lock only to check the map and collect matches.
 	a.probesMutex.RLock()
-	defer a.probesMutex.RUnlock()
+	matchedProbes := make(map[string]ActiveProbe)
+	for _, canary := range potentialCanaries {
+		if probe, ok := a.activeProbes[canary]; ok {
+			matchedProbes[canary] = probe
+		}
+	}
+	a.probesMutex.RUnlock() // Release lock before processing.
 
-	// Iterate through all active probes to find a match.
-	for canary, probe := range a.activeProbes {
-		if strings.Contains(event.Value, canary) {
-			// Found a potential taint flow.
-			a.logger.Info("Taint flow detected!",
-				zap.String("source", string(probe.Source)),
-				zap.String("sink", string(event.Type)),
-				zap.String("canary", canary),
-				zap.String("detail", event.Detail),
-			)
+	// Process the findings outside the lock.
+	for canary, probe := range matchedProbes {
+		a.logger.Info("Taint flow detected!",
+			zap.String("source", string(probe.Source)),
+			zap.String("sink", string(event.Type)),
+			zap.String("canary", canary),
+			zap.String("detail", event.Detail))
 
-			// Validate the context (e.g., XSS probe must land in an execution sink).
-			if a.isContextValid(event, probe) {
-				// SANITIZATION AWARENESS: Check if the payload was modified.
-				sanitizationLevel, detailSuffix := a.checkSanitization(event.Value, probe)
+		if a.isContextValid(event, probe) {
+			// SANITIZATION AWARENESS: Check if the payload was modified.
+			sanitizationLevel, detailSuffix := a.checkSanitization(event.Value, probe)
 
-				// Determine confirmation status. Sink events are suspicious but not definitive proof.
-				isConfirmed := false
+			// Determine confirmation status. Sink events are suspicious but not definitive proof.
+			isConfirmed := false
 
-				finding := CorrelatedFinding{
-					TaskID:            a.config.TaskID,
-					TargetURL:         a.config.Target.String(),
-					Sink:              event.Type,
-					Origin:            probe.Source,
-					Value:             event.Value,
-					Canary:            canary,
-					Probe:             probe,
-					Detail:            event.Detail + detailSuffix,
-					IsConfirmed:       isConfirmed,
-					SanitizationLevel: sanitizationLevel,
-					StackTrace:        event.StackTrace,
-				}
-				a.reporter.Report(finding)
-			} else {
-				a.logger.Debug("Context mismatch: Taint flow suppressed (False Positive).",
-					zap.String("canary", canary),
-					zap.String("probe_type", string(probe.Type)),
-					zap.String("sink_type", string(event.Type)),
-				)
+			finding := CorrelatedFinding{
+				TaskID:            a.config.TaskID,
+				TargetURL:         a.config.Target.String(),
+				Sink:              event.Type,
+				Origin:            probe.Source,
+				Value:             event.Value,
+				Canary:            canary,
+				Probe:             probe,
+				Detail:            event.Detail + detailSuffix,
+				IsConfirmed:       isConfirmed,
+				SanitizationLevel: sanitizationLevel,
+				StackTrace:        event.StackTrace,
 			}
-			return // Found the match, stop searching.
+			a.reporter.Report(finding)
+		} else {
+			a.logger.Debug("Context mismatch: Taint flow suppressed (False Positive).",
+				zap.String("canary", canary),
+				zap.String("probe_type", string(probe.Type)),
+				zap.String("sink_type", string(event.Type)),
+			)
 		}
 	}
 }
+
 
 // processPrototypePollutionConfirmation handles the specific event when the JS shim confirms Object.prototype was polluted.
 func (a *Analyzer) processPrototypePollutionConfirmation(event SinkEvent) {
@@ -841,6 +888,64 @@ func (a *Analyzer) processPrototypePollutionConfirmation(event SinkEvent) {
 }
 
 // -- Validation and False Positive Reduction --
+// Define a key representing a specific taint flow path.
+type TaintFlowPath struct {
+	ProbeType ProbeType
+	SinkType  TaintSink
+}
+
+// ValidTaintFlows defines the set of acceptable source-to-sink paths.
+var ValidTaintFlows = map[TaintFlowPath]bool{
+	// Rule 1: XSS (Examples)
+	{ProbeTypeXSS, SinkEval}:              true,
+	{ProbeTypeXSS, SinkInnerHTML}:         true,
+	{ProbeTypeXSS, SinkOuterHTML}:         true,
+	{ProbeTypeXSS, SinkDocumentWrite}:     true,
+	{ProbeTypeXSS, SinkIframeSrcDoc}:      true,
+	{ProbeTypeXSS, SinkFunctionConstructor}: true,
+	{ProbeTypeXSS, SinkScriptSrc}:         true,
+	{ProbeTypeXSS, SinkIframeSrc}:         true,
+	{ProbeTypeXSS, SinkNavigation}:        true, // Requires exceptional handling
+	{ProbeTypeXSS, SinkPostMessage}:       true,
+	{ProbeTypeXSS, SinkWorkerPostMessage}: true,
+
+	// DOM Clobbering can lead to XSS sinks
+	{ProbeTypeDOMClobbering, SinkEval}:              true,
+	{ProbeTypeDOMClobbering, SinkInnerHTML}:         true,
+	{ProbeTypeDOMClobbering, SinkNavigation}:        true,
+
+	// SSTI leading to client-side execution
+	{ProbeTypeSSTI, SinkEval}:              true,
+	{ProbeTypeSSTI, SinkInnerHTML}:         true,
+	{ProbeTypeSSTI, SinkOuterHTML}:         true,
+	{ProbeTypeSSTI, SinkDocumentWrite}:     true,
+	{ProbeTypeSSTI, SinkIframeSrcDoc}:      true,
+	{ProbeTypeSSTI, SinkFunctionConstructor}: true,
+
+	// Backend injections reflecting as XSS
+	{ProbeTypeSQLi, SinkInnerHTML}:         true,
+	{ProbeTypeCmdInjection, SinkInnerHTML}: true,
+
+	// Rule 3: Generic/OAST Probes for Data Leakage
+	{ProbeTypeGeneric, SinkWebSocketSend}:      true,
+	{ProbeTypeGeneric, SinkXMLHTTPRequest}:     true,
+	{ProbeTypeGeneric, SinkXMLHTTPRequest_URL}: true,
+	{ProbeTypeGeneric, SinkFetch}:              true,
+	{ProbeTypeGeneric, SinkFetch_URL}:          true,
+	{ProbeTypeGeneric, SinkNavigation}:         true,
+	{ProbeTypeGeneric, SinkSendBeacon}:         true,
+	{ProbeTypeGeneric, SinkWorkerSrc}:          true,
+
+	{ProbeTypeOAST, SinkWebSocketSend}:      true,
+	{ProbeTypeOAST, SinkXMLHTTPRequest}:     true,
+	{ProbeTypeOAST, SinkXMLHTTPRequest_URL}: true,
+	{ProbeTypeOAST, SinkFetch}:              true,
+	{ProbeTypeOAST, SinkFetch_URL}:          true,
+	{ProbeTypeOAST, SinkNavigation}:         true,
+	{ProbeTypeOAST, SinkSendBeacon}:         true,
+	{ProbeTypeOAST, SinkWorkerSrc}:          true,
+}
+
 
 // checkSanitization compares the value that reached the sink with the original probe payload.
 // It detects if critical parts of the payload were stripped or encoded.
@@ -870,49 +975,30 @@ func (a *Analyzer) checkSanitization(sinkValue string, probe ActiveProbe) (Sanit
 
 // isContextValid implements the rules engine for reducing false positives.
 func (a *Analyzer) isContextValid(event SinkEvent, probe ActiveProbe) bool {
-	// Note: Prototype Pollution is handled in processPrototypePollutionConfirmation.
+	flow := TaintFlowPath{ProbeType: probe.Type, SinkType: event.Type}
 
-	// Rule 1: XSS and related execution probes.
-	if probe.Type == ProbeTypeXSS || strings.Contains(string(probe.Type), "XSS") || probe.Type == ProbeTypeDOMClobbering {
-		switch event.Type {
-		case SinkEval, SinkInnerHTML, SinkOuterHTML, SinkDocumentWrite, SinkScriptSrc, SinkIframeSrc, SinkIframeSrcDoc, SinkFunctionConstructor:
-			return true
-		case SinkNavigation:
-			// Navigation sinks are only vulnerable if a dangerous protocol is used.
-			normalizedValue := strings.ToLower(strings.TrimSpace(event.Value))
-			// Check for common dangerous protocols.
-			if strings.HasPrefix(normalizedValue, "javascript:") || strings.HasPrefix(normalizedValue, "data:text/html") {
-				return true
-			}
-			return false
-		// IPC Sinks: Taint flowing into another context (Iframe/Worker) might lead to XSS there.
-		case SinkPostMessage, SinkWorkerPostMessage:
-			// This is lower confidence but important for tracking cross origin/cross context vulnerabilities.
-			return true
-		default:
-			// Tainted data in a network request body (e.g., SinkFetch) is not XSS.
-			return false
-		}
+	// Handle probes that can manifest as XSS (e.g., Reflected SQLi)
+	probeTypeString := string(probe.Type)
+	if strings.Contains(probeTypeString, "XSS") || strings.Contains(probeTypeString, "SQLi") || strings.Contains(probeTypeString, "CmdInjection") {
+		flow.ProbeType = ProbeTypeXSS // Treat as XSS for validation purposes
 	}
 
-	// Rule 2: SSTI that leads to client side execution (often overlaps with XSS sinks).
-	if probe.Type == ProbeTypeSSTI {
-		switch event.Type {
-		case SinkEval, SinkInnerHTML, SinkOuterHTML, SinkDocumentWrite, SinkIframeSrcDoc, SinkFunctionConstructor:
-			return true
-		}
+	// Check the declarative rules map.
+	if !ValidTaintFlows[flow] {
+		return false
 	}
 
-	// Rule 3: Generic probes and OAST probes (Data Leakage/Exfiltration/SSRF).
-	if probe.Type == ProbeTypeGeneric || probe.Type == ProbeTypeOAST {
-		switch event.Type {
-		case SinkWebSocketSend, SinkXMLHTTPRequest, SinkXMLHTTPRequest_URL, SinkFetch, SinkFetch_URL, SinkNavigation, SinkSendBeacon, SinkWorkerSrc:
-			// Tainted data flowing out of the application via network requests, navigation, or resource loading.
+	// Handle specific condition-based exceptions that cannot be declared statically.
+
+	// Exception 1: Navigation sinks require specific protocols for XSS/Clobbering.
+	if (flow.ProbeType == ProbeTypeXSS || flow.ProbeType == ProbeTypeDOMClobbering) && event.Type == SinkNavigation {
+		normalizedValue := strings.ToLower(strings.TrimSpace(event.Value))
+		if strings.HasPrefix(normalizedValue, "javascript:") || strings.HasPrefix(normalizedValue, "data:text/html") {
 			return true
 		}
+		return false
 	}
 
-	// Backend injections (SQLi, CmdInjection) are typically validated via ExecutionProof if they reflect as XSS (covered by Rule 1).
-
-	return false
+	// If no exceptions apply, the flow is valid.
+	return true
 }

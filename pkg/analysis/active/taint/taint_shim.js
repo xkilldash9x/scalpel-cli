@@ -27,6 +27,13 @@
         log: (...args) => console.log(`[Scalpel Taint Shim - ${CONTEXT_NAME}]`, ...args)
     };
 
+    // Predefined condition handlers for CSP compatibility.
+    const ConditionHandlers = {
+        'IS_STRING_ARG0': (args) => typeof args[0] === 'string',
+        'SEND_BEACON_DATA_EXISTS': (args) => args.length > 1 && args[1] != null,
+        'XHR_SEND_DATA_EXISTS': (args) => args.length > 0 && args[0] != null,
+    };
+
     // Set to track instrumented objects (Prototypes, Shadow Roots, Functions) to avoid infinite recursion/re-instrumentation.
     const instrumentedCache = new WeakSet();
 
@@ -73,45 +80,56 @@
 
     /**
      * Checks if a value contains the canary prefix, indicating it's tainted.
-     * Handles various data types robustly (Strings, URLSearchParams, FormData, Objects).
+     * Implements deep checking with cycle detection and depth limits.
      */
-    function isTainted(value) {
+    function isTainted(value, depth = 0, seen = new WeakSet()) {
+        const MAX_DEPTH = 4; // Limit recursion depth for performance.
+
         if (typeof value === 'string') {
             return value.includes(CONFIG.CanaryPrefix);
         }
-        
-        // Handle non-string types common in modern APIs (e.g., Fetch bodies, postMessage data).
-        if (typeof URLSearchParams !== 'undefined' && value instanceof URLSearchParams ||
-            typeof FormData !== 'undefined' && value instanceof FormData) {
-            for (const val of value.values()) {
-                if (typeof val === 'string' && val.includes(CONFIG.CanaryPrefix)) {
+
+        if (typeof value !== 'object' || value === null || depth > MAX_DEPTH) {
+            return false;
+        }
+
+        // Cycle detection
+        if (seen.has(value)) return false;
+        seen.add(value);
+
+        // Handle Arrays and specialized iterable objects (URLSearchParams, FormData)
+        if (Array.isArray(value) ||
+            (typeof URLSearchParams !== 'undefined' && value instanceof URLSearchParams) ||
+            (typeof FormData !== 'undefined' && value instanceof FormData)) {
+
+            const iterator = (typeof value.values === 'function') ? value.values() : value;
+            for (const val of iterator) {
+                if (isTainted(val, depth + 1, seen)) {
                     return true;
                 }
             }
             return false;
         }
-        
-        // For generic objects (often used in postMessage), do a shallow check.
-        if (typeof value === 'object' && value !== null && !Array.isArray(value)) {
-             try {
-                 // Use Reflect.ownKeys for safer iteration over object properties
-                 const keys = Reflect.ownKeys(value);
-                 for (const key of keys) {
-                    try {
-                        const propValue = value[key];
-                        if (typeof propValue === 'string' && propValue.includes(CONFIG.CanaryPrefix)) {
-                            return true;
-                        }
-                    } catch(e) {
-                        // Ignore errors accessing properties (e.g. getters throwing exceptions)
+
+        // Handle generic objects
+        try {
+            const keys = Reflect.ownKeys(value);
+            for (const key of keys) {
+                try {
+                    const propValue = value[key];
+                    if (isTainted(propValue, depth + 1, seen)) {
+                        return true;
                     }
-                 }
-             } catch(e) {
-                 // Cannot inspect object properties (e.g. cross-origin object)
-             }
+                } catch (e) {
+                    // Ignore errors accessing properties
+                }
+            }
+        } catch (e) {
+            // Cannot inspect object properties
         }
         return false;
     }
+
 
     /**
      * Reports a detected sink event to the Go backend.
@@ -243,21 +261,17 @@
 
                 if (isTainted(valueToInspect)) {
                     let conditionsMet = true;
-                    if (sinkDef.Conditions) {
-                        // Evaluate the condition snippet.
+                    if (sinkDef.ConditionID) {
                         try {
-                            // WARNING: Use of new Function() may be blocked by strict CSP (unsafe-eval).
-                            // We pass relevant constructors explicitly for instanceof checks.
-                            const context = {
-                                arguments: arguments,
-                                Request: typeof Request !== 'undefined' ? Request : null,
-                            };
-                            
-                            const conditionCheck = new Function(...Object.keys(context), `return (${sinkDef.Conditions});`);
-                            conditionsMet = conditionCheck(...Object.values(context));
-
+                            const handler = ConditionHandlers[sinkDef.ConditionID];
+                            if (handler) {
+                                conditionsMet = handler(args);
+                            } else {
+                                reportShimError(`Unknown ConditionID: ${sinkDef.ConditionID}`, `instrumentFunction ${sinkDef.Name}`);
+                                conditionsMet = false; // Fail closed
+                            }
                         } catch (e) {
-                            reportShimError(e, `Error evaluating condition for ${sinkDef.Name}. Condition: ${sinkDef.Conditions}`);
+                            reportShimError(e, `Error evaluating condition for ${sinkDef.Name}. ConditionID: ${sinkDef.ConditionID}`);
                             conditionsMet = false; // Assume condition failed if evaluation errors.
                         }
                     }
@@ -284,8 +298,8 @@
             Object.getOwnPropertyNames(originalFunc).forEach(prop => {
                 if (prop !== 'prototype' && prop !== 'name' && prop !== 'length') {
                     try {
-                         Object.defineProperty(wrapper, prop, Object.getOwnPropertyDescriptor(originalFunc, prop));
-                    } catch(e) {
+                        Object.defineProperty(wrapper, prop, Object.getOwnPropertyDescriptor(originalFunc, prop));
+                    } catch (e) {
                         // Ignore errors defining properties (e.g. non-configurable properties)
                     }
                 }
@@ -300,6 +314,7 @@
             reportShimError(e, `Could not fully restore prototype chain or define property for ${sinkDef.Name}`);
         }
     }
+
 
     /**
      * Instruments a property setter.
@@ -357,7 +372,7 @@
     function applyInstrumentation(root) {
         // Safety check to prevent redundant instrumentation on the same object/prototype.
         if (!root || instrumentedCache.has(root)) return;
-        
+
         // Mark the root as processed early to prevent recursion issues if sinks reference the root itself.
         instrumentedCache.add(root);
 
@@ -371,7 +386,10 @@
                     return;
                 }
 
-                const { parent, key } = resolved;
+                const {
+                    parent,
+                    key
+                } = resolved;
 
                 // Check if the resolved parent matches the intended root context.
                 // This is complex, especially with prototypes. We rely on resolvePath finding the correct prototype chain.
@@ -403,28 +421,8 @@
             try {
                 // Apply instrumentation to the ShadowRoot itself (e.g. shadowRoot.innerHTML).
                 applyInstrumentation(shadowRoot);
-
-                // Ensure core prototypes used within the Shadow DOM are instrumented.
-                // Since standard elements inside Shadow DOM inherit from the global Element.prototype,
-                // we ensure the global prototypes are instrumented if they haven't been already.
-                if (typeof HTMLElement !== 'undefined' && HTMLElement.prototype) applyInstrumentation(HTMLElement.prototype);
-                if (typeof Element !== 'undefined' && Element.prototype) applyInstrumentation(Element.prototype);
-
-                // Use MutationObserver to ensure dynamically added elements within the Shadow DOM are covered.
-                const observer = new MutationObserver((mutations) => {
-                    mutations.forEach(mutation => {
-                        if (mutation.type === 'childList') {
-                            mutation.addedNodes.forEach(node => {
-                                if (node.nodeType === Node.ELEMENT_NODE) {
-                                    // Ensure the prototype of the added node is instrumented (it usually is, but this is a safety measure).
-                                    applyInstrumentation(Object.getPrototypeOf(node));
-                                }
-                            });
-                        }
-                    });
-                });
-                observer.observe(shadowRoot, { childList: true, subtree: true });
-
+                // Global prototypes are already instrumented by initialize().
+                // We do not need a MutationObserver here.
             } catch (e) {
                 reportShimError(e, "Error during Shadow DOM instrumentation (attachShadow)");
             }
@@ -432,6 +430,7 @@
             return shadowRoot;
         };
     }
+
 
     /**
      * WEB WORKER SUPPORT: Instruments the creation and communication of Web Workers.
@@ -441,7 +440,7 @@
         if (!IS_WORKER && typeof Worker !== 'undefined') {
             const OriginalWorker = Worker;
             const WorkerWrapper = function(url, options) {
-                
+
                 if (isTainted(String(url))) {
                     reportSink("WORKER_SRC", String(url), "new Worker()");
                 }
@@ -455,12 +454,12 @@
 
                 return worker;
             };
-             // Restore prototype chain
-             WorkerWrapper.prototype = OriginalWorker.prototype;
-             Object.setPrototypeOf(WorkerWrapper, OriginalWorker);
+            // Restore prototype chain
+            WorkerWrapper.prototype = OriginalWorker.prototype;
+            Object.setPrototypeOf(WorkerWrapper, OriginalWorker);
 
-             // Override the global Worker constructor
-             scope.Worker = WorkerWrapper;
+            // Override the global Worker constructor
+            scope.Worker = WorkerWrapper;
         }
 
         // 2. Instrument Worker Context (Worker thread only)
@@ -468,7 +467,7 @@
             // applyInstrumentation(self) handles DedicatedWorkerGlobalScope.postMessage and other sinks (fetch, XHR).
             logger.log("IAST Shim initialized within Web Worker context.");
         }
-        
+
         // 3. Instrument EventTarget.addEventListener to track incoming 'message' events (IPC Taint Flow)
         if (typeof EventTarget !== 'undefined' && EventTarget.prototype.addEventListener) {
             const originalAddEventListener = EventTarget.prototype.addEventListener;
@@ -478,8 +477,8 @@
                     listenerToUse = function(event) {
                         // Check if the data property is tainted
                         if (isTainted(event.data)) {
-                             // Log the flow. We rely on subsequent sinks to catch the actual vulnerability if the data is used unsafely.
-                             logger.log("Tainted data received via postMessage/onmessage", event.origin);
+                            // Log the flow. We rely on subsequent sinks to catch the actual vulnerability if the data is used unsafely.
+                            logger.log("Tainted data received via postMessage/onmessage", event.origin);
                         }
                         return listener.call(this, event);
                     };
@@ -534,7 +533,7 @@
             if (typeof Element !== 'undefined' && Element.prototype) applyInstrumentation(Element.prototype);
             if (typeof HTMLElement !== 'undefined' && HTMLElement.prototype) applyInstrumentation(HTMLElement.prototype);
             if (typeof Window !== 'undefined' && Window.prototype) applyInstrumentation(Window.prototype);
-            
+
 
             // 3. Instrument advanced features.
             instrumentShadowDOM();

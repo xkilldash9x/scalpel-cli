@@ -206,8 +206,8 @@ func DefaultSinks() []SinkDefinition {
 		// -- Execution Sinks (High Risk) --
 		{Name: "eval", Type: SinkEval, Setter: false, ArgIndex: 0}, // Global eval
 		// setTimeout/setInterval are only dangerous if the first argument is a string.
-		{Name: "setTimeout", Type: SinkEval, Setter: false, ArgIndex: 0, Conditions: "typeof arguments[0] === 'string'"},
-		{Name: "setInterval", Type: SinkEval, Setter: false, ArgIndex: 0, Conditions: "typeof arguments[0] === 'string'"},
+		{Name: "setTimeout", Type: SinkEval, Setter: false, ArgIndex: 0, ConditionID: "IS_STRING_ARG0"},
+		{Name: "setInterval", Type: SinkEval, Setter: false, ArgIndex: 0, ConditionID: "IS_STRING_ARG0"},
 		// Function constructor sinks
 		{Name: "Function", Type: SinkFunctionConstructor, Setter: false, ArgIndex: 0},
 		{Name: "Function.prototype.constructor", Type: SinkFunctionConstructor, Setter: false, ArgIndex: 0},
@@ -250,16 +250,15 @@ func DefaultSinks() []SinkDefinition {
 		{Name: "WebSocket.prototype.send", Type: SinkWebSocketSend, Setter: false, ArgIndex: 0},
 
 		// navigator.sendBeacon (Arg 1 is the data)
-		{Name: "navigator.sendBeacon", Type: SinkSendBeacon, Setter: false, ArgIndex: 1, Conditions: "arguments.length > 1 && arguments[1] != null"},
+		{Name: "navigator.sendBeacon", Type: SinkSendBeacon, Setter: false, ArgIndex: 1, ConditionID: "SEND_BEACON_DATA_EXISTS"},
 
 		// XHR: Body (send) or URL (open)
-		{Name: "XMLHttpRequest.prototype.send", Type: SinkXMLHTTPRequest, Setter: false, ArgIndex: 0, Conditions: "arguments.length > 0 && arguments[0] != null"},
+		{Name: "XMLHttpRequest.prototype.send", Type: SinkXMLHTTPRequest, Setter: false, ArgIndex: 0, ConditionID: "XHR_SEND_DATA_EXISTS"},
 		{Name: "XMLHttpRequest.prototype.open", Type: SinkXMLHTTPRequest_URL, Setter: false, ArgIndex: 1},
 
 		// Fetch: URL (arg 0) or Body (arg 1) - Handled dynamically in JS Shim
 		{Name: "fetch", Type: SinkFetch_URL, Setter: false, ArgIndex: 0},
 		{Name: "fetch", Type: SinkFetch, Setter: false, ArgIndex: 1},
-
 
 		// -- Inter-Process Communication (IPC) Sinks --
 

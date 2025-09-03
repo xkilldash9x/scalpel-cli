@@ -10,8 +10,6 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
-
-	"github.com/google/uuid"
 )
 
 type IdentifierType string
@@ -34,10 +32,11 @@ const (
 )
 
 type ObservedIdentifier struct {
-	Value    string
-	Type     IdentifierType
-	Location IdentifierLocation
-	Key      string
+	Value     string
+	Type      IdentifierType
+	Location  IdentifierLocation
+	Key       string
+	PathIndex int // Added for LocationURLPath specificity
 }
 
 var (
@@ -106,12 +105,13 @@ func ExtractIdentifiers(req *http.Request, body []byte) []ObservedIdentifier {
 	var identifiers []ObservedIdentifier
 	// 1. URL Path
 	segments := strings.Split(req.URL.Path, "/")
-	for _, segment := range segments {
+	for i, segment := range segments { // Iterate with index i
 		if idType := ClassifyIdentifier(segment); idType != TypeUnknown {
 			identifiers = append(identifiers, ObservedIdentifier{
-				Value:    segment,
-				Type:     idType,
-				Location: LocationURLPath,
+				Value:     segment,
+				Type:      idType,
+				Location:  LocationURLPath,
+				PathIndex: i, // Store the index
 			})
 		}
 	}
@@ -288,18 +288,15 @@ func ApplyTestValue(req *http.Request, body []byte, identifier ObservedIdentifie
 
 	switch identifier.Location {
 	case LocationURLPath:
-		// Safer replacement: Replace only the specific segment.
 		segments := strings.Split(clonedReq.URL.Path, "/")
-		replaced := false
-		for i, segment := range segments {
-			if segment == identifier.Value {
-				segments[i] = testValue
-				replaced = true
-				break
+		// Use the specific index for replacement
+		idx := identifier.PathIndex
+		if idx >= 0 && idx < len(segments) {
+			// Verify that the value at the index still matches the original observed value
+			if segments[idx] == identifier.Value {
+				segments[idx] = testValue
+				clonedReq.URL.Path = strings.Join(segments, "/")
 			}
-		}
-		if replaced {
-			clonedReq.URL.Path = strings.Join(segments, "/")
 		}
 
 	case LocationQueryParam:
@@ -324,6 +321,8 @@ func ApplyTestValue(req *http.Request, body []byte, identifier ObservedIdentifie
 }
 
 // modifyJSONPayload modifies the JSON structure securely instead of using string replacement.
+// Note: While a library like tidwall/sjson could simplify this, this standard library
+// approach avoids adding external dependencies.
 func modifyJSONPayload(body []byte, identifier ObservedIdentifier, testValue string) ([]byte, error) {
 	var data interface{}
 	// Use Decoder with UseNumber for consistency and precision.

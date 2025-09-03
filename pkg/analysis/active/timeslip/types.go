@@ -69,6 +69,9 @@ type Config struct {
 	RequestJitter time.Duration `json:"request_jitter,omitempty"`
 	// ConnectionDelay (H1Concurrent only) adds a delay during initialization to prime connections.
 	ConnectionDelay time.Duration `json:"connection_delay,omitempty"`
+	// ExpectedSuccesses defines the maximum number of successful operations expected.
+	// If nil or <= 0, defaults to 1 (standard TOCTOU assumption).
+	ExpectedSuccesses int `json:"expected_successes,omitempty"`
 }
 
 // RaceResponse is the result from a single operation within a race attempt.
@@ -105,12 +108,12 @@ type ResponseStatistics struct {
 
 // AnalysisResult is the final assessment of the race attempt.
 type AnalysisResult struct {
-	Vulnerable bool
-	Strategy   RaceStrategy
-	Details    string
+	Vulnerable      bool
+	Strategy        RaceStrategy
+	Details         string
 	// Confidence level (0.0 to 1.0).
-	Confidence    float64
-	SuccessCount  int
+	Confidence      float64
+	SuccessCount    int
 	UniqueResponses map[string]int
 
 	// Stats provides detailed timing analysis.
@@ -118,6 +121,8 @@ type AnalysisResult struct {
 }
 
 // --- sync.Pool Implementation for Performance Optimization ---
+
+const maxResponseBodyBytes = 2 * 1024 * 1024 // 2 MB limit
 
 // bufferPool is used to reuse bytes.Buffer objects, reducing GC pressure.
 var bufferPool = sync.Pool{

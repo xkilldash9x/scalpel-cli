@@ -11,7 +11,6 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
-
 	"github.com/xkilldash9x/scalpel-cli/pkg/browser"
 	"github.com/xkilldash9x/scalpel-cli/pkg/config"
 	"github.com/xkilldash9x/scalpel-cli/pkg/knowledgegraph"
@@ -81,6 +80,7 @@ type SerializedResponse struct {
 }
 
 // Reporter is the interface for publishing analysis results.
+// Implementations MUST be safe for concurrent use by multiple goroutines.
 type Reporter interface {
 	Publish(finding AnalysisResult) error
 }

@@ -2,13 +2,15 @@
 package timeslip
 
 import (
-	"bytes"
 	"crypto/sha256"
 	"encoding/hex"
-	"fmt"
+	"hash"
+	"io"
 	"net/http"
 	"sort"
+	"strconv"
 	"strings"
+	"sync"
 )
 
 // Headers to exclude from fingerprinting as they are often volatile, connection-specific, or derived from the body.
@@ -29,18 +31,37 @@ var excludedHeaders = map[string]bool{
 	"Age":               true,
 }
 
+// Pool for sha256 hashers to reduce allocation overhead.
+var hasherPool = sync.Pool{
+	New: func() interface{} {
+		return sha256.New()
+	},
+}
+
+func getHasher() hash.Hash { return hasherPool.Get().(hash.Hash) }
+func putHasher(h hash.Hash) {
+	h.Reset()
+	hasherPool.Put(h)
+}
+
 // GenerateFingerprint creates a composite hash representing the unique state of the response.
 // It combines the Status Code, canonicalized headers, and the response body hash.
 func GenerateFingerprint(statusCode int, headers http.Header, body []byte) string {
-	hasher := sha256.New()
+	// Use pooled hasher.
+	hasher := getHasher()
+	defer putHasher(hasher)
 
-	// 1. Include Status Code.
-	hasher.Write([]byte(fmt.Sprintf("STATUS:%d;", statusCode)))
+	// 1. Include Status Code. (Optimized)
+	statusBuf := make([]byte, 0, 20) // Pre-allocate space
+	statusBuf = append(statusBuf, "STATUS:"...)
+	statusBuf = strconv.AppendInt(statusBuf, int64(statusCode), 10)
+	statusBuf = append(statusBuf, ';')
+	hasher.Write(statusBuf)
 
-	// 2. Include Canonicalized Headers.
-	headerFingerprint := canonicalizeHeaders(headers)
+	// 2. Include Canonicalized Headers. (Optimized)
 	hasher.Write([]byte("HEADERS:"))
-	hasher.Write(headerFingerprint)
+	// Write headers directly to the hasher.
+	canonicalizeHeaders(hasher, headers)
 	hasher.Write([]byte(";"))
 
 	// 3. Include Body Hash.
@@ -53,8 +74,8 @@ func GenerateFingerprint(statusCode int, headers http.Header, body []byte) strin
 	return hex.EncodeToString(hasher.Sum(nil))
 }
 
-// canonicalizeHeaders creates a stable string representation of the headers.
-func canonicalizeHeaders(headers http.Header) []byte {
+// canonicalizeHeaders writes a stable representation directly to the writer (hasher).
+func canonicalizeHeaders(w io.Writer, headers http.Header) {
 	keys := make([]string, 0, len(headers))
 	for k := range headers {
 		// Use the canonical MIME header key format for consistency.
@@ -67,17 +88,16 @@ func canonicalizeHeaders(headers http.Header) []byte {
 	// Sort keys to ensure consistent order regardless of server implementation.
 	sort.Strings(keys)
 
-	var buf bytes.Buffer
 	for _, k := range keys {
-		// Combine all values for the header key.
-		// Note: The order of values matters; http.Header preserves the order received.
 		values := headers[k]
 		// We join them with a comma.
 		normalizedValue := strings.Join(values, ",")
 
 		// Write format: lowercase_key:value|
-		fmt.Fprintf(&buf, "%s:%s|", strings.ToLower(k), normalizedValue)
+		// Use direct writes instead of Fprintf.
+		io.WriteString(w, strings.ToLower(k))
+		io.WriteString(w, ":")
+		io.WriteString(w, normalizedValue)
+		io.WriteString(w, "|")
 	}
-
-	return buf.Bytes()
 }

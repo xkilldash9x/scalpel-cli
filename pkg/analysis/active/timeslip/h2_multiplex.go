@@ -62,7 +62,7 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 			// --- Synchronization Phase ---
 			select {
 			case <-startGate:
-				// Proceed
+			// Proceed
 			case <-ctx.Done():
 				resultsChan <- &RaceResponse{Error: ctx.Err()}
 				return
@@ -70,8 +70,9 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 
 			// Apply Request Jitter.
 			if config.RequestJitter > 0 {
-				//nolint:gosec // Weak RNG is acceptable for timing jitter.
-				jitter := time.Duration(rand.Int63n(int64(config.RequestJitter)))
+				rng := getRNG() // Use pooled RNG
+				jitter := time.Duration(rng.Int63n(int64(config.RequestJitter)))
+				putRNG(rng) // Return RNG immediately after use
 				time.Sleep(jitter)
 			}
 
@@ -104,16 +105,21 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 			// Use pooled buffer for reading the response body.
 			buf := getBuffer()
 
-			_, err = io.Copy(buf, resp.Body)
-			if err != nil {
+			n, err := io.CopyN(buf, resp.Body, maxResponseBodyBytes+1)
+			if err != nil && err != io.EOF {
 				putBuffer(buf)
 				resultsChan <- &RaceResponse{Error: fmt.Errorf("failed to read response body: %w", err)}
 				return
 			}
+			if n > maxResponseBodyBytes {
+				putBuffer(buf)
+				resultsChan <- &RaceResponse{Error: fmt.Errorf("response body exceeded limit of %d bytes", maxResponseBodyBytes)}
+				return
+			}
 
 			// Copy the bytes from the buffer.
-			body := make([]byte, buf.Len())
-			copy(body, buf.Bytes())
+			body := make([]byte, n)
+			copy(body, buf.Bytes()[:n])
 			putBuffer(buf)
 
 			// Generate the composite fingerprint.

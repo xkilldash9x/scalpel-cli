@@ -51,9 +51,13 @@ func ExecuteGraphQLAsync(ctx context.Context, candidate *RaceCandidate, config *
 	}
 	defer resp.Body.Close()
 
-	body, err := io.ReadAll(resp.Body)
+	// Enforce read limit on the response body.
+	body, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyBytes))
 	if err != nil {
 		return nil, fmt.Errorf("failed to read response body: %w", err)
+	}
+	if len(body) >= int(maxResponseBodyBytes) {
+		return nil, fmt.Errorf("response body exceeded limit of %d bytes", maxResponseBodyBytes)
 	}
 
 	// Create the shared ParsedResponse.
@@ -67,7 +71,9 @@ func ExecuteGraphQLAsync(ctx context.Context, candidate *RaceCandidate, config *
 
 	// 3. Parse the batched response.
 	var batchedResponse []json.RawMessage
-	isBatched := len(body) > 0 && body[0] == '['
+	// Check if it looks like a batched response (JSON array), accounting for whitespace.
+	trimmedBody := bytes.TrimSpace(body)
+	isBatched := len(trimmedBody) > 0 && trimmedBody[0] == '['
 
 	if !isBatched || json.Unmarshal(body, &batchedResponse) != nil {
 		return handleNonBatchedGraphQLResponse(parsedHTTPResp, duration, oracle), nil

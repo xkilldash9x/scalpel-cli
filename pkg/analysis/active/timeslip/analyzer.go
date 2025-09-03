@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"go.uber.org/zap"
@@ -72,8 +73,12 @@ func (a *Analyzer) Analyze(ctx context.Context, candidate *RaceCandidate) error 
 		zap.Int("concurrency", a.config.Concurrency))
 
 	// Initialize the SuccessOracle specific to this candidate which handles the IsGraphQL flag.
-	// We know this won't error because the configuration was already validated in NewAnalyzer.
-	oracle, _ := NewSuccessOracle(a.config, candidate.IsGraphQL)
+	oracle, err := NewSuccessOracle(a.config, candidate.IsGraphQL)
+	if err != nil {
+		// This indicates an internal inconsistency.
+		a.logger.Error("Internal Error: Failed to initialize SuccessOracle despite prior validation.", zap.Error(err))
+		return fmt.Errorf("internal error initializing SuccessOracle: %w", err)
+	}
 
 	strategies := a.determineStrategies(candidate)
 
@@ -216,7 +221,6 @@ func (a *Analyzer) reportFinding(candidate *RaceCandidate, analysis *AnalysisRes
 		envelope := &schemas.ResultEnvelope{
 			Timestamp: time.Now().UTC(),
 			ScanID:    a.ScanID.String(),
-			Source:    finding.Module,
 			Findings:  []schemas.Finding{finding},
 		}
 
@@ -250,23 +254,19 @@ func (a *Analyzer) sampleUniqueResponses(responses []*RaceResponse) []core.Seria
 		// SpecificBody holds the relevant data for both standard and batched GraphQL responses.
 		bodyStr := string(resp.SpecificBody)
 
-		// This is the fleshed out truncation logic.
 		const maxBodyLen = 1024
 		if len(bodyStr) > maxBodyLen {
-			// We can't just slice the string by bytes, as we might slice a multi-byte
-			// UTF-8 character in half, creating invalid text.
-			// Instead, we find the last valid rune boundary at or before the max length.
-			endIndex := 0
-			for i := range bodyStr {
-				// If the start of the *next* character is past our limit,
-				// then the character starting at `endIndex` is the last one that fits.
-				if i > maxBodyLen {
-					break
-				}
-				endIndex = i
+			originalByteLen := len(bodyStr)
+			endIndex := maxBodyLen
+
+			// Ensure we don't slice in the middle of a UTF-8 character.
+			// If the byte at endIndex is not the start of a rune (i.e., it's a continuation byte), backtrack.
+			// Indexing a string (bodyStr[endIndex]) yields the byte value.
+			for ; endIndex > 0 && !utf8.RuneStart(bodyStr[endIndex]); endIndex-- {
+				// Backtrack until we find the start of a rune.
 			}
 
-			originalByteLen := len(bodyStr)
+			// If endIndex is 0, the first rune is longer than maxBodyLen; we truncate it entirely.
 			truncatedBody := bodyStr[:endIndex]
 
 			// Create a more informative suffix.

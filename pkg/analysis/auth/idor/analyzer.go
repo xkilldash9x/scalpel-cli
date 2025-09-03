@@ -112,13 +112,17 @@ func (a *Analyzer) ObserveAndExecute(ctx context.Context, role string, req *http
 	if err != nil {
 		return resp, err
 	}
+	defer resp.Body.Close()
 
 	// Read response body
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
-		a.logger.Warn("Failed to read response body during observation", zap.Error(err))
+		a.logger.Warn("Failed to read response body during observation, skipping", zap.Error(err), zap.String("url", req.URL.String()))
+		// Do not return the error, but also do not process the observation.
+		// We still need to give back the response object with a reset body.
+		resp.Body = io.NopCloser(bytes.NewReader(respBody))
+		return resp, nil
 	}
-	resp.Body.Close()
 	resp.Body = io.NopCloser(bytes.NewReader(respBody)) // Reset body
 
 	// Analyze the request for identifiers
@@ -127,12 +131,15 @@ func (a *Analyzer) ObserveAndExecute(ctx context.Context, role string, req *http
 	if len(identifiers) > 0 {
 		requestKey := fmt.Sprintf("%s %s", req.Method, req.URL.Path)
 
+		// Clone the request before acquiring the lock to reduce contention
+		clonedReq := req.Clone(ctx)
+
 		// Lock the SessionContext for safe concurrent writes during observation
 		session.mu.Lock()
 		defer session.mu.Unlock()
 
 		session.ObservedRequests[requestKey] = ObservedRequest{
-			Request:        req.Clone(ctx),
+			Request:        clonedReq,
 			Body:           body,
 			Identifiers:    identifiers,
 			BaselineStatus: resp.StatusCode,
@@ -155,10 +162,15 @@ func (a *Analyzer) RunAnalysis(ctx context.Context, primaryRole, secondaryRole s
 		return fmt.Errorf("both primary (%s) and secondary (%s) roles must be initialized", primaryRole, secondaryRole)
 	}
 
+	// Safely access the count of observed requests
+	primarySession.mu.RLock()
+	observedCount := len(primarySession.ObservedRequests)
+	primarySession.mu.RUnlock()
+
 	a.logger.Info("Starting IDOR analysis",
 		zap.String("Victim", primaryRole),
 		zap.String("Attacker", secondaryRole),
-		zap.Int("ObservedRequests", len(primarySession.ObservedRequests)))
+		zap.Int("ObservedRequests", observedCount))
 
 	var wg sync.WaitGroup
 
@@ -229,12 +241,19 @@ func (a *Analyzer) horizontalWorker(ctx context.Context, primarySession *Session
 		// Replay the request using the secondary session (Attacker's context)
 		resp, err := secondarySession.Client.Do(req)
 		if err != nil {
+			a.logger.Debug("Network error during IDOR replay", zap.Error(err), zap.String("url", req.URL.String()))
 			continue
 		}
+		// Crucial: Guarantee the body is closed to prevent connection leaks
+		defer resp.Body.Close()
 
 		// Analyze the response
-		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			a.logger.Warn("Failed to read response body during IDOR analysis", zap.Error(err), zap.String("url", req.URL.String()))
+			continue // Cannot analyze without the full body
+		}
+
 		currentLength := int64(len(respBody))
 
 		// Detection Logic: Same status code and similar content length.
@@ -349,9 +368,13 @@ func (a *Analyzer) predictiveWorker(ctx context.Context, session *SessionContext
 		if err != nil {
 			continue
 		}
+		defer resp.Body.Close()
 
-		respBody, _ := io.ReadAll(resp.Body)
-		resp.Body.Close()
+		respBody, err := io.ReadAll(resp.Body)
+		if err != nil {
+			a.logger.Warn("Failed to read response body during predictive IDOR analysis", zap.Error(err), zap.String("url", testReq.URL.String()))
+			continue
+		}
 
 		// Detection Logic: A successful response (2xx).
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {

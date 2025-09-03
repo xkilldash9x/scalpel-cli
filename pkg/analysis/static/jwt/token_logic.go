@@ -32,6 +32,14 @@ var weakSecrets = []string{
 	"production", "supersecret", "password123",
 }
 
+var (
+	// parserUnverified is used to inspect token contents without checking the signature.
+	parserUnverified = new(jwt.Parser)
+
+	// parserSkipClaimsValidation is used for brute-forcing secrets.
+	parserSkipClaimsValidation = jwt.NewParser(jwt.WithoutClaimsValidation())
+)
+
 // AnalyzeToken performs static analysis and optional weak secret attacks on a JWT string.
 func AnalyzeToken(tokenString string, bruteForceEnabled bool) (TokenAnalysisResult, error) {
 	result := TokenAnalysisResult{
@@ -41,7 +49,7 @@ func AnalyzeToken(tokenString string, bruteForceEnabled bool) (TokenAnalysisResu
 
 	// 1. Parse the token without verification.
 	// We use ParseUnverified to access the content even if the signature is invalid or expired.
-	token, _, err := new(jwt.Parser).ParseUnverified(tokenString, jwt.MapClaims{})
+	token, _, err := parserUnverified.ParseUnverified(tokenString, jwt.MapClaims{})
 	if err != nil {
 		return result, fmt.Errorf("failed to parse token unverified: %w", err)
 	}
@@ -93,12 +101,9 @@ func AnalyzeToken(tokenString string, bruteForceEnabled bool) (TokenAnalysisResu
 
 // bruteForceSecret attempts to verify the token signature using a list of weak secrets.
 func bruteForceSecret(tokenString string) string {
-	// Use a parser that skips claims validation (like expiration) to focus only on signature validity.
-	parser := jwt.NewParser(jwt.WithoutClaimsValidation())
-
 	for _, secret := range weakSecrets {
 		// Attempt to parse and verify the signature.
-		token, err := parser.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
+		token, err := parserSkipClaimsValidation.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 			// Security Check: Ensure the signing method is HMAC.
 			// This prevents "key confusion" attacks (using a public key as an HMAC secret).
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {

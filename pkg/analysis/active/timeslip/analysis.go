@@ -98,6 +98,10 @@ func prepareAndAggregate(result *RaceResult, analysis *AnalysisResult) []*RaceRe
 // Heuristic A: Time-of-check Time-of-use (TOCTOU).
 func checkTOCTOU(result *RaceResult, config *Config, analysis *AnalysisResult) bool {
 	expectedSuccesses := 1
+	if config.ExpectedSuccesses > 0 {
+		expectedSuccesses = config.ExpectedSuccesses
+	}
+
 	if analysis.SuccessCount > expectedSuccesses {
 		analysis.Vulnerable = true
 		analysis.Confidence = 1.0 // 1.0 (Certain): Confirmed TOCTOU.

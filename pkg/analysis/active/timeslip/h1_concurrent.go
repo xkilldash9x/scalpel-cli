@@ -6,7 +6,6 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"math/rand"
 	"net/http"
 	"sync"
 	"time"
@@ -54,7 +53,15 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 			// --- Initialization Phase (Connection Priming Simulation) ---
 			// If ConnectionDelay is specified, wait here before signaling readiness.
 			if config.ConnectionDelay > 0 {
-				time.Sleep(config.ConnectionDelay)
+				select {
+				case <-time.After(config.ConnectionDelay):
+					// Delay complete
+				case <-ctx.Done():
+					// Interrupted during initialization
+					resultsChan <- &RaceResponse{Error: ctx.Err()}
+					initWg.Done()
+					return
+				}
 			}
 
 			// Signal that this goroutine is initialized and ready to fire.
@@ -63,7 +70,7 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 			// --- Synchronization Phase ---
 			select {
 			case <-startGate:
-				// Proceed
+			// Proceed
 			case <-ctx.Done():
 				resultsChan <- &RaceResponse{Error: ctx.Err()}
 				return
@@ -71,8 +78,9 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 
 			// Apply Request Jitter just before sending.
 			if config.RequestJitter > 0 {
-				//nolint:gosec // Weak RNG is acceptable for timing jitter.
-				jitter := time.Duration(rand.Int63n(int64(config.RequestJitter)))
+				rng := getRNG() // Use pooled RNG
+				jitter := time.Duration(rng.Int63n(int64(config.RequestJitter)))
+				putRNG(rng) // Return RNG immediately after use
 				time.Sleep(jitter)
 			}
 
@@ -102,16 +110,25 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 			// Use pooled buffer for reading the response body to reduce GC pressure.
 			buf := getBuffer()
 
-			_, err = io.Copy(buf, resp.Body)
-			if err != nil {
+			// Read body with limit to prevent OOM. Read +1 to detect overflow.
+			n, err := io.CopyN(buf, resp.Body, maxResponseBodyBytes+1)
+
+			if err != nil && err != io.EOF {
 				putBuffer(buf)
 				resultsChan <- &RaceResponse{Error: fmt.Errorf("failed to read response body: %w", err)}
 				return
 			}
 
-			// CRITICAL: Copy the bytes from the buffer into a new slice before reusing the buffer.
-			body := make([]byte, buf.Len())
-			copy(body, buf.Bytes())
+			if n > maxResponseBodyBytes {
+				putBuffer(buf)
+				resultsChan <- &RaceResponse{Error: fmt.Errorf("response body exceeded limit of %d bytes", maxResponseBodyBytes)}
+				return
+			}
+
+			// CRITICAL: Copy the bytes from the buffer into a new slice.
+			// Use the actual number of bytes read (n).
+			body := make([]byte, n)
+			copy(body, buf.Bytes()[:n])
 			putBuffer(buf)
 
 			// Generate the composite fingerprint.

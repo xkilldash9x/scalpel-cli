@@ -4,6 +4,7 @@ package headers
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -138,10 +139,19 @@ func (a *HeadersAnalyzer) analyzeHSTS(analysisCtx *core.AnalysisContext, targetU
 		return
 	}
 
-	maxAge, err := strconv.Atoi(matches[1])
+	// Use ParseInt for robustness against large numbers
+	maxAge64, err := strconv.ParseInt(matches[1], 10, 64)
 	if err != nil {
-		return // Should be unreachable
+		// If the error is ErrRange, the number is very large, which is good for HSTS.
+		if errors.Is(err, strconv.ErrRange) {
+			return // Value is large; HSTS is strong.
+		}
+		// Handle other parsing errors
+		a.logger.Debug("Failed to parse HSTS max-age despite regex match", zap.Error(err), zap.String("value", matches[1]))
+		return
 	}
+	// Ensure MinHstsMaxAge is also defined as int64 if necessary for comparison.
+	maxAge := maxAge64
 
 	if maxAge == 0 {
 		a.createWeakHeaderFinding(analysisCtx, targetURL, "Strict-Transport-Security", string(core.SeverityMedium), "The HSTS 'max-age' is set to 0, effectively disabling the security mechanism.", hstsValue, "CWE-319")

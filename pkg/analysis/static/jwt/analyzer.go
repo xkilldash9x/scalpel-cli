@@ -6,6 +6,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"io"
 	"net/http"
 	"regexp"
 	"strings"
@@ -82,14 +83,28 @@ func (a *JWTAnalyzer) extractAndAnalyze(analysisCtx *core.AnalysisContext, req *
 	if req.Body != nil {
 		// Handle JSON bodies specifically for robust extraction
 		if strings.Contains(req.Header.Get("Content-Type"), "application/json") {
-			extractFromJSONBody(req.Body, tokens, "Request Body")
+			bodyBytes, err := io.ReadAll(req.Body)
+			if err == nil {
+				extractFromJSONBody(bodyBytes, tokens, "Request Body")
+			}
 		} else {
 			// Fallback for other body types (e.g., form data)
-			bodyBytes, _ := req.GetBody() // GetBody allows re-reading the body
-			if bodyBytes != nil {
-				matches := jwtRegex.FindAllString(string(bodyBytes), -1)
-				for _, match := range matches {
-					tokens[match] = "Request Body"
+			if req.GetBody != nil {
+				bodyReader, err := req.GetBody()
+				if err != nil {
+					a.logger.Warn("Could not get request body handle", zap.Error(err), zap.String("url", targetURL))
+				} else {
+					defer bodyReader.Close()
+					bodyBytes, err := io.ReadAll(bodyReader)
+					if err != nil {
+						a.logger.Warn("Could not read request body content", zap.Error(err), zap.String("url", targetURL))
+					} else if len(bodyBytes) > 0 {
+						// Optimization: Use FindAll on bytes directly (avoids string conversion)
+						byteMatches := jwtRegex.FindAll(bodyBytes, -1)
+						for _, match := range byteMatches {
+							tokens[string(match)] = "Request Body"
+						}
+					}
 				}
 			}
 		}
@@ -101,9 +116,11 @@ func (a *JWTAnalyzer) extractAndAnalyze(analysisCtx *core.AnalysisContext, req *
 		if strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
 			extractFromJSONBody(resp.Body, tokens, "Response Body")
 		} else {
-			matches := jwtRegex.FindAllString(string(resp.Body), -1)
-			for _, match := range matches {
-				tokens[match] = "Response Body"
+			// Use FindAll which operates on []byte
+			byteMatches := jwtRegex.FindAll(resp.Body, -1)
+			for _, byteMatch := range byteMatches {
+				// Convert only the matched segment (much smaller than the whole body)
+				tokens[string(byteMatch)] = "Response Body"
 			}
 		}
 	}
@@ -135,11 +152,15 @@ func extractFromHeaders(headers http.Header, tokens map[string]string, locationP
 	for key, values := range headers {
 		for _, value := range values {
 			// Check for Bearer tokens specifically
-			if strings.EqualFold(key, "Authorization") && strings.HasPrefix(strings.ToLower(value), "bearer ") {
-				token := strings.TrimSpace(value[7:])
-				if jwtRegex.MatchString(token) {
-					tokens[token] = fmt.Sprintf("%s: Authorization Bearer", locationPrefix)
-					continue
+			if strings.EqualFold(key, "Authorization") {
+				// Check prefix case-insensitively without allocating a full lowercase string.
+				// "bearer " is 7 characters.
+				if len(value) >= 7 && strings.EqualFold(value[:7], "bearer ") {
+					token := strings.TrimSpace(value[7:])
+					if jwtRegex.MatchString(token) {
+						tokens[token] = fmt.Sprintf("%s: Authorization Bearer", locationPrefix)
+						continue
+					}
 				}
 			}
 
@@ -152,30 +173,31 @@ func extractFromHeaders(headers http.Header, tokens map[string]string, locationP
 	}
 }
 
-// extractFromJSONBody parses the body as JSON and recursively searches for JWTs.
+// Optimized extractFromJSONBody using a streaming decoder
 func extractFromJSONBody(body []byte, tokens map[string]string, location string) {
-	var data interface{}
-	if err := json.NewDecoder(bytes.NewReader(body)).Decode(&data); err != nil {
-		return // Not valid JSON or error during decode
-	}
-	extractFromJSONRecursive(data, tokens, location)
-}
+	decoder := json.NewDecoder(bytes.NewReader(body))
 
-func extractFromJSONRecursive(data interface{}, tokens map[string]string, location string) {
-	switch v := data.(type) {
-	case map[string]interface{}:
-		for _, value := range v {
-			extractFromJSONRecursive(value, tokens, location)
+	for {
+		t, err := decoder.Token()
+		if err == io.EOF {
+			break
 		}
-	case []interface{}:
-		for _, value := range v {
-			extractFromJSONRecursive(value, tokens, location)
+		if err != nil {
+			// Error during decode (e.g., invalid JSON), stop processing this body
+			return
 		}
-	case string:
-		// Check if the string itself is a JWT
-		if jwtRegex.MatchString(v) {
-			tokens[v] = location
+
+		// We are only interested in string values
+		if str, ok := t.(string); ok {
+			// Optimization: Quickly check length heuristic (Min length: 10.10.)
+			if len(str) < 22 {
+				continue
+			}
+			if jwtRegex.MatchString(str) {
+				tokens[str] = location
+			}
 		}
+		// decoder.Token() naturally streams through nested structures.
 	}
 }
 

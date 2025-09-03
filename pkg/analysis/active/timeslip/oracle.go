@@ -98,11 +98,20 @@ func (o *SuccessOracle) checkHeaderRegex(headers http.Header) bool {
 		return true
 	}
 
+	// Use a pooled buffer to avoid allocations.
+	buf := getBuffer()
+	defer putBuffer(buf)
+
 	// Must match at least one header line (Key: Value).
 	for key, values := range headers {
 		for _, value := range values {
-			headerLine := fmt.Sprintf("%s: %s", key, value)
-			if rx.MatchString(headerLine) {
+			buf.Reset() // Reset buffer for the next iteration
+			buf.WriteString(key)
+			buf.WriteString(": ")
+			buf.WriteString(value)
+
+			// Use rx.Match which accepts []byte, avoiding string allocation.
+			if rx.Match(buf.Bytes()) {
 				return true
 			}
 		}
