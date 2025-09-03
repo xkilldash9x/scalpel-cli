@@ -1,100 +1,66 @@
-// pkg/orchestrator/orchestrator.go
 package orchestrator
 
 import (
 	"context"
 	"fmt"
-	"sync"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/xkilldash9x/scalpel-cli/pkg/browser"
-	"github.com/xkilldash9x/scalpel-cli/pkg/config"
-	"github.com/xkilldash9x/scalpel-cli/pkg/discovery"
-	"github.com/xkilldash9x/scalpel-cli/pkg/engine"
-	"github.com/xkilldash9x/scalpel-cli/pkg/knowledgegraph"
-	"github.com/xkilldash9x/scalpel-cli/pkg/store"
 	"go.uber.org/zap"
+
+	"github.com/xkilldash9x/scalpel-cli/pkg/config"
+	// CORRECTED: All dependencies are now abstract interfaces.
+	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces"
 )
 
-// Orchestrator manages the entire lifecycle of a scan.
+// Orchestrator manages the high-level lifecycle of a scan.
+// It is injected with fully configured engine components.
 type Orchestrator struct {
-	cfg    *config.Config
-	logger *zap.Logger
+	cfg             *config.Config
+	logger          *zap.Logger
+	discoveryEngine interfaces.DiscoveryEngine
+	taskEngine      interfaces.TaskEngine
 }
 
 // New creates a new Orchestrator.
-func New(cfg *config.Config, logger *zap.Logger) (*Orchestrator, error) {
-	return &Orchestrator{cfg: cfg, logger: logger}, nil
+// It now accepts interfaces for its core components.
+func New(
+	cfg *config.Config,
+	logger *zap.Logger,
+	discoveryEngine interfaces.DiscoveryEngine,
+	taskEngine interfaces.TaskEngine,
+) (*Orchestrator, error) {
+	return &Orchestrator{
+		cfg:             cfg,
+		logger:          logger,
+		discoveryEngine: discoveryEngine,
+		taskEngine:      taskEngine,
+	}, nil
 }
 
-// StartScan initializes all services and runs the scan to completion.
-// It now returns the unique scanID for reporting purposes.
-func (o *Orchestrator) StartScan(ctx context.Context, targets []string) (string, error) {
-	scanID := uuid.New().String()
+// StartScan runs the scan to completion using the injected engines.
+func (o *Orchestrator) StartScan(ctx context.Context, targets []string, scanID string) error {
+	o.logger.Info("Orchestrator starting scan", zap.String("scanID", scanID))
 
-	// Create a derived context for this specific scan execution.
-	scanCtx, cancelScan := context.WithCancel(ctx)
-	defer cancelScan() // Ensure cancellation happens when StartScan exits for any reason.
+	// 1. Start Engine Workers in the background.
+	// The scan context is passed to allow for graceful shutdown.
+	o.taskEngine.Start(ctx)
 
-	o.logger.Info("Initializing services for scan", zap.Strings("targets", targets), zap.String("scanID", scanID))
-
-	// Initialize Store (PostgreSQL)
-	storeService, err := store.New(scanCtx, o.cfg.Postgres.URL, o.logger)
-	if err != nil {
-		return scanID, fmt.Errorf("failed to initialize store: %w", err)
-	}
-	defer func() {
-		if err := storeService.Close(); err != nil {
-			o.logger.Error("Failed to close store service cleanly", zap.Error(err))
-		}
-	}()
-
-	// Initialize Knowledge Graph (PostgreSQL-backed)
-	kg, err := knowledgegraph.NewPostgresKG(scanCtx, storeService.GetPool(), o.logger)
-	if err != nil {
-		return scanID, fmt.Errorf("failed to initialize knowledge graph: %w", err)
-	}
-
-	// Initialize Browser Manager
-	browserManager, err := browser.NewManager(scanCtx, o.logger, o.cfg)
-	if err != nil {
-		return scanID, fmt.Errorf("failed to initialize browser manager: %w", err)
-	}
-	defer func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		if err := browserManager.Shutdown(shutdownCtx); err != nil {
-			o.logger.Error("Error during browser manager shutdown", zap.Error(err))
-		}
-	}()
-
-	// Initialize Task Engine
-	taskEngine, err := engine.New(o.cfg, o.logger, storeService, browserManager, kg)
-	if err != nil {
-		return scanID, fmt.Errorf("failed to initialize task engine: %w", err)
-	}
-
-	// Initialize Discovery Engine
-	discoveryEngine, err := discovery.New(o.cfg, taskEngine, browserManager, kg, o.logger)
-	if err != nil {
-		return scanID, fmt.Errorf("failed to initialize discovery engine: %w", err)
-	}
-	
-	// 1. Start Engine Workers (launches background workers and returns immediately)
-	taskEngine.Start(scanCtx)
-
-	// 2. Start Discovery (This blocks until discovery is complete)
-	discoveryErr := discoveryEngine.Start(scanCtx, targets, scanID)
-
-	// 3. Discovery is finished. Signal the engine to stop and wait for it to drain.
-	o.logger.Info("Discovery phase ended, waiting for task engine to drain...")
-	taskEngine.Stop() // Stop signals workers to stop and blocks until drained.
-
+	// 2. Start Discovery (This is a blocking call).
+	discoveryErr := o.discoveryEngine.Run(ctx, targets[0]) // Assuming one primary target for now
 	if discoveryErr != nil {
-		return scanID, fmt.Errorf("discovery phase failed: %w", discoveryErr)
+		o.logger.Error("Discovery phase failed", zap.Error(discoveryErr))
+		// We still proceed to shutdown gracefully to process any partial results.
+	} else {
+		o.logger.Info("Discovery phase completed.")
 	}
+
+	// 3. Stop the Task Engine. This blocks until all queued tasks are drained.
+	o.logger.Info("Waiting for task engine to drain...")
+	o.taskEngine.Stop()
 
 	o.logger.Info("Orchestration complete.", zap.String("scanID", scanID))
-	return scanID, nil
+
+	// Return the error from discovery, if any.
+	return discoveryErr
 }
+

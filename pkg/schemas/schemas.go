@@ -1,163 +1,113 @@
-// pkg/schemas/schemas.go
+// This file consolidates all agent-related data models.
+
 package schemas
 
-import (
-	"encoding/json"
-	"fmt"
-	"time"
-)
+import "time"
 
-// TaskType defines the valid types of tasks the engine can process.
-type TaskType string
+// -- Agent Cognitive State --
+
+type AgentState string
 
 const (
-	// Agent Tasks
-	TaskAgentMission TaskType = "AGENT_MISSION"
-
-	// Active Analysis Tasks
-	TaskAnalyzeWebPageTaint   TaskType = "ANALYZE_WEB_PAGE_TAINT"
-	TaskAnalyzeWebPageProtoPP TaskType = "ANALYZE_WEB_PAGE_PROTOPP"
-	TaskTestRaceCondition     TaskType = "TEST_RACE_CONDITION"
-
-	// Authentication Analysis Tasks
-	TaskTestAuthATO  TaskType = "TEST_AUTH_ATO"
-	TaskTestAuthIDOR TaskType = "TEST_AUTH_IDOR"
-
-	// Passive and Static Analysis Tasks
-	TaskAnalyzeHeaders TaskType = "ANALYZE_HEADERS"
-	TaskAnalyzeJWT     TaskType = "ANALYZE_JWT"
+	StateInitializing AgentState = "Initializing"
+	StateObserving    AgentState = "Observing"
+	StateOrienting    AgentState = "Orienting"
+	StateDeciding     AgentState = "Deciding"
+	StateActing       AgentState = "Acting"
+	StatePaused       AgentState = "Paused"
+	StateCompleted    AgentState = "Completed"
+	StateFailed       AgentState = "Failed"
 )
 
-// Severity defines the severity level of a finding for consistency.
-type Severity string
+// -- Mission and Action Primitives --
+
+type Mission struct {
+	ID          string                 `json:"id"`
+	Objective   string                 `json:"objective"`
+	TargetURL   string                 `json:"target_url"`
+	Constraints []string               `json:"constraints"`
+	Parameters  map[string]interface{} `json:"parameters"`
+	StartTime   time.Time              `json:"start_time"`
+}
+
+type ActionType string
 
 const (
-	SeverityCritical    Severity = "CRITICAL"
-	SeverityHigh        Severity = "HIGH"
-	SeverityMedium      Severity = "MEDIUM"
-	SeverityLow         Severity = "LOW"
-	SeverityInfo        Severity = "INFORMATIONAL"
+	ActionNavigate     ActionType = "NAVIGATE"
+	ActionClick        ActionType = "CLICK"
+	ActionInputText    ActionType = "INPUT_TEXT"
+	ActionSubmitForm   ActionType = "SUBMIT_FORM"
+	ActionScroll       ActionType = "SCROLL"
+	ActionWaitForAsync ActionType = "WAIT_FOR_ASYNC"
+	ActionAnalyzeElement ActionType = "ANALYZE_ELEMENT"
+	ActionInjectPayload  ActionType = "INJECT_PAYLOAD"
+	ActionConclude     ActionType = "CONCLUDE"
 )
 
-// Task defines the unit of work to be performed by a worker.
-type Task struct {
-	// ScanID identifies the overall scan operation this task belongs to.
-	ScanID     string      `json:"scan_id"`
-	TaskID     string      `json:"task_id"`
-	Type       TaskType    `json:"type"`
-	TargetURL  string      `json:"target_url"`
-	Parameters interface{} `json:"parameters,omitempty"`
+type Action struct {
+	ID        string                 `json:"id"`
+	MissionID string                 `json:"mission_id"`
+	Type      ActionType             `json:"type"`
+	Selector  string                 `json:"selector,omitempty"`
+	Value     string                 `json:"value,omitempty"`
+	Metadata  map[string]interface{} `json:"metadata,omitempty"`
+	Rationale string                 `json:"rationale"`
+	Timestamp time.Time              `json:"timestamp"`
 }
 
-// paramsFactory is a function type that returns a pointer to a new instance of a parameter struct.
-type paramsFactory func() interface{}
+// -- Observation Primitives --
 
-// paramsRegistry maps TaskTypes to their corresponding factory functions.
-// This centralizes the mapping and enables dynamic unmarshalling.
-var paramsRegistry = map[TaskType]paramsFactory{
-	TaskAgentMission:          func() interface{} { return &AgentMissionParams{} },
-	TaskAnalyzeWebPageTaint:   func() interface{} { return &TaintTaskParams{} },
-	TaskAnalyzeWebPageProtoPP: func() interface{} { return &ProtoPollutionTaskParams{} },
-	TaskTestAuthATO:           func() interface{} { return &ATOTaskParams{} },
-	TaskTestAuthIDOR:          func() interface{} { return &IDORTaskParams{} },
-	TaskAnalyzeJWT:            func() interface{} { return &JWTTaskParams{} },
-	TaskTestRaceCondition:     func() interface{} { return &RaceConditionTaskParams{} },
-	TaskAnalyzeHeaders:        func() interface{} { return &HeadersTaskParams{} },
-}
+type ObservationType string
 
-// UnmarshalJSON provides custom deserialization logic for the Task struct.
-func (t *Task) UnmarshalJSON(data []byte) error {
-	// Step 1: Use an optimized technique to avoid recursion and boilerplate.
-	// Define an Alias of the Task type.
-	type TaskAlias Task
-	// Define an auxiliary struct that embeds a pointer to the alias (*TaskAlias)
-	// and overrides the Parameters field to capture it as json.RawMessage.
-	aux := struct {
-		*TaskAlias
-		Parameters json.RawMessage `json:"parameters,omitempty"`
-	}{
-		TaskAlias: (*TaskAlias)(t), // Point the embedded field to the receiver 't'.
-	}
+const (
+	ObservedNetworkActivity ObservationType = "NETWORK_ACTIVITY"
+	ObservedDOMChange       ObservationType = "DOM_CHANGE"
+	ObservedConsoleMessage  ObservationType = "CONSOLE_MESSAGE"
+	ObservedTaintFlow       ObservationType = "TAINT_FLOW"
+	ObservedVulnerability   ObservationType = "VULNERABILITY"
+	ObservedSystemState     ObservationType = "SYSTEM_STATE"
+)
 
-	// Unmarshal the data. This populates 't' directly (via the embedded pointer)
-	// and captures the raw parameters, eliminating the need for manual field copying.
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return fmt.Errorf("failed to unmarshal base task structure: %w", err)
-	}
-
-	// Step 2: Handle cases where parameters are missing or explicitly null.
-	if len(aux.Parameters) == 0 || string(aux.Parameters) == "null" {
-		// No parameters provided. t.Parameters remains nil.
-		return nil
-	}
-
-	// Step 3: Use the registry to find the constructor for the specific TaskType.
-	factory, ok := paramsRegistry[t.Type]
-	if !ok {
-		// Error Handling: Fail fast if the task type is unknown.
-		return fmt.Errorf("unknown or unsupported task type encountered: %s", t.Type)
-	}
-
-	// Step 4: Create the parameter struct instance (as a pointer) and unmarshal.
-	params := factory()
-	if err := json.Unmarshal(aux.Parameters, params); err != nil {
-		// Provide specific context about which type failed.
-		return fmt.Errorf("failed to unmarshal parameters for task type %s: %w", t.Type, err)
-	}
-
-	// Step 5: Assign the pointer to the interface field.
-	// This is efficient (no boxing/copying).
-	t.Parameters = params
-
-	return nil
-}
-
-// ResultEnvelope is the container for data sent from workers to the central store.
-type ResultEnvelope struct {
-	ScanID    string          `json:"scan_id"`
-	TaskID    string          `json:"task_id"`
-	Timestamp time.Time       `json:"timestamp"`
-	Findings  []Finding       `json:"findings"`
-	KGUpdates *KGUpdates      `json:"kg_updates,omitempty"`
-	Artifacts json.RawMessage `json:"artifacts,omitempty"`
-}
-
-// Finding represents a specific security vulnerability or observation.
-type Finding struct {
+type Observation struct {
 	ID             string          `json:"id"`
-	ScanID         string          `json:"-"` // Excluded from user-facing JSON, used internally.
-	TaskID         string          `json:"task_id"`
+	MissionID      string          `json:"mission_id"`
+	SourceActionID string          `json:"source_action_id"`
+	Type           ObservationType `json:"type"`
+	Data           interface{}     `json:"data"`
 	Timestamp      time.Time       `json:"timestamp"`
-	Target         string          `json:"target"`
-	Module         string          `json:"module"`
-	Vulnerability  string          `json:"vulnerability"`
-	Severity       Severity        `json:"severity"`
-	Description    string          `json:"description"`
-	Evidence       json.RawMessage `json:"evidence,omitempty"`
-	Recommendation string          `json:"recommendation,omitempty"`
-	CWE            string          `json:"cwe,omitempty"`
 }
 
-// KGUpdates represents the interconnected data discovered during analysis.
-type KGUpdates struct {
-	Nodes []KGNode `json:"nodes"`
-	Edges []KGEdge `json:"edges"`
+type ExecutionResult struct {
+	Status          string          `json:"status"`
+	Error           string          `json:"error,omitempty"`
+	ObservationType ObservationType `json:"observation_type"`
 }
 
-// KGNode represents an entity for serialization.
-type KGNode struct {
-	ID   string `json:"id"`
-	Type string `json:"type"`
-	// Use RawMessage to defer parsing of dynamic properties.
-	Properties json.RawMessage `json:"properties"`
+type MissionResult struct {
+	Summary   string
+	Findings  []Finding
+	KGUpdates *KGUpdates
 }
 
-// KGEdge represents a relationship between two nodes for serialization.
-type KGEdge struct {
-	SourceID     string `json:"source_id"`
-	TargetID     string `json:"target_id"`
-	Relationship string `json:"relationship"`
-	// Use RawMessage to defer parsing of dynamic properties.
-	Properties json.RawMessage `json:"properties"`
-	Timestamp  time.Time       `json:"timestamp"`
+
+// -- LLM Interaction Schemas --
+
+type ModelTier string
+
+const (
+	TierFast     ModelTier = "fast"
+	TierPowerful ModelTier = "powerful"
+)
+
+type GenerationOptions struct {
+	Temperature     float32
+	MaxTokens       int
+	ForceJSONFormat bool
+}
+
+type GenerationRequest struct {
+	SystemPrompt string
+	UserPrompt   string
+	Tier         ModelTier
+	Options      GenerationOptions
 }

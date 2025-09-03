@@ -1,4 +1,3 @@
-// -- pkg/llmclient/gemini.go --
 package llmclient
 
 import (
@@ -11,45 +10,23 @@ import (
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
-	"github.com/xkilldash9x/scalpel-cli/pkg/config"
-	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces" // Import from central interfaces package
 	"go.uber.org/zap"
+
+	"github.com/xkilldash9x/scalpel-cli/pkg/config"
+	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces"
+	"github.com/xkilldash9x/scalpel-cli/pkg/schemas"
 )
 
 // GeminiClient implements the interfaces.LLMClient interface for Google Gemini APIs.
 type GeminiClient struct {
 	apiKey     string
 	endpoint   string
-	model      string
 	httpClient *http.Client
 	logger     *zap.Logger
-	config     config.LLMConfig
+	config     config.LLMModelConfig
 }
 
-// NewGeminiClient initializes the client.
-func NewGeminiClient(cfg config.AgentConfig, logger *zap.Logger) (*GeminiClient, error) {
-	llmCfg := cfg.LLM
-	if llmCfg.APIKey == "" {
-		return nil, fmt.Errorf("Gemini API Key is required (SCALPEL_AGENT_LLM_API_KEY)")
-	}
-
-	// Default to the v1beta endpoint which supports JSON mode and advanced features.
-	endpoint := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", llmCfg.Model)
-
-	return &GeminiClient{
-		apiKey:   llmCfg.APIKey,
-		endpoint: endpoint,
-		model:    llmCfg.Model,
-		config:   llmCfg,
-		httpClient: &http.Client{
-			Timeout: llmCfg.APITimeout,
-		},
-		logger: logger.Named("llm_client.gemini"),
-	}, nil
-}
-
-// -- Gemini API Request/Response Structures --
-
+// -- Gemini API Request/Response Structures (Internal to this file) --
 type GeminiContent struct {
 	Parts []GeminiPart `json:"parts"`
 	Role  string       `json:"role,omitempty"`
@@ -71,7 +48,7 @@ type GeminiSafetySetting struct {
 type GeminiGenerationConfig struct {
 	Temperature      float64 `json:"temperature"`
 	ResponseMimeType string  `json:"response_mime_type,omitempty"`
-	TopP             float64 `json:"topP,omitempty"`
+	TopP             float32 `json:"topP,omitempty"`
 	TopK             int     `json:"topK,omitempty"`
 	MaxOutputTokens  int     `json:"maxOutputTokens,omitempty"`
 }
@@ -95,9 +72,32 @@ type GeminiResponsePayload struct {
 	} `json:"usageMetadata"`
 }
 
+
+// NewGeminiClient initializes the client.
+func NewGeminiClient(cfg config.LLMModelConfig, logger *zap.Logger) (*GeminiClient, error) {
+	if cfg.APIKey == "" {
+		return nil, fmt.Errorf("Gemini API Key is required")
+	}
+
+	endpoint := cfg.Endpoint
+	if endpoint == "" {
+		endpoint = fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", cfg.Model)
+	}
+
+	return &GeminiClient{
+		apiKey:   cfg.APIKey,
+		endpoint: endpoint,
+		config:   cfg,
+		httpClient: &http.Client{
+			Timeout: cfg.APITimeout,
+		},
+		logger: logger.Named("llm_client.gemini"),
+	}, nil
+}
+
+
 // GenerateResponse sends the prompts to the Gemini API and returns the generated content with retries.
-// The signature now matches the interfaces.LLMClient interface.
-func (c *GeminiClient) GenerateResponse(ctx context.Context, req interfaces.GenerationRequest) (string, error) {
+func (c *GeminiClient) GenerateResponse(ctx context.Context, req schemas.GenerationRequest) (string, error) {
 	payload := c.buildRequestPayload(req)
 
 	body, err := json.Marshal(payload)
@@ -105,7 +105,6 @@ func (c *GeminiClient) GenerateResponse(ctx context.Context, req interfaces.Gene
 		return "", fmt.Errorf("failed to marshal request payload: %w", err)
 	}
 
-	// Configure exponential backoff strategy.
 	b := backoff.NewExponentialBackOff()
 	b.MaxElapsedTime = 2 * time.Minute
 	b.MaxInterval = 30 * time.Second
@@ -168,18 +167,16 @@ func (c *GeminiClient) GenerateResponse(ctx context.Context, req interfaces.Gene
 		return nil
 	}
 
-	err = backoff.Retry(operation, backoff.WithContext(b, ctx))
-	if err != nil {
+	if err = backoff.Retry(operation, backoff.WithContext(b, ctx)); err != nil {
 		return "", err
 	}
 
 	return responseContent, nil
 }
 
-func (c *GeminiClient) buildRequestPayload(req interfaces.GenerationRequest) GeminiRequestPayload {
+func (c *GeminiClient) buildRequestPayload(req schemas.GenerationRequest) GeminiRequestPayload {
 	genConfig := GeminiGenerationConfig{
-		Temperature: float64(req.Options.Temperature),
-		// Assuming these fields exist in config.LLMConfig
+		Temperature:     float64(req.Options.Temperature),
 		TopP:            c.config.TopP,
 		TopK:            c.config.TopK,
 		MaxOutputTokens: c.config.MaxTokens,
@@ -209,18 +206,15 @@ func (c *GeminiClient) buildRequestPayload(req interfaces.GenerationRequest) Gem
 	return payload
 }
 
-// handleAPIError interprets the HTTP status code to determine if the error is transient or permanent.
 func (c *GeminiClient) handleAPIError(statusCode int, body []byte) error {
 	c.logger.Error("Gemini API returned error status", zap.Int("status", statusCode), zap.String("response", string(body)))
 	err := fmt.Errorf("gemini API error: status %d, body: %s", statusCode, string(body))
 
 	switch statusCode {
-	case http.StatusTooManyRequests, // 429
-		http.StatusServiceUnavailable,   // 503
-		http.StatusInternalServerError:  // 500
+	case http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusInternalServerError:
 		return err // Transient errors, retry.
 	default:
-		return backoff.Permanent(err) // Permanent errors (e.g., 400, 401, 403).
+		return backoff.Permanent(err) // Permanent errors.
 	}
 }
 

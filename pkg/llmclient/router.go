@@ -1,49 +1,41 @@
-// File:         pkg/llmclient/router.go
-// Description:  This file introduces the LLMRouter, which intelligently dispatches
-//               requests to different LLM clients based on the requested capability tier.
-//
+
 package llmclient
 
 import (
 	"context"
 	"fmt"
-
-	"github.com/xkilldash9x/scalpel-cli/pkg/agent"
-	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces"
 	"go.uber.org/zap"
+	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces"
+	"github.com/xkilldash9x/scalpel-cli/pkg/schemas"
 )
 
-// LLMRouter implements the LLMClient interface and routes requests to different
-// underlying clients based on the requested agent.ModelTier.
+// LLMRouter implements the LLMClient interface and routes requests.
 type LLMRouter struct {
 	logger  *zap.Logger
-	clients map[agent.ModelTier]interfaces.LLMClient
+	clients map[schemas.ModelTier]interfaces.LLMClient
 }
 
 // NewLLMRouter creates a new router with the specified clients for each tier.
 func NewLLMRouter(logger *zap.Logger, fastClient, powerfulClient interfaces.LLMClient) (*LLMRouter, error) {
-	if fastClient == nil {
-		return nil, fmt.Errorf("fast tier client cannot be nil")
-	}
-	if powerfulClient == nil {
-		return nil, fmt.Errorf("powerful tier client cannot be nil")
+	if fastClient == nil || powerfulClient == nil {
+		return nil, fmt.Errorf("both fast and powerful tier clients must be provided")
 	}
 
 	return &LLMRouter{
 		logger: logger.Named("llm_router"),
-		clients: map[agent.ModelTier]interfaces.LLMClient{
-			agent.TierFast:     fastClient,
-			agent.TierPowerful: powerfulClient,
+		clients: map[schemas.ModelTier]interfaces.LLMClient{
+			schemas.TierFast:     fastClient,
+			schemas.TierPowerful: powerfulClient,
 		},
 	}, nil
 }
 
-// GenerateResponse selects the appropriate client based on the request's Tier and forwards the request.
-func (r *LLMRouter) GenerateResponse(ctx context.Context, req agent.GenerationRequest) (string, error) {
-	// Default to the powerful tier if the tier is not specified.
+// GenerateResponse selects the appropriate client based on the request's Tier.
+// CORRECTED: The request parameter now uses the centralized schemas.GenerationRequest type.
+func (r *LLMRouter) GenerateResponse(ctx context.Context, req schemas.GenerationRequest) (string, error) {
 	tier := req.Tier
 	if tier == "" {
-		tier = agent.TierPowerful
+		tier = schemas.TierPowerful // Default to the powerful tier if unspecified.
 	}
 
 	client, ok := r.clients[tier]
@@ -52,7 +44,6 @@ func (r *LLMRouter) GenerateResponse(ctx context.Context, req agent.GenerationRe
 	}
 
 	r.logger.Debug("Routing LLM request", zap.String("tier", string(tier)))
-
-	// The request is passed directly to the selected underlying client.
 	return client.GenerateResponse(ctx, req)
 }
+

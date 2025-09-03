@@ -34,4 +34,3 @@ type InteractionConfig struct {
 	InteractionDelayMs      int
 	PostInteractionWaitMs   int
 }
-
