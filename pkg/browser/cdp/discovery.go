@@ -3,10 +3,13 @@ package cdp
 
 import (
 	"context"
+	"fmt"
 	"strings"
 
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/chromedp"
+
+	"github.com/xkilldash9x/scalpel-cli/pkg/browser"
 	"github.com/xkilldash9x/scalpel-cli/pkg/discovery"
 )
 
@@ -17,13 +20,17 @@ func NewDOMTechnologyDiscoverer() *DOMTechnologyDiscoverer {
 	return &DOMTechnologyDiscoverer{}
 }
 
-// Discover now operates on an existing session, which is way more efficient.
-// No point spinning up a whole new browser just for this.
-func (d *DOMTechnologyDiscoverer) Discover(ctx context.Context, s *Session) ([]discovery.Technology, error) {
+// Discover operates on an existing browser session for efficiency.
+func (d *DOMTechnologyDiscoverer) Discover(ctx context.Context, session browser.SessionContext) ([]discovery.Technology, error) {
 	var technologies []discovery.Technology
 	techSet := make(map[string]bool)
 
-	runCtx, cancel := s.combineContexts(ctx)
+	// Get the underlying chromedp context.
+	sessionCtx := session.GetContext()
+
+	// Create a derived context that respects the deadline of the incoming context (ctx),
+	// while retaining the chromedp executor from the sessionCtx.
+	runCtx, cancel := chromedp.NewContext(sessionCtx, chromedp.WithTaskContext(ctx))
 	defer cancel()
 
 	// Helper function to add a technology only once.
@@ -34,7 +41,7 @@ func (d *DOMTechnologyDiscoverer) Discover(ctx context.Context, s *Session) ([]d
 		}
 	}
 
-	// we can discover a lot just by checking for global variables.
+	// Combine all checks into a single script for one CDP round trip.
 	discoveries := map[string]string{
 		"jQuery":  "typeof window.jQuery !== 'undefined'",
 		"React":   "typeof window.React !== 'undefined' || document.querySelector('[data-reactroot]') !== null",
@@ -42,14 +49,23 @@ func (d *DOMTechnologyDiscoverer) Discover(ctx context.Context, s *Session) ([]d
 		"Vue.js":  "typeof window.Vue !== 'undefined' || document.querySelector('[data-v-app]') !== null",
 	}
 
-	for tech, script := range discoveries {
-		var result bool
-		if err := chromedp.Run(runCtx, chromedp.Evaluate(script, &result)); err == nil && result {
-			addTech(tech)
+	var script strings.Builder
+	script.WriteString("(() => { const results = {};")
+	for tech, check := range discoveries {
+		fmt.Fprintf(&script, "try { results['%s'] = !!(%s); } catch(e) { results['%s'] = false; }", tech, check, tech)
+	}
+	script.WriteString("return results; })()")
+
+	var results map[string]bool
+	if err := chromedp.Run(runCtx, chromedp.Evaluate(script.String(), &results)); err == nil {
+		for tech, found := range results {
+			if found {
+				addTech(tech)
+			}
 		}
 	}
 
-	// also check script tags, sometimes the global isn't exposed.
+	// Check script tags as a fallback.
 	var nodes []*cdp.Node
 	if err := chromedp.Run(runCtx, chromedp.Nodes(`script[src]`, &nodes, chromedp.ByQueryAll)); err == nil {
 		for _, node := range nodes {

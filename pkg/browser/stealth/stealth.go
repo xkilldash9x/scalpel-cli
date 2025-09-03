@@ -6,13 +6,13 @@ import (
 	_ "embed" // Required for the go:embed directive
 	"encoding/json"
 	"fmt"
-	"log/slog"
 	"strings"
 
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
+	"go.uber.org/zap"
 )
 
 //go:embed evasions.js
@@ -76,38 +76,38 @@ type Persona struct {
 }
 
 // Apply orchestrates the stealth actions using chromedp.Tasks for sequential execution.
-func Apply(persona Persona) chromedp.Action {
+func Apply(persona Persona, logger *zap.Logger) chromedp.Action {
+	l := logger.Named("stealth")
 	return chromedp.Tasks{
 		// 1. Network Configuration
 		network.Enable(),
-		setExtraHTTPHeaders(persona),
+		setExtraHTTPHeaders(persona, l),
 
 		// 2. Core Emulation Overrides
-		setUserAgentAndClientHints(persona),
-		setDeviceMetrics(persona),
-		setEnvironmentOverrides(persona), // Timezone, Locale, Geolocation
+		setUserAgentAndClientHints(persona, l),
+		setDeviceMetrics(persona, l),
+		setEnvironmentOverrides(persona, l),
 
 		// 3. Script Injection (JS Environment Modification)
-		injectEvasionScript(persona),
+		injectEvasionScript(persona, l),
 
 		// 4. Lifecycle Management
-		// Ensure the page is perceived as active, affecting visibility APIs.
 		page.SetWebLifecycleState(page.WebLifecycleStateActive),
 
 		// Log success
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			slog.Debug("Stealth profile applied successfully", "UserAgent", persona.UserAgent, "Timezone", persona.TimezoneID)
+			l.Debug("Stealth profile applied successfully", zap.String("UserAgent", persona.UserAgent))
 			return nil
 		}),
 	}
 }
 
 // injectEvasionScript prepares and registers the JS evasion script.
-func injectEvasionScript(persona Persona) chromedp.Action {
+func injectEvasionScript(persona Persona, logger *zap.Logger) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
 		personaJSON, err := json.Marshal(persona)
 		if err != nil {
-			slog.Error("Failed to marshal Persona configuration", "error", err)
+			logger.Error("Failed to marshal Persona configuration", zap.Error(err))
 			return fmt.Errorf("stealth: failed to marshal persona: %w", err)
 		}
 
@@ -117,19 +117,17 @@ func injectEvasionScript(persona Persona) chromedp.Action {
 			evasionsScript,
 		)
 
-		// Configure CDP to evaluate immediately upon new document creation.
 		if _, err = page.AddScriptToEvaluateOnNewDocument(scriptWithPersona).Do(ctx); err != nil {
-			slog.Error("Failed to register evasion script with CDP", "error", err)
+			logger.Error("Failed to register evasion script with CDP", zap.Error(err))
 			return fmt.Errorf("stealth: failed to add script on new document: %w", err)
 		}
 		return nil
 	})
 }
 
-// setUserAgentAndClientHints configures the UserAgent string and Client Hints (Sec-CH-UA).
-func setUserAgentAndClientHints(persona Persona) chromedp.Action {
+// setUserAgentAndClientHints configures the UserAgent string and Client Hints.
+func setUserAgentAndClientHints(persona Persona, logger *zap.Logger) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
-		// Use ClientHints Platform if available, otherwise fallback to legacy Platform.
 		platform := persona.Platform
 		if persona.ClientHintsData != nil && persona.ClientHintsData.Platform != "" {
 			platform = persona.ClientHintsData.Platform
@@ -139,7 +137,6 @@ func setUserAgentAndClientHints(persona Persona) chromedp.Action {
 			WithPlatform(platform).
 			WithAcceptLanguage(strings.Join(persona.Languages, ","))
 
-		// Apply Client Hints Metadata if provided.
 		if ch := persona.ClientHintsData; ch != nil {
 			metadata := &emulation.UserAgentMetadata{
 				Brands:          ch.Brands,
@@ -155,21 +152,19 @@ func setUserAgentAndClientHints(persona Persona) chromedp.Action {
 		}
 
 		if err := override.Do(ctx); err != nil {
-			slog.Error("Failed to set UserAgent/ClientHints override via CDP", "error", err)
+			logger.Error("Failed to set UserAgent/ClientHints override via CDP", zap.Error(err))
 			return fmt.Errorf("stealth: failed to set user agent override: %w", err)
 		}
 		return nil
 	})
 }
 
-// setExtraHTTPHeaders configures persistent HTTP headers, notably Accept-Language.
-func setExtraHTTPHeaders(persona Persona) chromedp.Action {
+// setExtraHTTPHeaders configures persistent HTTP headers.
+func setExtraHTTPHeaders(persona Persona, logger *zap.Logger) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
 		if len(persona.Languages) == 0 {
 			return nil
 		}
-
-		// Format: "en-US,en;q=0.9"
 		formattedLanguage := persona.Languages[0]
 		for i := 1; i < len(persona.Languages); i++ {
 			qValue := 1.0 - float64(i)*0.1
@@ -178,34 +173,30 @@ func setExtraHTTPHeaders(persona Persona) chromedp.Action {
 			}
 			formattedLanguage += fmt.Sprintf(",%s;q=%.1f", persona.Languages[i], qValue)
 		}
-
-		headers := map[string]interface{}{
-			"Accept-Language": formattedLanguage,
-		}
-
+		headers := map[string]interface{}{"Accept-Language": formattedLanguage}
 		if err := network.SetExtraHTTPHeaders(network.Headers(headers)).Do(ctx); err != nil {
-			slog.Warn("Failed to set extra HTTP headers via CDP", "error", err)
+			logger.Error("Failed to set extra HTTP headers via CDP", zap.Error(err))
+			return fmt.Errorf("stealth: failed to set extra http headers: %w", err)
 		}
 		return nil
 	})
 }
 
 // setDeviceMetrics configures the viewport and resolution.
-func setDeviceMetrics(persona Persona) chromedp.Action {
+func setDeviceMetrics(persona Persona, logger *zap.Logger) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
 		if persona.Screen.Width > 0 && persona.Screen.Height > 0 {
 			orientation := emulation.OrientationTypeLandscapePrimary
 			if persona.Screen.Height > persona.Screen.Width {
 				orientation = emulation.OrientationTypePortraitPrimary
 			}
-
 			err := emulation.SetDeviceMetricsOverride(persona.Screen.Width, persona.Screen.Height, 1.0, false).
 				WithScreenOrientation(&emulation.ScreenOrientation{
 					Type:  orientation,
 					Angle: 0,
 				}).Do(ctx)
 			if err != nil {
-				slog.Error("Failed to set device metrics override via CDP", "error", err)
+				logger.Error("Failed to set device metrics override via CDP", zap.Error(err))
 				return fmt.Errorf("stealth: failed to set device metrics: %w", err)
 			}
 		}
@@ -214,36 +205,35 @@ func setDeviceMetrics(persona Persona) chromedp.Action {
 }
 
 // setEnvironmentOverrides ensures Timezone, Locale, and Geolocation consistency.
-func setEnvironmentOverrides(persona Persona) chromedp.Action {
+func setEnvironmentOverrides(persona Persona, logger *zap.Logger) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
-		// Timezone
 		if persona.TimezoneID != "" {
 			if err := emulation.SetTimezoneOverride(persona.TimezoneID).Do(ctx); err != nil {
-				slog.Warn("Failed to set timezone override via CDP", "error", err, "TimezoneID", persona.TimezoneID)
+				logger.Error("Failed to set timezone override via CDP", zap.Error(err))
+				return fmt.Errorf("stealth: failed to set timezone: %w", err)
 			}
 		}
 
-		// Locale
 		locale := persona.Locale
 		if locale == "" && len(persona.Languages) > 0 {
 			locale = persona.Languages[0]
 		}
 		if locale != "" {
-			// Normalize locale format (e.g., en_US -> en-US)
 			normalizedLocale := strings.ReplaceAll(locale, "_", "-")
 			if err := emulation.SetLocaleOverride(normalizedLocale).Do(ctx); err != nil {
-				slog.Warn("Failed to set locale override via CDP", "error", err, "Locale", normalizedLocale)
+				logger.Error("Failed to set locale override via CDP", zap.Error(err))
+				return fmt.Errorf("stealth: failed to set locale: %w", err)
 			}
 		}
 
-		// Geolocation
 		if geo := persona.Geolocation; geo != nil {
 			if err := emulation.SetGeolocationOverride().
 				WithLatitude(geo.Latitude).
 				WithLongitude(geo.Longitude).
 				WithAccuracy(geo.Accuracy).
 				Do(ctx); err != nil {
-				slog.Warn("Failed to set geolocation override via CDP", "error", err)
+				logger.Error("Failed to set geolocation override via CDP", zap.Error(err))
+				return fmt.Errorf("stealth: failed to set geolocation: %w", err)
 			}
 		}
 		return nil

@@ -14,7 +14,6 @@ import (
 	"sync"
 	"time"
 
-	// Replaced zerolog with zap for standardization
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 
@@ -25,27 +24,38 @@ import (
 type PassiveRunner struct {
 	config     Config
 	httpClient interfaces.HTTPClient
+	scope      interfaces.ScopeManager // Add scope manager
 	logger     *zap.Logger
 	// resilience: rate limiter for external services. gotta be a good net citizen.
 	crtLimiter *rate.Limiter
+	httpLimiter chan struct{} // Add concurrency limiter
 }
 
 // NewPassiveRunner creates a new PassiveRunner.
-// Updated to accept *zap.Logger.
-func NewPassiveRunner(cfg Config, client interfaces.HTTPClient, logger *zap.Logger) *PassiveRunner {
+// Updated to accept *zap.Logger and the scope manager.
+func NewPassiveRunner(cfg Config, client interfaces.HTTPClient, scope interfaces.ScopeManager, logger *zap.Logger) *PassiveRunner {
 	// ensure defaults are applied if this runner is initialized independently
 	cfg.SetDefaults()
 
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	
+	// Set a reasonable default for passive concurrency if not configured.
+	passiveConcurrency := 10
+	if cfg.PassiveConcurrency > 0 {
+		passiveConcurrency = cfg.PassiveConcurrency
+	}
+
 
 	return &PassiveRunner{
 		config:     cfg,
 		httpClient: client,
+		scope:      scope,
 		logger:     logger.Named("DiscoveryPassive"),
 		// setting the rate limit based on config
 		crtLimiter: rate.NewLimiter(rate.Limit(cfg.CrtShRateLimit), 1),
+		httpLimiter: make(chan struct{}, passiveConcurrency),
 	}
 }
 
@@ -174,8 +184,10 @@ func (p *PassiveRunner) loadCrtCache(domain string) ([]string, bool) {
 	var cache CrtCache
 	if err := json.Unmarshal(data, &cache); err != nil {
 		// corrupted cache file, remove it
-		p.logger.Warn("Cache file corrupted, removing.")
-		os.Remove(cachePath)
+		p.logger.Warn("Cache file corrupted, attempting to remove.", zap.Error(err), zap.String("path", cachePath))
+		if removeErr := os.Remove(cachePath); removeErr != nil {
+			p.logger.Error("Failed to remove corrupted cache file.", zap.Error(removeErr), zap.String("path", cachePath))
+		}
 		return nil, false
 	}
 	// check if cache is less than 24 hours old and matches the domain. standard operational window.
@@ -192,13 +204,17 @@ func (p *PassiveRunner) saveCrtCache(domain string, domains []string) {
 	}
 	cache := CrtCache{RootDomain: domain, Timestamp: time.Now(), Domains: domains}
 	data, err := json.Marshal(cache)
-	if err == nil {
-		// simple write is fine for cache data.
-		if err := os.WriteFile(p.getCachePath(domain), data, 0644); err != nil {
-			p.logger.Warn("Could not write cache file", zap.Error(err))
-		}
+	if err != nil {
+		p.logger.Error("Failed to marshal cache data to JSON. Cache not saved.", zap.Error(err), zap.String("domain", domain))
+		return
+	}
+
+	// simple write is fine for cache data.
+	if err := os.WriteFile(p.getCachePath(domain), data, 0644); err != nil {
+		p.logger.Warn("Could not write cache file", zap.Error(err))
 	}
 }
+
 
 // --- Robots.txt and Sitemap Implementation ---
 
@@ -287,6 +303,17 @@ type URLLoc struct {
 func (p *PassiveRunner) parseSitemap(ctx context.Context, sitemapURL string, resultsChan chan<- string) {
 	p.logger.Debug("Parsing sitemap", zap.String("url", sitemapURL))
 
+	// Acquire semaphore before making the HTTP request
+	select {
+	case p.httpLimiter <- struct{}{}:
+		// Acquired
+	case <-ctx.Done():
+		return
+	}
+	// Ensure semaphore is released when done
+	defer func() { <-p.httpLimiter }()
+
+
 	body, status, err := p.httpClient.Get(ctx, sitemapURL)
 	if err != nil || status != http.StatusOK {
 		// non critical failure, just move on
@@ -304,6 +331,18 @@ func (p *PassiveRunner) parseSitemap(ctx context.Context, sitemapURL string, res
 		var wg sync.WaitGroup
 		for _, ref := range sitemapIndex.Sitemaps {
 			if ref.Loc != "" {
+				// SECURITY: Validate scope before recursive call
+				parsedLoc, err := url.Parse(ref.Loc)
+				if err != nil {
+					p.logger.Debug("Invalid nested sitemap URL", zap.String("url", ref.Loc), zap.Error(err))
+					continue
+				}
+				// Assumes p.scope is initialized
+				if !p.scope.IsInScope(parsedLoc) {
+					p.logger.Debug("Nested sitemap URL out of scope, skipping.", zap.String("url", ref.Loc))
+					continue
+				}
+
 				wg.Add(1)
 				go func(url string) {
 					defer wg.Done()

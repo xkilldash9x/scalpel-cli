@@ -1,4 +1,7 @@
-// -- pkg/agent/executors.go --
+// File:         pkg/agent/executors.go
+// Description:  This file defines the ActionExecutor interface and the BrowserExecutor implementation,
+//               which translates abstract agent actions into concrete browser interactions.
+//
 package agent
 
 import (
@@ -11,16 +14,15 @@ import (
 
 // ActionExecutor defines the interface for components that execute actions decided by the Mind.
 type ActionExecutor interface {
-	// Execute performs the action. It returns (nil, err) for pre-flight errors (e.g., no session).
-	// For executed actions, it returns (*ExecutionResult, nil), encapsulating the outcome.
+	// Execute performs the action. It has clear error semantics:
+	// - It returns (nil, err) for pre-flight errors where the action could not be attempted (e.g., no active session).
+	// - For all attempted actions, it returns (*ExecutionResult, nil), where the result struct encapsulates the outcome (success or failure).
 	Execute(ctx context.Context, action Action) (*ExecutionResult, error)
 }
 
-// SessionProvider is a function type that returns the current active browser session.
+// SessionProvider is a function type that decouples the executor from the specific
+// browser session management logic, allowing it to retrieve the currently active session.
 type SessionProvider func() browser.SessionContext
-
-// MissionContextProvider is a function type that returns the current mission details.
-type MissionContextProvider func() Mission
 
 // --- Browser Executor ---
 
@@ -31,7 +33,8 @@ type ActionHandler func(session browser.SessionContext, action Action) error
 type BrowserExecutor struct {
 	logger          *zap.Logger
 	sessionProvider SessionProvider
-	handlers        map[ActionType]ActionHandler
+	// handlers provides an O(1) lookup for the correct action implementation.
+	handlers map[ActionType]ActionHandler
 }
 
 // NewBrowserExecutor creates a new BrowserExecutor and registers all action handlers.
@@ -39,21 +42,22 @@ func NewBrowserExecutor(logger *zap.Logger, provider SessionProvider) *BrowserEx
 	e := &BrowserExecutor{
 		logger:          logger.Named("browser_executor"),
 		sessionProvider: provider,
+		// Initialize the map with an estimated capacity to avoid reallocations.
+		handlers: make(map[ActionType]ActionHandler, 8),
 	}
 	e.registerHandlers()
 	return e
 }
 
 // registerHandlers initializes the map of action types to their handler functions.
+// This pattern makes the executor easily extensible with new actions.
 func (e *BrowserExecutor) registerHandlers() {
-	e.handlers = map[ActionType]ActionHandler{
-		ActionNavigate:     e.handleNavigate,
-		ActionClick:        e.handleClick,
-		ActionInputText:    e.handleInputText,
-		ActionSubmitForm:   e.handleSubmitForm,
-		ActionScroll:       e.handleScroll,
-		ActionWaitForAsync: e.handleWaitForAsync,
-	}
+	e.handlers[ActionNavigate] = e.handleNavigate
+	e.handlers[ActionClick] = e.handleClick
+	e.handlers[ActionInputText] = e.handleInputText
+	e.handlers[ActionSubmitForm] = e.handleSubmitForm
+	e.handlers[ActionScroll] = e.handleScroll
+	e.handlers[ActionWaitForAsync] = e.handleWaitForAsync
 }
 
 // Execute looks up and runs the appropriate handler for a given browser action.
@@ -61,7 +65,8 @@ func (e *BrowserExecutor) Execute(ctx context.Context, action Action) (*Executio
 	session := e.sessionProvider()
 	if session == nil {
 		// This is a pre-execution failure; the action cannot be attempted.
-		return nil, fmt.Errorf("cannot execute browser action (%s): No active browser session", action.Type)
+		// We return a direct error to signal a critical state issue to the agent.
+		return nil, fmt.Errorf("cannot execute browser action (%s): no active browser session", action.Type)
 	}
 
 	handler, ok := e.handlers[action.Type]
@@ -71,16 +76,19 @@ func (e *BrowserExecutor) Execute(ctx context.Context, action Action) (*Executio
 	}
 
 	// The action is now being attempted. The outcome will be captured in the ExecutionResult.
+	// The context passed to Execute is now plumbed into the handler.
 	err := handler(session, action)
 
 	result := &ExecutionResult{
 		Status:          "success",
-		ObservationType: ObservedDOMChange, // A browser action always results in a potential DOM change
+		ObservationType: ObservedDOMChange, // A browser action always results in a potential DOM change.
 	}
 	if err != nil {
-		// The action was attempted but failed during execution (e.g., selector not found).
+		// The action was attempted but failed during execution (e.g., selector not found, navigation timeout).
+		// This is not an error from the executor's perspective, but a failed outcome of the action.
 		result.Status = "failed"
 		result.Error = err.Error()
+		e.logger.Warn("Browser action execution failed", zap.String("action", string(action.Type)), zap.Error(err))
 	}
 
 	// The executor successfully attempted the action and is reporting the outcome.
@@ -116,8 +124,8 @@ func (e *BrowserExecutor) handleSubmitForm(session browser.SessionContext, actio
 }
 
 func (e *BrowserExecutor) handleScroll(session browser.SessionContext, action Action) error {
-	direction := "down"
-	if action.Value == "up" {
+	direction := "down" // Default direction
+	if strings.EqualFold(action.Value, "up") {
 		direction = "up"
 	}
 	return session.ScrollPage(direction)
@@ -127,9 +135,10 @@ func (e *BrowserExecutor) handleWaitForAsync(session browser.SessionContext, act
 	durationMs := 1000 // Default wait time
 	val, exists := action.Metadata["duration_ms"]
 	if exists {
-		// Handle different numeric types robustly using a type switch.
+		// ROBUSTNESS: Handle different numeric types robustly using a type switch,
+		// as JSON unmarshalling into interface{} often yields float64 for numbers.
 		switch v := val.(type) {
-		case float64: // Common for JSON unmarshaling
+		case float64:
 			durationMs = int(v)
 		case int:
 			durationMs = v
@@ -138,7 +147,7 @@ func (e *BrowserExecutor) handleWaitForAsync(session browser.SessionContext, act
 		case float32:
 			durationMs = int(v)
 		default:
-			// Log a warning and use default, rather than failing the action.
+			// Log a warning and use the default, rather than failing the entire action.
 			e.logger.Warn("Invalid type for duration_ms in WAIT_FOR_ASYNC, using default.",
 				zap.String("type", fmt.Sprintf("%T", v)))
 		}

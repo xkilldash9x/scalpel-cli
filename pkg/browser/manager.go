@@ -3,6 +3,8 @@ package browser
 
 import (
 	"context"
+	"crypto/rand"
+	"encoding/binary"
 	"fmt"
 	"runtime"
 	"strings"
@@ -38,17 +40,30 @@ type Manager struct {
 	wg sync.WaitGroup
 }
 
+// generateSecureSeed creates a high-entropy seed for the PRNG in the JS evasions script.
+func generateSecureSeed() int64 {
+	var b [8]byte
+	// Use crypto/rand for a high-entropy seed.
+	if _, err := rand.Read(b[:]); err != nil {
+		// Fallback to time-based seed if crypto/rand fails (less secure). This should be rare.
+		return time.Now().UnixNano()
+	}
+	// Convert the random bytes to an int64.
+	return int64(binary.LittleEndian.Uint64(b[:]))
+}
+
 // NewManager initializes the browser manager, launches the browser process, and prepares instrumentation.
 func NewManager(ctx context.Context, logger *zap.Logger, cfg *config.Config) (*Manager, error) {
 	m := &Manager{
 		logger:       logger.Named("browser_manager"),
 		globalConfig: cfg,
-		// Define the default persona. This should eventually be configurable.
+		// Define the default persona with a secure random seed.
 		persona: stealth.Persona{
 			UserAgent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/126.0.0.0 Safari/537.36",
 			Platform:  "Win32",
 			Languages: []string{"en-US", "en"},
-			Screen:    stealth.ScreenProperties{Width: 1920, Height: 1080, DevicePixelRatio: 1.0},
+			Screen:    stealth.ScreenProperties{Width: 1920, Height: 1080},
+			NoiseSeed: generateSecureSeed(),
 		},
 	}
 
@@ -67,7 +82,6 @@ func NewManager(ctx context.Context, logger *zap.Logger, cfg *config.Config) (*M
 func (m *Manager) loadInstrumentationConfig() {
 	m.logger.Info("Loading Pinnacle Unified Runtime (Taint Shim) configuration.")
 
-	// Load the template from the embedded file system.
 	script, err := shim.GetTaintShimTemplate()
 	if err != nil {
 		m.logger.Error("CRITICAL: Failed to load Pinnacle Runtime Template. IAST will be disabled.", zap.Error(err))
@@ -76,7 +90,6 @@ func (m *Manager) loadInstrumentationConfig() {
 		m.runtimeTemplateCache = script
 	}
 
-	// Define the sink configuration. In a production system, this should be loaded from a dynamic rule source.
 	m.staticTaintConfigJSON = `[
         {"Name": "document.write", "Setter": false, "Type": "DOMXSS"},
         {"Name": "Element.prototype.innerHTML", "Setter": true, "Type": "DOMXSS"},
@@ -95,20 +108,14 @@ func (m *Manager) launchBrowser(ctx context.Context) error {
 
 	opts := m.buildAllocatorOptions()
 
-	// Create the allocator context.
 	allocCtx, cancel := chromedp.NewExecAllocator(ctx, opts...)
 	m.allocatorCtx = allocCtx
 	m.allocatorCancel = cancel
 
-	// Create a temporary context with a timeout to verify the browser starts and is responsive.
 	testCtx, cancelTest := context.WithTimeout(allocCtx, 30*time.Second)
-	testCtx, cancelTestCtx := chromedp.NewContext(testCtx)
-	defer cancelTestCtx()
 	defer cancelTest()
-
-	// Run a simple task to confirm the browser is alive.
 	if err := chromedp.Run(testCtx, chromedp.Navigate("about:blank")); err != nil {
-		m.allocatorCancel() // Ensure cleanup if the test fails
+		m.allocatorCancel()
 		return fmt.Errorf("browser failed to start or respond: %w", err)
 	}
 
@@ -118,11 +125,9 @@ func (m *Manager) launchBrowser(ctx context.Context) error {
 
 // buildAllocatorOptions assembles the necessary flags for a stealthy, configurable browser instance.
 func (m *Manager) buildAllocatorOptions() []chromedp.ExecAllocatorOption {
-	// Start with default options, filtering out flags that reveal automation.
 	defaultOpts := chromedp.DefaultExecAllocatorOptions[:]
 	var opts []chromedp.ExecAllocatorOption
 
-	// Filter out the "enable-automation" flag.
 	for _, opt := range defaultOpts {
 		if flag, ok := opt.(chromedp.Flag); ok && flag.Name == "enable-automation" {
 			continue
@@ -130,18 +135,15 @@ func (m *Manager) buildAllocatorOptions() []chromedp.ExecAllocatorOption {
 		opts = append(opts, opt)
 	}
 
-	// Apply essential stealth and configuration flags.
 	opts = append(opts,
 		chromedp.Flag("headless", m.globalConfig.Browser.Headless),
 		chromedp.Flag("ignore-certificate-errors", m.globalConfig.Browser.IgnoreTLSErrors),
-		// Crucial stealth flag: Disable the Blink feature used to detect automation (navigator.webdriver).
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
 		chromedp.Flag("disable-extensions", true),
 		chromedp.Flag("disable-gpu", m.globalConfig.Browser.Headless),
-		chromedp.UserAgent(m.persona.UserAgent), // Apply UserAgent at launch.
+		chromedp.UserAgent(m.persona.UserAgent),
 	)
 
-	// Add custom arguments from config.yaml.
 	for _, arg := range m.globalConfig.Browser.Args {
 		parts := strings.SplitN(arg, "=", 2)
 		flagName := strings.TrimPrefix(parts[0], "--")
@@ -153,7 +155,6 @@ func (m *Manager) buildAllocatorOptions() []chromedp.ExecAllocatorOption {
 		}
 	}
 
-	// Add flags required for running inside containers (e.g., Docker on Linux).
 	if runtime.GOOS == "linux" {
 		opts = append(opts,
 			chromedp.Flag("no-sandbox", true),
@@ -167,7 +168,6 @@ func (m *Manager) buildAllocatorOptions() []chromedp.ExecAllocatorOption {
 
 // InitializeSession creates a new, fully isolated, and instrumented browser context (tab).
 func (m *Manager) InitializeSession(taskCtx context.Context) (SessionContext, error) {
-	// Initialize the concrete implementation (AnalysisContext).
 	ac := cdp.NewAnalysisContext(
 		m.allocatorCtx,
 		m.globalConfig,
@@ -177,15 +177,12 @@ func (m *Manager) InitializeSession(taskCtx context.Context) (SessionContext, er
 		m.staticTaintConfigJSON,
 	)
 
-	// Initialize the context (creates the actual browser tab and applies instrumentation).
 	if err := ac.Initialize(taskCtx); err != nil {
 		return nil, fmt.Errorf("failed to initialize analysis session: %w", err)
 	}
 
-	// Increment the WaitGroup counter.
 	m.wg.Add(1)
 
-	// Wrap the session context to ensure the WaitGroup is decremented when the session closes.
 	return &sessionWrapper{SessionContext: ac, wg: &m.wg}, nil
 }
 
@@ -193,7 +190,6 @@ func (m *Manager) InitializeSession(taskCtx context.Context) (SessionContext, er
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.logger.Info("Browser manager shutdown initiated. Waiting for active sessions to complete...")
 
-	// Wait for all sessions (tracked by wg) to finish, respecting the caller's deadline.
 	done := make(chan struct{})
 	go func() {
 		m.wg.Wait()
@@ -207,18 +203,15 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		m.logger.Warn("Shutdown deadline exceeded. Forcing browser termination.", zap.Error(ctx.Err()))
 	}
 
-	// Terminate the main browser process.
 	if m.allocatorCancel != nil {
 		m.logger.Info("Shutting down main browser process...")
 		m.allocatorCancel()
-		// Wait for the allocator context to confirm termination.
 		<-m.allocatorCtx.Done()
 	}
 	return nil
 }
 
 // -- sessionWrapper --
-// A decorator for SessionContext that ensures the Manager's WaitGroup is decremented exactly once upon closing.
 type sessionWrapper struct {
 	SessionContext
 	wg     *sync.WaitGroup

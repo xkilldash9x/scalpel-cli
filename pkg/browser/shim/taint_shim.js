@@ -76,39 +76,36 @@
      * Returns the parent object and the property name if found.
      */
     function resolveObjectPath(path) {
+        if (!path) return { parent: null, propName: '' };
+
         const parts = path.split('.');
-        let obj = window;
-        let parent = null;
-        let propName = '';
+        // The last part is the property we want to instrument.
+        const propName = parts.pop();
+        
+        let parent = window;
 
-        for (let i = 0; i < parts.length; i++) {
-            propName = parts[i];
-
-            // Check if the current object is traversable.
-            if (obj === undefined || obj === null) {
-                return { parent: null, propName: '' };
+        // Traverse the remaining parts to find the parent object.
+        for (const part of parts) {
+            // Ensure the current object is traversable (not null/undefined, and is an object or function).
+            if (parent === null || (typeof parent !== 'object' && typeof parent !== 'function')) {
+                 return { parent: null, propName: '' };
             }
 
-            if (i < parts.length - 1) {
-                // Navigate deeper
-                // Use 'in' operator to check prototype chain as well, which is often needed for browser APIs.
-                if (propName in obj) {
-                     parent = obj;
-                     obj = obj[propName];
-                } else {
-                    // Path does not exist.
+            // Check existence (including prototype chain) before access.
+            if (part in parent) {
+                try {
+                    // Robustness: Accessing properties can throw (e.g., cross-origin security exceptions).
+                    parent = parent[part];
+                } catch (e) {
+                    console.debug(`Scalpel: Error accessing property ${part} during traversal.`, e);
                     return { parent: null, propName: '' };
                 }
             } else {
-                // At the last part, the current object is the container (parent) of the target property.
-                parent = obj;
+                return { parent: null, propName: '' };
             }
         }
 
-        // The target property/function name is the last part
-        propName = parts[parts.length - 1];
-
-        // Final validation.
+        // Final validation on the resolved parent and property existence.
         if ((typeof parent !== 'object' && typeof parent !== 'function') || parent === null || !(propName in parent)) {
             return { parent: null, propName: '' };
         }
@@ -193,10 +190,13 @@
 
                 // Stealth: Try to maintain the original function's properties.
                 try {
-                    parent[propName].toString = () => original.toString();
-                    if (Object.getPrototypeOf(original)) {
-                        Object.setPrototypeOf(parent[propName], Object.getPrototypeOf(original));
-                    }
+                    // Use bind to ensure 'this' context if toString itself is called unusually
+                    parent[propName].toString = original.toString.bind(original);
+
+                    // AVOID Object.setPrototypeOf for performance reasons.
+
+                    // Copy descriptors (includes name, length, and others).
+                    // This might still fail for some native/host objects, but is safer than setPrototypeOf.
                     Object.defineProperties(parent[propName], Object.getOwnPropertyDescriptors(original));
                 } catch (e) {
                     // May fail for some native functions, not critical.

@@ -7,14 +7,16 @@ import (
 
 // Config holds the configuration for the Discovery engine.
 type Config struct {
-	MaxDepth    int           `yaml:"maxDepth"`
-	Concurrency int           `yaml:"concurrency"`
-	Timeout     time.Duration `yaml:"timeout"`
+	MaxDepth    int           `mapstructure:"maxDepth"`
+	Concurrency int           `mapstructure:"concurrency"`
+	Timeout     time.Duration `mapstructure:"timeout"`
 	// use pointer to distinguish between 'false' (explicitly disabled) and 'unset' (default behavior).
-	PassiveEnabled *bool `yaml:"passiveEnabled"`
+	PassiveEnabled *bool `mapstructure:"passiveEnabled"`
 	// requests per second for crt.sh
-	CrtShRateLimit float64 `yaml:"crtShRateLimit"`
-	CacheDir       string  `yaml:"cacheDir"`
+	CrtShRateLimit float64 `mapstructure:"crtShRateLimit"`
+	CacheDir       string  `mapstructure:"cacheDir"`
+	// Concurrency for passive HTTP requests (e.g., sitemap parsing)
+	PassiveConcurrency int `mapstructure:"passiveConcurrency"`
 }
 
 // SetDefaults applies default values if they aren't set in the config file.

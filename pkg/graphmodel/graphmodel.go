@@ -1,3 +1,7 @@
+// File:         pkg/graphmodel/graphmodel.go
+// Description:  This file contains the consolidated data models for the knowledge graph,
+//               including critical cloning methods for concurrency safety.
+//
 package graphmodel
 
 import "time"
@@ -16,7 +20,7 @@ const (
 )
 
 // Constants for Node Types (Entities)
-// Consolidated from pkg/knowledgegraph/types.go
+// Consolidated from the former pkg/graphmodel/types.go
 const (
 	// Metadata
 	NodeTypeScanRoot   NodeType = "ScanRoot"
@@ -51,7 +55,7 @@ const (
 )
 
 // Constants for Relationship Types (Edges)
-// Consolidated from pkg/knowledgegraph/types.go
+// Consolidated from the former pkg/graphmodel/types.go
 const (
 	// Structural
 	RelationshipTypeLinksTo      RelationshipType = "LINKS_TO"
@@ -134,7 +138,7 @@ type GraphExport struct {
 	Edges []*Edge `json:"edges"`
 }
 
-// -- Deep Copy and Cloning Methods --
+// --- Deep Copy and Cloning Methods ---
 
 // DeepCopy creates a true copy of the Properties map.
 // This is essential for preventing external modifications to internal graph state.
@@ -144,12 +148,15 @@ func (p Properties) DeepCopy() Properties {
 	}
 	copy := make(Properties, len(p))
 	for k, v := range p {
-		copy[k] = v // Assumes primitive, comparable values as required for indexing.
+		// Assumes primitive, comparable values as required for indexing.
+		copy[k] = v
 	}
 	return copy
 }
 
 // Clone creates a deep copy of a Node.
+// CRITICAL FIX: This prevents data races by ensuring callers receive a copy
+// of the node, not a pointer to the internal state of the in-memory graph.
 func (n *Node) Clone() *Node {
 	if n == nil {
 		return nil
@@ -164,6 +171,7 @@ func (n *Node) Clone() *Node {
 }
 
 // Clone creates a deep copy of an Edge.
+// CRITICAL FIX: Prevents data races in the same way as the Node.Clone method.
 func (e *Edge) Clone() *Edge {
 	if e == nil {
 		return nil

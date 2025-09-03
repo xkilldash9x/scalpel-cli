@@ -1,4 +1,8 @@
-// pkg/config/config.go
+// ----------------- REFACTORED FILE -----------------
+//
+// File:         pkg/config/config.go
+// Description:  The application's root configuration, updated with an expanded list of supported LLM providers.
+//
 package config
 
 import (
@@ -8,6 +12,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
+	"github.com/xkilldash9x/scalpel-cli/pkg/humanoid"
 )
 
 var (
@@ -54,18 +59,17 @@ type EngineConfig struct {
 
 // BrowserConfig holds settings for the headless browser.
 type BrowserConfig struct {
-	Headless        bool             `mapstructure:"headless"`
-	IgnoreTLSErrors bool             `mapstructure:"ignore_tls_errors"`
-	Args            []string         `mapstructure:"args"`
-	Viewport        map[string]int   `mapstructure:"viewport"`
-	DisableCache    bool             `mapstructure:"disable_cache"`
+	Headless        bool           `mapstructure:"headless"`
+	IgnoreTLSErrors bool           `mapstructure:"ignore_tls_errors"`
+	Args            []string       `mapstructure:"args"`
+	Viewport        map[string]int `mapstructure:"viewport"`
+	Humanoid        humanoid.Config `mapstructure:"humanoid"`
 }
 
 // NetworkConfig holds settings for HTTP requests.
 type NetworkConfig struct {
-	Timeout      time.Duration     `mapstructure:"timeout"`
-	PostLoadWait time.Duration     `mapstructure:"post_load_wait"`
-	Headers      map[string]string `mapstructure:"headers"`
+	Timeout time.Duration `mapstructure:"timeout"`
+	Headers map[string]string `mapstructure:"headers"`
 }
 
 // ScannersConfig holds settings for all analysis modules.
@@ -125,14 +129,14 @@ type AuthConfig struct {
 }
 
 type ATOConfig struct {
-	Enabled               bool     `mapstructure:"enabled"`
-	UsernameFields        []string `mapstructure:"username_fields"`
-	PasswordFields        []string `mapstructure:"password_fields"`
-	UsernameWordlist      string   `mapstructure:"username_wordlist"`
-	PasswordSprayWordlist string   `mapstructure:"password_spray_wordlist"`
-	SuccessRegex          string   `mapstructure:"success_regex"`
-	FailureRegex          string   `mapstructure:"failure_regex"`
-	LockoutRegex          string   `mapstructure:"lockout_regex"`
+	Enabled                bool     `mapstructure:"enabled"`
+	UsernameFields         []string `mapstructure:"username_fields"`
+	PasswordFields         []string `mapstructure:"password_fields"`
+	UsernameWordlist       string   `mapstructure:"username_wordlist"`
+	PasswordSprayWordlist  string   `mapstructure:"password_spray_wordlist"`
+	SuccessRegex           string   `mapstructure:"success_regex"`
+	FailureRegex           string   `mapstructure:"failure_regex"`
+	LockoutRegex           string   `mapstructure:"lockout_regex"`
 	DelayBetweenAttemptsMs int      `mapstructure:"delay_between_attempts_ms"`
 }
 
@@ -154,26 +158,37 @@ type ScanConfig struct {
 
 // AgentConfig holds settings for the autonomous agent.
 type AgentConfig struct {
-	Enabled bool      `mapstructure:"enabled"`
-	LLM     LLMConfig `mapstructure:"llm"`
+	Enabled bool             `mapstructure:"enabled"`
+	LLM     LLMRouterConfig `mapstructure:"llm"`
 }
 
 // LLMProvider defines the supported LLM providers.
 type LLMProvider string
 
 const (
-	ProviderGemini LLMProvider = "gemini"
-	ProviderOpenAI LLMProvider = "openai"
+	ProviderGemini    LLMProvider = "gemini"
+	ProviderOpenAI    LLMProvider = "openai"
+	ProviderAnthropic LLMProvider = "anthropic"
+	// ProviderOllama is for connecting to a local, self-hosted LLM instance.
+	ProviderOllama LLMProvider = "ollama"
 )
 
-// LLMConfig holds settings for the Language Model integration.
-type LLMConfig struct {
+// LLMRouterConfig holds the configuration for the multi-model LLM setup.
+type LLMRouterConfig struct {
+	DefaultFastModel     string                    `mapstructure:"default_fast_model"`
+	DefaultPowerfulModel string                    `mapstructure:"default_powerful_model"`
+	Models               map[string]LLMModelConfig `mapstructure:"models"`
+}
+
+// LLMModelConfig holds settings for a single Language Model configuration.
+type LLMModelConfig struct {
 	Provider      LLMProvider       `mapstructure:"provider"`
 	Model         string            `mapstructure:"model"`
 	APIKey        string            `mapstructure:"api_key"`
+	Endpoint      string            `mapstructure:"endpoint"` // Optional endpoint override
 	APITimeout    time.Duration     `mapstructure:"api_timeout"`
-	Temperature   float64           `mapstructure:"temperature"`
-	TopP          float64           `mapstructure:"top_p"`
+	Temperature   float32           `mapstructure:"temperature"`
+	TopP          float32           `mapstructure:"top_p"`
 	TopK          int               `mapstructure:"top_k"`
 	MaxTokens     int               `mapstructure:"max_tokens"`
 	SafetyFilters map[string]string `mapstructure:"safety_filters"`
@@ -196,9 +211,8 @@ func Load(v *viper.Viper) error {
 // Get returns the loaded configuration instance.
 func Get() *Config {
 	if instance == nil {
-		// This can happen if Get() is called before the root command's PersistentPreRunE.
-		// We can panic here because it's a programmer error.
 		panic("Configuration not initialized. Call config.Load() in the root command.")
 	}
 	return instance
 }
+

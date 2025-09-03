@@ -5,12 +5,13 @@ import (
 	"context"
 	"fmt"
 	"net/url"
+	"path/filepath"
+	"runtime/debug"
 	"strings"
 	"sync"
 	"sync/atomic"
 
 	"github.com/google/uuid"
-	// Replaced zerolog with zap for standardization
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces"
@@ -36,6 +37,13 @@ type Engine struct {
 	activeWorkers int32
 	sessionID     string
 }
+
+// Package level definition for ignored extensions
+var ignoredExtensions = map[string]struct{}{
+	".css":   {}, ".png": {}, ".jpg": {}, ".jpeg": {}, ".gif": {},
+	".woff":  {}, ".woff2": {}, ".ico": {}, ".svg": {}, ".ttf": {}, ".eot": {},
+}
+
 
 // NewEngine creates a new Discovery Engine instance.
 // Updated signature to accept *zap.Logger
@@ -157,6 +165,15 @@ func (e *Engine) worker(ctx context.Context, workerWG *sync.WaitGroup) {
 
 			// process the task. using an anonymous function for cleaner defer handling.
 			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						e.logger.Error("Crawl task panicked",
+							zap.String("url", task.URL),
+							zap.Any("panicValue", r),
+							zap.String("stack", string(debug.Stack())),
+						)
+					}
+				}()
 				// ensure taskWG is decremented when processing is finished. crucial.
 				defer e.taskWG.Done()
 				// ensure worker is marked as inactive when finished.
@@ -236,16 +253,25 @@ func (e *Engine) processAsset(ctx context.Context, u *url.URL, depth int, source
 	// handle Domain/Subdomain relationships
 	hostname := u.Hostname()
 	// attempt to add the hostname as a domain node. the KG implementation handles duplicates.
-	e.kg.AddNode(ctx, hostname, interfaces.NodeDomain, map[string]interface{}{"source": source})
+	if _, err := e.kg.AddNode(ctx, hostname, interfaces.NodeDomain, map[string]interface{}{"source": source}); err != nil {
+		e.logger.Warn("Failed to add/update Domain node in KG", zap.Error(err), zap.String("hostname", hostname))
+	}
+
 
 	// create edge between the specific domain/subdomain and the URL
-	e.kg.AddEdge(ctx, hostname, urlString, interfaces.EdgeHostsURL, map[string]interface{}{"source": source})
+	if err := e.kg.AddEdge(ctx, hostname, urlString, interfaces.EdgeHostsURL, map[string]interface{}{"source": source}); err != nil {
+		e.logger.Warn("Failed to add EdgeHostsURL in KG", zap.Error(err), zap.String("hostname", hostname), zap.String("url", urlString))
+	}
+
 
 	// if this is a subdomain, ensure the relationship to the root domain is captured.
 	rootDomain := e.scope.GetRootDomain()
 	if hostname != rootDomain {
-		e.kg.AddEdge(ctx, rootDomain, hostname, interfaces.EdgeHasSubdomain, map[string]interface{}{"source": source, "confidence": 1.0})
+		if err := e.kg.AddEdge(ctx, rootDomain, hostname, interfaces.EdgeHasSubdomain, map[string]interface{}{"source": source, "confidence": 1.0}); err != nil {
+			e.logger.Warn("Failed to add EdgeHasSubdomain in KG", zap.Error(err), zap.String("root", rootDomain), zap.String("subdomain", hostname))
+		}
 	}
+
 
 	// 2b. emit event for other modules (e.g. Taint Analyzer) to consume.
 	e.eventBus.Publish("ASSET_DISCOVERED", map[string]interface{}{
@@ -335,16 +361,13 @@ func (e *Engine) normalizeAndValidate(rawURL, baseURL string) (*url.URL, error) 
 	}
 
 	// 8. optimization: filter common static assets not typically useful for analysis. reduces noise.
-	pathLower := strings.ToLower(u.Path)
-	// CRITICAL: we must keep .js files as they are crucial for modern application analysis and taint tracking.
-	if strings.HasSuffix(pathLower, ".css") ||
-		strings.HasSuffix(pathLower, ".png") || strings.HasSuffix(pathLower, ".jpg") ||
-		strings.HasSuffix(pathLower, ".jpeg") || strings.HasSuffix(pathLower, ".gif") ||
-		strings.HasSuffix(pathLower, ".woff") || strings.HasSuffix(pathLower, ".woff2") ||
-		strings.HasSuffix(pathLower, ".ico") || strings.HasSuffix(pathLower, ".svg") ||
-		strings.HasSuffix(pathLower, ".ttf") || strings.HasSuffix(pathLower, ".eot") {
+	// Use filepath.Ext to correctly extract the extension (includes the dot) and convert to lower case.
+	ext := strings.ToLower(filepath.Ext(u.Path))
+	if _, ignore := ignoredExtensions[ext]; ignore {
+		// CRITICAL: Ensure .js is not in the ignoredExtensions map.
 		return nil, fmt.Errorf("static asset ignored")
 	}
+
 
 	return u, nil
 }

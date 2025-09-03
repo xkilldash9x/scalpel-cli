@@ -72,25 +72,27 @@ func NewAnalysisContext(
 // Initialize creates the browser tab and applies all necessary instrumentation.
 func (ac *AnalysisContext) Initialize(ctx context.Context) error {
 	ac.mu.Lock()
-	defer ac.mu.Unlock()
 
 	if ac.sessionContext != nil {
+		ac.mu.Unlock()
 		return fmt.Errorf("session already initialized")
 	}
 
-	// Create a new tab context.
+	// Critical Section: Initialize fields
 	sessionCtx, cancel := chromedp.NewContext(ac.allocatorContext)
 	ac.sessionContext = sessionCtx
 	ac.sessionCancel = cancel
-
-	// Initialize components.
 	ac.humanoid = humanoid.New(ac.globalConfig.Humanoid)
 	ac.harvester = NewHarvester(ac.sessionContext, ac.logger)
 	ac.interactor = NewInteractor(ac.logger, ac.humanoid)
 
-	// Apply instrumentation and stealth. Order is crucial: Stealth first.
+	// Unlock here. Fields are initialized and safe for concurrent access by other methods.
+	ac.mu.Unlock()
+
+	// Apply instrumentation and stealth.
 	if err := ac.applyStealth(); err != nil {
-		ac.Close(ctx) // Ensure cleanup on failure
+		// Safe to call Close now without holding the lock.
+		ac.Close(ctx)
 		return fmt.Errorf("failed to apply stealth: %w", err)
 	}
 
@@ -108,7 +110,7 @@ func (ac *AnalysisContext) Initialize(ctx context.Context) error {
 
 func (ac *AnalysisContext) applyStealth() error {
 	// Apply persona settings (UserAgent, Platform, Screen resolution, JS evasions).
-	if err := chromedp.Run(ac.sessionContext, stealth.Apply(ac.persona)); err != nil {
+	if err := chromedp.Run(ac.sessionContext, stealth.Apply(ac.persona, ac.logger)); err != nil {
 		return fmt.Errorf("failed to apply stealth persona: %w", err)
 	}
 	return nil
@@ -244,27 +246,35 @@ func (ac *AnalysisContext) Interact(config browser.InteractionConfig) error {
 }
 
 // CollectArtifacts gathers data from the session.
-func (ac *AnalysisContext) CollectArtifacts() (*browser.Artifacts, error) {
+func (ac *AnalysisContext) CollectArtifacts(ctx context.Context) (*browser.Artifacts, error) {
 	ac.mu.Lock()
-	defer ac.mu.Unlock()
 	if ac.isClosed {
+		ac.mu.Unlock()
 		return nil, fmt.Errorf("session is already closed")
 	}
+	harvester := ac.harvester
+	sessionContext := ac.sessionContext
+	ac.mu.Unlock()
 
 	artifacts := &browser.Artifacts{}
 	ac.logger.Debug("Collecting browser artifacts.")
 
+	// Use a timeout derived from the caller's context (ctx).
+	collectCtx, cancel := context.WithTimeout(ctx, 20*time.Second)
+	defer cancel()
+
 	// 1. Stop the harvester and get its data
-	if ac.harvester != nil {
-		// Use a timeout for collection.
-		collectCtx, cancel := context.WithTimeout(context.Background(), 20*time.Second)
-		defer cancel()
-		artifacts.HAR, artifacts.ConsoleLogs = ac.harvester.Stop(collectCtx)
+	if harvester != nil {
+		artifacts.HAR, artifacts.ConsoleLogs = harvester.Stop(collectCtx)
 	}
+
+	// Create a new derived context for CDP operations that respects the collection timeout.
+	runCtx, cancelRunCtx := context.WithTimeout(sessionContext, 20*time.Second)
+	defer cancelRunCtx()
 
 	// 2. Get DOM content (Snapshot)
 	var domContent string
-	if err := chromedp.Run(ac.sessionContext, chromedp.OuterHTML("html", &domContent)); err != nil {
+	if err := chromedp.Run(runCtx, chromedp.OuterHTML("html", &domContent)); err != nil {
 		ac.logger.Warn("Could not retrieve final DOM content", zap.Error(err))
 	}
 	artifacts.DOM = domContent
@@ -272,7 +282,7 @@ func (ac *AnalysisContext) CollectArtifacts() (*browser.Artifacts, error) {
 	// 3. Get storage state
 	var storageResult browser.StorageState
 	var cookies []*network.Cookie
-	err := chromedp.Run(ac.sessionContext,
+	err := chromedp.Run(runCtx,
 		// Evaluate JavaScript to extract storage maps.
 		chromedp.Evaluate(
 			`({
@@ -298,29 +308,42 @@ func (ac *AnalysisContext) CollectArtifacts() (*browser.Artifacts, error) {
 // Close safely terminates the browser tab and its associated resources.
 func (ac *AnalysisContext) Close(ctx context.Context) error {
 	ac.mu.Lock()
-	defer ac.mu.Unlock()
-
 	if ac.isClosed {
+		ac.mu.Unlock()
 		return nil
 	}
 	ac.isClosed = true
+	// Capture references needed for closing before releasing the lock.
+	harvester := ac.harvester
+	sessionCancel := ac.sessionCancel
+	sessionContext := ac.sessionContext
+	ac.mu.Unlock() // Release the lock before potentially blocking operations.
 
 	// Stop harvester first.
-	if ac.harvester != nil {
-		ac.harvester.Stop(ctx)
+	if harvester != nil {
+		harvester.Stop(ctx)
 	}
 
 	// Cancel the session context.
-	if ac.sessionCancel != nil {
-		ac.sessionCancel()
+	if sessionCancel != nil {
+		sessionCancel()
 	}
 
-	// Wait for the session context to be fully done, with a timeout.
+	if sessionContext == nil {
+		return nil
+	}
+
+	// Wait for the session context to be fully done.
+	// Use a robust timeout that respects the caller's deadline (ctx) and the hard timeout.
+	waitCtx, cancelWait := context.WithTimeout(ctx, 10*time.Second)
+	defer cancelWait()
+
 	select {
-	case <-ac.sessionContext.Done():
+	case <-sessionContext.Done():
 		ac.logger.Debug("Browser session closed gracefully.")
-	case <-time.After(10 * time.Second): // Hard timeout
-		ac.logger.Warn("Timeout waiting for browser session to close.")
+	case <-waitCtx.Done():
+		// This triggers if the caller's deadline OR the 10s timeout is reached.
+		ac.logger.Warn("Deadline exceeded waiting for browser session to close.", zap.Error(waitCtx.Err()))
 	}
 
 	return nil
