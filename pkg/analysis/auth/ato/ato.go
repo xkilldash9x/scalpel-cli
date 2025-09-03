@@ -3,24 +3,46 @@ package ato
 
 import (
 	"bytes"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math"
 	"net/http"
+	"net/url"
 	"strings"
 	"time"
-	"unicode"
 
 	"github.com/google/uuid"
+	"github.com/xkilldash9x/scalpel-cli/pkg/config"
 	"github.com/xkilldash9x/scalpel-cli/pkg/schemas"
 )
 
-// ATOAnalyzer performs passive analysis for ATO risks on observed traffic.
-type ATOAnalyzer struct{}
+// A default list of weak passwords to check for if none are provided in config.
+var defaultWeakPasswords = []string{"password", "123456", "admin", "qwerty", "12345678", "welcome", "12345"}
 
-// NewATOAnalyzer creates a new ATOAnalyzer.
-func NewATOAnalyzer() *ATOAnalyzer {
-	return &ATOAnalyzer{}
+// ATOAnalyzer performs passive analysis for ATO risks on observed traffic.
+// It is now architecturally aware and uses the main application configuration.
+type ATOAnalyzer struct {
+	config config.ATOConfig
+}
+
+// NewATOAnalyzer creates a new passive ATOAnalyzer.
+// It accepts the active ATO configuration to reuse username/password field definitions.
+func NewATOAnalyzer(cfg config.ATOConfig) *ATOAnalyzer {
+	// If the user hasn't provided a password list for active spraying,
+	// we'll use a basic default list for our passive check.
+	if len(cfg.PasswordSprayWordlist) == 0 {
+		cfg.PasswordSprayWordlist = defaultWeakPasswords
+	}
+	// Similarly, if field names aren't defined, use some sensible defaults.
+	if len(cfg.UsernameFields) == 0 {
+		cfg.UsernameFields = []string{"username", "email", "user", "login", "user_id"}
+	}
+	if len(cfg.PasswordFields) == 0 {
+		cfg.PasswordFields = []string{"password", "pass", "pwd", "secret", "passwd", "user_pass"}
+	}
+
+	return &ATOAnalyzer{config: cfg}
 }
 
 // Analyze checks for potential Account Takeover vulnerabilities based on passive observation.
@@ -46,23 +68,19 @@ func (a *ATOAnalyzer) Analyze(req *http.Request, resp *http.Response) ([]schemas
 
 	// Check for weak credentials in transit (Passive observation)
 	if req != nil && req.Method == "POST" && isLoginEndpoint(req.URL.Path) {
-		bodyBytes, err := readRequestBody(req)
-		// We proceed even if there was a partial read error.
-		if err == nil && len(bodyBytes) > 0 {
-			body := string(bodyBytes)
-			// TODO: This is a fragile heuristic. For better accuracy, this should
-			// parse the body based on Content-Type (JSON, form-urlencoded) and
-			// inspect the values of specific known password fields.
-			weakPasswords := []string{"password", "123456", "admin", "qwerty"}
-			for _, weakPass := range weakPasswords {
-				if strings.Contains(body, "password="+weakPass) || strings.Contains(body, `"`+weakPass+`"`) {
+		bodyBytes, _ := readRequestBody(req)
+
+		// This logic intelligently parses the request body using the configured field names.
+		if password, found := a.extractPasswordFromRequest(req, bodyBytes); found {
+			for _, weakPass := range a.config.PasswordSprayWordlist {
+				if password == weakPass {
 					vulnerabilities = append(vulnerabilities, createFinding(
 						"Weak Credentials Observed in Transit",
-						"Low",
-						"The application transmitted common or weak credentials during an authentication attempt.",
-						"CWE-521",
+						"Low", // Severity is low because we don't know if they were accepted.
+						fmt.Sprintf("The application transmitted a known weak password ('%s') during an authentication attempt.", weakPass),
+						"CWE-521", // Weak Password Requirements
 					))
-					break
+					break // Found a weak password, no need to check others.
 				}
 			}
 		}
@@ -100,6 +118,50 @@ func (a *ATOAnalyzer) Analyze(req *http.Request, resp *http.Response) ([]schemas
 	return vulnerabilities, nil
 }
 
+// extractPasswordFromRequest parses the request body based on Content-Type
+// and looks for common password field names from the analyzer's config.
+func (a *ATOAnalyzer) extractPasswordFromRequest(req *http.Request, bodyBytes []byte) (string, bool) {
+	if len(bodyBytes) == 0 {
+		return "", false
+	}
+
+	contentType := req.Header.Get("Content-Type")
+	passwordFields := a.config.PasswordFields
+
+	// Use an if/else if structure to ensure content type handlers are mutually exclusive.
+	if strings.Contains(contentType, "application/json") {
+		var data map[string]interface{}
+		if err := json.Unmarshal(bodyBytes, &data); err != nil {
+			return "", false // Not valid JSON
+		}
+
+		for key, value := range data {
+			lowerKey := strings.ToLower(key)
+			for _, fieldName := range passwordFields {
+				if lowerKey == fieldName {
+					if password, ok := value.(string); ok {
+						return password, true
+					}
+				}
+			}
+		}
+	} else if strings.Contains(contentType, "application/x-www-form-urlencoded") {
+		// Handle form-urlencoded bodies
+		values, err := url.ParseQuery(string(bodyBytes))
+		if err != nil {
+			return "", false // Malformed query string
+		}
+
+		for _, fieldName := range passwordFields {
+			if password := values.Get(fieldName); password != "" {
+				return password, true
+			}
+		}
+	}
+
+	return "", false
+}
+
 func isLoginEndpoint(path string) bool {
 	p := strings.ToLower(path)
 	keywords := []string{"login", "auth", "signin", "session", "authenticate"}
@@ -121,19 +183,11 @@ func readRequestBody(req *http.Request) ([]byte, error) {
 	if req.Body == nil {
 		return nil, nil
 	}
-
 	originalBody := req.Body
-	// Defer closing the original body to ensure it's always cleaned up.
 	defer originalBody.Close()
-
 	const maxBodySize = 1024 * 1024 // 1MB
 	bodyBytes, err := io.ReadAll(io.LimitReader(originalBody, maxBodySize))
-
-	// Immediately restore the body with whatever we managed to read.
-	// This ensures subsequent components in the chain can still read the request.
 	req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-
-	// Return the bytes read along with any error that occurred.
 	return bodyBytes, err
 }
 
@@ -145,18 +199,16 @@ func calculateShannonEntropy(s string) float64 {
 
 	freqMap := make(map[rune]float64)
 	for _, char := range s {
-		// Tokens must be treated as case-sensitive for accurate security analysis.
-		// Removing unicode.ToLower for correct entropy calculation.
 		freqMap[char]++
 	}
 
 	var entropy float64
 	length := float64(len(s))
-
 	for _, count := range freqMap {
 		probability := count / length
 		entropy -= probability * math.Log2(probability)
 	}
-
 	return entropy
 }
+
+

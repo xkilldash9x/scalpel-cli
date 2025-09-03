@@ -11,7 +11,7 @@ import (
 
 // JavaScript callback function names exposed by the Go analyzer to the browser.
 const (
-	JSCallbackSinkEvent    = "__scalpel_sink_event"
+	JSCallbackSinkEvent      = "__scalpel_sink_event"
 	JSCallbackExecutionProof = "__scalpel_execution_proof"
 	// ENHANCEMENT: Callback for instrumentation or runtime errors in the JS shim.
 	JSCallbackShimError = "__scalpel_shim_error"
@@ -19,19 +19,24 @@ const (
 
 // -- Core IAST Concepts --
 
+// Event represents any message sent to the correlation engine.
+type Event interface {
+	isEvent()
+}
+
 // TaintSource is where the sketchy data comes from.
 type TaintSource string
 
 const (
-	SourceURLParam         TaintSource = "URL_PARAMETER"
-	SourceHashFragment     TaintSource = "HASH_FRAGMENT"
-	SourceCookie           TaintSource = "COOKIE"
-	SourceHeader           TaintSource = "HEADER"
-	SourceBody             TaintSource = "BODY"
-	SourceLocalStorage     TaintSource = "LOCAL_STORAGE"
-	SourceSessionStorage   TaintSource = "SESSION_STORAGE"
-	SourcePostMessage      TaintSource = "POST_MESSAGE" // Taint arriving via window.postMessage
-	SourceWorkerMessage    TaintSource = "WORKER_MESSAGE" // Taint arriving from a Web Worker
+	SourceURLParam       TaintSource = "URL_PARAMETER"
+	SourceHashFragment   TaintSource = "HASH_FRAGMENT"
+	SourceCookie         TaintSource = "COOKIE"
+	SourceHeader         TaintSource = "HEADER"
+	SourceBody           TaintSource = "BODY"
+	SourceLocalStorage   TaintSource = "LOCAL_STORAGE"
+	SourceSessionStorage TaintSource = "SESSION_STORAGE"
+	SourcePostMessage    TaintSource = "POST_MESSAGE"   // Taint arriving via window.postMessage
+	SourceWorkerMessage  TaintSource = "WORKER_MESSAGE" // Taint arriving from a Web Worker
 )
 
 // TaintSink is where the sketchy data ends up.
@@ -47,8 +52,8 @@ const (
 	SinkIframeSrcDoc        TaintSink = "IFRAME_SRCDOC"
 
 	// High confidence signals
-	SinkExecution         TaintSink = "EXECUTION_PROOF"
-	SinkOASTInteraction   TaintSink = "OAST_INTERACTION" // Confirmed via Out-of-Band callback
+	SinkExecution          TaintSink = "EXECUTION_PROOF"
+	SinkOASTInteraction    TaintSink = "OAST_INTERACTION"    // Confirmed via Out-of-Band callback
 	SinkPrototypePollution TaintSink = "PROTOTYPE_POLLUTION" // Confirmed pollution of Object.prototype
 
 	// Resource/Navigation Sinks
@@ -66,7 +71,7 @@ const (
 	SinkSendBeacon         TaintSink = "SEND_BEACON"
 
 	// Inter-Process Communication (IPC) Sinks
-	SinkPostMessage       TaintSink = "POST_MESSAGE"      // Taint leaving via window.postMessage
+	SinkPostMessage       TaintSink = "POST_MESSAGE"        // Taint leaving via window.postMessage
 	SinkWorkerPostMessage TaintSink = "WORKER_POST_MESSAGE" // Taint being sent to a Web Worker
 )
 
@@ -74,24 +79,24 @@ const (
 type ProbeType string
 
 const (
-	ProbeTypeXSS               ProbeType = "XSS"
-	ProbeTypeSSTI              ProbeType = "SSTI"
-	ProbeTypeSQLi              ProbeType = "SQLI"
-	ProbeTypeCmdInjection      ProbeType = "CMD_INJECTION"
-	ProbeTypeGeneric           ProbeType = "GENERIC"
-	ProbeTypeDOMClobbering     ProbeType = "DOM_CLOBBERING"
+	ProbeTypeXSS                ProbeType = "XSS"
+	ProbeTypeSSTI               ProbeType = "SSTI"
+	ProbeTypeSQLi               ProbeType = "SQLI"
+	ProbeTypeCmdInjection       ProbeType = "CMD_INJECTION"
+	ProbeTypeGeneric            ProbeType = "GENERIC"
+	ProbeTypeDOMClobbering      ProbeType = "DOM_CLOBBERING"
 	// ENHANCEMENT: Probes specifically designed to pollute object prototypes.
 	ProbeTypePrototypePollution ProbeType = "PROTOTYPE_POLLUTION"
 	// ENHANCEMENT: Probes relying on Out-of-Band callbacks (Blind XSS, SSRF).
-	ProbeTypeOAST              ProbeType = "OAST"
+	ProbeTypeOAST ProbeType = "OAST"
 )
 
 // SanitizationLevel indicates if the payload was modified before reaching the sink.
 type SanitizationLevel int
 
 const (
-	SanitizationNone SanitizationLevel = iota // Payload arrived intact.
-	SanitizationPartial                     // Canary found, but payload structure is broken (e.g., tags stripped, quotes escaped).
+	SanitizationNone    SanitizationLevel = iota // Payload arrived intact.
+	SanitizationPartial                          // Canary found, but payload structure is broken (e.g., tags stripped, quotes escaped).
 )
 
 // -- Data Structures --
@@ -124,11 +129,15 @@ type SinkEvent struct {
 	StackTrace string    `json:"stack"` // JS stack trace.
 }
 
+func (SinkEvent) isEvent() {}
+
 // ExecutionProofEvent is a message from the browser confirming a payload executed.
 type ExecutionProofEvent struct {
 	Canary     string `json:"canary"`
 	StackTrace string `json:"stack"`
 }
+
+func (ExecutionProofEvent) isEvent() {}
 
 // ShimErrorEvent is a message from the browser reporting an internal instrumentation error.
 type ShimErrorEvent struct {
@@ -139,12 +148,14 @@ type ShimErrorEvent struct {
 
 // OASTInteraction represents a detected interaction on the OAST server.
 type OASTInteraction struct {
-	Canary        string
-	Protocol      string
-	SourceIP      string
+	Canary          string
+	Protocol        string
+	SourceIP        string
 	InteractionTime time.Time
-	RawRequest    string
+	RawRequest      string
 }
+
+func (OASTInteraction) isEvent() {}
 
 // CorrelatedFinding links a source to a sink, representing a vulnerability.
 type CorrelatedFinding struct {
@@ -164,20 +175,20 @@ type CorrelatedFinding struct {
 
 // -- Interfaces --
 
-// OASTProvider is the contract for interacting with an OAST service.
+// its the contract for interacting with an OAST service.
 type OASTProvider interface {
-	// GetInteractions fetches interactions since the last check for the given canaries.
+	//  fetches interactions since the last check for the given canaries.
 	GetInteractions(ctx context.Context, canaries []string) ([]OASTInteraction, error)
-	// GetServerURL returns the base URL/domain for the OAST server to be used in payloads.
+	//  returns the base URL/domain for the OAST server to be used in payloads.
 	GetServerURL() string
 }
 
-// BrowserInteractor is the contract for controlling a browser.
+// contract for controlling a browser.
 type BrowserInteractor interface {
 	InitializeSession(ctx context.Context) (SessionContext, error)
 }
 
-// SessionContext is the contract for a single, isolated browser tab.
+// contract for a single, isolated browser tab.
 type SessionContext interface {
 	// instrumentation stuff
 	InjectScriptPersistently(ctx context.Context, script string) error
@@ -193,24 +204,24 @@ type SessionContext interface {
 	Close() error
 }
 
-// ResultsReporter is how we phone home with any cool findings.
+//  how we phone home with any cool findings.
 type ResultsReporter interface {
 	Report(finding CorrelatedFinding)
 }
 
 // -- Configuration --
 
-// SinkDefinition is the blueprint for how to hook a specific function in JS.
+// the blueprint for how to hook a specific function in JS.
 type SinkDefinition struct {
-	Name       string    `json:"Name" yaml:"name"`             // e.g., "Element.prototype.innerHTML"
-	Type       TaintSink `json:"Type" yaml:"type"`
-	Setter     bool      `json:"Setter" yaml:"setter"`         // is it a property setter or a function call?
-	ArgIndex   int       `json:"ArgIndex" yaml:"arg_index"`    // which function argument do we care about?
-	// a little snippet of JS to run to reduce noise.
-	Conditions string    `json:"Conditions,omitempty" yaml:"conditions,omitempty"`
+	Name        string    `json:"Name" yaml:"name"`                   // e.g., "Element.prototype.innerHTML"
+	Type        TaintSink `json:"Type" yaml:"type"`
+	Setter      bool      `json:"Setter" yaml:"setter"`               // is it a property setter or a function call?
+	ArgIndex    int       `json:"ArgIndex" yaml:"arg_index"`          // which function argument do we care about?
+	// ConditionID refers to a predefined handler in the JS shim (CSP compliant).
+	ConditionID string    `json:"ConditionID,omitempty" yaml:"condition_id,omitempty"`
 }
 
-// InteractionConfig holds the settings for the browser interaction/crawling phase.
+//  holds the settings for the browser interaction/crawling phase.
 type InteractionConfig struct {
 	MaxDepth                int `json:"max_depth" yaml:"max_depth"`
 	MaxInteractionsPerDepth int `json:"max_interactions_per_depth" yaml:"max_interactions_per_depth"`
@@ -220,13 +231,13 @@ type InteractionConfig struct {
 
 // Config is all the settings for the Taint Analyzer.
 type Config struct {
-	TaskID        string `json:"task_id" yaml:"task_id"`
-	Target        *url.URL
-	// MODULARITY: Probes and Sinks are now part of the configuration, allowing dynamic loading.
-	Probes        []ProbeDefinition `json:"probes" yaml:"probes"`
-	Sinks         []SinkDefinition  `json:"sinks" yaml:"sinks"`
-	Interaction   InteractionConfig `json:"interaction" yaml:"interaction"`
-	AnalysisTimeout time.Duration   `json:"analysis_timeout" yaml:"analysis_timeout"`
+	TaskID string `json:"task_id" yaml:"task_id"`
+	Target *url.URL
+	// Probes and Sinks are now part of the configuration, allowing dynamic loading.
+	Probes      []ProbeDefinition `json:"probes" yaml:"probes"`
+	Sinks       []SinkDefinition  `json:"sinks" yaml:"sinks"`
+	Interaction InteractionConfig `json:"interaction" yaml:"interaction"`
+	AnalysisTimeout time.Duration `json:"analysis_timeout" yaml:"analysis_timeout"`
 
 	// Performance/Robustness configurations.
 	EventChannelBuffer      int           `json:"event_channel_buffer" yaml:"event_channel_buffer"`
