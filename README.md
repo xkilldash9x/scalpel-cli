@@ -104,10 +104,8 @@ Clone the repository and build the binary:
 
 ```bash
 # Clone the repository
-```git clone [https://github.com/xkilldash9x/scalpel-cli.git](https://github.com/xkilldash9x/scalpel-cli.git)
+git clone [https://github.com/xkilldash9x/scalpel-cli.git](https://github.com/xkilldash9x/scalpel-cli.git)
 cd scalpel-cli
-
-
 # Tidy dependencies and build the executable
 go mod tidy
 go build -o scalpel-cli ./cmd/main.go
