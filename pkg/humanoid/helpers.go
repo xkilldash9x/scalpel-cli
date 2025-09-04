@@ -3,128 +3,57 @@ package humanoid
 
 import (
 	"context"
-	"fmt"
 	"math"
 	"time"
 
-	"github.com/chromedp/cdproto/cdp"
-	"github.com/chromedp/cdproto/dom"
-	"github.com/chromedp/chromedp"
-	"go.uber.org/zap"
+	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces"
 )
 
-// boxToCenter calculates the geometric center of a DOM BoxModel (quadrilateral).
-func boxToCenter(box *dom.BoxModel) (center Vector2D, valid bool) {
-	// BoxModel Content contains the 4 corners (x0, y0, x1, y1, x2, y2, x3, y3).
-	if box == nil || len(box.Content) < 8 {
-		return Vector2D{}, false
-	}
-	// Calculate the average of the x and y coordinates (centroid).
-	centerX := (box.Content[0] + box.Content[2] + box.Content[4] + box.Content[6]) / 4
-	centerY := (box.Content[1] + box.Content[3] + box.Content[5] + box.Content[7]) / 4
-	return Vector2D{X: centerX, Y: centerY}, true
-}
-
-// boxToDimensions returns the center, width, and height of a BoxModel.
-func boxToDimensions(box *dom.BoxModel) (center Vector2D, width, height float64) {
-	if box == nil {
-		return Vector2D{}, 0, 0
-	}
-	center, valid := boxToCenter(box)
-	if !valid {
-		return Vector2D{}, 0, 0
-	}
-	// Width and Height are provided directly in the BoxModel struct.
-	return center, float64(box.Width), float64(box.Height)
-}
-
-// fittsLawMT calculates the Movement Time (MT) according to Fitts's Law.
-// MT = A + B * ID, where ID (Index of Difficulty) = log2(D/W + 1).
-func (h *Humanoid) fittsLawMT(distance, width float64) float64 {
-	// Ensure a minimum effective width to prevent extreme ID values for tiny targets.
-	minWidth := 5.0
-	effectiveWidth := math.Max(width, minWidth)
-
-	// Index of Difficulty (ID).
-	id := math.Log2(distance/effectiveWidth + 1)
-
+// updateFatigue modifies the fatigue level and adjusts the dynamic configuration.
+func (h *Humanoid) updateFatigue(change float64) {
 	h.mu.Lock()
-	// Use dynamic config parameters (affected by fatigue and session persona).
-	A := h.dynamicConfig.FittsA
-	B := h.dynamicConfig.FittsB
-	// Generate the random number while locked.
-	randNorm := h.rng.NormFloat64()
-	h.mu.Unlock()
+	defer h.mu.Unlock()
 
-	// Predicted Movement Time (MT).
-	mt := A + B*id
+	h.fatigueLevel += change
+	h.fatigueLevel = math.Max(0.0, math.Min(1.0, h.fatigueLevel)) // Clamp between 0 and 1
 
-	// Introduce variability (Coefficient of Variation CV ~ 12%).
-	variability := 0.12
-	stdDev := mt * variability
-	finalMT := randNorm*stdDev + mt
-
-	// Ensure MT is not unrealistically fast (bounded by minimum latency).
-	return math.Max(A*0.8, finalMT)
+	// As fatigue increases, movements become less precise.
+	// Adjust dynamic config based on the new fatigue level.
+	fatigueFactor := 1.0 + h.fatigueLevel // Scale from 1.0 to 2.0
+	h.dynamicConfig.GaussianStrength = h.baseConfig.GaussianStrength * fatigueFactor
+	h.dynamicConfig.PerlinAmplitude = h.baseConfig.PerlinAmplitude * fatigueFactor
 }
 
-// getElementBoxBySelector is a utility to find an element by selector and get its BoxModel.
-func (h *Humanoid) getElementBoxBySelector(ctx context.Context, selector string) (*dom.BoxModel, error) {
-	var nodes []*cdp.Node
-	// WaitVisible ensures the element is rendered and in the viewport before getting the box model.
-	err := chromedp.Nodes(selector, &nodes, chromedp.ByQuery, chromedp.WaitVisible).Do(ctx)
-
-	if err != nil {
-		// Check if nodes were found despite the error (e.g., context timeout during long wait, but element exists).
-		if len(nodes) == 0 {
-			return nil, fmt.Errorf("humanoid: failed to find visible nodes for selector '%s': %w", selector, err)
-		}
-		// If nodes were found, log the error but proceed.
-		h.logger.Debug("Humanoid: chromedp.Nodes returned error but found nodes, proceeding.", zap.Error(err))
-	}
-
-	if len(nodes) == 0 {
-		// Final check in case err was nil but nodes list is empty.
-		return nil, fmt.Errorf("humanoid: selector '%s' matched no nodes", selector)
-	}
-
-	// Use the robust getElementBox helper to retrieve the geometry.
-	box, err := getElementBox(ctx, nodes[0].NodeID, h.logger)
-	if err != nil {
-		return nil, fmt.Errorf("humanoid: failed to get element geometry for '%s': %w", selector, err)
-	}
-	return box, nil
+// pause introduces a variable delay to simulate human pauses.
+func (h *Humanoid) pause(baseDuration time.Duration) {
+	// Add variability: pause for 70% to 130% of the base duration.
+	variability := 0.7 + h.rng.Float64()*0.6
+	duration := time.Duration(float64(baseDuration) * variability)
+	time.Sleep(duration)
 }
 
-// getElementBox retrieves the BoxModel for a given node ID with retry logic.
-// This handles transient states where the element exists but its geometry is temporarily unavailable.
-func getElementBox(ctx context.Context, nodeID cdp.NodeID, logger *zap.Logger) (*dom.BoxModel, error) {
-	var box *dom.BoxModel
-	var err error
+// GetCurrentPos returns the current known position of the mouse.
+func (h *Humanoid) GetCurrentPos() (Vector2D, error) {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	// In a real scenario, you might need to query the browser if the position is unknown.
+	// For now, we return the last known position.
+	return h.currentPos, nil
+}
 
-	maxRetries := 3
-	for i := 0; i < maxRetries; i++ {
-		box, err = dom.GetBoxModel().WithNodeID(nodeID).Do(ctx)
+// MoveTo is a convenience wrapper around the main Move method.
+func (h *Humanoid) MoveTo(ctx context.Context, point Vector2D, exec interfaces.Executor) error {
+	return h.Move(ctx, point.X, point.Y, exec)
+}
 
-		if err == nil {
-			// Check if the BoxModel is valid (has geometry and non-zero size).
-			if box != nil && len(box.Content) >= 8 && box.Width > 0 && box.Height > 0 {
-				return box, nil
-			}
-			// If geometry is invalid, it might be transient (e.g., during animation or layout shift).
-			err = fmt.Errorf("element has no geometric representation (BoxModel invalid or zero size)")
-		}
-
-		logger.Debug("Humanoid: Failed to get valid BoxModel, retrying...", zap.Int("attempt", i+1), zap.Error(err))
-
-		// Wait before retrying (Exponential backoff).
-		select {
-		case <-time.After(time.Millisecond * time.Duration(50*math.Pow(2, float64(i)))):
-			continue
-		case <-ctx.Done():
-			return nil, ctx.Err()
-		}
+// updateCurrentPosition fetches the mouse position from the browser if it's unknown.
+func (h *Humanoid) updateCurrentPosition(ctx context.Context, exec interfaces.Executor) error {
+	// This is a placeholder. A real implementation would require a JS snippet
+	// to get the mouse position and return it, as chromedp doesn't track it.
+	// For now, we'll assume a starting position if one is not set.
+	if h.currentPos.X < 0 || h.currentPos.Y < 0 {
+		h.logger.Println("Current position unknown, assuming (0,0)")
+		h.currentPos = Vector2D{X: 0, Y: 0}
 	}
-
-	return nil, fmt.Errorf("failed to get element box after %d attempts: %w", maxRetries, err)
+	return nil
 }

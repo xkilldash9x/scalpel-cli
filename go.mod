@@ -14,9 +14,7 @@ require (
 	github.com/jackc/pgx/v5 v5.5.5
 	github.com/spf13/cobra v1.8.0
 	github.com/spf13/viper v1.18.2
-	github.com/xkilldash9x/evolution-scalpel v0.0.0-20250901134054-691b539d67eb
 	go.uber.org/zap v1.27.0
-	golang.org/x/exp v0.0.0-20230905200255-921286631fa9
 	golang.org/x/net v0.42.0
 	golang.org/x/time v0.5.0
 	gopkg.in/natefinch/lumberjack.v2 v2.2.1
@@ -47,6 +45,7 @@ require (
 	github.com/subosito/gotenv v1.6.0 // indirect
 	go.uber.org/multierr v1.10.0 // indirect
 	golang.org/x/crypto v0.41.0 // indirect
+	golang.org/x/exp v0.0.0-20230905200255-921286631fa9 // indirect
 	golang.org/x/sync v0.16.0 // indirect
 	golang.org/x/sys v0.35.0 // indirect
 	golang.org/x/text v0.28.0 // indirect

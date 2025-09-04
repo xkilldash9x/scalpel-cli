@@ -1,4 +1,3 @@
-// pkg/browser/manager.go
 package browser
 
 import (
@@ -14,10 +13,10 @@ import (
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/browser"
 	"github.com/xkilldash9x/scalpel-cli/pkg/browser/shim"
 	"github.com/xkilldash9x/scalpel-cli/pkg/browser/stealth"
 	"github.com/xkilldash9x/scalpel-cli/pkg/config"
+	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces" // CORRECTED IMPORT
 )
 
 // Manager handles the lifecycle of the headless browser process, ensuring efficient resource utilization and stealth.
@@ -167,10 +166,10 @@ func (m *Manager) buildAllocatorOptions() []chromedp.ExecAllocatorOption {
 }
 
 // InitializeSession creates a new, fully isolated, and instrumented browser context (tab).
-func (m *Manager) InitializeSession(taskCtx context.Context) (SessionContext, error) {
-	ac := cdp.NewAnalysisContext(
+func (m *Manager) InitializeSession(taskCtx context.Context) (interfaces.SessionContext, error) { // CORRECTED RETURN TYPE
+	ac := NewAnalysisContext(
 		m.allocatorCtx,
-		m.globalConfig,
+		&m.globalConfig,
 		m.logger,
 		m.persona,
 		m.runtimeTemplateCache,
@@ -213,10 +212,10 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 
 // -- sessionWrapper --
 type sessionWrapper struct {
-	SessionContext
-	wg     *sync.WaitGroup
-	closed bool
-	mu     sync.Mutex
+	interfaces.SessionContext // CORRECTED TYPE
+	wg                        *sync.WaitGroup
+	closed                    bool
+	mu                        sync.Mutex
 }
 
 // Close gracefully closes the underlying session and signals its completion to the manager.

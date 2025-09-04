@@ -1,4 +1,3 @@
-// This file contains browser-related data structures, moved here to break import cycles.
 package schemas
 
 import (

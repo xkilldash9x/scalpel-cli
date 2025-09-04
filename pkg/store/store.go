@@ -12,7 +12,7 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
-    "github.com/xkilldash9x/scalpel-cli/pkg/schemas"
+	"github.com/xkilldash9x/scalpel-cli/pkg/schemas"
 )
 
 // Define custom error types for better error handling.
@@ -37,7 +37,6 @@ type Store struct {
 
 // Compile-time check to ensure Store implements the Repository interface.
 var _ Repository = (*Store)(nil)
-
 
 // New creates a new store instance and verifies the connection.
 func New(ctx context.Context, connString string, logger *zap.Logger) (*Store, error) {
@@ -98,6 +97,7 @@ func (s *Store) PersistData(ctx context.Context, envelope *schemas.ResultEnvelop
 		}
 	}
 
+	// This part now works because persistNodes and persistEdges accept the new types.
 	if envelope.KGUpdates != nil {
 		if len(envelope.KGUpdates.Nodes) > 0 {
 			if err := s.persistNodes(ctx, tx, envelope.KGUpdates.Nodes); err != nil {
@@ -174,61 +174,61 @@ func (s *Store) persistFindings(ctx context.Context, tx pgx.Tx, scanID string, f
 // sanitizeValue recursively removes non-serializable types from an interface{}.
 // Public entry point for the sanitization logic.
 func sanitizeValue(v interface{}) interface{} {
-    if v == nil {
-        return nil
-    }
-    // Start the reflection-based recursion.
-    return sanitizeReflectValue(reflect.ValueOf(v))
+	if v == nil {
+		return nil
+	}
+	// Start the reflection-based recursion.
+	return sanitizeReflectValue(reflect.ValueOf(v))
 }
 
 // sanitizeReflectValue handles the recursion using reflect.Value directly to optimize performance
 // by avoiding repeated allocations from the .Interface() method.
 func sanitizeReflectValue(rv reflect.Value) interface{} {
-    if !rv.IsValid() {
-        return nil
-    }
+	if !rv.IsValid() {
+		return nil
+	}
 
-    // Dereference pointers and interfaces to get to the concrete value.
-    for rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Interface {
-        if rv.IsNil() {
-            return nil
-        }
-        rv = rv.Elem()
-    }
+	// Dereference pointers and interfaces to get to the concrete value.
+	for rv.Kind() == reflect.Ptr || rv.Kind() == reflect.Interface {
+		if rv.IsNil() {
+			return nil
+		}
+		rv = rv.Elem()
+	}
 
-    switch rv.Kind() {
-    case reflect.Chan, reflect.Func, reflect.UnsafePointer:
-        return fmt.Sprintf("[unserializable type: %s]", rv.Type().String())
+	switch rv.Kind() {
+	case reflect.Chan, reflect.Func, reflect.UnsafePointer:
+		return fmt.Sprintf("[unserializable type: %s]", rv.Type().String())
 
-    case reflect.Map:
-        sanitizedMap := make(map[string]interface{}, rv.Len())
-        iter := rv.MapRange()
-        for iter.Next() {
-            // Pass reflect.Value directly to the recursive call, avoiding .Interface() allocation.
-            sanitizedMap[iter.Key().String()] = sanitizeReflectValue(iter.Value())
-        }
-        return sanitizedMap
+	case reflect.Map:
+		sanitizedMap := make(map[string]interface{}, rv.Len())
+		iter := rv.MapRange()
+		for iter.Next() {
+			// Pass reflect.Value directly to the recursive call, avoiding .Interface() allocation.
+			sanitizedMap[iter.Key().String()] = sanitizeReflectValue(iter.Value())
+		}
+		return sanitizedMap
 
-    case reflect.Slice, reflect.Array:
-        sanitizedSlice := make([]interface{}, rv.Len())
-        for i := 0; i < rv.Len(); i++ {
-            // Pass reflect.Value directly.
-            sanitizedSlice[i] = sanitizeReflectValue(rv.Index(i))
-        }
-        return sanitizedSlice
+	case reflect.Slice, reflect.Array:
+		sanitizedSlice := make([]interface{}, rv.Len())
+		for i := 0; i < rv.Len(); i++ {
+			// Pass reflect.Value directly.
+			sanitizedSlice[i] = sanitizeReflectValue(rv.Index(i))
+		}
+		return sanitizedSlice
 
-    default:
-        // For primitive types that are safe to serialize.
-        if rv.CanInterface() {
-            return rv.Interface()
-        }
-        return fmt.Sprintf("[unreadable value: %s]", rv.Type().String())
-    }
+	default:
+		// For primitive types that are safe to serialize.
+		if rv.CanInterface() {
+			return rv.Interface()
+		}
+		return fmt.Sprintf("[unreadable value: %s]", rv.Type().String())
+	}
 }
 
-
 // persistNodes bulk upserts knowledge graph nodes using a highly performant temporary table strategy.
-func (s *Store) persistNodes(ctx context.Context, tx pgx.Tx, nodes []schemas.KGNode) error {
+// FIXED: The function now accepts the correct []schemas.NodeInput type.
+func (s *Store) persistNodes(ctx context.Context, tx pgx.Tx, nodes []schemas.NodeInput) error {
 	if len(nodes) == 0 {
 		return nil
 	}
@@ -241,7 +241,8 @@ func (s *Store) persistNodes(ctx context.Context, tx pgx.Tx, nodes []schemas.KGN
 			s.log.Error("Failed to marshal sanitized node properties", zap.String("id", n.ID), zap.Error(err))
 			return fmt.Errorf("%w: failed to marshal node properties for id %s: %w", ErrDataIntegrity, n.ID, err)
 		}
-		rows[i] = []interface{}{n.ID, n.Type, propertiesJSON}
+		// FIXED: Cast n.Type (schemas.NodeType) to a string for the database.
+		rows[i] = []interface{}{n.ID, string(n.Type), propertiesJSON}
 	}
 
 	// 2. Create Temporary Table for this transaction.
@@ -285,8 +286,9 @@ func (s *Store) persistNodes(ctx context.Context, tx pgx.Tx, nodes []schemas.KGN
 }
 
 // persistEdges bulk upserts knowledge graph edges using the temporary table strategy.
-func (s *Store) persistEdges(ctx context.Context, tx pgx.Tx, edges []schemas.KGEdge) error {
-    if len(edges) == 0 {
+// FIXED: The function now accepts the correct []schemas.EdgeInput type.
+func (s *Store) persistEdges(ctx context.Context, tx pgx.Tx, edges []schemas.EdgeInput) error {
+	if len(edges) == 0 {
 		return nil
 	}
 	// 1. Data Preparation
@@ -295,50 +297,53 @@ func (s *Store) persistEdges(ctx context.Context, tx pgx.Tx, edges []schemas.KGE
 		sanitizedProperties := sanitizeValue(e.Properties)
 		propertiesJSON, err := json.Marshal(sanitizedProperties)
 		if err != nil {
-			edgeID := fmt.Sprintf("%s->%s (%s)", e.SourceID, e.TargetID, e.Relationship)
+			// FIXED: Cast e.Relationship (schemas.RelationshipType) to a string for the log message.
+			edgeID := fmt.Sprintf("%s->%s (%s)", e.SourceID, e.TargetID, string(e.Relationship))
 			s.log.Error("Failed to marshal sanitized edge properties", zap.String("id", edgeID), zap.Error(err))
 			return fmt.Errorf("%w: failed to marshal edge properties for %s: %w", ErrDataIntegrity, edgeID, err)
 		}
-		rows[i] = []interface{}{e.SourceID, e.TargetID, e.Relationship, propertiesJSON, e.Timestamp}
+		// FIXED: Cast e.Relationship to a string for the database.
+		// NOTE: The new EdgeInput doesn't have a Timestamp, which is fine.
+		// The database's ON CONFLICT clause handles setting the timestamp to NOW().
+		rows[i] = []interface{}{e.SourceID, e.TargetID, string(e.Relationship), propertiesJSON}
 	}
 
-    // 2. Create Temporary Table
-    _, err := tx.Exec(ctx, `
-        CREATE TEMPORARY TABLE temp_kg_edges_ingest (
-            source_id TEXT NOT NULL,
-            target_id TEXT NOT NULL,
-            relationship TEXT NOT NULL,
-            properties JSONB,
-            timestamp TIMESTAMPTZ,
-            PRIMARY KEY (source_id, target_id, relationship)
-        ) ON COMMIT DROP;
-    `)
-    if err != nil {
-        return fmt.Errorf("failed to create temporary table for edges: %w", err)
-    }
+	// 2. Create Temporary Table
+	_, err := tx.Exec(ctx, `
+		CREATE TEMPORARY TABLE temp_kg_edges_ingest (
+			source_id TEXT NOT NULL,
+			target_id TEXT NOT NULL,
+			relationship TEXT NOT NULL,
+			properties JSONB,
+			PRIMARY KEY (source_id, target_id, relationship)
+		) ON COMMIT DROP;
+	`) // FIXED: Removed the timestamp column as it's not in EdgeInput.
+	if err != nil {
+		return fmt.Errorf("failed to create temporary table for edges: %w", err)
+	}
 
-    // 3. Bulk Copy into Temporary Table
-    _, err = tx.CopyFrom(
-        ctx,
-        pgx.Identifier{"temp_kg_edges_ingest"},
-        []string{"source_id", "target_id", "relationship", "properties", "timestamp"},
-        pgx.CopyFromRows(rows),
-    )
-    if err != nil {
-        return fmt.Errorf("failed to bulk copy edges to temporary table: %w", err)
-    }
+	// 3. Bulk Copy into Temporary Table
+	_, err = tx.CopyFrom(
+		ctx,
+		pgx.Identifier{"temp_kg_edges_ingest"},
+		[]string{"source_id", "target_id", "relationship", "properties"}, // FIXED: Removed "timestamp"
+		pgx.CopyFromRows(rows),
+	)
+	if err != nil {
+		return fmt.Errorf("failed to bulk copy edges to temporary table: %w", err)
+	}
 
 	// 4. Execute a single, efficient UPSERT from the temporary table.
 	_, err = tx.Exec(ctx, `
-		INSERT INTO kg_edges (source_id, target_id, relationship, properties, timestamp)
-		SELECT source_id, target_id, relationship, properties, timestamp FROM temp_kg_edges_ingest
+		INSERT INTO kg_edges (source_id, target_id, relationship, properties)
+		SELECT source_id, target_id, relationship, properties FROM temp_kg_edges_ingest
 		ON CONFLICT (source_id, target_id, relationship) DO UPDATE SET
 			properties = kg_edges.properties || EXCLUDED.properties,
 			timestamp = NOW();
-	`)
-    if err != nil {
-        return fmt.Errorf("failed to upsert edges from temporary table: %w", err)
-    }
+	`) // FIXED: Removed timestamp from INSERT/SELECT. The ON CONFLICT clause correctly updates it.
+	if err != nil {
+		return fmt.Errorf("failed to upsert edges from temporary table: %w", err)
+	}
 
 	s.log.Debug("Successfully upserted edges", zap.Int("count", len(edges)))
 	return nil
@@ -360,7 +365,6 @@ func (s *Store) GetFindingsByScanID(ctx context.Context, scanID string) ([]schem
 
 	// Use pgx.CollectRows with RowToStructByName for automatic, safe, and efficient row collection.
 	// This helper handles iteration, scanning, closing rows, and checking rows.Err() automatically.
-	// The schemas.Finding struct's json tags must match the column names for this to work.
 	findings, err := pgx.CollectRows(rows, pgx.RowToStructByName[schemas.Finding])
 	if err != nil {
 		return nil, fmt.Errorf("failed to collect findings rows for scan %s: %w", scanID, err)

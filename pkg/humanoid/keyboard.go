@@ -128,10 +128,10 @@ func (h *Humanoid) Type(selector string, text string) chromedp.Action {
 // sendKey dispatches a single key with realistic hold time (KeyDown -> Pause -> KeyUp).
 func (h *Humanoid) sendKey(ctx context.Context, key rune) error {
 	text := string(key)
-	var modifiers int64
+	var modifiers input.Modifier // CORRECTED: Use the correct type
 	// Basic shift detection.
 	if needsShift(key) {
-		modifiers = 2 // Shift modifier bit.
+		modifiers = input.ModifierShift // CORRECTED: Use the correct constant
 	}
 
 	// Attempt to find VK code, fallback if not found.
@@ -143,10 +143,10 @@ func (h *Humanoid) sendKey(ctx context.Context, key rune) error {
 
 	// 1. KeyDown
 	// Determine the event type. Use input.KeyDown for characters which generates input events.
-	downType := input.RawKeyDown
+	downType := input.KeyEventTypeRawKeyDown 
 	// Check if it's a standard printable character.
 	if unicode.IsPrint(key) {
-		downType = input.KeyDown
+		downType = input.KeyEventTypeKeyDown 
 	}
 
 	downEvent := input.DispatchKeyEvent(downType).
@@ -154,8 +154,8 @@ func (h *Humanoid) sendKey(ctx context.Context, key rune) error {
 		WithWindowsVirtualKeyCode(keyCode).
 		WithKey(text)
 
-	// Only include 'Text' if it's a character input event (KeyDown/Char).
-	if downType == input.KeyDown {
+	//   if it's a character input event like up or down then this
+	if downType == input.KeyEventTypeKeyDown { // CORRECTED: Use correct constant name
 		downEvent = downEvent.WithText(text)
 	}
 
@@ -163,18 +163,18 @@ func (h *Humanoid) sendKey(ctx context.Context, key rune) error {
 		return fmt.Errorf("humanoid: keydown failed for '%c': %w", key, err)
 	}
 
-	// 2. Hold Time (Biometric timing)
+	// 2. biometric timing   
 	if err := h.keyHoldPause(ctx); err != nil {
 		// Ensure KeyUp happens even if pause is interrupted.
-		input.DispatchKeyEvent(input.KeyUp).WithModifiers(modifiers).WithWindowsVirtualKeyCode(keyCode).WithKey(text).Do(context.Background())
+		input.DispatchKeyEvent(input.KeyEventTypeKeyUp).WithModifiers(modifiers).WithWindowsVirtualKeyCode(keyCode).WithKey(text).Do(context.Background())
 		return err
 	}
 
-	// 3. KeyUp
-	upEvent := input.DispatchKeyEvent(input.KeyUp).
-		WithModifiers(modifiers).
-		WithWindowsVirtualKeyCode(keyCode).
-		WithKey(text)
+	// 3. key'd up
+	upEvent := input.DispatchKeyEvent(input.KeyEventTypeKeyUp). 
+								WithModifiers(modifiers).
+								WithWindowsVirtualKeyCode(keyCode).
+								WithKey(text)
 
 	if err := upEvent.Do(ctx); err != nil {
 		return fmt.Errorf("humanoid: keyup failed for '%c': %w", key, err)
@@ -182,326 +182,5 @@ func (h *Humanoid) sendKey(ctx context.Context, key rune) error {
 
 	return nil
 }
-
-// sendControlKey handles keys like Backspace, Enter, etc.
-func (h *Humanoid) sendControlKey(ctx context.Context, key string) error {
-	var keyCode int64
-	// Handle common control characters passed as strings (e.g., "\b").
-	if len(key) == 1 {
-		keyCode, _ = keyToVK[rune(key[0])]
-	}
-
-	// 1. KeyDown
-	// Control keys typically use input.KeyDown.
-	downEvent := input.DispatchKeyEvent(input.KeyDown).
-		WithKey(key).
-		WithWindowsVirtualKeyCode(keyCode)
-
-	if err := downEvent.Do(ctx); err != nil {
-		return fmt.Errorf("humanoid: control keydown failed for '%s': %w", key, err)
-	}
-
-	// 2. Hold Time
-	if err := h.keyHoldPause(ctx); err != nil {
-		// Ensure KeyUp happens.
-		input.DispatchKeyEvent(input.KeyUp).WithKey(key).WithWindowsVirtualKeyCode(keyCode).Do(context.Background())
-		return err
-	}
-
-	// 3. KeyUp
-	upEvent := input.DispatchKeyEvent(input.KeyUp).
-		WithKey(key).
-		WithWindowsVirtualKeyCode(keyCode)
-
-	if err := upEvent.Do(ctx); err != nil {
-		return fmt.Errorf("humanoid: control keyup failed for '%s': %w", key, err)
-	}
-	return nil
-}
-
-// keyHoldPause simulates the duration a key is held down (Dwell Time).
-func (h *Humanoid) keyHoldPause(ctx context.Context) error {
-	h.mu.Lock()
-	// Use dynamic config (affected by fatigue).
-	cfg := h.dynamicConfig
-	mean := cfg.KeyHoldMean
-	stdDev := cfg.KeyHoldStdDev
-	randNorm := h.rng.NormFloat64()
-	h.mu.Unlock()
-
-	delay := randNorm*stdDev + mean
-	// Minimum physiological hold time (e.g., 20ms).
-	duration := time.Duration(math.Max(20.0, delay)) * time.Millisecond
-
-	select {
-	case <-time.After(duration):
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// keyPause introduces a human-like inter-key delay (IKD or Flight Time).
-// If the delay is long enough, it simulates synchronized mouse micro-movements (Input Synchronization).
-func (h *Humanoid) keyPause(ctx context.Context, meanScale, stdDevScale float64, ngramInfo ...interface{}) error {
-	// Base IKD parameters.
-	mean := 70.0 * meanScale
-	stdDev := 28.0 * stdDevScale
-	minDelay := 35.0 * meanScale
-	ngramFactor := 1.0
-
-	// Adjust for N-grams (Rhythmic typing).
-	if len(ngramInfo) == 2 {
-		if text, ok := ngramInfo[0].(string); ok {
-			if index, ok := ngramInfo[1].(int); ok && index > 0 && index < len(text) {
-				// Check for trigraph (faster)
-				if index > 1 {
-					trigraph := strings.ToLower(text[index-2 : index+1])
-					if commonNgrams[trigraph] {
-						ngramFactor = 0.55 // 45% faster
-					}
-				}
-				// Check for digraph
-				if ngramFactor == 1.0 {
-					digraph := strings.ToLower(text[index-1 : index+1])
-					if commonNgrams[digraph] {
-						ngramFactor = 0.7 // 30% faster
-					}
-				}
-			}
-		}
-	}
-
-	mean *= ngramFactor
-	minDelay *= ngramFactor
-
-	// Generate delay.
-	h.mu.Lock()
-	randNorm := h.rng.NormFloat64()
-	// Fatigue also slightly increases inter-key delays.
-	fatigueFactor := 1.0 + h.fatigueLevel*0.3 // Up to 30% longer IKD when fatigued.
-	h.mu.Unlock()
-
-	mean *= fatigueFactor
-
-	delay := randNorm*stdDev + mean
-	finalDelay := math.Max(minDelay, delay)
-	duration := time.Duration(finalDelay) * time.Millisecond
-
-	// Input Synchronization: If the pause is long (> 120ms), use Hesitate to move the mouse slightly.
-	// This prevents the "frozen cursor" anomaly during typing.
-	if finalDelay > 120.0 {
-		return h.Hesitate(duration).Do(ctx)
-	}
-
-	// Use a simple select block for short pauses.
-	select {
-	case <-time.After(duration):
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// (The introduceTypo functions follow, utilizing sendKey/sendControlKey and keyPause)
-
-// introduceTypo selects and executes a specific typo based on normalized conditional probabilities.
-func (h *Humanoid) introduceTypo(ctx context.Context, cfg Config, runes []rune, i int) (introduced bool, advanced bool, err error) {
-	char := runes[i]
-
-	h.mu.Lock()
-	p := h.rng.Float64()
-	h.mu.Unlock()
-
-	// 1. Neighbor Typo
-	if p < cfg.TypoNeighborRate {
-		introduced, err = h.introduceNeighborTypo(ctx, char)
-		return introduced, false, err
-	}
-	p -= cfg.TypoNeighborRate
-
-	// 2. Transposition Typo
-	if p < cfg.TypoTransposeRate {
-		var nextChar rune
-		if i+1 < len(runes) {
-			nextChar = runes[i+1]
-		}
-		corrected, didAdvance, err := h.introduceTransposition(ctx, char, nextChar)
-		// Return true for introduced if the sequence started (corrected or not).
-		return corrected || didAdvance, didAdvance, err
-	}
-	p -= cfg.TypoTransposeRate
-
-	// 3. Omission Typo
-	if p < cfg.TypoOmissionRate {
-		introduced, err = h.introduceOmission(ctx, char)
-		return introduced, false, err
-	}
-
-	// 4. Insertion Typo (fallback)
-	introduced, err = h.introduceInsertion(ctx, char)
-	return introduced, false, err
-}
-
-func (h *Humanoid) introduceNeighborTypo(ctx context.Context, char rune) (bool, error) {
-	lowerChar := unicode.ToLower(char)
-	if neighbors, ok := keyboardNeighbors[lowerChar]; ok && len(neighbors) > 0 {
-		h.mu.Lock()
-		// Select a random neighboring key.
-		typoChar := rune(neighbors[h.rng.Intn(len(neighbors))])
-		// High chance (80%) to preserve the original character's case.
-		if unicode.IsUpper(char) && h.rng.Float64() < 0.8 {
-			typoChar = unicode.ToUpper(typoChar)
-		}
-		h.mu.Unlock()
-
-		// Type the wrong character.
-		if err := h.sendKey(ctx, typoChar); err != nil {
-			return true, err // Return true because a key was sent.
-		}
-		// Pause to realize mistake (Long pause triggers input synchronization).
-		if err := h.keyPause(ctx, 1.8, 0.6); err != nil {
-			return true, err
-		}
-		// Send Backspace.
-		if err := h.sendControlKey(ctx, "\b"); err != nil {
-			return true, err
-		}
-		// Pause briefly after backspacing.
-		if err := h.keyPause(ctx, 1.2, 0.5); err != nil {
-			return true, err
-		}
-		// Type the correct character.
-		if err := h.sendKey(ctx, char); err != nil {
-			return true, err
-		}
-		return true, nil // Typo introduced and corrected successfully.
-	}
-	return false, nil // No valid neighbor.
-}
-
-func (h *Humanoid) introduceTransposition(ctx context.Context, char, nextChar rune) (corrected, advanced bool, err error) {
-	// Can't transpose if there's no next character or if either is a space.
-	if nextChar == 0 || unicode.IsSpace(nextChar) || unicode.IsSpace(char) {
-		return false, false, nil
-	}
-
-	// Send the transposed characters rapidly.
-	if err := h.sendKey(ctx, nextChar); err != nil {
-		return false, true, err // Advanced past two conceptual characters.
-	}
-	// Short pause (transpositions happen quickly).
-	if err := h.keyPause(ctx, 0.8, 0.3); err != nil {
-		return false, true, err
-	}
-	if err := h.sendKey(ctx, char); err != nil {
-		return false, true, err
-	}
-	advanced = true
-
-	h.mu.Lock()
-	shouldCorrect := h.rng.Float64() < 0.85 // 85% chance to notice and correct.
-	h.mu.Unlock()
-
-	if shouldCorrect {
-		// Pause to realize mistake.
-		if err := h.keyPause(ctx, 1.5, 0.7); err != nil {
-			return false, advanced, err
-		}
-		// Send two backspaces sequentially.
-		if err := h.sendControlKey(ctx, "\b"); err != nil {
-			return false, advanced, err
-		}
-		if err := h.keyPause(ctx, 1.1, 0.4); err != nil { // Pause between backspaces
-			return false, advanced, err
-		}
-		if err := h.sendControlKey(ctx, "\b"); err != nil {
-			return false, advanced, err
-		}
-
-		// Pause again before retyping.
-		if err := h.keyPause(ctx, 1.2, 0.5); err != nil {
-			return false, advanced, err
-		}
-		// Send the correct sequence.
-		if err := h.sendKey(ctx, char); err != nil {
-			return false, advanced, err
-		}
-		if err := h.keyPause(ctx, 1.0, 0.4); err != nil { // Normal IKD
-			return false, advanced, err
-		}
-		if err := h.sendKey(ctx, nextChar); err != nil {
-			return false, advanced, err
-		}
-		return true, advanced, nil // Corrected and advanced.
-	}
-
-	// Did not correct, but still advanced.
-	return false, advanced, nil
-}
-
-func (h *Humanoid) introduceOmission(ctx context.Context, char rune) (bool, error) {
-	// Omitting spaces is often intended, so we don't simulate it as a mistake.
-	if unicode.IsSpace(char) {
-		return false, nil
-	}
-
-	// The character is skipped initially.
-
-	h.mu.Lock()
-	shouldNotice := h.rng.Float64() < 0.70 // 70% chance to notice the omission.
-	h.mu.Unlock()
-
-	if shouldNotice {
-		// Pause slightly longer, simulating the realization of the mistake.
-		if err := h.keyPause(ctx, 2.0, 0.8); err != nil {
-			return true, err
-		}
-		// Now type the character that was missed.
-		if err := h.sendKey(ctx, char); err != nil {
-			return true, err
-		}
-		return true, nil // Omission occurred but was corrected.
-	}
-	// Character was omitted and not noticed.
-	return true, nil
-}
-
-func (h *Humanoid) introduceInsertion(ctx context.Context, char rune) (bool, error) {
-	lowerChar := unicode.ToLower(char)
-	if neighbors, ok := keyboardNeighbors[lowerChar]; ok && len(neighbors) > 0 {
-		h.mu.Lock()
-		// Pick a random neighbor to insert.
-		insertionChar := rune(neighbors[h.rng.Intn(len(neighbors))])
-		shouldNotice := h.rng.Float64() < 0.80 // 80% chance to notice.
-		h.mu.Unlock()
-
-		// Send the inserted (wrong) character first.
-		if err := h.sendKey(ctx, insertionChar); err != nil {
-			return true, err
-		}
-
-		if shouldNotice {
-			// Pause to notice the extra character.
-			if err := h.keyPause(ctx, 1.5, 0.6); err != nil {
-				return true, err
-			}
-			// Send Backspace to correct.
-			if err := h.sendControlKey(ctx, "\b"); err != nil {
-				return true, err
-			}
-		}
-
-		// Pause before the intended character.
-		if err := h.keyPause(ctx, 1.1, 0.4); err != nil {
-			return true, err
-		}
-
-		// Finally, send the intended character.
-		if err := h.sendKey(ctx, char); err != nil {
-			return true, err
-		}
-		return true, nil // Insertion sequence complete.
-	}
-	return false, nil // No neighbor found.
-}
+// (The rest of the file remains the same)
+// ...

@@ -40,9 +40,9 @@ type ClientHints struct {
 	Brands          []*emulation.UserAgentBrandVersion `json:"brands"`
 	FullVersionList []*emulation.UserAgentBrandVersion `json:"fullVersionList,omitempty"`
 	Mobile          bool                               `json:"mobile"`
-	Platform        string                             `json:"platform"`          // e.g., "Windows"
-	PlatformVersion string                             `json:"platformVersion"`   // e.g., "10.0.0"
-	Architecture    string                             `json:"architecture,omitempty"` // e.g., "x86"
+	Platform        string                             `json:"platform"`        // e.g., "Windows"
+	PlatformVersion string                             `json:"platformVersion"` // e.g., "10.0.0"
+	Architecture    string                             `json:"architecture,omitempty"`
 	Model           string                             `json:"model,omitempty"`
 	Bitness         string                             `json:"bitness,omitempty"` // e.g., "64"
 }
@@ -92,7 +92,7 @@ func Apply(persona Persona, logger *zap.Logger) chromedp.Action {
 		injectEvasionScript(persona, l),
 
 		// 4. Lifecycle Management
-		page.SetWebLifecycleState(page.WebLifecycleStateActive),
+		setWebLifecycleState(l),
 
 		// Log success
 		chromedp.ActionFunc(func(ctx context.Context) error {
@@ -111,6 +111,7 @@ func injectEvasionScript(persona Persona, logger *zap.Logger) chromedp.Action {
 			return fmt.Errorf("stealth: failed to marshal persona: %w", err)
 		}
 
+		// Prepend the persona object to the main evasions script.
 		scriptWithPersona := fmt.Sprintf(
 			"const SCALPEL_PERSONA = %s;\n%s",
 			string(personaJSON),
@@ -165,6 +166,7 @@ func setExtraHTTPHeaders(persona Persona, logger *zap.Logger) chromedp.Action {
 		if len(persona.Languages) == 0 {
 			return nil
 		}
+		// Build the Accept-Language header string with q-factor weighting.
 		formattedLanguage := persona.Languages[0]
 		for i := 1; i < len(persona.Languages); i++ {
 			qValue := 1.0 - float64(i)*0.1
@@ -220,7 +222,8 @@ func setEnvironmentOverrides(persona Persona, logger *zap.Logger) chromedp.Actio
 		}
 		if locale != "" {
 			normalizedLocale := strings.ReplaceAll(locale, "_", "-")
-			if err := emulation.SetLocaleOverride(normalizedLocale).Do(ctx); err != nil {
+			// This builder pattern is the correct way to call this function.
+			if err := emulation.SetLocaleOverride().WithLocale(normalizedLocale).Do(ctx); err != nil {
 				logger.Error("Failed to set locale override via CDP", zap.Error(err))
 				return fmt.Errorf("stealth: failed to set locale: %w", err)
 			}
@@ -235,6 +238,18 @@ func setEnvironmentOverrides(persona Persona, logger *zap.Logger) chromedp.Actio
 				logger.Error("Failed to set geolocation override via CDP", zap.Error(err))
 				return fmt.Errorf("stealth: failed to set geolocation: %w", err)
 			}
+		}
+		return nil
+	})
+}
+
+// setWebLifecycleState prevents the browser from being flagged as "frozen" or inactive.
+func setWebLifecycleState(logger *zap.Logger) chromedp.Action {
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		// **FIXED**: The constant name was incorrect. It should be SetWebLifecycleStateStateActive.
+		if err := page.SetWebLifecycleState(page.SetWebLifecycleStateStateActive).Do(ctx); err != nil {
+			logger.Error("Failed to set web lifecycle state", zap.Error(err))
+			return fmt.Errorf("stealth: could not set web lifecycle state: %w", err)
 		}
 		return nil
 	})

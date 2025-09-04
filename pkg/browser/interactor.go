@@ -1,4 +1,3 @@
-// pkg/browser/interactor.go
 package browser
 
 import (
@@ -17,8 +16,8 @@ import (
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/browser"
 	"github.com/xkilldash9x/scalpel-cli/pkg/humanoid"
+	"github.com/xkilldash9x/scalpel-cli/pkg/schemas" // CORRECTED IMPORT
 )
 
 // Interactor provides advanced, recursive interaction logic (crawling) using the humanoid engine.
@@ -53,7 +52,7 @@ func NewInteractor(logger *zap.Logger, h *humanoid.Humanoid) *Interactor {
 // ctx must be the active chromedp session context.
 func (i *Interactor) RecursiveInteract(
 	ctx context.Context,
-	config browser.InteractionConfig,
+	config schemas.InteractionConfig, // CORRECTED TYPE
 ) error {
 	interactedElements := make(map[string]bool)
 	return i.interactDepth(ctx, config, 0, interactedElements)
@@ -74,7 +73,7 @@ func sleepContext(ctx context.Context, duration time.Duration) error {
 // interactDepth handles the interaction logic for a specific depth.
 func (i *Interactor) interactDepth(
 	ctx context.Context,
-	config browser.InteractionConfig,
+	config schemas.InteractionConfig, // CORRECTED TYPE
 	depth int,
 	interactedElements map[string]bool,
 ) error {
@@ -124,7 +123,6 @@ func (i *Interactor) interactDepth(
 		fingerprint := element.Fingerprint
 		tempID := fmt.Sprintf("scalpel-interaction-%d", time.Now().UnixNano())
 		selector := fmt.Sprintf(`[data-scalpel-interaction-id="%s"]`, tempID)
-		distractors := "div, p, span, section, article"
 
 		// Set the temporary attribute.
 		err := chromedp.Run(ctx,

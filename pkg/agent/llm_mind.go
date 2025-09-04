@@ -15,7 +15,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/pkg/config"
-	"github.com/xkilldash9x/scalpel-cli/pkg/graphmodel"
+	"github.com/xkilldash9x/scalpel-cli/pkg/schemas"
 	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces" // Import from central interfaces package
 	"github.com/xkilldash9x/scalpel-cli/pkg/knowledgegraph"
 )
