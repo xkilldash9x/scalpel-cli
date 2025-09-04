@@ -1,4 +1,5 @@
-package agent
+// pkg/schemas/agent.go
+package schemas
 
 import "time"
 

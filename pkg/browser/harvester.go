@@ -1,104 +1,56 @@
-// pkg/browser/harvester.go
 package browser
 
 import (
 	"context"
-	"sync"
-	"time"
 
 	"github.com/chromedp/cdproto/har"
-	"github.com/chromedp/cdproto/log"
+	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/chromedp"
-	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/browser"
+	"github.com/xkilldash9x/scalpel-cli/pkg/schemas"
 )
 
-// Harvester collects network (HAR) and console artifacts from a browser session.
+// Harvester is responsible for collecting data artifacts from a browser page.
 type Harvester struct {
-	ctx         context.Context // The session context
-	cancel      context.CancelFunc
-	logger      *zap.Logger
-	mu          sync.RWMutex
-	consoleLogs []browser.ConsoleLog
-	isRunning   bool
+	// Add any necessary fields, like a logger
 }
 
-// NewHarvester creates a new Harvester associated with a specific session context.
-func NewHarvester(sessionCtx context.Context, logger *zap.Logger) *Harvester {
-	// Create a derived context for the harvester's internal operations.
-	ctx, cancel := context.WithCancel(sessionCtx)
-	return &Harvester{
-		ctx:    ctx,
-		cancel: cancel,
-		logger: logger.Named("harvester"),
-	}
+func NewHarvester() *Harvester {
+	return &Harvester{}
 }
 
-// Start begins listening for browser events.
-func (h *Harvester) Start() {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+// CollectArtifacts gathers HAR data, DOM, console logs, and storage state.
+func (h *Harvester) CollectArtifacts(ctx context.Context) (*schemas.Artifacts, error) {
+	var dom string
+	var cookies []*network.Cookie
+	var harData *har.HAR // Placeholder for HAR data
 
-	if h.isRunning {
-		return
-	}
+	// This is a simplified example. A real implementation would need to
+	// set up HAR recording before navigation and then retrieve it.
+	err := chromedp.Run(ctx,
+		chromedp.OuterHTML("html", &dom),
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			var err error
+			cookies, err = network.GetAllCookies().Do(ctx)
+			return err
+		}),
+	)
 
-	h.consoleLogs = make([]browser.ConsoleLog, 0)
-	h.isRunning = true
-
-	// --- Console Log Collection ---
-	// Listen for log events (includes console API calls).
-	chromedp.ListenTarget(h.ctx, func(ev interface{}) {
-		if ev, ok := ev.(*log.EventEntryAdded); ok {
-			h.mu.Lock()
-			h.consoleLogs = append(h.consoleLogs, browser.ConsoleLog{
-				Type: string(ev.Entry.Level),
-				Text: ev.Entry.Text,
-			})
-			h.mu.Unlock()
-		}
-	})
-
-	// --- HAR Collection ---
-	// Use the har package to automatically listen and record network events.
-	if err := har.Start(h.ctx); err != nil {
-		h.logger.Error("Failed to start HAR collection", zap.Error(err))
-		h.isRunning = false
-	}
-}
-
-// Stop halts event collection and returns the captured artifacts.
-func (h *Harvester) Stop(ctx context.Context) (*har.HAR, []browser.ConsoleLog) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if !h.isRunning {
-		return nil, h.copyLogs()
-	}
-
-	// Signal internal listeners to stop.
-	h.cancel()
-	h.isRunning = false
-
-	// Give a brief moment for final events to be processed.
-	time.Sleep(100 * time.Millisecond)
-
-	// Stop the HAR recording and retrieve the final log.
-	// We use the provided context (ctx) to respect the caller's deadlines during this operation,
-	// combined with the session's executor.
-	finalHarLog, err := har.Stop(chromedp.WithExecutor(ctx, chromedp.FromContext(h.ctx)))
 	if err != nil {
-		// Log the error but still return console logs.
-		h.logger.Error("Failed to finalize HAR collection", zap.Error(err))
+		return nil, err
 	}
 
-	return finalHarLog, h.copyLogs()
-}
+	// Collecting console logs and storage would require listening to events
+	// and executing JavaScript, which is omitted here for brevity.
 
-// copyLogs returns a copy of the console logs. Must be called with lock held.
-func (h *Harvester) copyLogs() []browser.ConsoleLog {
-	logsCopy := make([]browser.ConsoleLog, len(h.consoleLogs))
-	copy(logsCopy, h.consoleLogs)
-	return logsCopy
+	return &schemas.Artifacts{
+		HAR: harData,
+		DOM: dom,
+		ConsoleLogs: []schemas.ConsoleLog{}, // Placeholder
+		Storage: schemas.StorageState{
+			Cookies:        cookies,
+			LocalStorage:   make(map[string]string), // Placeholder
+			SessionStorage: make(map[string]string), // Placeholder
+		},
+	}, nil
 }

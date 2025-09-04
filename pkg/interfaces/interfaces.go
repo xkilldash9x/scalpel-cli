@@ -1,37 +1,15 @@
-// This file contains browser-related data structures, moved here to break import cycles.
-package schemas
+package interfaces
 
-import (
-	"github.com/chromedp/cdproto/har"
-	"github.com/chromedp/cdproto/network"
-)
+import "github.com/xkilldash9x/scalpel-cli/pkg/schemas"
 
-// Artifacts represents the data collected from a browser session.
-type Artifacts struct {
-	HAR         *har.HAR
-	DOM         string
-	ConsoleLogs []ConsoleLog
-	Storage     StorageState
+// KnowledgeGraph defines the standard interface for interacting with the graph database.
+// This abstraction allows for different backend implementations (e.g., in-memory, PostgreSQL)
+// to be used interchangeably throughout the application.
+type KnowledgeGraph interface {
+	AddNode(node *schemas.Node) error
+	AddEdge(edge *schemas.Edge) error
+	GetNode(id string) (*schemas.Node, error)
+	GetEdge(id string) (*schemas.Edge, error)
+	GetNeighbors(nodeID string) ([]*schemas.Node, error)
+	GetEdges(nodeID string) ([]*schemas.Edge, error)
 }
-
-// ConsoleLog represents a single entry from the browser console.
-type ConsoleLog struct {
-	Type string
-	Text string
-}
-
-// StorageState captures the state of cookies, localStorage, and sessionStorage.
-type StorageState struct {
-	Cookies        []*network.Cookie
-	LocalStorage   map[string]string `json:"localStorage"`
-	SessionStorage map[string]string `json:"sessionStorage"`
-}
-
-// InteractionConfig holds parameters for automated interaction/crawling.
-type InteractionConfig struct {
-	MaxDepth                int
-	MaxInteractionsPerDepth int
-	InteractionDelayMs      int
-	PostInteractionWaitMs   int
-}
-

@@ -6,24 +6,19 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/input"
-	"golang.org/x/exp/slog"
+	"go.uber.org/zap"
 )
 
-const (
-	// Maximum physiological mouse velocity (pixels per second).
-	maxVelocity = 6000.0
-)
-
-// easeInOutCubic provides a smooth acceleration and deceleration profile.
-func easeInOutCubic(t float64) float64 {
+// computeEaseInOutCubic provides a smooth acceleration and deceleration profile.
+func computeEaseInOutCubic(t float64) float64 {
 	if t < 0.5 {
 		return 4 * t * t * t
 	}
 	return 1 - math.Pow(-2*t+2, 3)/2
 }
 
-// generateIdealPath creates a human-like trajectory (Bezier curve) deformed by the potential field.
-func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField) []Vector2D {
+// computeIdealPath creates a human-like trajectory (Bezier curve) deformed by the potential field.
+func (h *Humanoid) computeIdealPath(start, end Vector2D, field *PotentialField) []Vector2D {
 	p0, p3 := start, end
 	mainVec := end.Sub(start)
 	dist := mainVec.Mag()
@@ -48,7 +43,7 @@ func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField)
 	p1 := samplePoint1.Add(force1.Mul(offsetScale))
 	p2 := samplePoint2.Add(force2.Mul(offsetScale))
 
-	// Introduce minor randomness to P2 (simulating mid-flight correction variability).
+	// introduce a bit of randomness to P2 ( mid flight correction vary).
 	h.mu.Lock()
 	shouldCorrect := h.rng.Float64() < 0.3
 	var correctionStrength float64
@@ -63,13 +58,13 @@ func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField)
 		p2 = p2.Add(perpDir.Mul(correctionStrength))
 	}
 
-	// Generate the Bezier curve points.
-	// Initialize with capacity for efficiency.
+	// generate the bezier curve points &
+	// initialize with capacity for efficiency.
 	path := make([]Vector2D, 0, numSteps+1)
 	for i := 0; i <= numSteps; i++ {
 		t := float64(i) / float64(numSteps)
 
-		// Cubic Bezier coefficients
+		// cubic bezier coefficients
 		c0 := math.Pow(1-t, 3)
 		c1 := 3 * math.Pow(1-t, 2) * t
 		c2 := 3 * (1 - t) * math.Pow(t, 2)
@@ -82,11 +77,11 @@ func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField)
 	return path
 }
 
-// executePathChase simulates the physical movement using a critically damped spring model.
-// This now includes a layer of Perlin noise for more organic, wandering movement.
-func (h *Humanoid) executePathChase(ctx context.Context, startPoint Vector2D, idealPath []Vector2D, startTime time.Time, deadline time.Time) (Vector2D, error) {
+//  sims the physical movement using a CDS model.
+// includes a layer of perlin noise for more organic, wandering movement.
+func (h *Humanoid) simulatePathChase(ctx context.Context, startPoint Vector2D, idealPath []Vector2D, startTime time.Time, deadline time.Time) (Vector2D, error) {
 	currentPos := startPoint
-	velocity := Vector2D{} // Start from rest.
+	velocity := Vector2D{} // start from rest.
 
 	totalDuration := deadline.Sub(startTime)
 
@@ -94,15 +89,15 @@ func (h *Humanoid) executePathChase(ctx context.Context, startPoint Vector2D, id
 		return Vector2D{}, nil
 	}
 
-	// Omega (ω): Natural frequency of the spring (controls responsiveness).
-	// Randomized around 25 rad/s.
+	// Omega natural frequency of the spring to control responsivness
+	// randomized about 25 rad/s. give or take
 	h.mu.Lock()
 	omega := 25.0 + (h.rng.Float64()-0.5)*6.0
 	h.mu.Unlock()
 
 	lastTime := time.Now()
 
-	// Simulation loop.
+	// simulation loop.
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return velocity, ctx.Err()
@@ -112,19 +107,19 @@ func (h *Humanoid) executePathChase(ctx context.Context, startPoint Vector2D, id
 		dt := currentTime.Sub(lastTime).Seconds()
 		lastTime = currentTime
 
-		// Handle time steps: Ensure stability.
+		// handle time steps: ensure stability.
 		if dt <= 0.002 {
 			time.Sleep(2 * time.Millisecond)
 			continue
 		}
-		if dt > 0.05 { // Clamp max dt.
+		if dt > 0.05 { // clamp max dt. dont really want it going over ..right?
 			dt = 0.05
 		}
 
-		// Determine the goal point on the ideal curve based on elapsed time.
+		// determine the goal point on a ideal curve based on time.
 		elapsed := time.Since(startTime)
 		progress := float64(elapsed) / float64(totalDuration)
-		easedProgress := easeInOutCubic(math.Min(progress, 1.0))
+		easedProgress := computeEaseInOutCubic(math.Min(progress, 1.0))
 
 		goalIndex := int(easedProgress * float64(len(idealPath)-1))
 		if goalIndex >= len(idealPath) {
@@ -132,17 +127,17 @@ func (h *Humanoid) executePathChase(ctx context.Context, startPoint Vector2D, id
 		}
 		goalPoint := idealPath[goalIndex]
 
-		// Critically Damped Spring Dynamics (Analytical Solution)
-		// This makes the physical cursor "chase" the ideal goal point.
+		// critically damped spring dynanamics
+		// makes the physical cursor "chase" the ideal goal point.
 		displacement := currentPos.Sub(goalPoint)
 		expTerm := math.Exp(-omega * dt)
 
-		// Coefficients.
+		// co efs
 		c1 := displacement
 		c2 := velocity.Add(displacement.Mul(omega))
 		c3 := c2.Mul(dt).Add(c1)
 
-		// Calculate new position and velocity.
+		// calc new position and velocity
 		newPos := goalPoint.Add(c3.Mul(expTerm))
 		newVelocity := c2.Sub(c3.Mul(omega)).Mul(expTerm)
 
@@ -150,7 +145,7 @@ func (h *Humanoid) executePathChase(ctx context.Context, startPoint Vector2D, id
 		currentPos = newPos
 
 		// -- Noise Combination --
-		// Parameters for the Perlin noise effect. These are great candidates for tuning.
+		// Parameters for the perlin noise effect. These are great candidates for tuning.
 		perlinFrequency := 0.8
 		perlinMagnitude := 2.5
 
@@ -171,7 +166,8 @@ func (h *Humanoid) executePathChase(ctx context.Context, startPoint Vector2D, id
 		// Dispatch the final, fully noised-up mouse movement event.
 		dispatchMouse := input.DispatchMouseEvent(input.MouseMoved, finalPerturbedPoint.X, finalPerturbedPoint.Y)
 		if err := dispatchMouse.Do(ctx); err != nil {
-			slog.Warn("Humanoid: Failed to dispatch mouse move event", "error", err)
+			// CORRECTED: Replaced slog with the humanoid's zap logger instance.
+			h.logger.Warn("Humanoid: Failed to dispatch mouse move event", zap.Error(err))
 			// If dispatch fails (e.g., page navigation), stop the movement.
 			return velocity, err
 		}

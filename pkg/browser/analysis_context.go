@@ -1,4 +1,3 @@
-// File: pkg/browser/analysis_context.go
 package browser
 
 import (
@@ -17,6 +16,8 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/pkg/browser/stealth"
 	"github.com/xkilldash9x/scalpel-cli/pkg/config"
 	"github.com/xkilldash9x/scalpel-cli/pkg/humanoid"
+	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces" // CORRECTED IMPORT
+	"github.com/xkilldash9x/scalpel-cli/pkg/schemas"    // CORRECTED IMPORT
 )
 
 // Define constants for timeouts to avoid magic numbers.
@@ -25,9 +26,8 @@ const (
 	closeTimeout              = 10 * time.Second
 )
 
-
 // ensure AnalysisContext implements the interface.
-var _ SessionContext = (*AnalysisContext)(nil)
+var _ interfaces.SessionContext = (*AnalysisContext)(nil) // CORRECTED INTERFACE
 
 // AnalysisContext manages a single, isolated browser tab (session) using CDP.
 type AnalysisContext struct {
@@ -114,7 +114,7 @@ func (ac *AnalysisContext) Initialize(ctx context.Context) error {
 
 func (ac *AnalysisContext) applyStealth() error {
 	// Apply persona settings (UserAgent, Platform, Screen resolution, JS evasions).
-	if err := chromedp.Run(ac.sessionContext, stealth.Apply(ac.persona)); err != nil {
+	if err := chromedp.Run(ac.sessionContext, stealth.Apply(ac.persona, ac.logger)); err != nil {
 		return fmt.Errorf("failed to apply stealth persona: %w", err)
 	}
 	return nil
@@ -242,7 +242,7 @@ func (ac *AnalysisContext) ScrollPage(direction string) error {
 }
 
 // Interact uses the Interactor helper to explore the page.
-func (ac *AnalysisContext) Interact(config InteractionConfig) error {
+func (ac *AnalysisContext) Interact(config schemas.InteractionConfig) error { // CORRECTED TYPE
 	ac.logger.Debug("Starting automated humanoid interaction phase", zap.Int("max_depth", config.MaxDepth))
 
 	// The Interactor handles the complexity of finding, prioritizing, and clicking elements recursively.
@@ -250,14 +250,14 @@ func (ac *AnalysisContext) Interact(config InteractionConfig) error {
 }
 
 // CollectArtifacts gathers data from the session.
-func (ac *AnalysisContext) CollectArtifacts() (*Artifacts, error) {
+func (ac *AnalysisContext) CollectArtifacts() (*schemas.Artifacts, error) { // CORRECTED TYPE
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
 	if ac.isClosed {
 		return nil, fmt.Errorf("session is already closed")
 	}
 
-	artifacts := &Artifacts{}
+	artifacts := &schemas.Artifacts{} // CORRECTED TYPE
 	ac.logger.Debug("Collecting browser artifacts.")
 
 	// 1. Stop the harvester and get its data
@@ -270,7 +270,6 @@ func (ac *AnalysisContext) CollectArtifacts() (*Artifacts, error) {
 
 	// 2. Get DOM content (Snapshot)
 	var domContent string
-	// ***FIX***: Check for the error from chromedp.Run and return it.
 	if err := chromedp.Run(ac.sessionContext, chromedp.OuterHTML("html", &domContent)); err != nil {
 		ac.logger.Warn("Could not retrieve final DOM content", zap.Error(err))
 		return nil, fmt.Errorf("failed to retrieve DOM: %w", err)
@@ -278,9 +277,8 @@ func (ac *AnalysisContext) CollectArtifacts() (*Artifacts, error) {
 	artifacts.DOM = domContent
 
 	// 3. Get storage state
-	var storageResult StorageState
+	var storageResult schemas.StorageState // CORRECTED TYPE
 	var cookies []*network.Cookie
-	// ***FIX***: Check for the error from the second chromedp.Run call and return it.
 	err := chromedp.Run(ac.sessionContext,
 		// Evaluate JavaScript to extract storage maps.
 		chromedp.Evaluate(
@@ -305,7 +303,6 @@ func (ac *AnalysisContext) CollectArtifacts() (*Artifacts, error) {
 	return artifacts, nil
 }
 
-
 // Close safely terminates the browser tab and its associated resources.
 func (ac *AnalysisContext) Close(ctx context.Context) error {
 	ac.mu.Lock()
@@ -325,7 +322,7 @@ func (ac *AnalysisContext) Close(ctx context.Context) error {
 	if ac.sessionCancel != nil {
 		ac.sessionCancel()
 	}
-	
+
 	// This check prevents a panic if Initialize was never called or failed early.
 	if ac.sessionContext == nil {
 		return nil
