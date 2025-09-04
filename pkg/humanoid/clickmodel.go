@@ -1,61 +1,57 @@
-// pkg/humanoid/clickmodel.go
 package humanoid
 
 import (
 	"context"
+	"fmt"
 	"math/rand"
 	"time"
 
 	"github.com/chromedp/cdproto/input"
-	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces"
 )
 
-// Click performs a human-like click at the specified coordinates.
-func (h *Humanoid) Click(ctx context.Context, x, y float64, exec interfaces.Executor) error {
-	target := Vector2D{X: x, Y: y}
-
-	// First, move to the target location.
-	if err := h.MoveTo(ctx, target, exec); err != nil {
-		return err
+// Click performs a human-like click on a given selector.
+func (h *Humanoid) Click(ctx context.Context, selector string) error {
+	pt, err := h.getCenterOfElement(ctx, selector)
+	if err != nil {
+		return fmt.Errorf("failed to get center of element '%s': %w", selector, err)
 	}
 
-	// Simulate the physical mouse press and release.
-	if err := h.dispatchMouseClick(ctx, x, y, exec); err != nil {
-		return err
+	if err := h.MoveTo(ctx, pt, nil); err != nil {
+		return fmt.Errorf("failed to move to element '%s': %w", selector, err)
+
 	}
 
-	// Clicking action slightly increases fatigue.
-	h.updateFatigue(0.02)
-
-	return nil
+	return h.clickAt(ctx, pt)
 }
 
-// dispatchMouseClick sends the mouse down and up events to the browser.
-func (h *Humanoid) dispatchMouseClick(ctx context.Context, x, y float64, exec interfaces.Executor) error {
-	pos, err := h.GetCurrentPos()
-	if err != nil {
-		return err
+// clickAt dispatches the low-level mouse press and release events with high-fidelity timestamps.
+func (h *Humanoid) clickAt(ctx context.Context, pt Vector2D) error {
+	// Dispatch mouse pressed event
+	pressEvent := (&input.DispatchMouseEventParams{
+		Type:       input.MousePressed,
+		X:          pt.X,
+		Y:          pt.Y,
+		Button:     input.MouseButtonLeft,
+		ClickCount: 1,
+	}).WithTimestamp(input.TimeSinceEpoch(time.Now().Unix()))
+
+	if err := h.browser.Execute(ctx, "Input.dispatchMouseEvent", nil, pressEvent); err != nil {
+		return fmt.Errorf("failed to dispatch mouse pressed event: %w", err)
 	}
 
-	// Introduce a tiny random pause before the click.
-	h.pause(time.Duration(rand.Intn(30)+20) * time.Millisecond)
+	time.Sleep(time.Duration(rand.Intn(100)+50) * time.Millisecond)
 
-	// Mouse Down
-	mouseDown := input.DispatchMouseEvent(input.MousePressed, pos.X, pos.Y).WithButton(input.MouseButtonLeft).WithClickCount(1)
-	if err := exec.Execute(ctx, mouseDown); err != nil {
-		h.logger.Printf("DEBUG: Mouse down event failed: %v", err)
-		return err
-	}
+	// Dispatch mouse released event
+	releaseEvent := (&input.DispatchMouseEventParams{
+		Type:       input.MouseReleased,
+		X:          pt.X,
+		Y:          pt.Y,
+		Button:     input.MouseButtonLeft,
+		ClickCount: 1,
+	}).WithTimestamp(input.TimeSinceEpoch(time.Now().Unix()))
 
-	// Hold the click for a human-like duration.
-	holdDuration := time.Duration(h.rng.Intn(70)+50) * time.Millisecond // 50-120ms
-	time.Sleep(holdDuration)
-
-	// Mouse Up
-	mouseUp := input.DispatchMouseEvent(input.MouseReleased, pos.X, pos.Y).WithButton(input.MouseButtonLeft).WithClickCount(1)
-	if err := exec.Execute(ctx, mouseUp); err != nil {
-		h.logger.Printf("DEBUG: Mouse up event failed: %v", err)
-		return err
+	if err := h.browser.Execute(ctx, "Input.dispatchMouseEvent", nil, releaseEvent); err != nil {
+		return fmt.Errorf("failed to dispatch mouse released event: %w", err)
 	}
 
 	return nil

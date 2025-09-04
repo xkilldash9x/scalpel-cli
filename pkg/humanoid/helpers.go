@@ -1,59 +1,42 @@
-// pkg/humanoid/helpers.go
 package humanoid
 
 import (
 	"context"
-	"math"
-	"time"
-
-	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces"
+	"encoding/json"
+	"fmt"
+	"github.com/chromedp/cdproto/dom"
+	"github.com/chromedp/cdproto/runtime"
 )
+// NOTE: This is a partial file containing only the missing function. 
+// Add this function to your existing helpers.go file.
 
-// updateFatigue modifies the fatigue level and adjusts the dynamic configuration.
-func (h *Humanoid) updateFatigue(change float64) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
+// getCenterOfElement finds an element by selector and returns its center coordinates.
+func (h *Humanoid) getCenterOfElement(ctx context.Context, selector string) (Vector2D, error) {
+	var res *runtime.RemoteObject
+	expression := fmt.Sprintf(`
+		(() => {
+			const el = document.querySelector('%s');
+			if (!el) return null;
+			const rect = el.getBoundingClientRect();
+			return JSON.stringify({ x: rect.left + rect.width / 2, y: rect.top + rect.height / 2 });
+		})();
+	`, selector)
 
-	h.fatigueLevel += change
-	h.fatigueLevel = math.Max(0.0, math.Min(1.0, h.fatigueLevel)) // Clamp between 0 and 1
-
-	// As fatigue increases, movements become less precise.
-	// Adjust dynamic config based on the new fatigue level.
-	fatigueFactor := 1.0 + h.fatigueLevel // Scale from 1.0 to 2.0
-	h.dynamicConfig.GaussianStrength = h.baseConfig.GaussianStrength * fatigueFactor
-	h.dynamicConfig.PerlinAmplitude = h.baseConfig.PerlinAmplitude * fatigueFactor
-}
-
-// pause introduces a variable delay to simulate human pauses.
-func (h *Humanoid) pause(baseDuration time.Duration) {
-	// Add variability: pause for 70% to 130% of the base duration.
-	variability := 0.7 + h.rng.Float64()*0.6
-	duration := time.Duration(float64(baseDuration) * variability)
-	time.Sleep(duration)
-}
-
-// GetCurrentPos returns the current known position of the mouse.
-func (h *Humanoid) GetCurrentPos() (Vector2D, error) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	// In a real scenario, you might need to query the browser if the position is unknown.
-	// For now, we return the last known position.
-	return h.currentPos, nil
-}
-
-// MoveTo is a convenience wrapper around the main Move method.
-func (h *Humanoid) MoveTo(ctx context.Context, point Vector2D, exec interfaces.Executor) error {
-	return h.Move(ctx, point.X, point.Y, exec)
-}
-
-// updateCurrentPosition fetches the mouse position from the browser if it's unknown.
-func (h *Humanoid) updateCurrentPosition(ctx context.Context, exec interfaces.Executor) error {
-	// This is a placeholder. A real implementation would require a JS snippet
-	// to get the mouse position and return it, as chromedp doesn't track it.
-	// For now, we'll assume a starting position if one is not set.
-	if h.currentPos.X < 0 || h.currentPos.Y < 0 {
-		h.logger.Println("Current position unknown, assuming (0,0)")
-		h.currentPos = Vector2D{X: 0, Y: 0}
+	err := h.browser.Evaluate(ctx, expression, &res)
+	if err != nil {
+		return Vector2D{}, fmt.Errorf("failed to execute javascript to find element center: %w", err)
 	}
-	return nil
+
+	if res.Type == "string" {
+		var point struct {
+			X float64 `json:"x"`
+			Y float64 `json:"y"`
+		}
+		if err := json.Unmarshal([]byte(res.Value.(string)), &point); err != nil {
+			return Vector2D{}, fmt.Errorf("failed to unmarshal element coordinates: %w", err)
+		}
+		return Vector2D{X: point.X, Y: point.Y}, nil
+	}
+
+	return Vector2D{}, fmt.Errorf("element with selector '%s' not found", selector)
 }

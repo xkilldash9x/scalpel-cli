@@ -2,13 +2,12 @@ package results
 
 import "github.com/xkilldash9x/scalpel-cli/pkg/schemas"
 
-// Normalize takes a raw schema.Finding and converts it into the standardized
-// NormalizedFinding format. This is where you could implement logic to
-// standardize severity levels (e.g., mapping "High", "high", "HIGH" to a single value).
+// Normalize converts a raw finding into a normalized finding.
 func Normalize(finding schemas.Finding) NormalizedFinding {
-	// Simple pass-through for now, but can be expanded with more complex logic.
+	// For now, we'll just pass the finding through.
+	// In a real implementation, we would normalize the severity, etc.
 	return NormalizedFinding{
 		Finding:            finding,
-		NormalizedSeverity: finding.Severity, // Or apply mapping logic here
+		NormalizedSeverity: string(finding.Severity), // Explicitly cast to string
 	}
 }

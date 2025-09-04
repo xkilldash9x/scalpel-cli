@@ -2,9 +2,7 @@ package schemas
 
 import "time"
 
-// Node represents a fundamental entity in the knowledge graph, such as a web page,
-// a JavaScript function, or a piece of infrastructure. It's the core building block
-// for representing the system under analysis.
+// Node represents a fundamental entity in the knowledge graph.
 type Node struct {
 	ID         string                 `json:"id"`
 	Type       string                 `json:"type"`
@@ -15,9 +13,7 @@ type Node struct {
 	Properties map[string]interface{} `json:"properties"`
 }
 
-// Edge represents a relationship or connection between two Nodes in the knowledge graph.
-// It could signify anything from a hyperlink between pages to a data flow relationship
-// between a source and a sink.
+// Edge represents a relationship between two Nodes.
 type Edge struct {
 	ID         string                 `json:"id"`
 	From       string                 `json:"from"`
@@ -28,3 +24,33 @@ type Edge struct {
 	LastSeen   time.Time              `json:"last_seen"`
 	Properties map[string]interface{} `json:"properties"`
 }
+
+// KGUpdates represents the interconnected data discovered during analysis.
+type KGUpdates struct {
+	Nodes []Node `json:"nodes"`
+	Edges []Edge `json:"edges"`
+}
+
+// NodeInput is used for creating or updating a node for the Knowledge Graph.
+type NodeInput struct {
+	ID         string
+	Type       NodeType
+	Properties Properties
+}
+
+// EdgeInput is used for creating or updating an edge for the Knowledge Graph.
+type EdgeInput struct {
+	SourceID     string
+	TargetID     string
+	Relationship RelationshipType
+	Properties   Properties
+}
+
+// NodeType defines the categories of entities in the graph.
+type NodeType string
+
+// RelationshipType defines the nature of the connection between nodes.
+type RelationshipType string
+
+// Properties is a generic map for storing attributes.
+type Properties map[string]interface{}
