@@ -6,7 +6,9 @@ import (
 	"math"
 	"time"
 
-	// Import input package
+	// UPDATED: Import cdp for MouseButton constants
+	"github.com/chromedp/cdproto/cdp"
+	// Import input package for DispatchMouseEvent
 	"github.com/chromedp/cdproto/input"
 	"go.uber.org/zap"
 )
@@ -19,7 +21,7 @@ func computeEaseInOutCubic(t float64) float64 {
 	return 1 - math.Pow(-2*t+2, 3)/2
 }
 
-// generateIdealPath creates a human-like trajectory (Bezier curve) deformed by the potential field.
+// generateIdealPath creates a human like trajectory (Bezier curve) deformed by the potential field.
 func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField, numSteps int) []Vector2D {
 	p0, p3 := start, end
 	mainVec := end.Sub(start)
@@ -44,7 +46,7 @@ func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField,
 
 	// Introduce slight randomness to P2 (mid-flight correction variability).
 	h.mu.Lock()
-	// 30% chance of a randomized mid-course adjustment.
+	// 30% chance of a randomized mid course adjustment.
 	shouldCorrect := h.rng.Float64() < 0.3
 	var correctionStrength float64
 	if shouldCorrect {
@@ -77,7 +79,8 @@ func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField,
 }
 
 // executePathChase simulates the physical movement using a Critically Damped Spring (CDS) model.
-func (h *Humanoid) executePathChase(ctx context.Context, startPoint Vector2D, idealPath []Vector2D, startTime time.Time, deadline time.Time, buttonState input.MouseButton) (Vector2D, error) {
+// UPDATED: Use cdp.MouseButton
+func (h *Humanoid) executePathChase(ctx context.Context, startPoint Vector2D, idealPath []Vector2D, startTime time.Time, deadline time.Time, buttonState cdp.MouseButton) (Vector2D, error) {
 	currentPos := startPoint
 	velocity := Vector2D{} // Start from rest.
 
@@ -145,6 +148,8 @@ func (h *Humanoid) executePathChase(ctx context.Context, startPoint Vector2D, id
 		perlinMagnitude := h.dynamicConfig.PerlinAmplitude
 		h.mu.Unlock()
 
+
+
 		perlinFrequency := 0.8
 
 		// 1. Calculate Perlin noise drift.
@@ -163,7 +168,8 @@ func (h *Humanoid) executePathChase(ctx context.Context, startPoint Vector2D, id
 		// Dispatch the mouse movement event.
 		dispatchMouse := input.DispatchMouseEvent(input.MouseMoved, finalPerturbedPoint.X, finalPerturbedPoint.Y)
 		// Include button state if dragging.
-		if buttonState != input.MouseButtonNone {
+		// UPDATED: Use cdp.MouseButtonNone
+		if buttonState != cdp.MouseButtonNone {
 			dispatchMouse = dispatchMouse.WithButton(buttonState)
 		}
 

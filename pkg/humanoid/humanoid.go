@@ -11,9 +11,10 @@ import (
 
 	"github.com/aquilax/go-perlin"
 	// Import necessary cdproto packages
+	"github.com/chromedp/cdproto/cdp" // UPDATED: Import cdp
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/page"
-	"github.com/chromedp/cdproto/target"
+	// target is no longer needed for BrowserContextID in this file
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
 )
@@ -29,15 +30,17 @@ type Humanoid struct {
 	dynamicConfig Config
 
 	// Browser context and logging
-	browserContextID target.BrowserContextID
+	// UPDATED: Use cdp.BrowserContextID
+	browserContextID cdp.BrowserContextID
 	logger           *zap.Logger
 
 	// Internal state synchronization
 	mu sync.Mutex
 
 	// Current cursor position and state
-	currentPos         Vector2D
-	currentButtonState input.MouseButton // Tracks the currently pressed mouse button
+	currentPos Vector2D
+	// UPDATED: Use cdp.MouseButton
+	currentButtonState cdp.MouseButton // Tracks the currently pressed mouse button
 
 	// Fatigue modeling
 	fatigueLevel float64 // Ranges from 0.0 (rested) to 1.0 (exhausted)
@@ -52,7 +55,8 @@ type Humanoid struct {
 }
 
 // New creates a new Humanoid instance.
-func New(config Config, browserContextID target.BrowserContextID, logger *zap.Logger) *Humanoid {
+// UPDATED: Use cdp.BrowserContextID
+func New(config Config, browserContextID cdp.BrowserContextID, logger *zap.Logger) *Humanoid {
 	// 1. Initialize RNG
 	var seed int64
 	var rng *rand.Rand
@@ -73,13 +77,14 @@ func New(config Config, browserContextID target.BrowserContextID, logger *zap.Lo
 	alpha, beta, n := 2.0, 2.0, int32(3)
 
 	h := &Humanoid{
-		baseConfig:           config,
-		dynamicConfig:        config, // Initialize dynamic config
-		browserContextID:     browserContextID,
-		logger:               logger,
-		rng:                  rng,
-		currentPos:           Vector2D{X: 0.0, Y: 0.0},
-		currentButtonState:   input.MouseButtonNone, // Correct constant usage
+		baseConfig:       config,
+		dynamicConfig:    config, // Initialize dynamic config
+		browserContextID: browserContextID,
+		logger:           logger,
+		rng:              rng,
+		currentPos:       Vector2D{X: 0.0, Y: 0.0},
+		// UPDATED: Use cdp.MouseButtonNone
+		currentButtonState:   cdp.MouseButtonNone,
 		fatigueLevel:         0.0,
 		lastMovementDistance: 0.0,
 		noiseX:               perlin.NewPerlin(alpha, beta, n, seed),
