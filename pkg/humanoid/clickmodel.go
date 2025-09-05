@@ -7,7 +7,6 @@ import (
 	"math"
 	"time"
 
-	// CRITICAL IMPORT: Required for input.MouseButtonLeft, input.MouseButtonNone, etc.
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 )
@@ -38,66 +37,59 @@ func (h *Humanoid) IntelligentClick(selector string, field *PotentialField) chro
 			}
 
 			// Execute the physical click (down and up).
+			// UPDATED: Use the "left" string constant for the left mouse button.
 			if err := h.mouseDown(ctx, currentPos, input.MouseButtonLeft); err != nil {
 				return fmt.Errorf("failed to dispatch mousedown: %w", err)
 			}
 
-			// Delay between mouse down and mouse up (Dwell time).
+			// Calculate a realistic delay between mouse down and up.
 			h.mu.Lock()
-			duration := time.Duration(50+h.rng.Intn(100)) * time.Millisecond
+			holdDuration := time.Duration(h.dynamicConfig.ClickHoldMinMs+
+				h.rng.Intn(h.dynamicConfig.ClickHoldMaxMs-h.dynamicConfig.ClickHoldMinMs)) * time.Millisecond
 			h.mu.Unlock()
 
-			if err := sleepContext(ctx, duration); err != nil {
+			if err := sleepContext(ctx, holdDuration); err != nil {
 				return err
 			}
 
+			// UPDATED: Use the "left" string constant for the left mouse button.
 			if err := h.mouseUp(ctx, currentPos, input.MouseButtonLeft); err != nil {
 				return fmt.Errorf("failed to dispatch mouseup: %w", err)
 			}
 
-			// Clicking is a moderately intense action.
-			h.updateFatigue(0.5)
 			return nil
 		}),
 	}
 }
 
-// Helper to get the current time as an input.TimeSinceEpoch pointer.
-// This is required because WithTimestamp expects a pointer.
-func timeNowInputPtr() *input.TimeSinceEpoch {
-	// input.TimeSinceEpoch is an alias for cdp.TimeSinceEpoch
-	t := input.TimeSinceEpoch(time.Now())
-	return &t
-}
-
-// mouseDown simulates pressing the mouse button down.
+// mouseDown dispatches a mouse pressed event.
 func (h *Humanoid) mouseDown(ctx context.Context, pos Vector2D, button input.MouseButton) error {
+	// A little bit of noise to make the click position more realistic.
 	h.mu.Lock()
-	// Use dynamic config (affected by fatigue).
 	noiseX := (h.rng.Float64() - 0.5) * h.dynamicConfig.ClickNoise
 	noiseY := (h.rng.Float64() - 0.5) * h.dynamicConfig.ClickNoise
-	// Update the button state BEFORE dispatching the event.
+	h.mu.Unlock()
+
+	// Update the button state BEFORE the event is dispatched.
+	h.mu.Lock()
+	// UPDATED: No more undefined input.MouseButtonNone
+	if h.currentButtonState != input.MouseButtonNone {
+		h.mu.Unlock()
+		return fmt.Errorf("mouse button %s is already pressed", h.currentButtonState)
+	}
 	h.currentButtonState = button
 	h.mu.Unlock()
 
-	err := input.DispatchMouseEvent(input.MousePressed, pos.X+noiseX, pos.Y+noiseY).
+	return input.DispatchMouseEvent(input.MousePressed, pos.X+noiseX, pos.Y+noiseY).
 		WithButton(button).
 		WithClickCount(1).
 		WithTimestamp(timeNowInputPtr()).
 		Do(ctx)
-
-	if err != nil {
-		// If dispatch failed, reset the state.
-		h.mu.Lock()
-		h.currentButtonState = input.MouseButtonNone
-		h.mu.Unlock()
-	}
-	return err
 }
 
-// mouseUp simulates releasing the mouse button.
+// mouseUp dispatches a mouse released event.
 func (h *Humanoid) mouseUp(ctx context.Context, pos Vector2D, button input.MouseButton) error {
-	// Noise upon release (typically less than on down).
+	// A little bit of noise to make the click position more realistic.
 	h.mu.Lock()
 	noiseX := (h.rng.Float64() - 0.5) * (h.dynamicConfig.ClickNoise * 0.5)
 	noiseY := (h.rng.Float64() - 0.5) * (h.dynamicConfig.ClickNoise * 0.5)
@@ -111,6 +103,7 @@ func (h *Humanoid) mouseUp(ctx context.Context, pos Vector2D, button input.Mouse
 
 	// Update the button state AFTER the event is dispatched.
 	h.mu.Lock()
+	// UPDATED: Use the correct "none" string constant.
 	h.currentButtonState = input.MouseButtonNone
 	h.mu.Unlock()
 
@@ -136,23 +129,7 @@ func (h *Humanoid) calculateTerminalFittsLaw(distance float64) time.Duration {
 	mt := A + B*id
 
 	// Add slight randomization (+/- 10%)
-	mt += (rng.Float64() - 0.5) * mt * 0.2
-
-	if mt < 50 {
-		mt = 50 // Enforce a minimum physiological delay.
-	}
+	mt += mt * (rng.Float64()*0.2 - 0.1)
 
 	return time.Duration(mt) * time.Millisecond
-}
-
-// sleepContext is a utility for context-aware sleeps.
-func sleepContext(ctx context.Context, duration time.Duration) error {
-	t := time.NewTimer(duration)
-	defer t.Stop()
-	select {
-	case <-t.C:
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
 }

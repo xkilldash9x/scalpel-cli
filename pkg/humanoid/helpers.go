@@ -7,7 +7,7 @@ import (
 	"math"
 	"time"
 
-	"github.com/chromedp/cdproto/cdp"
+	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/dom"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"

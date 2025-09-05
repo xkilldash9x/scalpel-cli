@@ -6,9 +6,7 @@ import (
 	"math"
 	"time"
 
-	// UPDATED: Import cdp for MouseButton constants
 	"github.com/chromedp/cdproto/cdp"
-	// Import input package for DispatchMouseEvent
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
@@ -41,102 +39,45 @@ func (h *Humanoid) CognitivePause(ctx context.Context, meanMs, stdDevMs float64)
 	return h.pause(ctx, duration)
 }
 
-// Hesitate simulates a pause with subtle, noisy cursor movements (idling behavior).
+// Hesitate simulates a pause with subtle, noisy cursor movements.
 func (h *Humanoid) Hesitate(duration time.Duration) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
-		startTime := time.Now()
-		deadline := startTime.Add(duration)
-
 		h.mu.Lock()
 		startPos := h.currentPos
-		cfg := h.dynamicConfig
-		// Amplitude for idling.
-		amplitude := cfg.PerlinAmplitude * 1.5
-		noiseX, noiseY := h.noiseX, h.noiseY
-		// Get the current button state to dispatch realistic MouseMoved events.
-		buttonState := h.currentButtonState
 		h.mu.Unlock()
 
-		if noiseX == nil || noiseY == nil {
-			return h.pause(ctx, duration)
-		}
-
-		// Frequency of the idle movement (wandering speed).
-		noiseFreq := 0.5
-
-		for time.Now().Before(deadline) {
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-
-			t := time.Since(startTime).Seconds()
-			tInput := t * noiseFreq
-
-			dX := noiseX.Noise1D(tInput) * amplitude
-			dY := noiseY.Noise1D(tInput) * amplitude
-			nextPos := startPos.Add(Vector2D{X: dX, Y: dY})
-
-			// Apply high frequency tremor.
-			noisyPos := h.applyGaussianNoise(nextPos)
-
-			dispatchMouse := input.DispatchMouseEvent(input.MouseMoved, noisyPos.X, noisyPos.Y)
-			// Include button state if pressed.
-			// UPDATED: Use cdp.MouseButtonNone
-			if buttonState != cdp.MouseButtonNone {
-				dispatchMouse = dispatchMouse.WithButton(buttonState)
-			}
-
-			if err := dispatchMouse.Do(ctx); err != nil {
-				h.logger.Warn("Humanoid: Hesitate move dispatch failed", zap.Error(err))
-				// If dispatch fails (e.g., navigation), stop the hesitation loop.
-				return err
-			} else {
-				h.mu.Lock()
-				h.currentPos = noisyPos
-				h.mu.Unlock()
-			}
-
-			// Sleep interval between mouse events (8-18ms).
+		startTime := time.Now()
+		for time.Since(startTime) < duration {
+			// Small, random movements.
 			h.mu.Lock()
-			sleepDuration := time.Duration(h.rng.Intn(10)+8) * time.Millisecond
+			targetPos := startPos.Add(Vector2D{
+				X: (h.rng.Float64() - 0.5) * 5,
+				Y: (h.rng.Float64() - 0.5) * 5,
+			})
 			h.mu.Unlock()
 
-			select {
-			case <-time.After(sleepDuration):
-			case <-ctx.Done():
-				return ctx.Err()
+			// Simulate a short, quick movement to the new target.
+			// UPDATED: Use the correct "none" string constant.
+			_, err := h.simulateTrajectory(ctx, h.currentPos, targetPos, nil, input.MouseButtonNone)
+			if err != nil {
+				h.logger.Debug("Humanoid: Hesitation movement failed", zap.Error(err))
+				// We can ignore this error as it's not critical.
 			}
+
+			// Wait a bit before the next micro movement.
+			h.mu.Lock()
+			pauseDuration := time.Duration(50+h.rng.Intn(100)) * time.Millisecond
+			h.mu.Unlock()
+			if time.Since(startTime)+pauseDuration > duration {
+				break
+			}
+			time.Sleep(pauseDuration)
 		}
 		return nil
 	})
 }
 
-// applyGaussianNoise adds high frequency tremor.
-func (h *Humanoid) applyGaussianNoise(point Vector2D) Vector2D {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-	// Strength varies slightly randomly around the dynamic config value.
-	strength := h.dynamicConfig.GaussianStrength * (0.5 + h.rng.Float64())
-	pX := h.rng.NormFloat64() * strength
-	pY := h.rng.NormFloat64() * strength
-	return Vector2D{X: point.X + pX, Y: point.Y + pY}
-}
-
-// pause is a simple, context aware sleep helper.
-func (h *Humanoid) pause(ctx context.Context, duration time.Duration) error {
-	if duration <= 0 {
-		return nil
-	}
-	select {
-	case <-time.After(duration):
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// applyFatigueEffects updates the dynamic configuration based on the current fatigueLevel.
-// Assumes the mutex (h.mu) is already held.
+// applyFatigueEffects adjusts the dynamic configuration based on the current fatigue level.
 func (h *Humanoid) applyFatigueEffects() {
 	// Fatigue factor (1.0 when rested, up to 2.0 when exhausted).
 	fatigueFactor := 1.0 + h.fatigueLevel
@@ -168,7 +109,7 @@ func (h *Humanoid) recoverFatigue(duration time.Duration) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Recovery is proportional to the duration of the pause (seconds).
+	// Recovery is proportional to the duration of the pause.
 	recovery := h.baseConfig.FatigueRecoveryRate * duration.Seconds()
 	h.fatigueLevel -= recovery
 	h.fatigueLevel = math.Max(0.0, h.fatigueLevel) // Clamp at 0.0

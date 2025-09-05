@@ -7,10 +7,8 @@ import (
 	"math"
 	"time"
 
-	// UPDATED: Import cdp for MouseButton constants
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/dom"
-	// Import input package for DispatchMouseEvent
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
@@ -38,116 +36,57 @@ func (h *Humanoid) MoveTo(selector string, field *PotentialField) chromedp.Actio
 			return fmt.Errorf("humanoid: failed to locate target element after scroll: %w", err)
 		}
 
-		targetCenter, targetWidth, _ := boxToDimensions(box)
+		// 4. Calculate the target point (center with some noise).
+		target := h.calculateTargetPoint(box, box.Center(), Vector2D{X: 0, Y: 0})
 
-		// 4. Execute the physical movement simulation.
-		// buttonState is None for a simple move.
-		// UPDATED: Use cdp.MouseButtonNone
-		finalVelocity, err := h.executeMovement(ctx, targetCenter, targetWidth, field, cdp.MouseButtonNone)
-		if err != nil {
-			return err
-		}
-
-		// 5. Final refinement: Generate the precise target point within the element bounds.
-		finalPos := h.generateClickPoint(box, targetCenter, finalVelocity)
-
-		// Ensure the cursor is exactly at the final position if the simulation undershot slightly.
-		if h.GetCurrentPos().Dist(finalPos) > 0.5 {
-			dispatchMove := input.DispatchMouseEvent(input.MouseMoved, finalPos.X, finalPos.Y)
-			if err := dispatchMove.Do(ctx); err != nil {
-				return fmt.Errorf("humanoid: failed to move to final refined point: %w", err)
-			}
-		}
-
-		h.mu.Lock()
-		h.currentPos = finalPos
-		// lastMovementDistance is updated within executeMovement.
-		h.mu.Unlock()
-
-		return nil
+		// 5. Execute the movement.
+		return h.MoveToVector(target, field).Do(ctx)
 	})
 }
 
-// MoveToVector simulates human like movement to a specific coordinate.
+// MoveToVector simulates human like movement from the current position to the target vector.
 func (h *Humanoid) MoveToVector(target Vector2D, field *PotentialField) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
-		h.updateFatigue(0.8)
+		h.mu.Lock()
+		start := h.currentPos
+		h.mu.Unlock()
 
-		// Assume a default width for Fitts's Law calculation.
-		targetWidth := 15.0
+		if field == nil {
+			field = NewPotentialField()
+		}
 
-		// Get the current button state (to determine if we are dragging).
+		// Simulate the trajectory and dispatch mouse events.
+		// The button state is passed to handle dragging movements.
 		h.mu.Lock()
 		buttonState := h.currentButtonState
 		h.mu.Unlock()
 
-		// Execute the physical movement simulation.
-		_, err := h.executeMovement(ctx, target, targetWidth, field, buttonState)
+		// Simulate the movement and get the final velocity.
+		finalVelocity, err := h.simulateTrajectory(ctx, start, target, field, buttonState)
 		if err != nil {
 			return err
 		}
 
-		// The simulation updates currentPos.
+		// Recalculate the target point with the final velocity to simulate overshooting.
 		h.mu.Lock()
 		finalPos := h.currentPos
 		h.mu.Unlock()
+		box, _ := h.getElementBoxByVector(ctx, finalPos)
+		finalTarget := h.calculateTargetPoint(box, finalPos, finalVelocity)
 
-		// Final dispatch to ensure the very last position is registered.
-		dispatchMove := input.DispatchMouseEvent(input.MouseMoved, finalPos.X, finalPos.Y)
-		// UPDATED: Use cdp.MouseButtonNone
-		if buttonState != cdp.MouseButtonNone {
-			dispatchMove = dispatchMove.WithButton(buttonState)
-		}
-		if err := dispatchMove.Do(ctx); err != nil {
-			return fmt.Errorf("humanoid: failed to dispatch final move event in MoveToVector: %w", err)
+		// A small correction movement if the final position is not the same as the target.
+		if finalTarget.Dist(finalPos) > 1.0 {
+			correctionField := NewPotentialField()
+			_, err = h.simulateTrajectory(ctx, finalPos, finalTarget, correctionField, buttonState)
 		}
 
-		return nil
+		return err
 	})
 }
 
-// executeMovement handles the physics simulation of the move.
-// UPDATED: Use cdp.MouseButton
-func (h *Humanoid) executeMovement(ctx context.Context, targetCenter Vector2D, targetWidth float64, field *PotentialField, buttonState cdp.MouseButton) (Vector2D, error) {
-	startPos := h.GetCurrentPos()
-	distance := startPos.Dist(targetCenter)
-
-	// Update the movement distance tracker immediately.
-	h.mu.Lock()
-	h.lastMovementDistance = distance
-	h.mu.Unlock()
-
-	if distance < 2.0 {
-		return Vector2D{}, nil // Already at the target.
-	}
-
-	// Calculate the movement duration based on Fitts's Law.
-	duration := h.fittsLawMT(distance, targetWidth)
-
-	if field == nil {
-		field = NewPotentialField()
-	}
-
-	// Determine the number of steps for the ideal path generation.
-	numSteps := int(math.Max(10.0, math.Min(200.0, distance/3.0)))
-
-	// 1. Generate the ideal trajectory (deformed Bezier curve).
-	idealPath := h.generateIdealPath(startPos, targetCenter, field, numSteps)
-
-	startTime := time.Now()
-	deadline := startTime.Add(time.Duration(duration) * time.Millisecond)
-
-	// 2. Execute the path chasing simulation (Critically Damped Spring).
-	finalVelocity, err := h.executePathChase(ctx, startPos, idealPath, startTime, deadline, buttonState)
-	if err != nil {
-		return Vector2D{}, fmt.Errorf("humanoid: movement execution failed: %w", err)
-	}
-	return finalVelocity, nil
-}
-
-// generateClickPoint determines the final precise point within the target element.
-// This simulates slight inaccuracy, biased towards the center and influenced by velocity.
-func (h *Humanoid) generateClickPoint(box *dom.BoxModel, center Vector2D, finalVelocity Vector2D) Vector2D {
+// calculateTargetPoint determines a realistic click point within an element,
+// considering its center, size, and the velocity of the mouse.
+func (h *Humanoid) calculateTargetPoint(box *dom.BoxModel, center Vector2D, finalVelocity Vector2D) Vector2D {
 	if box == nil {
 		return center
 	}
@@ -187,14 +126,9 @@ func (h *Humanoid) generateClickPoint(box *dom.BoxModel, center Vector2D, finalV
 	finalX := center.X + offsetX
 	finalY := center.Y + offsetY
 
-	// 3. Clamp the coordinates to ensure they are strictly within the element bounds (1 pixel margin).
-	minX := center.X - width/2.0 + 1.0
-	maxX := center.X + width/2.0 - 1.0
-	minY := center.Y - height/2.0 + 1.0
-	maxY := center.Y + height/2.0 - 1.0
-
-	finalX = math.Max(minX, math.Min(maxX, finalX))
-	finalY = math.Max(minY, math.Min(maxY, finalY))
+	// Clamp to the element's bounding box.
+	finalX = math.Max(float64(box.Content[0]), math.Min(finalX, float64(box.Content[2])))
+	finalY = math.Max(float64(box.Content[1]), math.Min(finalY, float64(box.Content[5])))
 
 	return Vector2D{X: finalX, Y: finalY}
 }

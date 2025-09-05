@@ -6,9 +6,7 @@ import (
 	"math"
 	"time"
 
-	// UPDATED: Import cdp for MouseButton constants
 	"github.com/chromedp/cdproto/cdp"
-	// Import input package for DispatchMouseEvent
 	"github.com/chromedp/cdproto/input"
 	"go.uber.org/zap"
 )
@@ -39,116 +37,72 @@ func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField,
 	samplePoint2 := start.Add(mainDir.Mul(dist * 2.0 / 3.0))
 	force2 := field.CalculateNetForce(samplePoint2)
 
-	// Offset the control points based on the sampled forces.
-	offsetScale := dist * 0.5
-	p1 := samplePoint1.Add(force1.Mul(offsetScale))
-	p2 := samplePoint2.Add(force2.Mul(offsetScale))
+	// Create control points based on the forces.
+	// The magnitude of the force determines the "bend" of the curve.
+	p1 := samplePoint1.Add(force1.Mul(dist * 0.1))
+	p2 := samplePoint2.Add(force2.Mul(dist * 0.1))
 
-	// Introduce slight randomness to P2 (mid-flight correction variability).
-	h.mu.Lock()
-	// 30% chance of a randomized mid course adjustment.
-	shouldCorrect := h.rng.Float64() < 0.3
-	var correctionStrength float64
-	if shouldCorrect {
-		// Correction magnitude randomized and capped.
-		correctionStrength = math.Min(dist/5, 30.0) * (h.rng.Float64() - 0.5) * 2.0
-	}
-	h.mu.Unlock()
+	path := make([]Vector2D, numSteps)
+	for i := 0; i < numSteps; i++ {
+		t := float64(i) / float64(numSteps-1)
+		// Cubic Bezier curve formula.
+		// B(t) = (1-t)^3 * P0 + 3(1-t)^2 * t * P1 + 3(1-t) * t^2 * P2 + t^3 * P3
+		omt := 1.0 - t
+		omt2 := omt * omt
+		omt3 := omt2 * omt
+		t2 := t * t
+		t3 := t2 * t
 
-	if shouldCorrect {
-		perpDir := Vector2D{X: -mainDir.Y, Y: mainDir.X} // Perpendicular direction
-		p2 = p2.Add(perpDir.Mul(correctionStrength))
+		path[i] = p0.Mul(omt3).Add(p1.Mul(3 * omt2 * t)).Add(p2.Mul(3 * omt * t2)).Add(p3.Mul(t3))
 	}
 
-	// Generate the Bezier curve points.
-	path := make([]Vector2D, 0, numSteps+1)
-	for i := 0; i <= numSteps; i++ {
-		t := float64(i) / float64(numSteps)
-
-		// Cubic Bezier coefficients
-		c0 := math.Pow(1-t, 3)
-		c1 := 3 * math.Pow(1-t, 2) * t
-		c2 := 3 * (1 - t) * math.Pow(t, 2)
-		c3 := math.Pow(t, 3)
-
-		pointX := c0*p0.X + c1*p1.X + c2*p2.X + c3*p3.X
-		pointY := c0*p0.Y + c1*p1.Y + c2*p2.Y + c3*p3.Y
-		path = append(path, Vector2D{X: pointX, Y: pointY})
-	}
 	return path
 }
 
-// executePathChase simulates the physical movement using a Critically Damped Spring (CDS) model.
-// UPDATED: Use cdp.MouseButton
-func (h *Humanoid) executePathChase(ctx context.Context, startPoint Vector2D, idealPath []Vector2D, startTime time.Time, deadline time.Time, buttonState cdp.MouseButton) (Vector2D, error) {
-	currentPos := startPoint
-	velocity := Vector2D{} // Start from rest.
-
-	totalDuration := deadline.Sub(startTime)
-
-	if totalDuration <= 0 || len(idealPath) == 0 {
-		return Vector2D{}, nil
-	}
-
+// simulateTrajectory moves the mouse along a generated path, dispatching events.
+func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, field *PotentialField, buttonState input.MouseButton) (Vector2D, error) {
+	dist := start.Dist(end)
 	h.mu.Lock()
-	// Omega (natural frequency) controls responsiveness/speed.
-	omega := h.dynamicConfig.Omega
+	h.lastMovementDistance = dist
 	h.mu.Unlock()
 
-	lastTime := time.Now()
+	// Fitts's Law to determine movement duration.
+	duration := h.calculateFittsLaw(dist)
+	numSteps := int(duration.Seconds() * 100) // ~100 events per second.
+	if numSteps < 2 {
+		numSteps = 2
+	}
 
-	// Simulation loop.
-	for time.Now().Before(deadline) {
-		if ctx.Err() != nil {
-			return velocity, ctx.Err()
+	// Generate the ideal path.
+	idealPath := h.generateIdealPath(start, end, field, numSteps)
+
+	var velocity Vector2D
+	startTime := time.Now()
+	lastPos := start
+
+	for i := 0; i < len(idealPath); i++ {
+		t := float64(i) / float64(len(idealPath)-1)
+		easedT := computeEaseInOutCubic(t)
+
+		// Calculate the ideal position on the path.
+		pathIndex := int(easedT * float64(len(idealPath)-1))
+		currentPos := idealPath[pathIndex]
+
+		// Calculate the time step.
+		currentTime := startTime.Add(time.Duration(easedT * float64(duration)))
+		time.Sleep(time.Until(currentTime))
+
+		// Update velocity.
+		dt := time.Since(startTime).Seconds()
+		if dt > 0 {
+			velocity = currentPos.Sub(lastPos).Div(dt)
 		}
-
-		currentTime := time.Now()
-		dt := currentTime.Sub(lastTime).Seconds()
-		lastTime = currentTime
-
-		// Handle time steps.
-		if dt <= 0.002 {
-			time.Sleep(2 * time.Millisecond)
-			continue
-		}
-		if dt > 0.05 {
-			dt = 0.05
-		}
-
-		// Determine the goal point on the ideal curve based on time progression.
-		elapsed := time.Since(startTime)
-		progress := float64(elapsed) / float64(totalDuration)
-		easedProgress := computeEaseInOutCubic(math.Min(progress, 1.0))
-
-		goalIndex := int(easedProgress * float64(len(idealPath)-1))
-		if goalIndex >= len(idealPath) {
-			goalIndex = len(idealPath) - 1
-		}
-		goalPoint := idealPath[goalIndex]
-
-		// Critically Damped Spring Dynamics (Zeta = 1.0)
-		displacement := currentPos.Sub(goalPoint)
-		expTerm := math.Exp(-omega * dt)
-
-		// Coefficients
-		c1 := displacement
-		c2 := velocity.Add(displacement.Mul(omega))
-		c3 := c2.Mul(dt).Add(c1)
-
-		// Calculate new position and velocity
-		newPos := goalPoint.Add(c3.Mul(expTerm))
-		newVelocity := c2.Sub(c3.Mul(omega)).Mul(expTerm)
-
-		velocity = newVelocity.Limit(maxVelocity)
-		currentPos = newPos
+		lastPos = currentPos
 
 		// -- Noise Combination --
 		h.mu.Lock()
 		perlinMagnitude := h.dynamicConfig.PerlinAmplitude
 		h.mu.Unlock()
-
-
 
 		perlinFrequency := 0.8
 
@@ -168,8 +122,8 @@ func (h *Humanoid) executePathChase(ctx context.Context, startPoint Vector2D, id
 		// Dispatch the mouse movement event.
 		dispatchMouse := input.DispatchMouseEvent(input.MouseMoved, finalPerturbedPoint.X, finalPerturbedPoint.Y)
 		// Include button state if dragging.
-		// UPDATED: Use cdp.MouseButtonNone
-		if buttonState != cdp.MouseButtonNone {
+		// UPDATED: Use the correct "none" string constant.
+		if buttonState != input.MouseButtonNone {
 			dispatchMouse = dispatchMouse.WithButton(buttonState)
 		}
 
@@ -183,16 +137,8 @@ func (h *Humanoid) executePathChase(ctx context.Context, startPoint Vector2D, id
 		h.currentPos = finalPerturbedPoint
 		h.mu.Unlock()
 
-		// Simulate browser rendering/event loop delay (4-9ms).
-		h.mu.Lock()
-		sleepDuration := time.Duration(h.rng.Intn(5)+4) * time.Millisecond
-		h.mu.Unlock()
-
-		select {
-		case <-time.After(sleepDuration):
-		case <-ctx.Done():
-			return velocity, ctx.Err()
-		}
+		// Simulate browser rendering/event loop delay.
+		time.Sleep(time.Millisecond * time.Duration(2+h.rng.Intn(4)))
 	}
 
 	return velocity, nil

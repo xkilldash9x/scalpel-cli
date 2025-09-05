@@ -5,7 +5,6 @@ import (
 	"context"
 	"fmt"
 
-	// CRITICAL IMPORT: Required for input.MouseButtonLeft
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 )
@@ -54,6 +53,7 @@ func (h *Humanoid) DragAndDrop(startSelector, endSelector string) chromedp.Actio
 			return err
 		}
 
+		// UPDATED: Use the "left" string constant for the left mouse button.
 		if err := h.mouseDown(ctx, currentPos, input.MouseButtonLeft); err != nil {
 			return fmt.Errorf("failed to press mouse button: %w", err)
 		}
@@ -70,24 +70,22 @@ func (h *Humanoid) DragAndDrop(startSelector, endSelector string) chromedp.Actio
 			h.mu.Lock()
 			cleanupPos := h.currentPos
 			h.mu.Unlock()
+			// UPDATED: Use the "left" string constant for the left mouse button.
 			h.mouseUp(ctx, cleanupPos, input.MouseButtonLeft)
 			return fmt.Errorf("failed during drag movement: %w", err)
 		}
 
-		// 6. Mouse up (Drop).
+		// 6. Mouse up (Release).
 		h.mu.Lock()
 		finalPos := h.currentPos
 		h.mu.Unlock()
 
-		// Short pause before release.
-		if err := h.CognitivePause(ctx, 70, 30); err != nil {
+		// Pause briefly before releasing.
+		if err := h.CognitivePause(ctx, 90, 35); err != nil {
 			return err
 		}
 
-		if err := h.mouseUp(ctx, finalPos, input.MouseButtonLeft); err != nil {
-			return fmt.Errorf("failed to release mouse button: %w", err)
-		}
-
-		return nil
+		// UPDATED: Use the "left" string constant for the left mouse button.
+		return h.mouseUp(ctx, finalPos, input.MouseButtonLeft)
 	})
 }
