@@ -74,7 +74,7 @@ func (h *Humanoid) Hesitate(duration time.Duration) chromedp.Action {
 			dY := noiseY.Noise1D(tInput) * amplitude
 			nextPos := startPos.Add(Vector2D{X: dX, Y: dY})
 
-			// Apply high-frequency tremor.
+			// Apply high frequency tremor.
 			noisyPos := h.applyGaussianNoise(nextPos)
 
 			dispatchMouse := input.DispatchMouseEvent(input.MouseMoved, noisyPos.X, noisyPos.Y)
@@ -108,7 +108,7 @@ func (h *Humanoid) Hesitate(duration time.Duration) chromedp.Action {
 	})
 }
 
-// applyGaussianNoise adds high-frequency tremor.
+// applyGaussianNoise adds high frequency tremor.
 func (h *Humanoid) applyGaussianNoise(point Vector2D) Vector2D {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -119,7 +119,7 @@ func (h *Humanoid) applyGaussianNoise(point Vector2D) Vector2D {
 	return Vector2D{X: point.X + pX, Y: point.Y + pY}
 }
 
-// pause is a simple, context-aware sleep helper.
+// pause is a simple, context aware sleep helper.
 func (h *Humanoid) pause(ctx context.Context, duration time.Duration) error {
 	if duration <= 0 {
 		return nil

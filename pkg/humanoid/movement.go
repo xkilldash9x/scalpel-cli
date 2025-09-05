@@ -7,17 +7,19 @@ import (
 	"math"
 	"time"
 
+	// UPDATED: Import cdp for MouseButton constants
+	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/dom"
-	// Import input package
-	"github.com/chromedp/cdproto/input"
+	// Import input package for DispatchMouseEvent
+	"github.comcom/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
 )
 
-// MoveTo simulates human-like movement from the current position to the target selector.
+// MoveTo simulates human like movement from the current position to the target selector.
 func (h *Humanoid) MoveTo(selector string, field *PotentialField) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
-		// Moving is a high-intensity action.
+		// Moving is a high intensity action.
 		h.updateFatigue(1.0)
 
 		// 1. Ensure the target is visible (Scrolling).
@@ -40,7 +42,8 @@ func (h *Humanoid) MoveTo(selector string, field *PotentialField) chromedp.Actio
 
 		// 4. Execute the physical movement simulation.
 		// buttonState is None for a simple move.
-		finalVelocity, err := h.executeMovement(ctx, targetCenter, targetWidth, field, input.MouseButtonNone)
+		// UPDATED: Use cdp.MouseButtonNone
+		finalVelocity, err := h.executeMovement(ctx, targetCenter, targetWidth, field, cdp.MouseButtonNone)
 		if err != nil {
 			return err
 		}
@@ -65,7 +68,7 @@ func (h *Humanoid) MoveTo(selector string, field *PotentialField) chromedp.Actio
 	})
 }
 
-// MoveToVector simulates human-like movement to a specific coordinate.
+// MoveToVector simulates human like movement to a specific coordinate.
 func (h *Humanoid) MoveToVector(target Vector2D, field *PotentialField) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
 		h.updateFatigue(0.8)
@@ -91,7 +94,8 @@ func (h *Humanoid) MoveToVector(target Vector2D, field *PotentialField) chromedp
 
 		// Final dispatch to ensure the very last position is registered.
 		dispatchMove := input.DispatchMouseEvent(input.MouseMoved, finalPos.X, finalPos.Y)
-		if buttonState != input.MouseButtonNone {
+		// UPDATED: Use cdp.MouseButtonNone
+		if buttonState != cdp.MouseButtonNone {
 			dispatchMove = dispatchMove.WithButton(buttonState)
 		}
 		if err := dispatchMove.Do(ctx); err != nil {
@@ -103,7 +107,8 @@ func (h *Humanoid) MoveToVector(target Vector2D, field *PotentialField) chromedp
 }
 
 // executeMovement handles the physics simulation of the move.
-func (h *Humanoid) executeMovement(ctx context.Context, targetCenter Vector2D, targetWidth float64, field *PotentialField, buttonState input.MouseButton) (Vector2D, error) {
+// UPDATED: Use cdp.MouseButton
+func (h *Humanoid) executeMovement(ctx context.Context, targetCenter Vector2D, targetWidth float64, field *PotentialField, buttonState cdp.MouseButton) (Vector2D, error) {
 	startPos := h.GetCurrentPos()
 	distance := startPos.Dist(targetCenter)
 
