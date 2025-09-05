@@ -29,18 +29,14 @@ type scrollStatus struct {
 //go:embed scrolling_script.js
 var scrollScript string
 
-// intelligentScroll implements a human-like scrolling strategy (bidirectional, content-aware, multi-modal).
+// intelligentScroll implements a human-like scrolling strategy.
 func (h *Humanoid) intelligentScroll(selector string) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
-		// Update fatigue before the scrolling sequence begins.
 		h.updateFatigue(0.5)
 
-		h.logger.Debug("Humanoid: Starting intelligent scroll sequence", zap.String("selector", selector))
-
 		h.mu.Lock()
-		// Use dynamic config.
 		cfg := h.dynamicConfig
-		// Decide modality: Mouse wheel simulation vs JS-based smooth scrolling (trackpad/touch).
+		// Decide modality: Mouse wheel vs JS smooth scrolling.
 		useMouseWheel := h.rng.Float64() < cfg.ScrollMouseWheelProbability
 		h.mu.Unlock()
 
@@ -53,12 +49,9 @@ func (h *Humanoid) intelligentScroll(selector string) chromedp.Action {
 
 // scrollWithJS uses the injected JS script (simulating smooth scrolling or trackpad).
 func (h *Humanoid) scrollWithJS(ctx context.Context, selector string, cfg Config) error {
-	h.logger.Debug("Humanoid: Executing JS Smooth Scroll")
 	var overshot bool
-	// These variables are used to communicate overshoot/regression requests to the JS script.
 	var injectedDeltaY, injectedDeltaX float64
 
-	// Extract parameters from config.
 	scrollOvershootProb := cfg.ScrollOvershootProbability
 	readDensityFactor := cfg.ScrollReadDensityFactor
 	regressionProb := cfg.ScrollRegressionProbability
@@ -69,7 +62,7 @@ func (h *Humanoid) scrollWithJS(ctx context.Context, selector string, cfg Config
 
 	for {
 		if scrollCtx.Err() != nil {
-			return fmt.Errorf("humanoid: JS scrolling operation failed or timed out: %w", scrollCtx.Err())
+			return fmt.Errorf("humanoid: JS scrolling timed out: %w", scrollCtx.Err())
 		}
 
 		// Execute the in-browser scroll logic.
@@ -78,7 +71,7 @@ func (h *Humanoid) scrollWithJS(ctx context.Context, selector string, cfg Config
 			scrollScript,
 			&res,
 			func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
-				return p.WithAwaitPromise(true) // Wait for the JS promise (stabilization) to resolve.
+				return p.WithAwaitPromise(true) // Wait for stabilization.
 			},
 			selector,
 			injectedDeltaY,
@@ -86,17 +79,13 @@ func (h *Humanoid) scrollWithJS(ctx context.Context, selector string, cfg Config
 			readDensityFactor,
 		).Do(scrollCtx)
 
-		// Reset injected deltas for the next iteration unless overridden below.
+		// Reset injected deltas.
 		injectedDeltaY = 0
 		injectedDeltaX = 0
 
 		if err != nil {
-			if scrollCtx.Err() != nil {
-				return scrollCtx.Err()
-			}
 			// Handle navigation during scroll gracefully.
 			if strings.Contains(err.Error(), "execution context destroyed") {
-				h.logger.Debug("Humanoid: Scroll script execution context destroyed, assuming completion.")
 				return nil
 			}
 			return fmt.Errorf("humanoid: scroll script evaluation failed: %w", err)
@@ -112,9 +101,7 @@ func (h *Humanoid) scrollWithJS(ctx context.Context, selector string, cfg Config
 		}
 
 		// --- Decision making: Overshoot, Regression, or Continue ---
-
 		normalizedDensity := math.Min(1.0, status.ContentDensity)
-		// Overshoot is less likely if the content is dense (user is focused).
 		adjustedOvershootProb := scrollOvershootProb * (1.0 - normalizedDensity*0.5)
 		maxDelta := math.Max(math.Abs(status.VerticalDelta), math.Abs(status.HorizontalDelta))
 
@@ -124,76 +111,61 @@ func (h *Humanoid) scrollWithJS(ctx context.Context, selector string, cfg Config
 		h.mu.Unlock()
 
 		shouldOvershoot := !overshot && rngValOvershoot < adjustedOvershootProb && maxDelta > 300
-		// Determine if a regression (scroll back slightly to re-read) should occur.
 		shouldRegress := !overshot && !shouldOvershoot && rngValRegression < regressionProb && maxDelta > 100
 
 		if shouldRegress {
-			// Execute a regression (scroll backward).
 			h.mu.Lock()
-			// Regression magnitude is a randomized fraction of the distance to the target.
 			regressionFactor := -(0.15 + h.rng.Float64()*0.3)
 			h.mu.Unlock()
-			// Inject the regression amount back to the JS script for the next iteration.
 			injectedDeltaY = status.VerticalDelta * regressionFactor
 			injectedDeltaX = status.HorizontalDelta * regressionFactor
-			overshot = true // Treat regression as an 'event' similar to overshoot for the logic flow.
-			h.logger.Debug("Humanoid: Performing scroll regression")
+			overshot = true
 		} else if shouldOvershoot {
-			// Execute an overshoot.
 			overshot = true
 			h.mu.Lock()
 			overshootFactor := 0.10 + h.rng.Float64()*0.25
 			h.mu.Unlock()
 			injectedDeltaY = status.VerticalDelta * overshootFactor
 			injectedDeltaX = status.HorizontalDelta * overshootFactor
-			h.logger.Debug("Humanoid: Performing scroll overshoot")
 		} else if overshot {
-			// Reset overshoot flag after the corrective scroll (which happens next iteration).
 			overshot = false
 		}
 
 		// Pause between scroll iterations (Simulating reading/scanning time).
-		// Use CognitivePause for realistic pauses with idle movement.
 		if err := h.calculateScrollPause(scrollCtx, status.ContentDensity, readDensityFactor); err != nil {
 			return err
 		}
 	}
 }
 
-// scrollWithMouseWheel simulates scrolling using discrete mouse wheel events (Stealthier native events).
+// scrollWithMouseWheel simulates scrolling using discrete mouse wheel events.
 func (h *Humanoid) scrollWithMouseWheel(ctx context.Context, selector string, cfg Config) error {
-	h.logger.Debug("Humanoid: Executing Mouse Wheel Scroll")
 	scrollCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 
-	// JS snippet for basic visibility checking and positioning estimation.
+	// JS snippet for basic visibility checking.
 	visibilityCheckJS := `(selector) => {
 		const el = document.querySelector(selector);
 		if (!el) return { visible: false, y: 0 };
 		const rect = el.getBoundingClientRect();
 		const viewportHeight = window.innerHeight;
 		const visibilityThreshold = 50;
-		// Check if the element is reasonably centered vertically.
 		const isVisible = (rect.top >= visibilityThreshold && rect.bottom <= viewportHeight - visibilityThreshold);
-		// Return the vertical center of the element relative to the viewport.
 		return { visible: isVisible, y: rect.top + rect.height / 2 };
 	}`
 
-	// Ensure cursor is initialized before dispatching wheel events.
+	// Ensure cursor is initialized.
 	if h.GetCurrentPos().Mag() < 1.0 {
-		if err := h.InitializePosition(scrollCtx); err != nil {
-			// Log warning but attempt to continue if initialization fails.
-			h.logger.Warn("Humanoid: Failed to initialize cursor for wheel scroll.", zap.Error(err))
-		}
+		h.InitializePosition(scrollCtx)
 	}
 
-	maxIterations := 30 // Prevent infinite loops if target is unreachable.
+	maxIterations := 30
 	for i := 0; i < maxIterations; i++ {
 		if scrollCtx.Err() != nil {
-			return fmt.Errorf("humanoid: mouse wheel scrolling failed or timed out: %w", scrollCtx.Err())
+			return fmt.Errorf("humanoid: mouse wheel scrolling timed out: %w", scrollCtx.Err())
 		}
 
-		// 1. Check visibility and get target Y position relative to viewport.
+		// 1. Check visibility.
 		var visibilityResult map[string]interface{}
 		err := chromedp.Evaluate(visibilityCheckJS, &visibilityResult, selector).Do(scrollCtx)
 
@@ -201,7 +173,6 @@ func (h *Humanoid) scrollWithMouseWheel(ctx context.Context, selector string, cf
 			if strings.Contains(err.Error(), "execution context destroyed") {
 				return nil
 			}
-			// If evaluation fails (e.g., element disappeared), stop scrolling.
 			break
 		}
 
@@ -209,43 +180,38 @@ func (h *Humanoid) scrollWithMouseWheel(ctx context.Context, selector string, cf
 		targetY, ok2 := visibilityResult["y"].(float64)
 
 		if !ok1 || !ok2 {
-			break // Element not found or error in result format.
+			break
 		}
 
 		if isVisible {
 			return nil
 		}
 
-		// 2. Determine scroll direction and magnitude.
+		// 2. Determine scroll direction.
 		cursorPos := h.GetCurrentPos()
 
-		// Determine direction based on target position relative to viewport center.
-		viewportCenterY := 400.0 // Default fallback.
-		// Use layout metrics if available for better accuracy.
+		viewportCenterY := 400.0
 		layout, err := page.GetLayoutMetrics().Do(scrollCtx)
 		if err == nil && layout != nil && layout.VisualViewport != nil {
 			viewportCenterY = layout.VisualViewport.ClientHeight / 2.0
 		}
 
-		deltaY := 1.0 // Default to scroll down.
+		deltaY := 1.0
 		if targetY < viewportCenterY {
-			deltaY = -1.0 // Scroll up.
+			deltaY = -1.0
 		}
 
-		// Humans scroll in bursts (flicks of the wheel).
+		// Scroll in bursts (flicks).
 		h.mu.Lock()
-		// Randomized burst length (e.g., 2-6 ticks). Gaussian distribution centered at 4.
 		burstLength := int(h.rng.NormFloat64()*2.0 + 4.0)
 		if burstLength < 1 {
 			burstLength = 1
 		}
 		h.mu.Unlock()
 
-		// Standard wheel tick size (pixels).
 		tickSize := 100.0
 
 		for j := 0; j < burstLength; j++ {
-			// Dispatch the event at the current cursor position.
 			dispatchWheel := input.DispatchMouseEvent(input.MouseWheel, cursorPos.X, cursorPos.Y).
 				WithDeltaX(0).
 				WithDeltaY(deltaY * tickSize)
@@ -255,31 +221,31 @@ func (h *Humanoid) scrollWithMouseWheel(ctx context.Context, selector string, cf
 			}
 
 			// Pause between ticks (short physiological delay).
-			if err := h.pause(scrollCtx, 30, 10); err != nil {
+			h.mu.Lock()
+			pauseDur := time.Duration(30+h.rng.NormFloat64()*10) * time.Millisecond
+			h.mu.Unlock()
+			if err := h.pause(scrollCtx, pauseDur); err != nil {
 				return err
 			}
 		}
 
-		// 3. Pause after the burst (Cognitive pause to read/process).
+		// 3. Pause after the burst (Cognitive pause).
 		if err := h.CognitivePause(scrollCtx, 250, 100); err != nil {
 			return err
 		}
 	}
-
-	h.logger.Debug("Humanoid: Mouse wheel scroll finished (max iterations reached).")
 	return nil
 }
 
-// calculateScrollPause determines the pause duration based on content density and executes the pause.
+// calculateScrollPause determines the pause duration based on content density.
 func (h *Humanoid) calculateScrollPause(ctx context.Context, contentDensity, readDensityFactor float64) error {
-	// Adjust pause based on content density (Content-aware behavior).
 	basePauseMean := 150.0
 	basePauseStdDev := 50.0
 
-	// Increase pause time if density is high. Max increase around 500ms based on config factor.
+	// Increase pause time if density is high.
 	densityAdjustment := contentDensity * readDensityFactor * 500.0
 	pauseMean := basePauseMean + densityAdjustment
 
-	// Use CognitivePause (incorporates fatigue and idle movements).
+	// Use CognitivePause (incorporates fatigue recovery and idle movements).
 	return h.CognitivePause(ctx, pauseMean, basePauseStdDev)
 }

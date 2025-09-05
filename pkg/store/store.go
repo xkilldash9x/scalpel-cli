@@ -6,12 +6,12 @@ import (
 	"fmt"
 
 	"github.com/jackc/pgx/v5"
-	"github.com/jackc/pgx/v5/pgconn"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/pkg/schemas"
 )
+
 
 // Store provides a PostgreSQL implementation of the Repository interface.
 type Store struct {
@@ -87,7 +87,7 @@ func (s *Store) persistFindings(ctx context.Context, tx pgx.Tx, scanID string, f
 
 	_, err := tx.CopyFrom(
 		ctx,
-		pgconn.Identifier{"findings"},
+		pgx.Identifier{"findings"},
 		[]string{"id", "scan_id", "task_id", "timestamp", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe"},
 		pgx.CopyFromRows(rows),
 	)
@@ -105,7 +105,7 @@ func (s *Store) persistNodes(ctx context.Context, tx pgx.Tx, nodes []schemas.Nod
 		}
 		rows[i] = []interface{}{n.ID, string(n.Type), propertiesJSON}
 	}
-	_, err := tx.CopyFrom(ctx, pgconn.Identifier{"kg_nodes"}, []string{"id", "type", "properties"}, pgx.CopyFromRows(rows))
+	_, err := tx.CopyFrom(ctx, pgx.Identifier{"kg_nodes"}, []string{"id", "type", "properties"}, pgx.CopyFromRows(rows))
 	return err
 }
 
@@ -119,6 +119,6 @@ func (s *Store) persistEdges(ctx context.Context, tx pgx.Tx, edges []schemas.Edg
 		}
 		rows[i] = []interface{}{e.SourceID, e.TargetID, string(e.Relationship), propertiesJSON}
 	}
-	_, err := tx.CopyFrom(ctx, pgconn.Identifier{"kg_edges"}, []string{"source_id", "target_id", "relationship", "properties"}, pgx.CopyFromRows(rows))
+	_, err := tx.CopyFrom(ctx, pgx.Identifier{"kg_edges"}, []string{"source_id", "target_id", "relationship", "properties"}, pgx.CopyFromRows(rows))
 	return err
 }

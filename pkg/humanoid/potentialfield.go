@@ -39,14 +39,13 @@ func (pf *PotentialField) CalculateNetForce(cursorPos Vector2D) Vector2D {
 		dist := vecToSource.Mag()
 
 		if dist < 1e-9 {
-			continue // Avoid division by zero if cursor is exactly on the source.
+			continue // Avoid division by zero.
 		}
 
 		// Exponential decay function: F = S * exp(-d/L)
 		magnitude := source.Strength * math.Exp(-dist/source.Falloff)
-		
-		// Calculate the force vector (normalize vecToSource and multiply by magnitude).
-		// Optimization: vecToSource / dist gives the normalized vector.
+
+		// Calculate the force vector.
 		force := vecToSource.Mul(magnitude / dist)
 		netForce = netForce.Add(force)
 	}
