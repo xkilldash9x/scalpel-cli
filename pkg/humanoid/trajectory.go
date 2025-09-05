@@ -1,3 +1,4 @@
+// pkg/humanoid/trajectory.go
 package humanoid
 
 import (
@@ -5,6 +6,7 @@ import (
 	"math"
 	"time"
 
+	// Import input package
 	"github.com/chromedp/cdproto/input"
 	"go.uber.org/zap"
 )
@@ -17,16 +19,13 @@ func computeEaseInOutCubic(t float64) float64 {
 	return 1 - math.Pow(-2*t+2, 3)/2
 }
 
-// computeIdealPath creates a human-like trajectory (Bezier curve) deformed by the potential field.
-func (h *Humanoid) computeIdealPath(start, end Vector2D, field *PotentialField) []Vector2D {
+// generateIdealPath creates a human-like trajectory (Bezier curve) deformed by the potential field.
+func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField, numSteps int) []Vector2D {
 	p0, p3 := start, end
 	mainVec := end.Sub(start)
 	dist := mainVec.Mag()
 
-	// Determine the number of steps for sufficient resolution.
-	numSteps := int(math.Max(50.0, dist/2.0))
-
-	if dist < 1.0 {
+	if dist < 1.0 || numSteps <= 0 {
 		return []Vector2D{end}
 	}
 
@@ -43,12 +42,13 @@ func (h *Humanoid) computeIdealPath(start, end Vector2D, field *PotentialField) 
 	p1 := samplePoint1.Add(force1.Mul(offsetScale))
 	p2 := samplePoint2.Add(force2.Mul(offsetScale))
 
-	// introduce a bit of randomness to P2 ( mid flight correction vary).
+	// Introduce slight randomness to P2 (mid-flight correction variability).
 	h.mu.Lock()
+	// 30% chance of a randomized mid-course adjustment.
 	shouldCorrect := h.rng.Float64() < 0.3
 	var correctionStrength float64
 	if shouldCorrect {
-		// Correction magnitude randomized and capped at 30px.
+		// Correction magnitude randomized and capped.
 		correctionStrength = math.Min(dist/5, 30.0) * (h.rng.Float64() - 0.5) * 2.0
 	}
 	h.mu.Unlock()
@@ -58,13 +58,12 @@ func (h *Humanoid) computeIdealPath(start, end Vector2D, field *PotentialField) 
 		p2 = p2.Add(perpDir.Mul(correctionStrength))
 	}
 
-	// generate the bezier curve points &
-	// initialize with capacity for efficiency.
+	// Generate the Bezier curve points.
 	path := make([]Vector2D, 0, numSteps+1)
 	for i := 0; i <= numSteps; i++ {
 		t := float64(i) / float64(numSteps)
 
-		// cubic bezier coefficients
+		// Cubic Bezier coefficients
 		c0 := math.Pow(1-t, 3)
 		c1 := 3 * math.Pow(1-t, 2) * t
 		c2 := 3 * (1 - t) * math.Pow(t, 2)
@@ -77,11 +76,10 @@ func (h *Humanoid) computeIdealPath(start, end Vector2D, field *PotentialField) 
 	return path
 }
 
-//  sims the physical movement using a CDS model.
-// includes a layer of perlin noise for more organic, wandering movement.
-func (h *Humanoid) simulatePathChase(ctx context.Context, startPoint Vector2D, idealPath []Vector2D, startTime time.Time, deadline time.Time) (Vector2D, error) {
+// executePathChase simulates the physical movement using a Critically Damped Spring (CDS) model.
+func (h *Humanoid) executePathChase(ctx context.Context, startPoint Vector2D, idealPath []Vector2D, startTime time.Time, deadline time.Time, buttonState input.MouseButton) (Vector2D, error) {
 	currentPos := startPoint
-	velocity := Vector2D{} // start from rest.
+	velocity := Vector2D{} // Start from rest.
 
 	totalDuration := deadline.Sub(startTime)
 
@@ -89,15 +87,14 @@ func (h *Humanoid) simulatePathChase(ctx context.Context, startPoint Vector2D, i
 		return Vector2D{}, nil
 	}
 
-	// Omega natural frequency of the spring to control responsivness
-	// randomized about 25 rad/s. give or take
 	h.mu.Lock()
-	omega := 25.0 + (h.rng.Float64()-0.5)*6.0
+	// Omega (natural frequency) controls responsiveness/speed.
+	omega := h.dynamicConfig.Omega
 	h.mu.Unlock()
 
 	lastTime := time.Now()
 
-	// simulation loop.
+	// Simulation loop.
 	for time.Now().Before(deadline) {
 		if ctx.Err() != nil {
 			return velocity, ctx.Err()
@@ -107,16 +104,16 @@ func (h *Humanoid) simulatePathChase(ctx context.Context, startPoint Vector2D, i
 		dt := currentTime.Sub(lastTime).Seconds()
 		lastTime = currentTime
 
-		// handle time steps: ensure stability.
+		// Handle time steps.
 		if dt <= 0.002 {
 			time.Sleep(2 * time.Millisecond)
 			continue
 		}
-		if dt > 0.05 { // clamp max dt. dont really want it going over ..right?
+		if dt > 0.05 {
 			dt = 0.05
 		}
 
-		// determine the goal point on a ideal curve based on time.
+		// Determine the goal point on the ideal curve based on time progression.
 		elapsed := time.Since(startTime)
 		progress := float64(elapsed) / float64(totalDuration)
 		easedProgress := computeEaseInOutCubic(math.Min(progress, 1.0))
@@ -127,17 +124,16 @@ func (h *Humanoid) simulatePathChase(ctx context.Context, startPoint Vector2D, i
 		}
 		goalPoint := idealPath[goalIndex]
 
-		// critically damped spring dynanamics
-		// makes the physical cursor "chase" the ideal goal point.
+		// Critically Damped Spring Dynamics (Zeta = 1.0)
 		displacement := currentPos.Sub(goalPoint)
 		expTerm := math.Exp(-omega * dt)
 
-		// co efs
+		// Coefficients
 		c1 := displacement
 		c2 := velocity.Add(displacement.Mul(omega))
 		c3 := c2.Mul(dt).Add(c1)
 
-		// calc new position and velocity
+		// Calculate new position and velocity
 		newPos := goalPoint.Add(c3.Mul(expTerm))
 		newVelocity := c2.Sub(c3.Mul(omega)).Mul(expTerm)
 
@@ -145,39 +141,47 @@ func (h *Humanoid) simulatePathChase(ctx context.Context, startPoint Vector2D, i
 		currentPos = newPos
 
 		// -- Noise Combination --
-		// Parameters for the perlin noise effect. These are great candidates for tuning.
-		perlinFrequency := 0.8
-		perlinMagnitude := 2.5
+		h.mu.Lock()
+		perlinMagnitude := h.dynamicConfig.PerlinAmplitude
+		h.mu.Unlock()
 
-		// 1. Calculate the smooth, wandering Perlin noise drift based on elapsed time.
+		perlinFrequency := 0.8
+
+		// 1. Calculate Perlin noise drift.
 		timeElapsed := currentTime.Sub(startTime).Seconds()
 		perlinDrift := Vector2D{
 			X: h.noiseX.Noise1D(timeElapsed*perlinFrequency) * perlinMagnitude,
 			Y: h.noiseY.Noise1D(timeElapsed*perlinFrequency) * perlinMagnitude,
 		}
 
-		// 2. Add the smooth Perlin drift to the base physical position.
+		// 2. Add Perlin drift.
 		driftAppliedPos := currentPos.Add(perlinDrift)
 
-		// 3. Apply the original high-frequency tremor (Gaussian noise) on top of the drifted path.
-		finalPerturbedPoint := h.applyPerturbation(driftAppliedPos)
-		// -- End Noise Combination --
+		// 3. Apply Gaussian noise (tremor).
+		finalPerturbedPoint := h.applyGaussianNoise(driftAppliedPos)
 
-		// Dispatch the final, fully noised-up mouse movement event.
+		// Dispatch the mouse movement event.
 		dispatchMouse := input.DispatchMouseEvent(input.MouseMoved, finalPerturbedPoint.X, finalPerturbedPoint.Y)
+		// Include button state if dragging.
+		if buttonState != input.MouseButtonNone {
+			dispatchMouse = dispatchMouse.WithButton(buttonState)
+		}
+
 		if err := dispatchMouse.Do(ctx); err != nil {
-			// CORRECTED: Replaced slog with the humanoid's zap logger instance.
-			h.logger.Warn("Humanoid: Failed to dispatch mouse move event", zap.Error(err))
-			// If dispatch fails (e.g., page navigation), stop the movement.
+			h.logger.Warn("Humanoid: Failed to dispatch mouse move event during simulation", zap.Error(err))
 			return velocity, err
 		}
+
+		// Update the internal position tracker.
+		h.mu.Lock()
+		h.currentPos = finalPerturbedPoint
+		h.mu.Unlock()
 
 		// Simulate browser rendering/event loop delay (4-9ms).
 		h.mu.Lock()
 		sleepDuration := time.Duration(h.rng.Intn(5)+4) * time.Millisecond
 		h.mu.Unlock()
 
-		// Use select for the sleep to be responsive to cancellation.
 		select {
 		case <-time.After(sleepDuration):
 		case <-ctx.Done():
@@ -187,19 +191,3 @@ func (h *Humanoid) simulatePathChase(ctx context.Context, startPoint Vector2D, i
 
 	return velocity, nil
 }
-
-// applyPerturbation adds small Gaussian noise to the position, simulating motor tremor.
-func (h *Humanoid) applyPerturbation(point Vector2D) Vector2D {
-	h.mu.Lock()
-	// Strength of the tremor.
-	perturbationStrength := 0.3 + h.rng.Float64()*0.6
-	normX := h.rng.NormFloat64()
-	normY := h.rng.NormFloat64()
-	h.mu.Unlock()
-
-	return Vector2D{
-		X: point.X + normX*perturbationStrength,
-		Y: point.Y + normY*perturbationStrength,
-	}
-}
-
