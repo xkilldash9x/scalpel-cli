@@ -1,4 +1,3 @@
-originial:
 // pkg/humanoid/behavior.go
 package humanoid
 
@@ -7,7 +6,9 @@ import (
 	"math"
 	"time"
 
-	// CRITICAL IMPORT: Required for input.MouseButtonNone and input.DispatchMouseEvent
+	// UPDATED: Import cdp for MouseButton constants
+	"github.com/chromedp/cdproto/cdp"
+	// Import input package for DispatchMouseEvent
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
@@ -80,7 +81,8 @@ func (h *Humanoid) Hesitate(duration time.Duration) chromedp.Action {
 
 			dispatchMouse := input.DispatchMouseEvent(input.MouseMoved, noisyPos.X, noisyPos.Y)
 			// Include button state if pressed.
-			if buttonState != input.MouseButtonNone {
+			// UPDATED: Use cdp.MouseButtonNone
+			if buttonState != cdp.MouseButtonNone {
 				dispatchMouse = dispatchMouse.WithButton(buttonState)
 			}
 
@@ -172,3 +174,4 @@ func (h *Humanoid) recoverFatigue(duration time.Duration) {
 	h.fatigueLevel = math.Max(0.0, h.fatigueLevel) // Clamp at 0.0
 
 	h.applyFatigueEffects()
+}
