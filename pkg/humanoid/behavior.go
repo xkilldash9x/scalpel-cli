@@ -6,11 +6,10 @@ import (
 	"math"
 	"time"
 
-	// Import input package
+	// CRITICAL IMPORT: Required for input.MouseButtonNone and input.DispatchMouseEvent
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
-	"github.com/xkilldash9x/scalpel-cli/pkg/humanoid/config.go"
 )
 
 // CognitivePause simulates a pause with subtle, noisy cursor movements (idling behavior).

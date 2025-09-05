@@ -7,7 +7,7 @@ import (
 	"math"
 	"time"
 
-	// Import input package
+	// CRITICAL IMPORT: Required for input.MouseButtonLeft, input.MouseButtonNone, etc.
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 )
@@ -80,7 +80,6 @@ func (h *Humanoid) mouseDown(ctx context.Context, pos Vector2D, button input.Mou
 	h.currentButtonState = button
 	h.mu.Unlock()
 
-	// FIXED: Use pointer helper for timestamp.
 	err := input.DispatchMouseEvent(input.MousePressed, pos.X+noiseX, pos.Y+noiseY).
 		WithButton(button).
 		WithClickCount(1).
@@ -104,7 +103,6 @@ func (h *Humanoid) mouseUp(ctx context.Context, pos Vector2D, button input.Mouse
 	noiseY := (h.rng.Float64() - 0.5) * (h.dynamicConfig.ClickNoise * 0.5)
 	h.mu.Unlock()
 
-	// FIXED: Use pointer helper for timestamp.
 	err := input.DispatchMouseEvent(input.MouseReleased, pos.X+noiseX, pos.Y+noiseY).
 		WithButton(button).
 		WithClickCount(1).

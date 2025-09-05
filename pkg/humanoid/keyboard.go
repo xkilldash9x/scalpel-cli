@@ -15,6 +15,7 @@ import (
 )
 
 // -- keyboardNeighbors --
+// Maps characters to adjacent keys on a standard QWERTY layout for "fat-finger" typos.
 var keyboardNeighbors = map[rune]string{
 	'1': "2q`", '2': "13wq", '3': "24we", '4': "35er", '5': "46rt", '6': "57ty",
 	'7': "68yu", '8': "79ui", '9': "80io", '0': "9-op",
@@ -26,6 +27,7 @@ var keyboardNeighbors = map[rune]string{
 }
 
 // -- commonNgrams --
+// Stores common English digraphs/trigraphs for faster typing simulation (muscle memory).
 var commonNgrams = map[string]bool{
 	"th": true, "he": true, "in": true, "er": true, "an": true, "re": true,
 	"es": true, "on": true, "st": true, "nt": true,
@@ -261,8 +263,8 @@ func (h *Humanoid) keyPause(ctx context.Context, meanScale, stdDevScale float64,
 	finalDelay := math.Max(minDelay, delay)
 	duration := time.Duration(finalDelay) * time.Millisecond
 
-    // Recover fatigue during the pause.
-    h.recoverFatigue(duration)
+	// Recover fatigue during the pause.
+	h.recoverFatigue(duration)
 
 	// Input Synchronization: If the pause is long (> 120ms), use Hesitate.
 	if finalDelay > 120.0 {

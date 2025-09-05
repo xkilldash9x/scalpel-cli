@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 
-	// Import input package
+	// CRITICAL IMPORT: Required for input.MouseButtonLeft
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 )
