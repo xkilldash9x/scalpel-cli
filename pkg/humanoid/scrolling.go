@@ -10,9 +10,9 @@ import (
 	"strings"
 	"time"
 
-	// Required for GetLayoutMetrics
+	// Required for GetLayoutMetrics (low-level access)
 	"github.com/chromedp/cdproto/page"
-	// Required for EvaluateParams
+	// Required for customizing EvaluateParams in chromedp.Evaluate options
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
@@ -69,17 +69,15 @@ func (h *Humanoid) scrollWithJS(ctx context.Context, selector string, cfg Config
 		// Execute the in-browser scroll logic.
 		var res string
 		// Use the modern high-level chromedp.Evaluate Action.
+		// FIX: Arguments passed to the JS script must be wrapped in `chromedp.EvalWithArgs`.
 		err := chromedp.Evaluate(
 			scrollScript,
 			&res,
-			// Use the modern modifier pattern to await the promise returned by the JS.
+			chromedp.EvalWithArgs(selector, injectedDeltaY, injectedDeltaX, readDensityFactor),
+			// Use the modern modifier pattern to customize EvaluateParams (e.g., await the promise).
 			func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
 				return p.WithAwaitPromise(true)
 			},
-			selector,
-			injectedDeltaY,
-			injectedDeltaX,
-			readDensityFactor,
 		).Do(scrollCtx)
 
 		// Reset injected deltas.
@@ -174,7 +172,8 @@ func (h *Humanoid) scrollWithMouseWheel(ctx context.Context, selector string, cf
 
 		// 1. Check visibility.
 		var visibilityResult map[string]interface{}
-		err := chromedp.Evaluate(visibilityCheckJS, &visibilityResult, selector).Do(scrollCtx)
+		// FIX: The selector argument must be passed using `chromedp.EvalWithArgs`.
+		err := chromedp.Evaluate(visibilityCheckJS, &visibilityResult, chromedp.EvalWithArgs(selector)).Do(scrollCtx)
 
 		if err != nil {
 			if strings.Contains(err.Error(), "execution context destroyed") {
@@ -230,13 +229,16 @@ func (h *Humanoid) scrollWithMouseWheel(ctx context.Context, selector string, cf
 			h.mu.Lock()
 			pauseDur := time.Duration(30+h.rng.NormFloat64()*10) * time.Millisecond
 			h.mu.Unlock()
-			if err := h.pause(scrollCtx, pauseDur); err != nil {
+
+			// MODERNIZATION: Use standard chromedp.Sleep for consistency.
+			if err := chromedp.Sleep(pauseDur).Do(scrollCtx); err != nil {
 				return err
 			}
 		}
 
 		// 3. Pause after the burst (Cognitive pause).
-		if err := h.CognitivePause(scrollCtx, 250, 100); err != nil {
+		// CORRECTION: CognitivePause returns an Action and must be executed with .Do(ctx).
+		if err := h.CognitivePause(250, 100).Do(scrollCtx); err != nil {
 			return err
 		}
 	}
@@ -253,5 +255,6 @@ func (h *Humanoid) calculateScrollPause(ctx context.Context, contentDensity, rea
 	pauseMean := basePauseMean + densityAdjustment
 
 	// Use CognitivePause (incorporates fatigue recovery and idle movements).
-	return h.CognitivePause(ctx, pauseMean, basePauseStdDev)
+	// CORRECTION: CognitivePause returns an Action and must be executed with .Do(ctx).
+	return h.CognitivePause(pauseMean, basePauseStdDev).Do(ctx)
 }

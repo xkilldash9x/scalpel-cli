@@ -9,11 +9,9 @@ import (
 	"time"
 
 	"github.com/aquilax/go-perlin"
-	// Required for BrowserContextID
 	"github.com/chromedp/cdproto/cdp"
-	// Required for MouseButton types and constants
+	// Re-added for MouseEvent constants. This is the modern way.
 	"github.com/chromedp/cdproto/input"
-	// Required for GetLayoutMetrics
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
@@ -21,6 +19,16 @@ import (
 
 // maxVelocity defines the maximum physiological mouse velocity (pixels per second).
 const maxVelocity = 6000.0
+
+// MouseButton represents the state of a mouse button, mirroring the CDP protocol strings.
+// Defined here to avoid direct dependency on cdproto/input.
+type MouseButton string
+
+const (
+	MouseButtonNone MouseButton = "none"
+	MouseButtonLeft MouseButton = "left"
+	// Other buttons (Middle, Right, etc.) can be added if needed.
+)
 
 // Humanoid manages the state and execution of human-like interactions.
 type Humanoid struct {
@@ -37,8 +45,9 @@ type Humanoid struct {
 	mu sync.Mutex
 
 	// Current cursor position and state
-	currentPos         Vector2D
-	currentButtonState input.MouseButton // Tracks the currently pressed mouse button
+	currentPos Vector2D
+	// Updated to use internal MouseButton type.
+	currentButtonState MouseButton // Tracks the currently pressed mouse button
 
 	// Fatigue modeling
 	fatigueLevel float64 // Ranges from 0.0 (rested) to 1.0 (exhausted)
@@ -82,8 +91,8 @@ func New(config Config, logger *zap.Logger, browserContextID cdp.BrowserContextI
 		logger:           logger,
 		rng:              rng,
 		lastActionTime:   time.Now(),
-		// Use the modern constant for the 'none' button state.
-		currentButtonState: input.MouseButtonNone,
+		// Use the internal constant for the 'none' button state.
+		currentButtonState: MouseButtonNone,
 		noiseX:             perlin.NewPerlin(alpha, beta, n, seed),
 		noiseY:             perlin.NewPerlin(alpha, beta, n, seed+1), // Offset seed for Y noise
 	}
@@ -100,9 +109,8 @@ func (h *Humanoid) GetCurrentPos() Vector2D {
 
 // SetButtonState returns an Action that executes the provided button action (e.g., MouseDown or MouseUp)
 // AND updates the internal button state tracker.
-// This is essential for hybrid implementations (like DragAndDrop) that mix high-level
-// button actions with low-level movement simulation (simulateTrajectory).
-func (h *Humanoid) SetButtonState(newState input.MouseButton, action chromedp.Action) chromedp.Action {
+// Signature updated to use the internal MouseButton type.
+func (h *Humanoid) SetButtonState(newState MouseButton, action chromedp.Action) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
 		// 1. Execute the actual browser action (MouseDown/Up).
 		if err := action.Do(ctx); err != nil {
@@ -120,15 +128,18 @@ func (h *Humanoid) SetButtonState(newState input.MouseButton, action chromedp.Ac
 // InitializePosition sets the initial cursor position realistically within the viewport.
 func (h *Humanoid) InitializePosition(ctx context.Context) error {
 	// 1. Get the layout metrics using the modern low-level API pattern.
-	_, _, _, _, cssVisualViewport, _, err := page.GetLayoutMetrics().Do(ctx)
+	// MODERNIZED: Updated the return signature for page.GetLayoutMetrics().
+	// The modern API returns (layoutViewport, visualViewport, contentSize, err).
+	_, visualViewport, _, err := page.GetLayoutMetrics().Do(ctx)
 	if err != nil {
 		h.logger.Warn("Humanoid: failed to get layout metrics", zap.Error(err))
 	}
 
 	var width, height float64
-	if cssVisualViewport != nil {
-		width = cssVisualViewport.ClientWidth
-		height = cssVisualViewport.ClientHeight
+	// MODERNIZED: Use the correctly returned visualViewport.
+	if visualViewport != nil {
+		width = visualViewport.ClientWidth
+		height = visualViewport.ClientHeight
 	}
 
 	// Fallback resolution if metrics fail or are zero.
@@ -149,11 +160,7 @@ func (h *Humanoid) InitializePosition(ctx context.Context) error {
 	h.mu.Unlock()
 
 	// 3. Dispatch the initial mouse move event using a modern high-level Action.
-	// CORRECTION: Use the correct function name chromedp.MouseMove.
-	return chromedp.MouseMove(startX, startY).Do(ctx)
-}
-
-// pause is a simple, context aware sleep helper.
-func (h *Humanoid) pause(ctx context.Context, duration time.Duration) error {
-	return sleepContext(ctx, duration)
+	// FIX: `chromedp.MouseMove` is not a function. The correct modern action is `chromedp.MouseEvent`
+	// using the `input.MouseMoved` event type.
+	return chromedp.MouseEvent(input.MouseMoved, startX, startY).Do(ctx)
 }

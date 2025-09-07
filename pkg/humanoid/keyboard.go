@@ -9,9 +9,9 @@ import (
 	"time"
 	"unicode"
 
-	// Required for key constants (like input.Backspace)
-	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
+	// MODERNIZED: Import the kb package for type-safe handling of special keys.
+	"github.com/chromedp/chromedp/kb"
 )
 
 // -- keyboardNeighbors --
@@ -45,7 +45,7 @@ func (h *Humanoid) Type(selector string, text string) chromedp.Action {
 		}
 
 		// Pause after focusing (Cognitive planning).
-		if err := h.CognitivePause(ctx, 200, 80); err != nil {
+		if err := h.CognitivePause(200, 80).Do(ctx); err != nil {
 			return err
 		}
 
@@ -91,39 +91,35 @@ func (h *Humanoid) Type(selector string, text string) chromedp.Action {
 
 // sendKey dispatches a single key with realistic hold time using high-level actions.
 func (h *Humanoid) sendKey(ctx context.Context, key rune) error {
-	// Use the modern, high-level SendKeys action.
+	// We simulate the "hold" duration by sleeping for a tiny bit *after* the key is sent.
 	action := chromedp.SendKeys(
 		// SendKeys needs a target. Since the element is already focused (by Type()),
 		// we robustly target the active element using JS path.
 		"document.activeElement",
 		string(key),
 		chromedp.ByJSPath,
-		// Add a random hold duration (Dwell time) using the built-in option.
-		chromedp.WithTypingDelay(h.keyHoldDuration()),
 	)
 
-	return action.Do(ctx)
+	if err := action.Do(ctx); err != nil {
+		return err
+	}
+	// This simulates the dwell/hold time.
+	return chromedp.Sleep(h.keyHoldDuration()).Do(ctx)
 }
 
 // sendControlKey dispatches control characters (like Backspace).
-func (h *Humanoid) sendControlKey(ctx context.Context, key rune) error {
-	var keyToPress string
-	switch key {
-	case '\b':
-		keyToPress = input.Backspace
-	case '\r', '\n':
-		keyToPress = input.Enter
-	default:
-		// Fallback for other potential control characters.
-		keyToPress = string(key)
-	}
+// MODERNIZED: Updated signature to accept interface{} to accommodate kb.Key types (e.g., kb.Backspace)
+// as well as standard strings/runes, matching the flexibility of chromedp.KeyAction.
+func (h *Humanoid) sendControlKey(ctx context.Context, key interface{}) error {
+	// The high-level chromedp.KeyAction handles control runes
+	// (like '\b' for Backspace, '\r' or '\n' for Enter) directly.
 
-	// Use the modern, high-level KeyAction for control keys.
-	action := chromedp.KeyAction(
-		keyToPress,
-		chromedp.WithTypingDelay(h.keyHoldDuration()),
-	)
-	return action.Do(ctx)
+	action := chromedp.KeyAction(key)
+	if err := action.Do(ctx); err != nil {
+		return err
+	}
+	// This simulates the dwell/hold time.
+	return chromedp.Sleep(h.keyHoldDuration()).Do(ctx)
 }
 
 // keyHoldDuration calculates the duration a key should be held down.
@@ -154,24 +150,21 @@ func (h *Humanoid) keyPause(ctx context.Context, meanScale, stdDevScale float64,
 	// Adjust for N-grams (Rhythmic typing).
 	// We operate on the rune slice for safety.
 	if runes != nil && index > 0 && index < len(runes) {
-		if index > 1 {
-			// Check trigraph boundaries
-			if index-2 >= 0 && index+1 <= len(runes) {
-				// Convert the rune slice segment to a lowercase string for map lookup.
-				trigraph := strings.ToLower(string(runes[index-2 : index+1]))
-				if commonNgrams[trigraph] {
-					ngramFactor = 0.55
-				}
+		// Check Trigram (Previous 2 + Current)
+		if index >= 2 {
+			// Convert the rune slice segment to a lowercase string for map lookup.
+			trigraph := strings.ToLower(string(runes[index-2 : index+1]))
+			if commonNgrams[trigraph] {
+				ngramFactor = 0.55
 			}
 		}
-		if ngramFactor == 1.0 {
-			// Check digraph boundaries
-			if index-1 >= 0 && index+1 <= len(runes) {
-				// Convert the rune slice segment to a lowercase string for map lookup.
-				digraph := strings.ToLower(string(runes[index-1 : index+1]))
-				if commonNgrams[digraph] {
-					ngramFactor = 0.7
-				}
+
+		// Check Digram (Previous 1 + Current)
+		if ngramFactor == 1.0 && index >= 1 {
+			// Convert the rune slice segment to a lowercase string for map lookup.
+			digraph := strings.ToLower(string(runes[index-1 : index+1]))
+			if commonNgrams[digraph] {
+				ngramFactor = 0.7
 			}
 		}
 	}
@@ -194,7 +187,8 @@ func (h *Humanoid) keyPause(ctx context.Context, meanScale, stdDevScale float64,
 	// Recover fatigue during the pause.
 	h.recoverFatigue(duration)
 
-	return h.pause(ctx, duration)
+	// Use the standard, context-aware chromedp.Sleep.
+	return chromedp.Sleep(duration).Do(ctx)
 }
 
 // introduceTypo attempts to simulate a realistic typo based on configuration probabilities.
@@ -254,7 +248,8 @@ func (h *Humanoid) introduceNeighborTypo(ctx context.Context, char rune) (bool, 
 			return true, err
 		}
 		// Backspace
-		if err := h.sendControlKey(ctx, '\b'); err != nil {
+		// MODERNIZED: Use kb.Backspace instead of the rune literal '\b'.
+		if err := h.sendControlKey(ctx, kb.Backspace); err != nil {
 			return true, err
 		}
 		// Pause (Repositioning)
@@ -297,13 +292,15 @@ func (h *Humanoid) introduceTransposition(ctx context.Context, char, nextChar ru
 			return false, advanced, err
 		}
 		// Backspace x2
-		if err := h.sendControlKey(ctx, '\b'); err != nil {
+		// MODERNIZED: Use kb.Backspace.
+		if err := h.sendControlKey(ctx, kb.Backspace); err != nil {
 			return false, advanced, err
 		}
 		if err := h.keyPause(ctx, 1.1, 0.4, nil, 0); err != nil {
 			return false, advanced, err
 		}
-		if err := h.sendControlKey(ctx, '\b'); err != nil {
+		// MODERNIZED: Use kb.Backspace.
+		if err := h.sendControlKey(ctx, kb.Backspace); err != nil {
 			return false, advanced, err
 		}
 		// Pause (Repositioning)
@@ -350,7 +347,7 @@ func (h *Humanoid) introduceOmission(ctx context.Context, char rune) (bool, erro
 	return true, nil
 }
 
-func (h *Humanoid) introduceInsertion(ctx context.Context, char rune) (bool, error) {
+func (h *Humanoid) introduceInsertion(ctx context.Context, char rune) (bool, bool, error) {
 	lowerChar := unicode.ToLower(char)
 	if neighbors, ok := keyboardNeighbors[lowerChar]; ok && len(neighbors) > 0 {
 		h.mu.Lock()
@@ -360,29 +357,30 @@ func (h *Humanoid) introduceInsertion(ctx context.Context, char rune) (bool, err
 
 		// Send extra character
 		if err := h.sendKey(ctx, insertionChar); err != nil {
-			return true, err
+			return true, false, err
 		}
 
 		if shouldNotice {
 			// Pause (Recognition)
 			if err := h.keyPause(ctx, 1.5, 0.6, nil, 0); err != nil {
-				return true, err
+				return true, false, err
 			}
 			// Backspace
-			if err := h.sendControlKey(ctx, '\b'); err != nil {
-				return true, err
+			// MODERNIZED: Use kb.Backspace.
+			if err := h.sendControlKey(ctx, kb.Backspace); err != nil {
+				return true, false, err
 			}
 		}
 
 		// Pause before intended character
 		if err := h.keyPause(ctx, 1.1, 0.4, nil, 0); err != nil {
-			return true, err
+			return true, false, err
 		}
 		// Send intended character
 		if err := h.sendKey(ctx, char); err != nil {
-			return true, err
+			return true, false, err
 		}
-		return true, nil
+		return true, false, nil
 	}
-	return false, nil
+	return false, false, nil
 }
