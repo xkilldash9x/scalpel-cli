@@ -5,7 +5,7 @@ import (
 	"context"
 	"fmt"
 
-	// MODERNIZED: Restored import for access to input constants (MousePressed, ButtonLeft, etc.)
+	// Requires latest cdproto for input.ButtonLeft
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
@@ -18,7 +18,6 @@ func (h *Humanoid) DragAndDrop(startSelector, endSelector string) chromedp.Actio
 	// The entire operation is a sequence of tasks.
 	return chromedp.Tasks{
 		// 1. Preparation.
-		// This must be an ActionFunc as it requires immediate execution to fetch coordinates.
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			h.updateFatigue(1.5)
 
@@ -49,14 +48,13 @@ func (h *Humanoid) DragAndDrop(startSelector, endSelector string) chromedp.Actio
 		h.CognitivePause(80, 30),
 
 		// 4. Mouse down (Grab).
-		// FIXED: Replace h.SetButtonState with direct mouse event
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			h.mu.Lock()
 			currentPos := h.currentPos
 			h.mu.Unlock()
 
-			// MODERNIZED: Use type-safe constants input.MousePressed and input.ButtonLeft
-			// instead of string literals and internal constant casting.
+			// MODERNIZED: Use type-safe constants input.MousePressed and input.ButtonLeft.
+			// This requires the updated cdproto dependency.
 			if err := chromedp.MouseEvent(input.MousePressed, currentPos.X, currentPos.Y, chromedp.Button(input.ButtonLeft)).Do(ctx); err != nil {
 				return err
 			}
@@ -71,7 +69,6 @@ func (h *Humanoid) DragAndDrop(startSelector, endSelector string) chromedp.Actio
 		h.CognitivePause(100, 40),
 
 		// 6. Execute the drag movement.
-		// Wrapped in ActionFunc as MoveToVector requires immediate execution context.
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			field := NewPotentialField()
 			h.mu.Lock()
@@ -92,7 +89,6 @@ func (h *Humanoid) DragAndDrop(startSelector, endSelector string) chromedp.Actio
 		h.CognitivePause(70, 30),
 
 		// 8. Mouse up (Drop).
-		// FIXED: Replace h.SetButtonState with direct mouse event
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			h.mu.Lock()
 			currentPos := h.currentPos

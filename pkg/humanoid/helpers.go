@@ -15,10 +15,6 @@ import (
 	"go.uber.org/zap"
 )
 
-/*
-sleepContext removed. Standardized on chromedp.Sleep(duration).Do(ctx).
-*/
-
 // boxToCenter calculates the geometric center (centroid) of a DOM BoxModel.
 func boxToCenter(box *dom.BoxModel) (center Vector2D, valid bool) {
 	if box == nil || len(box.Content) < 8 {
@@ -32,7 +28,6 @@ func boxToCenter(box *dom.BoxModel) (center Vector2D, valid bool) {
 }
 
 // getElementBoxByVector creates a virtual BoxModel around a specific coordinate.
-// This is useful for functions that need a box but only have a target vector.
 func (h *Humanoid) getElementBoxByVector(ctx context.Context, vec Vector2D) (*dom.BoxModel, error) {
 	// Create a virtual box of 10x10 pixels centered on the vector
 	const virtualBoxSize = 10.0
@@ -56,6 +51,7 @@ func (h *Humanoid) getElementBoxBySelector(ctx context.Context, selector string)
 
 	// In the modern API, `chromedp.WaitVisible` is a standalone Action.
 	// We must sequence WaitVisible and Nodes using chromedp.Tasks.
+    // Note: We use WaitVisible to ensure the element is ready, which often implies scrolling has finished.
 	tasks := chromedp.Tasks{
 		chromedp.WaitVisible(selector, chromedp.ByQuery),
 		chromedp.Nodes(selector, &nodes, chromedp.ByQuery),
@@ -67,6 +63,7 @@ func (h *Humanoid) getElementBoxBySelector(ctx context.Context, selector string)
 			return nil, ctx.Err()
 		}
 		if len(nodes) == 0 {
+            // If WaitVisible fails, it usually means the element isn't visible even after scrolling attempts.
 			return nil, fmt.Errorf("humanoid: failed to find visible nodes for selector '%s': %w", selector, err)
 		}
 		// If nodes were found despite the error (e.g., timeout during Nodes retrieval but after WaitVisible succeeded), proceed.
@@ -106,7 +103,7 @@ func getElementBox(ctx context.Context, nodeID cdp.NodeID, logger *zap.Logger) (
 		logger.Debug("Humanoid: Failed to get valid BoxModel, retrying...", zap.Int("attempt", i+1), zap.Error(err))
 
 		// Wait before retrying (Exponential backoff).
-		// MODERNIZATION: Use chromedp.Sleep for context awareness instead of time.After/select.
+		// MODERNIZATION: Use chromedp.Sleep for context awareness.
 		sleepDuration := time.Millisecond * time.Duration(50*math.Pow(2, float64(i)))
 		if err := chromedp.Sleep(sleepDuration).Do(ctx); err != nil {
 			// Context was cancelled during sleep

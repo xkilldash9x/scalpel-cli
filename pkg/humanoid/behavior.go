@@ -5,6 +5,7 @@ import (
 	"context"
 	"math"
 	"time"
+
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 )
@@ -43,8 +44,6 @@ func (h *Humanoid) CognitivePause(meanMs, stdDevMs float64) chromedp.Action {
 }
 
 // Hesitate simulates a pause with subtle, noisy cursor movements.
-// REFACTORED: The original implementation built a task list based on time elapsed during planning.
-// We now execute iteratively within an ActionFunc to ensure correct real-time behavior.
 func (h *Humanoid) Hesitate(duration time.Duration) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
 		h.mu.Lock()
@@ -71,7 +70,6 @@ func (h *Humanoid) Hesitate(duration time.Duration) chromedp.Action {
 			})
 			h.mu.Unlock()
 
-			
 			if err := chromedp.MouseEvent(input.MouseMoved, targetPos.X, targetPos.Y).Do(ctx); err != nil {
 				return err
 			}

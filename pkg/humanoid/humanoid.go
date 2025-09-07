@@ -10,7 +10,7 @@ import (
 
 	"github.com/aquilax/go-perlin"
 	"github.com/chromedp/cdproto/cdp"
-	// Re-added for MouseEvent constants. This is the modern way.
+	// Requires latest cdproto
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
@@ -21,13 +21,11 @@ import (
 const maxVelocity = 6000.0
 
 // MouseButton represents the state of a mouse button, mirroring the CDP protocol strings.
-// Defined here to avoid direct dependency on cdproto/input.
 type MouseButton string
 
 const (
 	MouseButtonNone MouseButton = "none"
 	MouseButtonLeft MouseButton = "left"
-	// Other buttons (Middle, Right, etc.) can be added if needed.
 )
 
 // Humanoid manages the state and execution of human-like interactions.
@@ -45,8 +43,7 @@ type Humanoid struct {
 	mu sync.Mutex
 
 	// Current cursor position and state
-	currentPos Vector2D
-	// Updated to use internal MouseButton type.
+	currentPos         Vector2D
 	currentButtonState MouseButton // Tracks the currently pressed mouse button
 
 	// Fatigue modeling
@@ -85,13 +82,12 @@ func New(config Config, logger *zap.Logger, browserContextID cdp.BrowserContextI
 	alpha, beta, n := 2.0, 2.0, int32(3)
 
 	h := &Humanoid{
-		baseConfig:       config,
-		dynamicConfig:    config, // Start with the base config
-		browserContextID: browserContextID,
-		logger:           logger,
-		rng:              rng,
-		lastActionTime:   time.Now(),
-		// Use the internal constant for the 'none' button state.
+		baseConfig:         config,
+		dynamicConfig:      config, // Start with the base config
+		browserContextID:   browserContextID,
+		logger:             logger,
+		rng:                rng,
+		lastActionTime:     time.Now(),
 		currentButtonState: MouseButtonNone,
 		noiseX:             perlin.NewPerlin(alpha, beta, n, seed),
 		noiseY:             perlin.NewPerlin(alpha, beta, n, seed+1), // Offset seed for Y noise
@@ -107,9 +103,8 @@ func (h *Humanoid) GetCurrentPos() Vector2D {
 	return h.currentPos
 }
 
-// SetButtonState returns an Action that executes the provided button action (e.g., MouseDown or MouseUp)
+// SetButtonState returns an Action that executes the provided button action
 // AND updates the internal button state tracker.
-// Signature updated to use the internal MouseButton type.
 func (h *Humanoid) SetButtonState(newState MouseButton, action chromedp.Action) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
 		// 1. Execute the actual browser action (MouseDown/Up).
@@ -127,19 +122,18 @@ func (h *Humanoid) SetButtonState(newState MouseButton, action chromedp.Action) 
 
 // InitializePosition sets the initial cursor position realistically within the viewport.
 func (h *Humanoid) InitializePosition(ctx context.Context) error {
-	// 1. Get the layout metrics using the modern low-level API pattern.
-	// MODERNIZED: Updated the return signature for page.GetLayoutMetrics().
-	// The modern API returns (layoutViewport, visualViewport, contentSize, err).
-	_, visualViewport, _, err := page.GetLayoutMetrics().Do(ctx)
+	// 1. Get the layout metrics.
+	// MODERNIZED & VERIFIED: Using the modern 7-value return signature required by the latest cdproto.
+	_, _, _, _, cssVisualViewport, _, err := page.GetLayoutMetrics().Do(ctx)
 	if err != nil {
 		h.logger.Warn("Humanoid: failed to get layout metrics", zap.Error(err))
 	}
 
 	var width, height float64
-	// MODERNIZED: Use the correctly returned visualViewport.
-	if visualViewport != nil {
-		width = visualViewport.ClientWidth
-		height = visualViewport.ClientHeight
+	// Use the cssVisualViewport returned from the modern signature.
+	if cssVisualViewport != nil {
+		width = cssVisualViewport.ClientWidth
+		height = cssVisualViewport.ClientHeight
 	}
 
 	// Fallback resolution if metrics fail or are zero.
@@ -159,8 +153,6 @@ func (h *Humanoid) InitializePosition(ctx context.Context) error {
 	h.currentPos = Vector2D{X: startX, Y: startY}
 	h.mu.Unlock()
 
-	// 3. Dispatch the initial mouse move event using a modern high-level Action.
-	// FIX: `chromedp.MouseMove` is not a function. The correct modern action is `chromedp.MouseEvent`
-	// using the `input.MouseMoved` event type.
+	// 3. Dispatch the initial mouse move event.
 	return chromedp.MouseEvent(input.MouseMoved, startX, startY).Do(ctx)
 }

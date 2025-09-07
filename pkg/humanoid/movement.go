@@ -26,10 +26,11 @@ func (h *Humanoid) MoveTo(selector string, field *PotentialField) chromedp.Actio
 			h.updateFatigue(1.0)
 
 			// 1a. Ensure the target is visible (Scrolling).
-            // NOTE: intelligentScroll is assumed to be defined elsewhere (e.g., the JS file provided previously) and returns a chromedp.Action.
+			// intelligentScroll is implemented in scroll.go.
 			if err := h.intelligentScroll(selector).Do(ctx); err != nil {
-				h.logger.Debug("Humanoid: Scrolling encountered issues", zap.Error(err), zap.String("selector", selector))
-				// Continue even if scrolling fails, as the element might still be partially visible.
+				h.logger.Debug("Humanoid: Scrolling encountered issues (non-critical)", zap.Error(err), zap.String("selector", selector))
+				// Continue even if scrolling fails (e.g., context cancelled during scroll), 
+                // as the element might still be partially visible or the next step will fail robustly.
 			}
 
 			// 1b. Cognitive pause (Visual search and planning after scroll).
@@ -38,6 +39,7 @@ func (h *Humanoid) MoveTo(selector string, field *PotentialField) chromedp.Actio
 			}
 
 			// 1c. Locate the target element geometry.
+            // This step confirms visibility after the scroll attempt.
 			box, err := h.getElementBoxBySelector(ctx, selector)
 			if err != nil {
 				return fmt.Errorf("humanoid: failed to locate target element after scroll: %w", err)
@@ -83,8 +85,8 @@ func (h *Humanoid) MoveToVector(target Vector2D, field *PotentialField) chromedp
 			// Simulate the movement. This function call is blocking.
 			var err error
 			// Capture the velocity returned by the simulation.
-			// NOTE: simulateTrajectory is assumed to be defined elsewhere (e.g., trajectory.go)
-			// CORRECTED: Cast our internal MouseButton type to the required input.MouseButton type.
+			// simulateTrajectory is defined in trajectory.go
+			// Cast our internal MouseButton type to the required input.MouseButton type.
 			finalVelocity, err = h.simulateTrajectory(ctx, start, target, field, input.MouseButton(buttonState))
 
 			if err == nil {
@@ -112,8 +114,7 @@ func (h *Humanoid) MoveToVector(target Vector2D, field *PotentialField) chromedp
 			distanceToFinalTarget := finalTarget.Dist(finalPos)
 			if distanceToFinalTarget > 1.5 { // Threshold for correction (pixels).
 				correctionField := NewPotentialField()
-				// NOTE: simulateTrajectory is assumed to be defined elsewhere
-				// CORRECTED: Cast our internal MouseButton type to the required input.MouseButton type.
+				// Cast our internal MouseButton type to the required input.MouseButton type.
 				_, err := h.simulateTrajectory(ctx, finalPos, finalTarget, correctionField, input.MouseButton(buttonState))
 
 				if err == nil {
@@ -128,8 +129,7 @@ func (h *Humanoid) MoveToVector(target Vector2D, field *PotentialField) chromedp
 	}
 }
 
-// calculateTargetPoint determines a realistic click point within an element,
-// considering its center, size, and the velocity of the mouse.
+// calculateTargetPoint determines a realistic click point within an element.
 func (h *Humanoid) calculateTargetPoint(box *dom.BoxModel, center Vector2D, finalVelocity Vector2D) Vector2D {
 	if box == nil || box.Width == 0 || box.Height == 0 {
 		return center
