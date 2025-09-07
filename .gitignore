@@ -18,6 +18,7 @@ logs/
 # but ignore local versions with secrets.
 config.local.yaml
 *.local.yaml
+scalpel-cli/internal/browser/testing/
 test_imports.go
 # ## Common ##
 # IDE and editor directories
