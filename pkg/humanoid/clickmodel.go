@@ -6,9 +6,7 @@ import (
 	"math"
 	"time"
 
-	// Required for MouseButton constants (e.g., input.MouseButtonLeft)
 	"github.com/chromedp/cdproto/input"
-	// Required for high-level actions (e.g., chromedp.MouseDown, chromedp.LeftButton)
 	"github.com/chromedp/chromedp"
 )
 
@@ -19,25 +17,49 @@ func (h *Humanoid) IntelligentClick(selector string, field *PotentialField) chro
 	}
 
 	// We build a sequence of Actions using chromedp.Tasks.
+	// Each action in the slice needs to be separated by a comma.
 	return chromedp.Tasks{
-		// 1. Your custom human-like movement action.
+		// 1. Human-like movement action.
 		h.MoveTo(selector, field),
 
 		// 2. Fitts's Law delay before the click.
+		// This must be an ActionFunc because the delay depends on the result of the previous action (MoveTo).
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			h.mu.Lock()
+			// Relies on MoveTo having correctly updated lastMovementDistance.
 			distance := h.lastMovementDistance
 			h.mu.Unlock()
 
 			clickDelay := h.calculateTerminalFittsLaw(distance)
-			return sleepContext(ctx, clickDelay)
+
+			// Use the standard chromedp.Sleep action executor.
+			if clickDelay > 0 {
+				return chromedp.Sleep(clickDelay).Do(ctx)
+			}
+			return nil
 		}),
 
-		// 3. Mouse down using the modern, built-in action.
-		// Use SetButtonState wrapper to ensure internal state is tracked for potential low-level interaction later.
-		h.SetButtonState(input.MouseButtonLeft, chromedp.MouseDown(chromedp.LeftButton)),
+		// 3. Mouse down.
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			h.mu.Lock()
+			currentPos := h.currentPos
+			h.mu.Unlock()
 
-		// 4. Realistic hold duration between down and up.
+			// MODERNIZED: Use the standard input.ButtonLeft constant directly.
+			// The modern chromedp.Button() helper accepts the input.MouseButton type.
+			mouseDownAction := chromedp.MouseEvent(input.MousePressed, currentPos.X, currentPos.Y, chromedp.Button(input.ButtonLeft))
+			if err := mouseDownAction.Do(ctx); err != nil {
+				return err
+			}
+
+			h.mu.Lock()
+			h.currentButtonState = MouseButtonLeft
+			h.mu.Unlock()
+			return nil
+		}),
+
+		// 4. Realistic hold duration.
+		// This is an ActionFunc to calculate the duration just before execution.
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			h.mu.Lock()
 
@@ -50,12 +72,31 @@ func (h *Humanoid) IntelligentClick(selector string, field *PotentialField) chro
 
 			holdDuration := time.Duration(h.dynamicConfig.ClickHoldMinMs+randomAddition) * time.Millisecond
 			h.mu.Unlock()
-			return sleepContext(ctx, holdDuration)
+
+			// Use chromedp.Sleep action executor.
+			if holdDuration > 0 {
+				return chromedp.Sleep(holdDuration).Do(ctx)
+			}
+			return nil
 		}),
 
-		// 5. Mouse up using the modern, built-in action.
-		// Use SetButtonState wrapper to reset internal state.
-		h.SetButtonState(input.MouseButtonNone, chromedp.MouseUp(chromedp.LeftButton)),
+		// 5. Mouse up.
+		chromedp.ActionFunc(func(ctx context.Context) error {
+			h.mu.Lock()
+			currentPos := h.currentPos
+			h.mu.Unlock()
+
+			// MODERNIZED: Use the standard input.ButtonLeft constant directly.
+			mouseUpAction := chromedp.MouseEvent(input.MouseReleased, currentPos.X, currentPos.Y, chromedp.Button(input.ButtonLeft))
+			if err := mouseUpAction.Do(ctx); err != nil {
+				return err
+			}
+
+			h.mu.Lock()
+			h.currentButtonState = MouseButtonNone
+			h.mu.Unlock()
+			return nil
+		}),
 	}
 }
 
@@ -79,6 +120,11 @@ func (h *Humanoid) calculateTerminalFittsLaw(distance float64) time.Duration {
 
 	// Add slight randomization (+/- 10%)
 	mt += mt * (rng.Float64()*0.2 - 0.1)
+
+	// Make sure we don't return a negative duration, which would be... weird.
+	if mt < 0 {
+		mt = 0
+	}
 
 	return time.Duration(mt) * time.Millisecond
 }

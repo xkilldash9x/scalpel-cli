@@ -6,9 +6,9 @@ import (
 	"math"
 	"time"
 
-	// Low-level input package is required here for fine-grained control (NewDispatchMouseEvent).
-	// This is the correct import path for the modern API.
+	// CRITICAL: Low-level input access is fundamentally required for high-fidelity simulation.
 	"github.com/chromedp/cdproto/input"
+	"github.com/chromedp/chromedp" // Required for chromedp.Sleep
 	"go.uber.org/zap"
 )
 
@@ -21,7 +21,6 @@ func computeEaseInOutCubic(t float64) float64 {
 }
 
 // calculateFittsLaw determines movement duration based on Fitts's Law.
-// This is a simplified version for trajectory timing.
 func (h *Humanoid) calculateFittsLaw(distance float64) time.Duration {
 	const W = 30.0 // Assumed default target width (W) in pixels.
 
@@ -29,7 +28,6 @@ func (h *Humanoid) calculateFittsLaw(distance float64) time.Duration {
 	id := math.Log2(1.0 + distance/W)
 
 	h.mu.Lock()
-	// Use dynamic config parameters (already affected by fatigue).
 	A := h.dynamicConfig.FittsA
 	B := h.dynamicConfig.FittsB
 	rng := h.rng
@@ -83,26 +81,23 @@ func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField,
 }
 
 // simulateTrajectory moves the mouse along a generated path, dispatching events.
-// This function requires low-level control (cdproto/input) for realistic simulation.
+// This function requires immediate execution and precise timing, utilizing the low-level cdproto/input API.
 func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, field *PotentialField, buttonState input.MouseButton) (Vector2D, error) {
 	dist := start.Dist(end)
 	h.mu.Lock()
 	h.lastMovementDistance = dist
 	h.mu.Unlock()
 
-	// Fitts's Law to determine movement duration.
 	duration := h.calculateFittsLaw(dist)
-	numSteps := int(duration.Seconds() * 100) // ~100 events per second.
+	numSteps := int(duration.Seconds() * 100)
 	if numSteps < 2 {
 		numSteps = 2
 	}
 
-	// Ensure the potential field is initialized.
 	if field == nil {
 		field = NewPotentialField()
 	}
 
-	// Generate the ideal path.
 	idealPath := h.generateIdealPath(start, end, field, numSteps)
 
 	var velocity Vector2D
@@ -114,9 +109,7 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 		t := float64(i) / float64(len(idealPath)-1)
 		easedT := computeEaseInOutCubic(t)
 
-		// Calculate the ideal position on the path.
 		pathIndex := int(easedT * float64(len(idealPath)-1))
-		// Ensure index is safe (float precision might cause issues at the very end).
 		if pathIndex >= len(idealPath) {
 			pathIndex = len(idealPath) - 1
 		}
@@ -125,9 +118,12 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 		// Calculate the target time for this step.
 		currentTime := startTime.Add(time.Duration(easedT * float64(duration)))
 
-		// Use context-aware sleep to respect cancellation and adhere to Fitts's law timing.
-		if err := sleepContext(ctx, time.Until(currentTime)); err != nil {
-			return velocity, err
+		// Use context-aware sleep to adhere to Fitts's law timing.
+		sleepDur := time.Until(currentTime)
+		if sleepDur > 0 {
+			if err := chromedp.Sleep(sleepDur).Do(ctx); err != nil {
+				return velocity, err
+			}
 		}
 
 		// Update velocity based on actual time elapsed.
@@ -139,43 +135,38 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 		lastPos = currentPos
 		lastTime = now
 
-		// -- Noise Combination --
+		// -- Noise Combination (Relies on real-time elapsed) --
 		h.mu.Lock()
 		perlinMagnitude := h.dynamicConfig.PerlinAmplitude
+		rng := h.rng
 		h.mu.Unlock()
 
 		perlinFrequency := 0.8
-
-		// 1. Calculate Perlin noise drift.
 		timeElapsed := now.Sub(startTime).Seconds()
 		perlinDrift := Vector2D{
 			X: h.noiseX.Noise1D(timeElapsed*perlinFrequency) * perlinMagnitude,
 			Y: h.noiseY.Noise1D(timeElapsed*perlinFrequency) * perlinMagnitude,
 		}
 
-		// 2. Add Perlin drift.
 		driftAppliedPos := currentPos.Add(perlinDrift)
-
-		// 3. Apply Gaussian noise (tremor).
 		finalPerturbedPoint := h.applyGaussianNoise(driftAppliedPos)
 
 		// Dispatch the mouse movement event.
-		// Use the modern constructor pattern `input.NewDispatchMouseEvent`.
-		dispatchMouse := input.NewDispatchMouseEvent(input.EventMouseMoved, finalPerturbedPoint.X, finalPerturbedPoint.Y)
+		// CORRECTED: Used the modern builder pattern `input.DispatchMouseEvent`
+		// and the correct event type constant `input.MouseMoved`.
+		dispatchMouse := input.DispatchMouseEvent(input.MouseMoved, finalPerturbedPoint.X, finalPerturbedPoint.Y)
 
-		// Include button state if dragging.
-		if buttonState != input.MouseButtonNone {
+		// CORRECTED: Used the correct constant for no button, `input.ButtonNone`.
+		if buttonState != input.ButtonNone {
 			dispatchMouse = dispatchMouse.WithButton(buttonState)
-
-			// CRITICAL: When dragging (MouseMoved with button pressed), the 'buttons' field (plural, bitmask)
-			// must also be set according to the CDP specification.
 			var buttons int64
+			// CORRECTED: Used the correct button constants from the input package.
 			switch buttonState {
-			case input.MouseButtonLeft:
+			case input.ButtonLeft:
 				buttons = 1
-			case input.MouseButtonRight:
+			case input.ButtonRight:
 				buttons = 2
-			case input.MouseButtonMiddle:
+			case input.ButtonMiddle:
 				buttons = 4
 			}
 			if buttons > 0 {
@@ -183,7 +174,7 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 			}
 		}
 
-		// Execute the low-level command.
+		// Execute the low-level command immediately.
 		if err := dispatchMouse.Do(ctx); err != nil {
 			h.logger.Warn("Humanoid: Failed to dispatch mouse move event during simulation", zap.Error(err))
 			return velocity, err
@@ -195,17 +186,14 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 		h.mu.Unlock()
 
 		// Simulate browser rendering/event loop delay.
-		h.mu.Lock()
 		// Ensure Intn argument is positive
 		randPart := 0
 		if 4 > 0 {
-			randPart = h.rng.Intn(4)
+			randPart = rng.Intn(4)
 		}
 		sleepDuration := time.Duration(2+randPart) * time.Millisecond
-		h.mu.Unlock()
 
-		// Use context-aware sleep.
-		if err := sleepContext(ctx, sleepDuration); err != nil {
+		if err := chromedp.Sleep(sleepDuration).Do(ctx); err != nil {
 			return velocity, err
 		}
 	}

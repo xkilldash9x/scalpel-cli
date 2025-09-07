@@ -6,8 +6,10 @@ import (
 	"fmt"
 	"math"
 
-	// Required for BoxModel
+	// Required for BoxModel (necessary low-level access)
 	"github.com/chromedp/cdproto/dom"
+	// Required for input.MouseButton type for simulateTrajectory
+	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
 )
@@ -24,13 +26,14 @@ func (h *Humanoid) MoveTo(selector string, field *PotentialField) chromedp.Actio
 			h.updateFatigue(1.0)
 
 			// 1a. Ensure the target is visible (Scrolling).
+            // NOTE: intelligentScroll is assumed to be defined elsewhere (e.g., the JS file provided previously) and returns a chromedp.Action.
 			if err := h.intelligentScroll(selector).Do(ctx); err != nil {
 				h.logger.Debug("Humanoid: Scrolling encountered issues", zap.Error(err), zap.String("selector", selector))
 				// Continue even if scrolling fails, as the element might still be partially visible.
 			}
 
 			// 1b. Cognitive pause (Visual search and planning after scroll).
-			if err := h.CognitivePause(ctx, 150, 50); err != nil {
+			if err := h.CognitivePause(150, 50).Do(ctx); err != nil {
 				return err
 			}
 
@@ -80,7 +83,16 @@ func (h *Humanoid) MoveToVector(target Vector2D, field *PotentialField) chromedp
 			// Simulate the movement. This function call is blocking.
 			var err error
 			// Capture the velocity returned by the simulation.
-			finalVelocity, err = h.simulateTrajectory(ctx, start, target, field, buttonState)
+			// NOTE: simulateTrajectory is assumed to be defined elsewhere (e.g., trajectory.go)
+			// CORRECTED: Cast our internal MouseButton type to the required input.MouseButton type.
+			finalVelocity, err = h.simulateTrajectory(ctx, start, target, field, input.MouseButton(buttonState))
+
+			if err == nil {
+				h.mu.Lock()
+				h.lastMovementDistance = start.Dist(target)
+				h.mu.Unlock()
+			}
+
 			return err
 		}),
 		// Corrective movement action
@@ -97,9 +109,18 @@ func (h *Humanoid) MoveToVector(target Vector2D, field *PotentialField) chromedp
 			finalTarget := h.calculateTargetPoint(box, target, finalVelocity)
 
 			// A small correction movement if the deviation is significant.
-			if finalTarget.Dist(finalPos) > 1.5 { // Threshold for correction (pixels).
+			distanceToFinalTarget := finalTarget.Dist(finalPos)
+			if distanceToFinalTarget > 1.5 { // Threshold for correction (pixels).
 				correctionField := NewPotentialField()
-				_, err := h.simulateTrajectory(ctx, finalPos, finalTarget, correctionField, buttonState)
+				// NOTE: simulateTrajectory is assumed to be defined elsewhere
+				// CORRECTED: Cast our internal MouseButton type to the required input.MouseButton type.
+				_, err := h.simulateTrajectory(ctx, finalPos, finalTarget, correctionField, input.MouseButton(buttonState))
+
+				if err == nil {
+					h.mu.Lock()
+					h.lastMovementDistance += distanceToFinalTarget
+					h.mu.Unlock()
+				}
 				return err
 			}
 			return nil

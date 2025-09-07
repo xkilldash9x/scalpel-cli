@@ -12,6 +12,15 @@ logger:
   max_backups: 3
   max_age: 7
   compress: true
+  # Here's the new section for custom terminal colors.
+  colors:
+    debug: "cyan"
+    info: "green"
+    warn: "yellow"
+    error: "red"
+    dpanic: "magenta"
+    panic: "magenta"
+    fatal: "magenta"
 
 # postgresql database configuration for storing findings
 postgres:
@@ -110,3 +119,4 @@ scanners:
           UUID: ["horizontal_swap"]
           Base64Encoded: ["bit_flip"]
           ObjectID: ["increment_char"]
+

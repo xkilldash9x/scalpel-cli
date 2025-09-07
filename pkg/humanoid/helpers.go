@@ -9,26 +9,15 @@ import (
 
 	// Required for NodeID and Node types
 	"github.com/chromedp/cdproto/cdp"
-	// Required for BoxModel and low-level DOM access
+	// Required for BoxModel and low-level DOM access. Necessary for precise geometry.
 	"github.com/chromedp/cdproto/dom"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
 )
 
-// sleepContext is a helper function that pauses execution for a given duration
-// while being cancellable by the parent context.
-func sleepContext(ctx context.Context, duration time.Duration) error {
-	// Handle negative or zero duration immediately.
-	if duration <= 0 {
-		return nil
-	}
-	select {
-	case <-ctx.Done():
-		return ctx.Err()
-	case <-time.After(duration):
-		return nil
-	}
-}
+/*
+sleepContext removed. Standardized on chromedp.Sleep(duration).Do(ctx).
+*/
 
 // boxToCenter calculates the geometric center (centroid) of a DOM BoxModel.
 func boxToCenter(box *dom.BoxModel) (center Vector2D, valid bool) {
@@ -117,11 +106,11 @@ func getElementBox(ctx context.Context, nodeID cdp.NodeID, logger *zap.Logger) (
 		logger.Debug("Humanoid: Failed to get valid BoxModel, retrying...", zap.Int("attempt", i+1), zap.Error(err))
 
 		// Wait before retrying (Exponential backoff).
-		select {
-		case <-time.After(time.Millisecond * time.Duration(50*math.Pow(2, float64(i)))):
-			continue
-		case <-ctx.Done():
-			return nil, ctx.Err()
+		// MODERNIZATION: Use chromedp.Sleep for context awareness instead of time.After/select.
+		sleepDuration := time.Millisecond * time.Duration(50*math.Pow(2, float64(i)))
+		if err := chromedp.Sleep(sleepDuration).Do(ctx); err != nil {
+			// Context was cancelled during sleep
+			return nil, err
 		}
 	}
 

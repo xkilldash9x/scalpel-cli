@@ -5,94 +5,96 @@ import (
 	"context"
 	"math"
 	"time"
-
+	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
-	"go.uber.org/zap"
 )
 
 // CognitivePause simulates a pause with subtle, noisy cursor movements (idling behavior).
-// It also handles fatigue recovery.
-func (h *Humanoid) CognitivePause(ctx context.Context, meanMs, stdDevMs float64) error {
-	h.mu.Lock()
-	// Fatigue makes cognitive processes slower.
-	fatigueFactor := 1.0 + h.fatigueLevel
-	rng := h.rng
-	h.mu.Unlock()
+// This function returns a chromedp.Action, making it composable.
+func (h *Humanoid) CognitivePause(meanMs, stdDevMs float64) chromedp.Action {
+	// We wrap the logic in an ActionFunc so that randomness and fatigue
+	// are evaluated at execution time, not planning time.
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		h.mu.Lock()
+		// Fatigue makes cognitive processes slower.
+		fatigueFactor := 1.0 + h.fatigueLevel
+		rng := h.rng
+		h.mu.Unlock()
 
-	// Calculate the duration of the pause.
-	duration := time.Duration(fatigueFactor*(meanMs+rng.NormFloat64()*stdDevMs)) * time.Millisecond
-	if duration <= 0 {
-		return nil
-	}
+		// Calculate the duration of the pause.
+		duration := time.Duration(fatigueFactor*(meanMs+rng.NormFloat64()*stdDevMs)) * time.Millisecond
+		if duration <= 0 {
+			return nil
+		}
 
-	// Recover fatigue during the pause.
-	h.recoverFatigue(duration)
+		// Recover fatigue during the pause (this happens immediately upon execution start).
+		h.recoverFatigue(duration)
 
-	// For longer pauses (> 100ms), simulate the cursor idling (Hesitate).
-	if duration > 100*time.Millisecond {
-		return h.Hesitate(duration).Do(ctx)
-	}
+		// For longer pauses (> 100ms), simulate the cursor idling (Hesitate).
+		if duration > 100*time.Millisecond {
+			// Hesitate returns an Action which we execute immediately.
+			return h.Hesitate(duration).Do(ctx)
+		}
 
-	// For shorter pauses, a simple sleep is sufficient (no mouse movement).
-	return h.pause(ctx, duration)
+		// For shorter pauses, a simple sleep is sufficient.
+		// Use chromedp.Sleep, which is context-aware during execution.
+		return chromedp.Sleep(duration).Do(ctx)
+	})
 }
 
 // Hesitate simulates a pause with subtle, noisy cursor movements.
+// REFACTORED: The original implementation built a task list based on time elapsed during planning.
+// We now execute iteratively within an ActionFunc to ensure correct real-time behavior.
 func (h *Humanoid) Hesitate(duration time.Duration) chromedp.Action {
 	return chromedp.ActionFunc(func(ctx context.Context) error {
 		h.mu.Lock()
 		startPos := h.currentPos
+		rng := h.rng
 		h.mu.Unlock()
 
 		startTime := time.Now()
-		// Use context-aware loop termination check.
-		for time.Since(startTime) < duration && ctx.Err() == nil {
+
+		// Loop and execute actions immediately until the duration is reached.
+		for time.Since(startTime) < duration {
 			// Small, random movements.
 			h.mu.Lock()
-			finalPerturbedPoint := startPos.Add(Vector2D{
-				X: (h.rng.Float64() - 0.5) * 5,
-				Y: (h.rng.Float64() - 0.5) * 5,
+			// Ensure Intn argument is positive for robustness
+			randRange := 100
+			randIntVal := 0
+			if randRange > 0 {
+				randIntVal = rng.Intn(randRange)
+			}
+
+			targetPos := startPos.Add(Vector2D{
+				X: (rng.Float64() - 0.5) * 5,
+				Y: (rng.Float64() - 0.5) * 5,
 			})
 			h.mu.Unlock()
 
-			// CORRECTION: Use the correct high-level function chromedp.MouseMove.
-			moveAction := chromedp.MouseMove(finalPerturbedPoint.X, finalPerturbedPoint.Y)
-			if err := moveAction.Do(ctx); err != nil {
-				h.logger.Debug("Humanoid: Hesitation movement failed", zap.Error(err))
-				// If context is cancelled, return the error immediately.
-				if ctx.Err() != nil {
-					return ctx.Err()
-				}
-				// Otherwise, we can ignore this non-critical error.
+			
+			if err := chromedp.MouseEvent(input.MouseMoved, targetPos.X, targetPos.Y).Do(ctx); err != nil {
+				return err
 			}
 
-			// Update internal position tracker after successful move.
+			// Update the internal position tracker immediately.
 			h.mu.Lock()
-			h.currentPos = finalPerturbedPoint
+			h.currentPos = targetPos
 			h.mu.Unlock()
 
 			// Wait a bit before the next micro movement.
-			h.mu.Lock()
-			// Ensure Intn argument is positive.
-			randPart := 0
-			if 100 > 0 {
-				randPart = h.rng.Intn(100)
-			}
-			pauseDuration := time.Duration(50+randPart) * time.Millisecond
-			h.mu.Unlock()
+			pauseDuration := time.Duration(50+randIntVal) * time.Millisecond
 
 			// Adjust pause duration if it exceeds the remaining total duration.
 			if time.Since(startTime)+pauseDuration > duration {
 				pauseDuration = duration - time.Since(startTime)
 			}
 
-			// Ensure duration is positive before sleeping.
 			if pauseDuration <= 0 {
 				break
 			}
 
-			// Use context-aware sleep instead of time.Sleep.
-			if err := sleepContext(ctx, pauseDuration); err != nil {
+			// Execute Sleep immediately (context-aware).
+			if err := chromedp.Sleep(pauseDuration).Do(ctx); err != nil {
 				return err
 			}
 		}
