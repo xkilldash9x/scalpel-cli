@@ -1,240 +1,203 @@
-/**
- * In-browser logic for performing a single human-like scroll iteration (JS-based).
- */
-async (selector, injectedDeltaY, injectedDeltaX, readDensityFactor) => {
-    // --- Utility Functions (getScrollableParent, waitForScrollStabilization, estimateContentDensity) ---
+//pkg/humanoid/trajectory.go
+package humanoid
 
-    const getScrollableParent = (node, axis = 'y') => {
-        if (node == null || node === document.body || node === document.documentElement) {
-            return document.scrollingElement || document.documentElement;
+import (
+    "context"
+    "math"
+    "time"
+
+    // Requires latest cdproto for input.ButtonNone, input.ButtonLeft, etc.
+    "github.com/chromedp/cdproto/input"
+    "github.com/chromedp/chromedp" // Required for chromedp.Sleep
+    "go.uber.org/zap"
+)
+
+// computeEaseInOutCubic provides a smooth acceleration and deceleration profile.
+func computeEaseInOutCubic(t float64) float64 {
+    if t < 0.5 {
+        return 4 * t * t * t
+    }
+    return 1 - math.Pow(-2*t+2, 3)/2
+}
+
+// calculateFittsLaw determines movement duration based on Fitts's Law.
+func (h *Humanoid) calculateFittsLaw(distance float64) time.Duration {
+    const W = 30.0 // Assumed default target width (W) in pixels.
+
+    // Index of Difficulty (ID)
+    id := math.Log2(1.0 + distance/W)
+
+    h.mu.Lock()
+    A := h.dynamicConfig.FittsA
+    B := h.dynamicConfig.FittsB
+    rng := h.rng
+    h.mu.Unlock()
+
+    // Movement Time (MT) in milliseconds
+    mt := A + B*id
+
+    // Add slight randomization (+/- 15%)
+    mt += mt * (rng.Float64()*0.3 - 0.15)
+
+    return time.Duration(mt) * time.Millisecond
+}
+
+// generateIdealPath creates a human like trajectory (Bezier curve) deformed by the potential field.
+func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField, numSteps int) []Vector2D {
+    p0, p3 := start, end
+    mainVec := end.Sub(start)
+    dist := mainVec.Mag()
+
+    if dist < 1.0 || numSteps <= 1 {
+        return []Vector2D{end}
+    }
+
+    mainDir := mainVec.Normalize()
+
+    // Sample forces at 1/3rd and 2/3rds along the path.
+    samplePoint1 := start.Add(mainDir.Mul(dist / 3.0))
+    force1 := field.CalculateNetForce(samplePoint1)
+    samplePoint2 := start.Add(mainDir.Mul(dist * 2.0 / 3.0))
+    force2 := field.CalculateNetForce(samplePoint2)
+
+    // Create control points based on the forces.
+    p1 := samplePoint1.Add(force1.Mul(dist * 0.1))
+    p2 := samplePoint2.Add(force2.Mul(dist * 0.1))
+
+    path := make([]Vector2D, numSteps)
+    for i := 0; i < numSteps; i++ {
+        t := float64(i) / float64(numSteps-1)
+        // Cubic Bezier curve formula.
+        omt := 1.0 - t
+        omt2 := omt * omt
+        omt3 := omt2 * omt
+        t2 := t * t
+        t3 := t2 * t
+
+        path[i] = p0.Mul(omt3).Add(p1.Mul(3*omt2*t)).Add(p2.Mul(3*omt*t2)).Add(p3.Mul(t3))
+    }
+
+    return path
+}
+
+// simulateTrajectory moves the mouse along a generated path, dispatching events.
+// This function requires immediate execution and precise timing, utilizing the low-level cdproto/input API.
+func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, field *PotentialField, buttonState input.MouseButton) (Vector2D, error) {
+    dist := start.Dist(end)
+    h.mu.Lock()
+    h.lastMovementDistance = dist
+    h.mu.Unlock()
+
+    duration := h.calculateFittsLaw(dist)
+    numSteps := int(duration.Seconds() * 100)
+    if numSteps < 2 {
+        numSteps = 2
+    }
+
+    if field == nil {
+        field = NewPotentialField()
+    }
+
+    idealPath := h.generateIdealPath(start, end, field, numSteps)
+
+    var velocity Vector2D
+    startTime := time.Now()
+    lastPos := start
+    lastTime := startTime
+
+    for i := 0; i < len(idealPath); i++ {
+        t := float64(i) / float64(len(idealPath)-1)
+        easedT := computeEaseInOutCubic(t)
+
+        pathIndex := int(easedT * float64(len(idealPath)-1))
+        if pathIndex >= len(idealPath) {
+            pathIndex = len(idealPath) - 1
         }
-        if (node.nodeType !== Node.ELEMENT_NODE) {
-            return getScrollableParent(node.parentNode, axis);
-        }
-        let style;
-        try {
-            style = window.getComputedStyle(node);
-        } catch (e) {
-            // Element might be detached or in a context that prevents style access.
-            return getScrollableParent(node.parentNode, axis);
-        }
-        let overflow, clientSize, scrollSize;
-        if (axis === 'y') {
-            overflow = style.overflowY;
-            clientSize = node.clientHeight;
-            scrollSize = node.scrollHeight;
-        } else {
-            overflow = style.overflowX;
-            clientSize = node.clientWidth;
-            scrollSize = node.scrollWidth;
-        }
-        const isScrollable = (overflow === 'auto' || overflow === 'scroll') && scrollSize > clientSize + 1;
-        if (isScrollable) {
-            return node;
-        }
-        return getScrollableParent(node.parentNode, axis);
-    };
+        currentPos := idealPath[pathIndex]
 
-    const waitForScrollStabilization = (element, timeout = 1000) => {
-        return new Promise((resolve) => {
-            let lastScrollTop = element.scrollTop;
-            let lastScrollLeft = element.scrollLeft;
-            let stabilizationChecks = 0;
-            const requiredChecks = 3;
-            let timeoutId = null;
+        // Calculate the target time for this step.
+        currentTime := startTime.Add(time.Duration(easedT * float64(duration)))
 
-            const checkScroll = () => {
-                // Check if element is still valid/connected
-                if (!element.isConnected && element !== document.scrollingElement && element !== document.documentElement) {
-                    if (timeoutId) clearTimeout(timeoutId);
-                    resolve();
-                    return;
-                }
-                const currentScrollTop = element.scrollTop;
-                const currentScrollLeft = element.scrollLeft;
-
-                if (currentScrollTop !== lastScrollTop || currentScrollLeft !== lastScrollLeft) {
-                    lastScrollTop = currentScrollTop;
-                    lastScrollLeft = currentScrollLeft;
-                    stabilizationChecks = 0;
-                    requestAnimationFrame(checkScroll);
-                } else {
-                    stabilizationChecks++;
-                    if (stabilizationChecks >= requiredChecks) {
-                        if (timeoutId) clearTimeout(timeoutId);
-                        resolve();
-                    } else {
-                        requestAnimationFrame(checkScroll);
-                    }
-                }
-            };
-            requestAnimationFrame(checkScroll);
-            timeoutId = setTimeout(() => {
-                resolve();
-            }, timeout);
-        });
-    };
-
-    const estimateContentDensity = () => {
-        let totalTextLength = 0;
-        const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
-            acceptNode: (node) => {
-                if (!node.parentElement || node.parentElement.offsetParent === null) return NodeFilter.FILTER_REJECT;
-                
-                // Ignore non-readable elements.
-                const parentTagName = node.parentElement.tagName;
-                if (parentTagName === 'SCRIPT' || parentTagName === 'STYLE' || parentTagName === 'NOSCRIPT') return NodeFilter.FILTER_REJECT;
-
-                try {
-                    const style = window.getComputedStyle(node.parentElement);
-                    if (style.visibility === 'hidden' || style.display === 'none') return NodeFilter.FILTER_REJECT;
-                } catch (e) {
-                    return NodeFilter.FILTER_REJECT;
-                }
-                if (node.nodeValue.trim().length < 3) return NodeFilter.FILTER_SKIP;
-                return NodeFilter.FILTER_ACCEPT;
+        // Use context-aware sleep to adhere to Fitts's law timing.
+        sleepDur := time.Until(currentTime)
+        if sleepDur > 0 {
+            if err := chromedp.Sleep(sleepDur).Do(ctx); err != nil {
+                return velocity, err
             }
-        });
-        while (walker.nextNode()) {
-            totalTextLength += walker.currentNode.nodeValue.length;
         }
-        const normalizationFactor = 3000;
-        const density = totalTextLength / normalizationFactor;
-        return Math.min(1.5, density);
-    };
 
-    // --- Main Logic ---
+        // Update velocity based on actual time elapsed.
+        now := time.Now()
+        dt := now.Sub(lastTime).Seconds()
+        if dt > 1e-6 {
+            velocity = currentPos.Sub(lastPos).Mul(1.0 / dt)
+        }
+        lastPos = currentPos
+        lastTime = now
 
-    const el = document.querySelector(selector);
-    if (!el) {
-        return JSON.stringify({ isIntersecting: false, isComplete: true, verticalDelta: 0, horizontalDelta: 0, contentDensity: 0 });
-    }
+        // -- Noise Combination (Relies on real-time elapsed) --
+        h.mu.Lock()
+        perlinMagnitude := h.dynamicConfig.PerlinAmplitude
+        rng := h.rng
+        h.mu.Unlock()
 
-    const viewportHeight = window.innerHeight;
-    const viewportWidth = window.innerWidth;
-    const elementBounds = el.getBoundingClientRect();
-    const visibilityThreshold = 30; // Pixels from edge.
+        perlinFrequency := 0.8
+        timeElapsed := now.Sub(startTime).Seconds()
+        perlinDrift := Vector2D{
+            X: h.noiseX.Noise1D(timeElapsed*perlinFrequency) * perlinMagnitude,
+            Y: h.noiseY.Noise1D(timeElapsed*perlinFrequency) * perlinMagnitude,
+        }
 
-    const isVerticallyVisible = elementBounds.top >= visibilityThreshold && elementBounds.bottom <= viewportHeight - visibilityThreshold;
-    const isHorizontallyVisible = elementBounds.left >= visibilityThreshold && elementBounds.right <= viewportWidth - visibilityThreshold;
+        driftAppliedPos := currentPos.Add(perlinDrift)
+        finalPerturbedPoint := h.applyGaussianNoise(driftAppliedPos)
 
-    if (isVerticallyVisible && isHorizontallyVisible) {
-        return JSON.stringify({ isIntersecting: true, isComplete: true, verticalDelta: 0, horizontalDelta: 0, contentDensity: 0 });
-    }
+        // Dispatch the mouse movement event.
+        // MODERNIZED: Use the modern builder pattern `input.DispatchMouseEvent`
+        // and the correct event type constant `input.MouseMoved`.
+        dispatchMouse := input.DispatchMouseEvent(input.MouseMoved, finalPerturbedPoint.X, finalPerturbedPoint.Y)
 
-    const contentDensity = estimateContentDensity();
-
-    // 1. Calculate Vertical Scroll
-    let scrollAmountY = 0, distanceToTargetY = 0, scrollableParentY = null, startScrollTop = 0;
-    if (!isVerticallyVisible) {
-        scrollableParentY = getScrollableParent(el, 'y');
-        if (scrollableParentY) {
-            startScrollTop = scrollableParentY.scrollTop;
-            let elementYRelativeToParent;
-            if (scrollableParentY === document.scrollingElement || scrollableParentY === document.documentElement) {
-                elementYRelativeToParent = elementBounds.top + scrollableParentY.scrollTop;
-            } else {
-                const parentBounds = scrollableParentY.getBoundingClientRect();
-                elementYRelativeToParent = elementBounds.top - parentBounds.top + startScrollTop;
+        // MODERNIZED: Use the correct constant for no button, `input.ButtonNone`.
+        // This requires the updated cdproto dependency.
+        if buttonState != input.ButtonNone {
+            dispatchMouse = dispatchMouse.WithButton(buttonState)
+            var buttons int64
+            // MODERNIZED: Use the correct button constants (e.g., input.ButtonLeft).
+            switch buttonState {
+            case input.ButtonLeft:
+                buttons = 1
+            case input.ButtonRight:
+                buttons = 2
+            case input.ButtonMiddle:
+                buttons = 4
             }
-            const parentHeight = scrollableParentY.clientHeight || viewportHeight;
-            const targetViewportPosition = parentHeight * (0.2 + Math.random() * 0.6);
-            let targetScrollTop = elementYRelativeToParent - targetViewportPosition;
-            distanceToTargetY = targetScrollTop - startScrollTop;
-            scrollAmountY = distanceToTargetY;
-        }
-    }
-
-    // 2. Calculate Horizontal Scroll
-    let scrollAmountX = 0, distanceToTargetX = 0, scrollableParentX = null, startScrollLeft = 0;
-    if (!isHorizontallyVisible) {
-        scrollableParentX = getScrollableParent(el, 'x');
-        if (scrollableParentX) {
-            startScrollLeft = scrollableParentX.scrollLeft;
-            let elementXRelativeToParent;
-            if (scrollableParentX === document.scrollingElement || scrollableParentX === document.documentElement) {
-                elementXRelativeToParent = elementBounds.left + scrollableParentX.scrollLeft;
-            } else {
-                const parentBounds = scrollableParentX.getBoundingClientRect();
-                elementXRelativeToParent = elementBounds.left - parentBounds.left + startScrollLeft;
+            if buttons > 0 {
+                dispatchMouse = dispatchMouse.WithButtons(buttons)
             }
-            const parentWidth = scrollableParentX.clientWidth || viewportWidth;
-            const targetViewportPosition = parentWidth * (0.2 + Math.random() * 0.6);
-            let targetScrollLeft = elementXRelativeToParent - targetViewportPosition;
-            distanceToTargetX = targetScrollLeft - startScrollLeft;
-            scrollAmountX = distanceToTargetX;
+        }
+
+        // Execute the low-level command immediately.
+        if err := dispatchMouse.Do(ctx); err != nil {
+            h.logger.Warn("Humanoid: Failed to dispatch mouse move event during simulation", zap.Error(err))
+            return velocity, err
+        }
+
+        // Update the internal position tracker.
+        h.mu.Lock()
+        h.currentPos = finalPerturbedPoint
+        h.mu.Unlock()
+
+        // Simulate browser rendering/event loop delay.
+        // Ensure Intn argument is positive
+        randPart := 0
+        if 4 > 0 {
+            randPart = rng.Intn(4)
+        }
+        sleepDuration := time.Duration(2+randPart) * time.Millisecond
+
+        if err := chromedp.Sleep(sleepDuration).Do(ctx); err != nil {
+            return velocity, err
         }
     }
 
-    // 3. Apply Injected Deltas and Chunking/Density
-    if (injectedDeltaY !== 0 || injectedDeltaX !== 0) {
-        scrollAmountY = injectedDeltaY;
-        scrollAmountX = injectedDeltaX;
-    } else {
-        const densityImpact = Math.max(0.1, 1.0 - contentDensity * readDensityFactor);
-        const randomFactor = 0.6 + Math.random() * 0.4;
-        const chunkFactor = randomFactor * densityImpact;
-        scrollAmountY = distanceToTargetY * chunkFactor;
-        scrollAmountX = distanceToTargetX * chunkFactor;
-    }
-
-    // 4. Execute Scroll
-    const maxScroll = Math.max(Math.abs(scrollAmountY), Math.abs(scrollAmountX));
-    const behavior = maxScroll > 150 ? 'smooth' : 'auto';
-
-    const parentsToWaitFor = new Set();
-
-    if (scrollableParentY === scrollableParentX && scrollableParentY) {
-        if (Math.abs(scrollAmountY) > 1 || Math.abs(scrollAmountX) > 1) {
-            scrollableParentY.scrollBy({ top: scrollAmountY, left: scrollAmountX, behavior: behavior });
-            parentsToWaitFor.add(scrollableParentY);
-        }
-    } else {
-        if (Math.abs(scrollAmountY) > 1 && scrollableParentY) {
-            scrollableParentY.scrollBy({ top: scrollAmountY, behavior: behavior });
-            parentsToWaitFor.add(scrollableParentY);
-        }
-        if (Math.abs(scrollAmountX) > 1 && scrollableParentX) {
-            scrollableParentX.scrollBy({ left: scrollAmountX, behavior: behavior });
-            parentsToWaitFor.add(scrollableParentX);
-        }
-    }
-
-    // 5. Wait for Stabilization
-    if (behavior === 'smooth' && parentsToWaitFor.size > 0) {
-        const waitPromises = Array.from(parentsToWaitFor).map(p => waitForScrollStabilization(p));
-        await Promise.all(waitPromises);
-    } else if (parentsToWaitFor.size > 0) {
-        // Short wait for 'auto' scroll
-        await new Promise(res => setTimeout(res, 50 + Math.random() * 100));
-    }
-
-    // 6. Check Completion
-    let isComplete = false;
-    let boundaryHit = false;
-
-    if (Math.abs(distanceToTargetY) > 1 && scrollableParentY) {
-        const endScrollTop = scrollableParentY.scrollTop;
-        if (Math.abs(startScrollTop - endScrollTop) < 1 && Math.abs(scrollAmountY) > 1) {
-            boundaryHit = true;
-        }
-    }
-    if (Math.abs(distanceToTargetX) > 1 && scrollableParentX) {
-        const endScrollLeft = scrollableParentX.scrollLeft;
-        if (Math.abs(startScrollLeft - endScrollLeft) < 1 && Math.abs(scrollAmountX) > 1) {
-            boundaryHit = true;
-        }
-    }
-
-    if (boundaryHit || (Math.abs(distanceToTargetY) < 5 && Math.abs(distanceToTargetX) < 5)) {
-        isComplete = true;
-    }
-
-    return JSON.stringify({
-        isIntersecting: false,
-        isComplete: isComplete,
-        verticalDelta: distanceToTargetY,
-        horizontalDelta: distanceToTargetX,
-        contentDensity: contentDensity,
-    });
+    return velocity, nil
 }

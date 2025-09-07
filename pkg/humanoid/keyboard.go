@@ -55,7 +55,6 @@ func (h *Humanoid) Type(selector string, text string) chromedp.Action {
 		// 2. Execution Loop.
 		for i := 0; i < len(runes); i++ {
 			// Inter-key pause (IKD).
-			// Pass the rune slice instead of the string for safe N-gram analysis.
 			if err := h.keyPause(ctx, 1.0, 1.0, runes, i); err != nil {
 				return err
 			}
@@ -108,13 +107,18 @@ func (h *Humanoid) sendKey(ctx context.Context, key rune) error {
 }
 
 // sendControlKey dispatches control characters (like Backspace).
-// MODERNIZED: Updated signature to accept interface{} to accommodate kb.Key types (e.g., kb.Backspace)
-// as well as standard strings/runes, matching the flexibility of chromedp.KeyAction.
+// CORRECTED: The previous implementation misused chromedp.KeyAction, causing compilation errors.
+// MODERNIZED: Updated to use chromedp.SendKeys targeting the active element.
+// We accept interface{} to handle both strings/runes and kb.Key types seamlessly.
 func (h *Humanoid) sendControlKey(ctx context.Context, key interface{}) error {
-	// The high-level chromedp.KeyAction handles control runes
-	// (like '\b' for Backspace, '\r' or '\n' for Enter) directly.
+	// Use SendKeys targeted at the active element.
+	// This correctly handles control keys defined in the kb package (like kb.Backspace).
+	action := chromedp.SendKeys(
+		"document.activeElement",
+		key,
+		chromedp.ByJSPath,
+	)
 
-	action := chromedp.KeyAction(key)
 	if err := action.Do(ctx); err != nil {
 		return err
 	}
@@ -140,7 +144,6 @@ func (h *Humanoid) keyHoldDuration() time.Duration {
 }
 
 // keyPause introduces a human-like inter-key delay (IKD or Flight Time).
-// Now accepts []rune for safe, character-aware N-gram analysis.
 func (h *Humanoid) keyPause(ctx context.Context, meanScale, stdDevScale float64, runes []rune, index int) error {
 	mean := 70.0 * meanScale
 	stdDev := 28.0 * stdDevScale
@@ -148,11 +151,9 @@ func (h *Humanoid) keyPause(ctx context.Context, meanScale, stdDevScale float64,
 	ngramFactor := 1.0
 
 	// Adjust for N-grams (Rhythmic typing).
-	// We operate on the rune slice for safety.
 	if runes != nil && index > 0 && index < len(runes) {
 		// Check Trigram (Previous 2 + Current)
 		if index >= 2 {
-			// Convert the rune slice segment to a lowercase string for map lookup.
 			trigraph := strings.ToLower(string(runes[index-2 : index+1]))
 			if commonNgrams[trigraph] {
 				ngramFactor = 0.55
@@ -161,7 +162,6 @@ func (h *Humanoid) keyPause(ctx context.Context, meanScale, stdDevScale float64,
 
 		// Check Digram (Previous 1 + Current)
 		if ngramFactor == 1.0 && index >= 1 {
-			// Convert the rune slice segment to a lowercase string for map lookup.
 			digraph := strings.ToLower(string(runes[index-1 : index+1]))
 			if commonNgrams[digraph] {
 				ngramFactor = 0.7
@@ -226,7 +226,7 @@ func (h *Humanoid) introduceTypo(ctx context.Context, cfg Config, runes []rune, 
 	return h.introduceInsertion(ctx, char)
 }
 
-// --- Typo Implementations (These correctly use the modernized sendKey/sendControlKey) ---
+// --- Typo Implementations ---
 
 func (h *Humanoid) introduceNeighborTypo(ctx context.Context, char rune) (bool, error) {
 	lowerChar := unicode.ToLower(char)
