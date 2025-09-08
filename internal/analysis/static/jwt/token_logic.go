@@ -1,4 +1,4 @@
-// pkg/analysis/static/jwt/token_logic.go
+// internal/analysis/static/jwt/token_logic.go
 package jwt
 
 import (
@@ -7,7 +7,7 @@ import (
 
 	// Using v5 of the jwt-go library
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/xkilldash9x/scalpel-cli/pkg/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
 // FindingType defines the specific kind of JWT vulnerability found.

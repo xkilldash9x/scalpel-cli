@@ -1,4 +1,4 @@
-// pkg/analysis/auth/idor/analyzer.go
+// internal/analysis/auth/idor/analyzer.go
 package idor
 
 import (
@@ -14,7 +14,7 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
 // SessionContext holds the state and history for a single user persona.
