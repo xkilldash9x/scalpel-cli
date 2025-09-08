@@ -12,7 +12,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/network"
+	"github.com/xkilldash9x/scalpel-cli/internal/network"
 )
 
 // ExecuteH2Multiplexing leverages HTTP/2 stream multiplexing.

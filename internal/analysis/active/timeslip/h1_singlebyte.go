@@ -10,8 +10,8 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/network"
-	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
+	"github.com/xkilldash9x/scalpel-cli/internal/network"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"go.uber.org/zap"
 )
 
