@@ -1,0 +1,38 @@
+# .github/workflows/go-test.yml
+
+# This is the name of the workflow as it will appear in the "Actions" tab of your GitHub repository.
+name: Go Test
+
+# This section defines when the workflow should run.
+on:
+  # Run on pushes to the "main" branch.
+  push:
+    branches: [ "main" ]
+  # Run on any pull request that targets the "main" branch.
+  pull_request:
+    branches: [ "main" ]
+
+# This section defines the jobs to be executed.
+jobs:
+  # We have a single job named "build".
+  build:
+    # The type of virtual machine to run the job on. "ubuntu-latest" is a good default.
+    runs-on: ubuntu-latest
+
+    # These are the individual steps that make up the job.
+    steps:
+    # Step 1: Check out your repository's code so the workflow can access it.
+    - uses: actions/checkout@v4
+
+    # Step 2: Set up the Go programming language environment.
+    - name: Set up Go
+      uses: actions/setup-go@v5
+      with:
+        # Specify the version of Go to use.
+        go-version: '1.25'
+
+    # Step 3: Run the tests
+    - name: Test
+      # The "go test ./..." command runs tests in the current directory and all subdirectories.
+      # The "-v" flag provides verbose output, just like you've been using.
+      run: go test -v ./...
