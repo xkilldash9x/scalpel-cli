@@ -1,20 +1,23 @@
+// Filename: internal/humanoid/scrolling.go
 package humanoid
 
 import (
-    "context"
-    "encoding/json"
-    "fmt"
-    "time"
+	"context"
+	"encoding/json"
+	"fmt"
+	"time"
 
-    "github.com/chromedp/cdproto/runtime" // <-- REQUIRED IMPORT ADDED
-    "github.com/chromedp/chromedp"
-    "go.uber.org/zap"
+	"github.com/chromedp/cdproto/runtime"
+	"github.com/chromedp/chromedp"
+	"go.uber.org/zap"
 )
 
-// The JavaScript logic for performing a single scroll iteration.
+// scrollIterationJS is the beast of a JavaScript function that does the actual scrolling.
+// It's designed to run in the browser context and figures out what to scroll and by how much,
+// trying its best to mimic how a person would scroll to find something.
 const scrollIterationJS = `
 async (selector, injectedDeltaY, injectedDeltaX, readDensityFactor) => {
-    // --- Utility Functions (getScrollableParent, waitForScrollStabilization, estimateContentDensity) ---
+    // -- Utility Functions (getScrollableParent, waitForScrollStabilization, estimateContentDensity) --
 
     const getScrollableParent = (node, axis = 'y') => {
         if (node == null || node === document.body || node === document.documentElement) {
@@ -115,7 +118,7 @@ async (selector, injectedDeltaY, injectedDeltaX, readDensityFactor) => {
         return Math.min(1.5, density);
     };
 
-    // --- Main Logic ---
+    // -- Main Logic --
 
     const el = document.querySelector(selector);
     if (!el) {
@@ -255,187 +258,218 @@ async (selector, injectedDeltaY, injectedDeltaX, readDensityFactor) => {
 }
 `
 
+// scrollResult is what we get back from our JavaScript friend. It tells us how the scroll went.
 type scrollResult struct {
-    IsIntersecting  bool    `json:"isIntersecting"`
-    IsComplete      bool    `json:"isComplete"`
-    VerticalDelta   float64 `json:"verticalDelta"`
-    HorizontalDelta float64 `json:"horizontalDelta"`
-    ContentDensity  float64 `json:"contentDensity"`
-    ElementExists   bool    `json:"elementExists"`
+	IsIntersecting  bool    `json:"isIntersecting"`
+	IsComplete      bool    `json:"isComplete"`
+	VerticalDelta   float64 `json:"verticalDelta"`
+	HorizontalDelta float64 `json:"horizontalDelta"`
+	ContentDensity  float64 `json:"contentDensity"`
+	ElementExists   bool    `json:"elementExists"`
 }
 
-// intelligentScroll scrolls the page until the target selector is visible.
+// executeScrollJS is our new gatekeeper for running the scroll script.
+// It abstracts away the direct executor call, making things cleaner and easier to test.
+func (h *Humanoid) executeScrollJS(ctx context.Context, selector string, injectedDeltaY, injectedDeltaX, readDensityFactor float64) (*scrollResult, error) {
+	// We need to marshal our Go types into JSON for the runtime.CallArgument.
+	arg1, err := json.Marshal(selector)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal selector arg: %w", err)
+	}
+	arg2, err := json.Marshal(injectedDeltaY)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal deltaY arg: %w", err)
+	}
+	arg3, err := json.Marshal(injectedDeltaX)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal deltaX arg: %w", err)
+	}
+	arg4, err := json.Marshal(readDensityFactor)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal density arg: %w", err)
+	}
+
+	// We're manually building the parameters here, this is what chromedp.CallFunctionOn does behind the scenes anyway.
+	args := []*runtime.CallArgument{
+		{Value: arg1},
+		{Value: arg2},
+		{Value: arg3},
+		{Value: arg4},
+	}
+
+	params := runtime.CallFunctionOn(scrollIterationJS).
+		WithArguments(args).
+		WithAwaitPromise(true).
+		WithReturnByValue(true) // We want the JSON string back, not a handle to a remote object.
+
+	// Offload the actual execution to the executor. No more direct calls.
+	remoteObject, exceptionDetails, err := h.executor.CallFunctionOn(ctx, params)
+	if err != nil {
+		return nil, err
+	}
+	if exceptionDetails != nil {
+		return nil, fmt.Errorf("javascript execution failed: %s", exceptionDetails.Text)
+	}
+	if remoteObject == nil || remoteObject.Value == nil {
+		return nil, fmt.Errorf("javascript returned null or undefined result")
+	}
+
+	// The result we get is a JSON string, but it's wrapped in another layer of JSON.
+	// So we unmarshal it once to get the string...
+	var resJSON string
+	if err := json.Unmarshal(remoteObject.Value, &resJSON); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal remote object value: %w", err)
+	}
+
+	// ...and then unmarshal that string into our actual result struct.
+	var result scrollResult
+	if err := json.Unmarshal([]byte(resJSON), &result); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal scroll result JSON: %w", err)
+	}
+
+	return &result, nil
+}
+
+// intelligentScroll is the main entry point for our human like scrolling.
+// It tries to scroll until the target selector is nicely in view.
 func (h *Humanoid) intelligentScroll(selector string) chromedp.Action {
-    return chromedp.ActionFunc(func(ctx context.Context) error {
-        h.mu.Lock()
-        readDensityFactor := h.dynamicConfig.ScrollReadDensityFactor
-        rng := h.rng
-        // Probability checks
-        shouldOvershoot := rng.Float64() < h.dynamicConfig.ScrollOvershootProbability
-        shouldRegress := rng.Float64() < h.dynamicConfig.ScrollRegressionProbability
-        h.mu.Unlock()
+	return chromedp.ActionFunc(func(ctx context.Context) error {
+		h.mu.Lock()
+		readDensityFactor := h.dynamicConfig.ScrollReadDensityFactor
+		rng := h.rng
+		// Let's roll the dice to see if we should be a little sloppy.
+		shouldOvershoot := rng.Float64() < h.dynamicConfig.ScrollOvershootProbability
+		shouldRegress := rng.Float64() < h.dynamicConfig.ScrollRegressionProbability
+		h.mu.Unlock()
 
-        maxIterations := 15
-        iteration := 0
+		maxIterations := 15
+		iteration := 0
 
-        for iteration < maxIterations {
-            iteration++
+		for iteration < maxIterations {
+			iteration++
 
-            // 1. Execute Scroll Iteration
-            var resJSON string
+			// -- Step 1: Execute Scroll Iteration --
+			// Using our new abstracted helper function. Much cleaner.
+			result, err := h.executeScrollJS(ctx, selector, 0.0, 0.0, readDensityFactor)
+			if err != nil {
+				// Don't panic if the context was cancelled, that's a graceful exit.
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
+				h.logger.Warn("Humanoid: Scroll iteration JS execution failed", zap.Error(err), zap.Int("iteration", iteration))
+				// The DOM might be having a moment. Let's give it a second.
+				if err := h.executor.Sleep(ctx, 100*time.Millisecond); err != nil {
+					return err
+				}
+				continue
+			}
 
-            // FIXED: Replaced incorrect option with the correct functional option syntax.
-            err := chromedp.CallFunctionOn(
-                scrollIterationJS,
-                &resJSON,
-                func(p *runtime.CallFunctionOnParams) *runtime.CallFunctionOnParams {
-                    return p.WithAwaitPromise(true)
-                },
-                nil,
-                selector, 0.0, 0.0, readDensityFactor,
-            ).Do(ctx)
+			// -- Step 2: Process Results --
+			// If the element's not there, no point in continuing the charade.
+			if !result.ElementExists {
+				h.logger.Debug("Humanoid: Scroll target element does not exist", zap.String("selector", selector))
+				return nil
+			}
 
-            if err != nil {
-                // Handle context cancellation gracefully.
-                if ctx.Err() != nil {
-                    return ctx.Err()
-                }
-                h.logger.Warn("Humanoid: Scroll iteration JS execution failed", zap.Error(err), zap.Int("iteration", iteration))
-                // If JS fails, maybe the DOM is unstable. Wait briefly and try again.
-                if err := chromedp.Sleep(100 * time.Millisecond).Do(ctx); err != nil {
-                    return err
-                }
-                continue
-            }
+			if result.IsIntersecting || result.IsComplete {
+				h.logger.Debug("Humanoid: Scroll complete", zap.Bool("intersecting", result.IsIntersecting), zap.Int("iteration", iteration))
 
-            // 2. Process Results
-            var result scrollResult
-            if err := json.Unmarshal([]byte(resJSON), &result); err != nil {
-                h.logger.Error("Humanoid: Failed to unmarshal scroll result", zap.Error(err))
-                return fmt.Errorf("failed to unmarshal scroll result: %w", err)
-            }
+				// -- Step 3: Handle Overshoot (if applicable) --
+				// Sometimes you scroll a little too far. It happens.
+				if result.IsComplete && !result.IsIntersecting && shouldOvershoot {
+					h.logger.Debug("Humanoid: Simulating scroll overshoot")
+					if err := h.simulateOvershoot(ctx, selector, readDensityFactor, result.VerticalDelta, result.HorizontalDelta); err != nil {
+						// This one is important enough to return the error.
+						return err
+					}
+				}
+				return nil // We're done here.
+			}
 
-            // If the element does not exist, stop trying to scroll to it.
-            if !result.ElementExists {
-                h.logger.Debug("Humanoid: Scroll target element does not exist", zap.String("selector", selector))
-                return nil
-            }
+			// -- Step 4: Pause Between Scrolls --
+			// Gotta simulate reading the content, right?
+			pauseDuration := h.calculateScrollPause(result.ContentDensity)
+			if err := h.executor.Sleep(ctx, pauseDuration); err != nil {
+				return err
+			}
 
-            if result.IsIntersecting || result.IsComplete {
-                h.logger.Debug("Humanoid: Scroll complete", zap.Bool("intersecting", result.IsIntersecting), zap.Int("iteration", iteration))
+			// -- Step 5: Handle Regression (if applicable) --
+			// "Wait, what did I just read?" *scrolls back up*
+			if shouldRegress && iteration > 2 && (result.VerticalDelta > 100 || result.HorizontalDelta > 100) {
+				h.logger.Debug("Humanoid: Simulating scroll regression")
+				if err := h.simulateRegression(ctx, selector, readDensityFactor, result.VerticalDelta, result.HorizontalDelta); err != nil {
+					// Also important enough to bubble up.
+					return err
+				}
+				// Only do this once per scroll attempt, let's not get stuck in a loop.
+				shouldRegress = false
+				// A little extra pause to "re-read".
+				base := 300 * time.Millisecond
+				random := time.Duration(h.rng.Intn(100)) * time.Millisecond
+				if err := h.executor.Sleep(ctx, base+random); err != nil {
+					return err
+				}
+			}
+		}
 
-                // 3. Handle Overshoot (if applicable)
-                if result.IsComplete && !result.IsIntersecting && shouldOvershoot {
-                    h.logger.Debug("Humanoid: Simulating scroll overshoot")
-                    if err := h.simulateOvershoot(ctx, selector, readDensityFactor, result.VerticalDelta, result.HorizontalDelta); err != nil {
-                        return err
-                    }
-                }
-                return nil
-            }
-
-            // 4. Pause between scrolls (Cognitive processing / Reading)
-            pauseDuration := h.calculateScrollPause(result.ContentDensity)
-            if err := chromedp.Sleep(pauseDuration).Do(ctx); err != nil {
-                return err
-            }
-
-            // 5. Handle Regression (if applicable)
-            if shouldRegress && iteration > 2 && (result.VerticalDelta > 100 || result.HorizontalDelta > 100) {
-                h.logger.Debug("Humanoid: Simulating scroll regression")
-                if err := h.simulateRegression(ctx, selector, readDensityFactor, result.VerticalDelta, result.HorizontalDelta); err != nil {
-                    return err
-                }
-                // Reset regression flag so it only happens once per scroll action.
-                shouldRegress = false
-                // Add an extra pause after regression.
-                if err := h.CognitivePause(300, 100).Do(ctx); err != nil {
-                    return err
-                }
-            }
-        }
-
-        h.logger.Warn("Humanoid: Scroll timed out (max iterations reached)", zap.String("selector", selector))
-        // Return nil even on timeout. The caller should handle visibility failure.
-        return nil
-    })
+		h.logger.Warn("Humanoid: Scroll timed out (max iterations reached)", zap.String("selector", selector))
+		// Don't throw an error on timeout. Let the calling action decide if visibility is a problem.
+		return nil
+	})
 }
 
-// calculateScrollPause determines the duration of the pause between scroll actions.
+// calculateScrollPause decides how long to wait between scroll chunks.
+// More text means more "reading" time.
 func (h *Humanoid) calculateScrollPause(contentDensity float64) time.Duration {
-    h.mu.Lock()
-    rng := h.rng
-    h.mu.Unlock()
+	h.mu.Lock()
+	rng := h.rng
+	h.mu.Unlock()
 
-    // Base pause (reaction time)
-    basePause := 150.0 + rng.Float64()*100.0
+	// Base pause for "reaction time".
+	basePause := 150.0 + rng.Float64()*100.0
 
-    // Density impact (reading time) - Higher density means longer pauses.
-    densityPause := contentDensity * (500.0 + rng.Float64()*500.0)
+	// Add time based on how much stuff is on the page.
+	densityPause := contentDensity * (500.0 + rng.Float64()*500.0)
 
-    return time.Duration(basePause+densityPause) * time.Millisecond
+	return time.Duration(basePause+densityPause) * time.Millisecond
 }
 
-// simulateOvershoot performs a small corrective scroll if the main scroll went too far.
+// simulateOvershoot makes a small corrective scroll after going a bit too far.
 func (h *Humanoid) simulateOvershoot(ctx context.Context, selector string, readDensityFactor, lastVDelta, lastHDelta float64) error {
-    h.mu.Lock()
-    rng := h.rng
-    h.mu.Unlock()
+	h.mu.Lock()
+	rng := h.rng
+	h.mu.Unlock()
 
-    // Calculate a small corrective movement in the opposite direction.
-    correctionFactor := 0.1 + rng.Float64()*0.2
-    vCorrection := -lastVDelta * correctionFactor
-    hCorrection := -lastHDelta * correctionFactor
+	// Let's correct by a small random fraction of the last movement.
+	correctionFactor := 0.1 + rng.Float64()*0.2
+	vCorrection := -lastVDelta * correctionFactor
+	hCorrection := -lastHDelta * correctionFactor
 
-    // Execute the corrective scroll using the JS function with injected deltas.
-    var resJSON string
-
-    // FIXED: Replaced incorrect option with the correct functional option syntax.
-    err := chromedp.CallFunctionOn(
-        scrollIterationJS,
-        &resJSON,
-        func(p *runtime.CallFunctionOnParams) *runtime.CallFunctionOnParams {
-            return p.WithAwaitPromise(true)
-        },
-        nil,
-        selector, vCorrection, hCorrection, readDensityFactor,
-    ).Do(ctx)
-
-    if err != nil {
-        h.logger.Warn("Humanoid: Overshoot correction failed", zap.Error(err))
-        // Non-critical error, return nil.
-    }
-    return nil
+	// Use our helper to run the script with the corrective deltas.
+	_, err := h.executeScrollJS(ctx, selector, vCorrection, hCorrection, readDensityFactor)
+	if err != nil {
+		h.logger.Warn("Humanoid: Overshoot correction failed", zap.Error(err))
+		// This isn't a critical failure, so we don't return the error.
+	}
+	return nil
 }
 
-// simulateRegression scrolls slightly backwards, simulating losing one's place while reading.
+// simulateRegression scrolls back a bit, like when you lose your place reading.
 func (h *Humanoid) simulateRegression(ctx context.Context, selector string, readDensityFactor, lastVDelta, lastHDelta float64) error {
-    h.mu.Lock()
-    rng := h.rng
-    h.mu.Unlock()
+	h.mu.Lock()
+	rng := h.rng
+	h.mu.Unlock()
 
-    // Calculate a regression movement (scrolling back up/left).
-    regressionFactor := 0.3 + rng.Float64()*0.4
-    vRegression := -lastVDelta * regressionFactor
-    hRegression := -lastHDelta * regressionFactor
+	// Go back by a larger chunk than the overshoot correction.
+	regressionFactor := 0.3 + rng.Float64()*0.4
+	vRegression := -lastVDelta * regressionFactor
+	hRegression := -lastHDelta * regressionFactor
 
-    // Execute the regression scroll.
-    var resJSON string
-
-    // FIXED: Replaced incorrect option with the correct functional option syntax.
-    err := chromedp.CallFunctionOn(
-        scrollIterationJS,
-        &resJSON,
-        func(p *runtime.CallFunctionOnParams) *runtime.CallFunctionOnParams {
-            return p.WithAwaitPromise(true)
-        },
-        nil,
-        selector, vRegression, hRegression, readDensityFactor,
-    ).Do(ctx)
-
-    if err != nil {
-        h.logger.Warn("Humanoid: Scroll regression failed", zap.Error(err))
-        // Non-critical error, return nil.
-    }
-    return nil
+	// Use the helper again to inject these "oops, went too far" values.
+	_, err := h.executeScrollJS(ctx, selector, vRegression, hRegression, readDensityFactor)
+	if err != nil {
+		h.logger.Warn("Humanoid: Scroll regression failed", zap.Error(err))
+		// Also not a show-stopper.
+	}
+	return nil
 }
