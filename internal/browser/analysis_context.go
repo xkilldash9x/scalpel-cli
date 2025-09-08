@@ -6,23 +6,19 @@ import (
 	"fmt"
 	"sync"
 	"time"
-
-	// Required for low-level CDP access to network, page, storage, and context management.
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/storage"
 	"github.com/chromedp/chromedp"
-	"github.comcom/google/uuid"
+	"github.com/google/uuid" 
 	"go.uber.org/zap"
-
-	// Project specific imports
-	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas" 
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/shim"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/stealth"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/humanoid"
-	"github.com/xkilldash9x/scalpel-cli/internal/interfaces"
+	"github.com/xkilldash9x/scalpel-cli/internal/interfaces" 
 )
 
 // Define constants for timeouts.

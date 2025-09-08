@@ -1,4 +1,4 @@
-// pkg/browser/manager.go
+// internal/browser/manager.go
 package browser
 
 import (
@@ -10,12 +10,9 @@ import (
 	"strings"
 	"sync"
 	"time"
-
 	"github.com/chromedp/cdproto/emulation"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
-
-
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/shim"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/stealth"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
