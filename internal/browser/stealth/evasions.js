@@ -1,4 +1,4 @@
-// pkg/browser/stealth/evasions.js
+// internal/browser/stealth/evasions.js
 // Production-grade evasion script for Project Scalpel.
 // Enhanced for advanced adversarial simulation.
 

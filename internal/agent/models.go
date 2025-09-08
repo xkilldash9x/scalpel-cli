@@ -1,4 +1,4 @@
-// -- pkg/agent/models.go --
+// internal/agent/models.go --
 package agent
 
 import (

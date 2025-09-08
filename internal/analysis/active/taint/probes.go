@@ -1,4 +1,4 @@
-// pkg/analysis/active/taint/probes.go
+// internal/analysis/active/taint/probes.go
 package taint
 
 // DefaultProbes returns a comprehensive list of attack payloads for various vulnerability classes.

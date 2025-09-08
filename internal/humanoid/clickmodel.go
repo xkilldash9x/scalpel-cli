@@ -1,4 +1,4 @@
-// -- pkg/humanoid/clickmodel.go --
+// internal/humanoid/clickmodel.go --
 package humanoid
 
 import (

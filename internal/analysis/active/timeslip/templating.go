@@ -1,4 +1,4 @@
-// pkg/analysis/active/timeslip/templating.go
+// internal/analysis/active/timeslip/templating.go
 package timeslip
 
 import (

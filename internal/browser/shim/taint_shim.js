@@ -1,4 +1,4 @@
-// pkg/browser/shim/taint_shim.js
+// internal/browser/shim/taint_shim.js
 /*
     Pinnacle Unified Runtime (Taint Shim)
     This is the JavaScript payload responsible for client-side taint analysis instrumentation.

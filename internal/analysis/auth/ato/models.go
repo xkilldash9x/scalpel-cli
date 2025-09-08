@@ -1,4 +1,4 @@
-// -- pkg/analysis/auth/ato/models.go --
+// internal/analysis/auth/ato/models.go 
 package ato
 
 import (
@@ -6,8 +6,7 @@ import (
 	"net/http"
 	"strings"
 	"time"
-
-	"github.com/xkilldash9x/scalpel-cli/pkg/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
 // LoginAttempt represents a single username/password combination.

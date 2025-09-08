@@ -1,4 +1,4 @@
-// pkg/analysis/active/taint/taint_shim.js
+// internal/analysis/active/taint/taint_shim.js
 (function(scope) {
     'use strict';
 

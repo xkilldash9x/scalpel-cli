@@ -3,9 +3,9 @@ package agent
 import (
 	"context"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	// Updated import path to use the interface
-	"github.com/xkilldash9x/scalpel-cli/pkg/knowledgegraph"
+	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
 )
 
 // Mind defines the interface for the agent's cognitive core (The OODA loop implementation).

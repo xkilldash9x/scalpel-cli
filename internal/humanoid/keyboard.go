@@ -1,4 +1,4 @@
-// -- pkg/humanoid/keyboard.go --
+// internal/humanoid/keyboard.go --
 package humanoid
 
 import (
