@@ -14,7 +14,7 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
-	"github.com/xkilldash9x/scalpel-cli/api/schema"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
 // Analyzer orchestrates the TimeSlip module, managing strategy execution and result analysis.
