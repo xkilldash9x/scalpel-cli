@@ -19,7 +19,7 @@ import (
 	"golang.org/x/net/publicsuffix"
 	"golang.org/x/time/rate"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
 // Constants for user enumeration heuristics and operational limits.

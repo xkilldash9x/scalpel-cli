@@ -10,7 +10,7 @@ import (
 	"net/http"
 	"time"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/network"
+	"github.com/xkilldash9x/scalpel-cli/internal/network"
 )
 
 // ExecuteGraphQLAsync implements the GraphQL Batching race strategy.
