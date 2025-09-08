@@ -1,4 +1,4 @@
-// pkg/discovery/engine.go
+// internal/discovery/engine.go
 package discovery
 
 import (
@@ -14,7 +14,7 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces"
+	"github.com/xkilldash9x/scalpel-cli/internal/interfaces"
 )
 
 // Engine orchestrates the discovery process (passive and active crawling).

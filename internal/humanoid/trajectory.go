@@ -1,4 +1,4 @@
-//pkg/humanoid/trajectory.go
+//internal/humanoid/trajectory.go
 package humanoid
 
 import (

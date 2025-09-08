@@ -1,12 +1,12 @@
-// -- pkg/worker/adapters/agent_adapter.go --
+// internal/worker/adapters/agent_adapter.go --
 package adapters
 
 import (
 	"context"
 	"fmt"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/agent"
-	"github.com/xkilldash9x/scalpel-cli/pkg/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/agent"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
 // AgentAdapter integrates the autonomous agent as a standard worker module.

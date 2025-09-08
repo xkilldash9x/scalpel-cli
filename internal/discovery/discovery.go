@@ -1,4 +1,4 @@
-// pkg/discovery/discovery.go
+// internal/discovery/discovery.go
 package discovery
 
 import (

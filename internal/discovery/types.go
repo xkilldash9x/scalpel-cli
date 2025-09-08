@@ -1,4 +1,4 @@
-// pkg/discovery/types.go
+// internal/discovery/types.go
 package discovery
 
 import (

@@ -1,4 +1,4 @@
-// -- pkg/worker/adapters/idor_adapter.go --
+// internal/worker/adapters/idor_adapter.go --
 package adapters
 
 import (

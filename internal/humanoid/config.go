@@ -1,4 +1,4 @@
-// pkg/humanoid/config.go
+// internal/humanoid/config.go
 package humanoid
 
 import (

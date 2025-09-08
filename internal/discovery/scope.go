@@ -1,4 +1,4 @@
-// pkg/discovery/scope.go
+// internal/discovery/scope.go
 package discovery
 
 import (

@@ -1,4 +1,4 @@
-// pkg/discovery/passive.go
+// internal/discovery/passive.go
 package discovery
 
 import (
@@ -17,7 +17,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/interfaces"
+	"github.com/xkilldash9x/scalpel-cli/internal/interfaces"
 )
 
 // PassiveRunner handles passive discovery techniques. less noise, high value intel.

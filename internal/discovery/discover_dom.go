@@ -1,4 +1,4 @@
-// pkg/discovery/discover_dom.go
+// internal/discovery/discover_dom.go
 package discovery
 
 import (
@@ -9,8 +9,8 @@ import (
 
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/chromedp"
-	"github.com/xkilldash9x/scalpel-cli/pkg/browser"
-	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"go.uber.org/zap"
 )
 

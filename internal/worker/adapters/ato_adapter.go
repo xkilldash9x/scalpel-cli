@@ -1,4 +1,4 @@
-// -- pkg/worker/adapters/ato_adapter.go --
+// internal/worker/adapters/ato_adapter.go --
 package adapters
 
 import (

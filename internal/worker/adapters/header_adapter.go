@@ -1,11 +1,11 @@
-// pkg/worker/adapters/headers_adapter.go
+// internal/worker/adapters/headers_adapter.go
 package adapters
 
 import (
 	"context"
 
-	"github.com/xkilldash9x/scalpel-cli/pkg/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/pkg/analysis/passive/headers"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/passive/headers"
 )
 
 // HeadersAdapter adapts the passive HeadersAnalyzer to be used by a generic worker.

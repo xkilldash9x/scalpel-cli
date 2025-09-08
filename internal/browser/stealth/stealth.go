@@ -1,4 +1,4 @@
-// pkg/browser/stealth/stealth.go
+// internal/browser/stealth/stealth.go
 package stealth
 
 import (

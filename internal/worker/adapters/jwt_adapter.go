@@ -1,4 +1,4 @@
-// -- pkg/worker/adapters/jwt_adapter.go --
+// internal/worker/adapters/jwt_adapter.go --
 package adapters
 
 import (
