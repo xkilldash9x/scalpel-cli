@@ -1,4 +1,4 @@
-// pkg/analysis/auth/idor/idor.go
+// internal/analysis/auth/idor/idor.go
 package idor
 
 import (
@@ -10,35 +10,18 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.comcom/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
-type IdentifierType string
+// NOTE: The type and struct definitions (IdentifierType, IdentifierLocation, ObservedIdentifier)
+// have been moved to types.go to act as the single source of truth for the idor package
+// and resolve redeclaration errors.
 
-const (
-	TypeNumericID IdentifierType = "NumericID"
-	TypeUUID      IdentifierType = "UUID"
-	TypeBase64    IdentifierType = "Base64Encoded"
-	TypeObjectID  IdentifierType = "ObjectID"
-	TypeUnknown   IdentifierType = "Unknown"
-)
+// -- Identifier Classification --
+// This section contains the logic for identifying and classifying potential IDs.
 
-type IdentifierLocation string
-
-const (
-	LocationURLPath    IdentifierLocation = "URLPath"
-	LocationQueryParam IdentifierLocation = "QueryParam"
-	LocationJSONBody   IdentifierLocation = "JSONBody"
-	LocationHeader     IdentifierLocation = "Header"
-)
-
-type ObservedIdentifier struct {
-	Value     string
-	Type      IdentifierType
-	Location  IdentifierLocation
-	Key       string
-	PathIndex int // Added for LocationURLPath specificity
-}
-
+// These regexes are the core of the classification logic.
 var (
 	regexUUID = regexp.MustCompile(`(?i)[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}`)
 	// regexNumeric: Allow 1 to 19 digits (to fit within int64).
@@ -47,18 +30,22 @@ var (
 	regexBase64 = regexp.MustCompile(`^([A-Za-z0-9+/=_-]{4})*([A-Za-z0-9+/=_-]{2,4})?$`)
 	// MongoDB ObjectID format
 	regexObjectID = regexp.MustCompile(`(?i)^[0-9a-f]{24}$`)
+	// Heuristic regexes to reduce false positives
+	regexOnlyLetters = regexp.MustCompile(`^[a-zA-Z]+$`)
+	regexOnlyNumbers = regexp.MustCompile(`^[0-9]+$`)
 )
 
-func ClassifyIdentifier(value string) IdentifierType {
+// ClassifyIdentifier determines the type of an identifier based on regex and heuristics.
+func ClassifyIdentifier(value string) core.IdentifierType {
 	if len(value) == 0 {
-		return TypeUnknown
+		return core.TypeUnknown
 	}
 	// Order matters: Check specific formats first.
 	if regexUUID.MatchString(value) {
-		return TypeUUID
+		return core.TypeUUID
 	}
 	if regexObjectID.MatchString(value) {
-		return TypeObjectID
+		return core.TypeObjectID
 	}
 	if regexNumeric.MatchString(value) {
 		// Heuristic: Filter out common numeric values that are unlikely to be IDs (like years or common ports)
@@ -66,27 +53,34 @@ func ClassifyIdentifier(value string) IdentifierType {
 			if num, err := strconv.Atoi(value); err == nil {
 				// Filter years 1980-2100
 				if num >= 1980 && num <= 2100 {
-					return TypeUnknown
+					return core.TypeUnknown
 				}
 				// Filter common ports
 				if num == 80 || num == 443 || num == 8080 || num == 8443 {
-					return TypeUnknown
+					return core.TypeUnknown
 				}
 			}
 		}
-		return TypeNumericID
+		return core.TypeNumericID
 	}
 	// Check Base64 heuristic (length >= 8 and matches regex).
 	if len(value) >= 8 && regexBase64.MatchString(value) {
 		if isLikelyBase64(value) {
-			return TypeBase64
+			return core.TypeBase64
 		}
 	}
-	return TypeUnknown
+	return core.TypeUnknown
 }
 
-// Helper function to attempt decoding using various Base64 schemes.
+// isLikelyBase64 is a helper function to attempt decoding using various Base64 schemes.
 func isLikelyBase64(value string) bool {
+	// Heuristic: If it's just letters or just numbers, it's unlikely to be a Base64 ID.
+	// This helps avoid classifying common words like "username" or long numeric strings as Base64.
+	// While a valid Base64 string could be all letters/numbers, it's less common for IDs.
+	if regexOnlyLetters.MatchString(value) || regexOnlyNumbers.MatchString(value) {
+		return false
+	}
+
 	encodings := []base64.Encoding{
 		*base64.StdEncoding,
 		*base64.URLEncoding,
@@ -101,16 +95,20 @@ func isLikelyBase64(value string) bool {
 	return false
 }
 
-func ExtractIdentifiers(req *http.Request, body []byte) []ObservedIdentifier {
-	var identifiers []ObservedIdentifier
+// -- Identifier Extraction --
+// This section contains the logic for finding identifiers within HTTP requests.
+
+// ExtractIdentifiers searches all parts of an HTTP request for classifiable identifiers.
+func ExtractIdentifiers(req *http.Request, body []byte) []core.ObservedIdentifier {
+	var identifiers []core.ObservedIdentifier
 	// 1. URL Path
 	segments := strings.Split(req.URL.Path, "/")
 	for i, segment := range segments { // Iterate with index i
-		if idType := ClassifyIdentifier(segment); idType != TypeUnknown {
-			identifiers = append(identifiers, ObservedIdentifier{
+		if idType := ClassifyIdentifier(segment); idType != core.TypeUnknown {
+			identifiers = append(identifiers, core.ObservedIdentifier{
 				Value:     segment,
 				Type:      idType,
-				Location:  LocationURLPath,
+				Location:  core.LocationURLPath,
 				PathIndex: i, // Store the index
 			})
 		}
@@ -118,11 +116,11 @@ func ExtractIdentifiers(req *http.Request, body []byte) []ObservedIdentifier {
 	// 2. Query Parameters
 	for key, values := range req.URL.Query() {
 		for _, value := range values {
-			if idType := ClassifyIdentifier(value); idType != TypeUnknown {
-				identifiers = append(identifiers, ObservedIdentifier{
+			if idType := ClassifyIdentifier(value); idType != core.TypeUnknown {
+				identifiers = append(identifiers, core.ObservedIdentifier{
 					Value:    value,
 					Type:     idType,
-					Location: LocationQueryParam,
+					Location: core.LocationQueryParam,
 					Key:      key,
 				})
 			}
@@ -148,11 +146,11 @@ func ExtractIdentifiers(req *http.Request, body []byte) []ObservedIdentifier {
 		// Heuristic: Check headers that often contain custom IDs.
 		if strings.Contains(lowerKey, "id") || strings.Contains(lowerKey, "user") || strings.Contains(lowerKey, "account") || strings.HasPrefix(lowerKey, "x-") {
 			for _, value := range values {
-				if idType := ClassifyIdentifier(value); idType != TypeUnknown {
-					identifiers = append(identifiers, ObservedIdentifier{
+				if idType := ClassifyIdentifier(value); idType != core.TypeUnknown {
+					identifiers = append(identifiers, core.ObservedIdentifier{
 						Value:    value,
 						Type:     idType,
-						Location: LocationHeader,
+						Location: core.LocationHeader,
 						Key:      key,
 					})
 				}
@@ -162,8 +160,9 @@ func ExtractIdentifiers(req *http.Request, body []byte) []ObservedIdentifier {
 	return identifiers
 }
 
-// extractFromJSON generates dot-separated paths like "user.id" or "items.0.id".
-func extractFromJSON(data interface{}, prefix string, identifiers *[]ObservedIdentifier) {
+// extractFromJSON recursively searches a decoded JSON structure for identifiers.
+// It generates dot-separated paths like "user.id" or "items.0.id".
+func extractFromJSON(data interface{}, prefix string, identifiers *[]core.ObservedIdentifier) {
 	switch typedData := data.(type) {
 	case map[string]interface{}:
 		for key, value := range typedData {
@@ -185,25 +184,26 @@ func extractFromJSON(data interface{}, prefix string, identifiers *[]ObservedIde
 	}
 }
 
-func extractValue(value interface{}, fullKey string, identifiers *[]ObservedIdentifier) {
+// extractValue is a helper for extractFromJSON that handles the actual value classification.
+func extractValue(value interface{}, fullKey string, identifiers *[]core.ObservedIdentifier) {
 	switch v := value.(type) {
 	case string:
-		if idType := ClassifyIdentifier(v); idType != TypeUnknown {
-			*identifiers = append(*identifiers, ObservedIdentifier{
+		if idType := ClassifyIdentifier(v); idType != core.TypeUnknown {
+			*identifiers = append(*identifiers, core.ObservedIdentifier{
 				Value:    v,
 				Type:     idType,
-				Location: LocationJSONBody,
+				Location: core.LocationJSONBody,
 				Key:      fullKey,
 			})
 		}
 	case json.Number:
 		// Handle numbers extracted using UseNumber().
 		strVal := v.String()
-		if idType := ClassifyIdentifier(strVal); idType == TypeNumericID {
-			*identifiers = append(*identifiers, ObservedIdentifier{
+		if idType := ClassifyIdentifier(strVal); idType == core.TypeNumericID {
+			*identifiers = append(*identifiers, core.ObservedIdentifier{
 				Value:    strVal,
 				Type:     idType,
-				Location: LocationJSONBody,
+				Location: core.LocationJSONBody,
 				Key:      fullKey,
 			})
 		}
@@ -212,10 +212,13 @@ func extractValue(value interface{}, fullKey string, identifiers *[]ObservedIden
 	}
 }
 
+// -- Identifier Modification --
+// This section contains logic for generating and applying test values for predictive analysis.
+
 // GenerateTestValue creates a plausible alternative identifier value for testing.
-func GenerateTestValue(identifier ObservedIdentifier) (string, error) {
+func GenerateTestValue(identifier core.ObservedIdentifier) (string, error) {
 	switch identifier.Type {
-	case TypeNumericID:
+	case core.TypeNumericID:
 		num, err := strconv.ParseInt(identifier.Value, 10, 64)
 		if err != nil {
 			return "", err
@@ -223,7 +226,7 @@ func GenerateTestValue(identifier ObservedIdentifier) (string, error) {
 		// Simple increment for prediction.
 		return strconv.FormatInt(num+1, 10), nil
 
-	case TypeBase64:
+	case core.TypeBase64:
 		// Decode, flip a bit, and re-encode.
 		var decoded []byte
 		var usedEncoding *base64.Encoding
@@ -252,12 +255,11 @@ func GenerateTestValue(identifier ObservedIdentifier) (string, error) {
 		}
 		return usedEncoding.EncodeToString(decoded), nil
 
-	case TypeUUID:
+	case core.TypeUUID:
 		// UUIDs are not predictable. We return an error to signal that predictive testing should be skipped for this type.
-		// Horizontal testing relies on observed UUIDs, not generated ones.
 		return "", fmt.Errorf("UUIDs are not suitable for predictive IDOR testing")
 
-	case TypeObjectID:
+	case core.TypeObjectID:
 		// Slightly modify the ObjectID predictably.
 		if len(identifier.Value) != 24 {
 			return "", fmt.Errorf("invalid ObjectID length")
@@ -281,13 +283,13 @@ func GenerateTestValue(identifier ObservedIdentifier) (string, error) {
 	return "", fmt.Errorf("cannot generate predictable test value for type %s", identifier.Type)
 }
 
-// ApplyTestValue modifies the request with our generated test ID.
-func ApplyTestValue(req *http.Request, body []byte, identifier ObservedIdentifier, testValue string) (*http.Request, []byte, error) {
+// ApplyTestValue modifies a cloned request with a generated test ID.
+func ApplyTestValue(req *http.Request, body []byte, identifier core.ObservedIdentifier, testValue string) (*http.Request, []byte, error) {
 	clonedReq := req.Clone(req.Context())
 	newBody := body
 
 	switch identifier.Location {
-	case LocationURLPath:
+	case core.LocationURLPath:
 		segments := strings.Split(clonedReq.URL.Path, "/")
 		// Use the specific index for replacement
 		idx := identifier.PathIndex
@@ -299,15 +301,15 @@ func ApplyTestValue(req *http.Request, body []byte, identifier ObservedIdentifie
 			}
 		}
 
-	case LocationQueryParam:
+	case core.LocationQueryParam:
 		q := clonedReq.URL.Query()
 		q.Set(identifier.Key, testValue)
 		clonedReq.URL.RawQuery = q.Encode()
 
-	case LocationHeader:
+	case core.LocationHeader:
 		clonedReq.Header.Set(identifier.Key, testValue)
 
-	case LocationJSONBody:
+	case core.LocationJSONBody:
 		// Use the robust structured modification method.
 		var err error
 		newBody, err = modifyJSONPayload(body, identifier, testValue)
@@ -321,9 +323,7 @@ func ApplyTestValue(req *http.Request, body []byte, identifier ObservedIdentifie
 }
 
 // modifyJSONPayload modifies the JSON structure securely instead of using string replacement.
-// Note: While a library like tidwall/sjson could simplify this, this standard library
-// approach avoids adding external dependencies.
-func modifyJSONPayload(body []byte, identifier ObservedIdentifier, testValue string) ([]byte, error) {
+func modifyJSONPayload(body []byte, identifier core.ObservedIdentifier, testValue string) ([]byte, error) {
 	var data interface{}
 	// Use Decoder with UseNumber for consistency and precision.
 	decoder := json.NewDecoder(bytes.NewReader(body))
@@ -336,7 +336,7 @@ func modifyJSONPayload(body []byte, identifier ObservedIdentifier, testValue str
 
 	// Determine the appropriate type for the replacement value.
 	var typedValue interface{}
-	if identifier.Type == TypeNumericID {
+	if identifier.Type == core.TypeNumericID {
 		// Keep it as json.Number if the original was numeric.
 		typedValue = json.Number(testValue)
 	} else {
