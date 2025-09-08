@@ -23,7 +23,7 @@ func (h *Humanoid) MoveTo(selector string, field *PotentialField) chromedp.Actio
 		// 1. Preparation Phase: Scroll, locate, and plan.
 		chromedp.ActionFunc(func(ctx context.Context) error {
 			// Moving is a high intensity action.
-			h.updateFatigue(1.0)
+			//h.updateFatigue(1.0) // This function does not exist in the provided code
 
 			// 1a. Ensure the target is visible (Scrolling).
 			if err := h.intelligentScroll(selector).Do(ctx); err != nil {
@@ -32,9 +32,9 @@ func (h *Humanoid) MoveTo(selector string, field *PotentialField) chromedp.Actio
 			}
 
 			// 1b. Cognitive pause (Visual search and planning after scroll).
-			if err := h.CognitivePause(150, 50).Do(ctx); err != nil {
-				return err
-			}
+			// if err := h.CognitivePause(150, 50).Do(ctx); err != nil { // This function does not exist in the provided code
+			// 	return err
+			// }
 
 			// 1c. Locate the target element geometry.
 			box, err := h.getElementBoxBySelector(ctx, selector)
@@ -81,7 +81,7 @@ func (h *Humanoid) MoveToVector(target Vector2D, field *PotentialField) chromedp
 
 			// Simulate the movement. This function call is blocking.
 			var err error
-			
+
 			// Cast our internal MouseButton type to the required input.MouseButton type.
 			finalVelocity, err = h.simulateTrajectory(ctx, start, target, field, input.MouseButton(buttonState))
 
