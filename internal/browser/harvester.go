@@ -1,3 +1,4 @@
+// internal/browser/harvester.go
 package browser
 
 import (
@@ -9,7 +10,6 @@ import (
 	"strings"
 	"sync"
 	"time"
-
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/cdproto/har"
 	"github.com/chromedp/cdproto/network"
@@ -17,8 +17,7 @@ import (
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
-
-	"github.com/xkilldash9x/scalpel-cli/pkg/schemas"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
 // Harvester is responsible for actively collecting data artifacts (Network traffic, Console logs)
