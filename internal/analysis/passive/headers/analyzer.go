@@ -16,8 +16,8 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
 // Define the minimum acceptable HSTS max-age (6 months in seconds)
@@ -78,7 +78,7 @@ func (a *HeadersAnalyzer) checkHeaders(analysisCtx *core.AnalysisContext, target
 
 	if isHTML {
 		if !cspOk {
-			a.createMissingHeaderFinding(analysisCtx, urlString, "Content-Security-Policy", string(core.SeverityMedium), "The CSP header is not set. This significantly increases the risk of Cross-Site Scripting (XSS) attacks.", "CWE-693")
+			a.createMissingHeaderFinding(analysisCtx, urlString, "Content-Security-Policy", schemas.SeverityMedium, "The CSP header is not set. This significantly increases the risk of Cross-Site Scripting (XSS) attacks.", "CWE-693")
 		} else {
 			a.analyzeCSP(analysisCtx, urlString, cspValues)
 		}
@@ -88,7 +88,7 @@ func (a *HeadersAnalyzer) checkHeaders(analysisCtx *core.AnalysisContext, target
 	if strings.EqualFold(targetURL.Scheme, "https") {
 		hstsValues := headers.Values("Strict-Transport-Security")
 		if len(hstsValues) == 0 {
-			a.createMissingHeaderFinding(analysisCtx, urlString, "Strict-Transport-Security", string(core.SeverityMedium), "The HSTS header is not set over HTTPS. This can expose users to man-in-the-middle attacks (e.g., SSL stripping).", "CWE-319")
+			a.createMissingHeaderFinding(analysisCtx, urlString, "Strict-Transport-Security", schemas.SeverityMedium, "The HSTS header is not set over HTTPS. This can expose users to man-in-the-middle attacks (e.g., SSL stripping).", "CWE-319")
 		} else {
 			a.analyzeHSTS(analysisCtx, urlString, hstsValues)
 		}
@@ -97,7 +97,7 @@ func (a *HeadersAnalyzer) checkHeaders(analysisCtx *core.AnalysisContext, target
 	// 3. X-Content-Type-Options - Relevant for all traffic
 	val := headers.Get("X-Content-Type-Options")
 	if strings.ToLower(val) != "nosniff" {
-		a.createMissingHeaderFinding(analysisCtx, urlString, "X-Content-Type-Options", string(core.SeverityLow), "The header should be set to 'nosniff' to prevent the browser from MIME-sniffing a response away from the declared content-type.", "CWE-693")
+		a.createMissingHeaderFinding(analysisCtx, urlString, "X-Content-Type-Options", schemas.SeverityLow, "The header should be set to 'nosniff' to prevent the browser from MIME-sniffing a response away from the declared content-type.", "CWE-693")
 	}
 
 	// 4. X-Frame-Options - Primarily relevant for HTML
@@ -105,21 +105,21 @@ func (a *HeadersAnalyzer) checkHeaders(analysisCtx *core.AnalysisContext, target
 		if len(headers.Values("X-Frame-Options")) == 0 {
 			// Check if CSP frame-ancestors is used instead.
 			if !cspOk || !strings.Contains(strings.ToLower(strings.Join(cspValues, ",")), "frame-ancestors") {
-				a.createMissingHeaderFinding(analysisCtx, urlString, "X-Frame-Options (or CSP frame-ancestors)", string(core.SeverityMedium), "Neither X-Frame-Options nor CSP frame-ancestors are set. This may allow the page to be rendered in a frame, leading to Clickjacking attacks.", "CWE-1021")
+				a.createMissingHeaderFinding(analysisCtx, urlString, "X-Frame-Options (or CSP frame-ancestors)", schemas.SeverityMedium, "Neither X-Frame-Options nor CSP frame-ancestors are set. This may allow the page to be rendered in a frame, leading to Clickjacking attacks.", "CWE-1021")
 			}
 		}
 	}
 
 	// 5. Referrer-Policy
 	if len(headers.Values("Referrer-Policy")) == 0 {
-		a.createMissingHeaderFinding(analysisCtx, urlString, "Referrer-Policy", string(core.SeverityLow), "The Referrer-Policy header is missing. This controls how much referrer information (URL) is included with requests.", "CWE-200")
+		a.createMissingHeaderFinding(analysisCtx, urlString, "Referrer-Policy", schemas.SeverityLow, "The Referrer-Policy header is missing. This controls how much referrer information (URL) is included with requests.", "CWE-200")
 	}
 
 	// 6. Permissions-Policy / Feature-Policy
 	if isHTML {
 		if len(headers.Values("Permissions-Policy")) == 0 {
 			if len(headers.Values("Feature-Policy")) == 0 {
-				a.createMissingHeaderFinding(analysisCtx, urlString, "Permissions-Policy", string(core.SeverityInfo), "The Permissions-Policy (formerly Feature-Policy) header is missing. This header allows control over which browser features and APIs can be used.", "CWE-693")
+				a.createMissingHeaderFinding(analysisCtx, urlString, "Permissions-Policy", schemas.SeverityInformational, "The Permissions-Policy (formerly Feature-Policy) header is missing. This header allows control over which browser features and APIs can be used.", "CWE-693")
 			}
 		}
 	}
@@ -135,7 +135,7 @@ func (a *HeadersAnalyzer) analyzeHSTS(analysisCtx *core.AnalysisContext, targetU
 	matches := regexMaxAge.FindStringSubmatch(hstsValue)
 
 	if len(matches) < 2 {
-		a.createWeakHeaderFinding(analysisCtx, targetURL, "Strict-Transport-Security", string(core.SeverityLow), "The HSTS header is missing the required 'max-age' directive.", hstsValue, "CWE-319")
+		a.createWeakHeaderFinding(analysisCtx, targetURL, "Strict-Transport-Security", schemas.SeverityLow, "The HSTS header is missing the required 'max-age' directive.", hstsValue, "CWE-319")
 		return
 	}
 
@@ -154,10 +154,10 @@ func (a *HeadersAnalyzer) analyzeHSTS(analysisCtx *core.AnalysisContext, targetU
 	maxAge := maxAge64
 
 	if maxAge == 0 {
-		a.createWeakHeaderFinding(analysisCtx, targetURL, "Strict-Transport-Security", string(core.SeverityMedium), "The HSTS 'max-age' is set to 0, effectively disabling the security mechanism.", hstsValue, "CWE-319")
+		a.createWeakHeaderFinding(analysisCtx, targetURL, "Strict-Transport-Security", schemas.SeverityMedium, "The HSTS 'max-age' is set to 0, effectively disabling the security mechanism.", hstsValue, "CWE-319")
 	} else if maxAge < MinHstsMaxAge {
 		desc := fmt.Sprintf("The HSTS 'max-age' is too short (%d seconds). It should be at least %d seconds (6 months).", maxAge, MinHstsMaxAge)
-		a.createWeakHeaderFinding(analysisCtx, targetURL, "Strict-Transport-Security", string(core.SeverityLow), desc, hstsValue, "CWE-319")
+		a.createWeakHeaderFinding(analysisCtx, targetURL, "Strict-Transport-Security", schemas.SeverityLow, desc, hstsValue, "CWE-319")
 	}
 }
 
@@ -172,18 +172,18 @@ func (a *HeadersAnalyzer) analyzeCSP(analysisCtx *core.AnalysisContext, targetUR
 		hasMitigation := strings.Contains(cspLower, "nonce-") || strings.Contains(cspLower, "sha256-") || strings.Contains(cspLower, "'strict-dynamic'")
 
 		if hasScriptDirective && !hasMitigation {
-			a.createWeakHeaderFinding(analysisCtx, targetURL, "Content-Security-Policy", string(core.SeverityHigh), "The CSP uses 'unsafe-inline' for scripts without a corresponding nonce, hash, or 'strict-dynamic', which largely negates XSS protection.", cspContent, "CWE-693")
+			a.createWeakHeaderFinding(analysisCtx, targetURL, "Content-Security-Policy", schemas.SeverityHigh, "The CSP uses 'unsafe-inline' for scripts without a corresponding nonce, hash, or 'strict-dynamic', which largely negates XSS protection.", cspContent, "CWE-693")
 		}
 	}
 
 	// Check 2: 'unsafe-eval'.
 	if strings.Contains(cspLower, "'unsafe-eval'") {
-		a.createWeakHeaderFinding(analysisCtx, targetURL, "Content-Security-Policy", string(core.SeverityMedium), "The CSP allows 'unsafe-eval', which permits the use of eval() and similar methods, increasing the attack surface for XSS.", cspContent, "CWE-693")
+		a.createWeakHeaderFinding(analysisCtx, targetURL, "Content-Security-Policy", schemas.SeverityMedium, "The CSP allows 'unsafe-eval', which permits the use of eval() and similar methods, increasing the attack surface for XSS.", cspContent, "CWE-693")
 	}
 
 	// Check 3: Overly permissive sources.
 	if strings.Contains(cspContent, "*") || strings.Contains(cspLower, "data:") || strings.Contains(cspLower, "http:") {
-		a.createWeakHeaderFinding(analysisCtx, targetURL, "Content-Security-Policy", string(core.SeverityMedium), "The CSP includes overly permissive sources (e.g., '*', 'data:', or 'http:'), which may allow loading untrusted content.", cspContent, "CWE-693")
+		a.createWeakHeaderFinding(analysisCtx, targetURL, "Content-Security-Policy", schemas.SeverityMedium, "The CSP includes overly permissive sources (e.g., '*', 'data:', or 'http:'), which may allow loading untrusted content.", cspContent, "CWE-693")
 	}
 }
 
@@ -194,13 +194,13 @@ func (a *HeadersAnalyzer) checkInformationLeakage(analysisCtx *core.AnalysisCont
 		// Simple heuristic: check if the value contains version numbers (dots or slashes)
 		if len(value) > 5 && (strings.Contains(value, ".") || strings.Contains(value, "/")) {
 			desc := fmt.Sprintf("The server is disclosing software/framework information via the '%s' header (%s).", headerName, value)
-			a.createWeakHeaderFinding(analysisCtx, targetURL, headerName, string(core.SeverityInfo), desc, value, "CWE-200")
+			a.createWeakHeaderFinding(analysisCtx, targetURL, headerName, schemas.SeverityInformational, desc, value, "CWE-200")
 		}
 	}
 }
 
 // Helper function for missing headers.
-func (a *HeadersAnalyzer) createMissingHeaderFinding(analysisCtx *core.AnalysisContext, targetURL, headerName, severity, description, cwe string) {
+func (a *HeadersAnalyzer) createMissingHeaderFinding(analysisCtx *core.AnalysisContext, targetURL, headerName string, severity schemas.Severity, description, cwe string) {
 	evidence, _ := json.Marshal(map[string]string{
 		"header": headerName,
 		"status": "Missing",
@@ -222,13 +222,13 @@ func (a *HeadersAnalyzer) createMissingHeaderFinding(analysisCtx *core.AnalysisC
 	analysisCtx.AddFinding(finding)
 
 	// Log actionable findings
-	if severity == string(core.SeverityHigh) || severity == string(core.SeverityMedium) {
+	if severity == schemas.SeverityHigh || severity == schemas.SeverityMedium {
 		a.logger.Warn("Missing Security Header", zap.String("header", headerName), zap.String("url", targetURL))
 	}
 }
 
 // Helper function for weak or misconfigured headers.
-func (a *HeadersAnalyzer) createWeakHeaderFinding(analysisCtx *core.AnalysisContext, targetURL, headerName, severity, description, headerValue, cwe string) {
+func (a *HeadersAnalyzer) createWeakHeaderFinding(analysisCtx *core.AnalysisContext, targetURL, headerName string, severity schemas.Severity, description, headerValue, cwe string) {
 	evidence, _ := json.Marshal(map[string]string{
 		"header": headerName,
 		"status": "Weak or Misconfigured",
@@ -251,7 +251,7 @@ func (a *HeadersAnalyzer) createWeakHeaderFinding(analysisCtx *core.AnalysisCont
 	analysisCtx.AddFinding(finding)
 
 	// Log actionable findings
-	if severity == string(core.SeverityHigh) || severity == string(core.SeverityMedium) {
+	if severity == schemas.SeverityHigh || severity == schemas.SeverityMedium {
 		a.logger.Warn("Weak Security Header Configuration", zap.String("header", headerName), zap.String("url", targetURL))
 	}
 }
