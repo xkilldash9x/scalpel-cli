@@ -1,35 +1,44 @@
-// internal/analysis/auth/idor/types.go
 package idor
 
-import (
-	"net/http"
-	"sync"
+import "net/http"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-)
-
-// SessionContext holds the state and history for a single user persona.
-// It's the central hub for a user's cookies, client, and observed requests.
-type SessionContext struct {
-	Role             string
-	Client           *http.Client
-	ObservedRequests map[string]ObservedRequest
-	mu               sync.RWMutex // Protects ObservedRequests from concurrent access
+// Session defines the interface for an authenticated user session.
+// This allows the analyzer to apply session details (like cookies or headers) to a request.
+type Session interface {
+	// IsAuthenticated should return true if the session represents a logged-in user.
+	IsAuthenticated() bool
+	// ApplyToRequest modifies an *http.Request to use the session's authentication credentials.
+	ApplyToRequest(req *http.Request)
 }
 
-// ObservedRequest is a snapshot of a request that contains potential identifiers.
-// We store this to replay and modify it during the analysis phase.
-type ObservedRequest struct {
-	Request        *http.Request
-	Body           []byte
-	Identifiers    []core.ObservedIdentifier
-	BaselineStatus int   // The original response status code
-	BaselineLength int64 // The original response content length
+// RequestResponsePair holds a matched HTTP request and its corresponding response.
+type RequestResponsePair struct {
+	Request  *http.Request
+	Response *http.Response
 }
 
-// PredictiveJob is a work item for the predictive analysis worker.
-// It bundles an observed request with a specific identifier to be tested.
-type PredictiveJob struct {
-	Observed   ObservedRequest
-	Identifier core.ObservedIdentifier
+// Config holds the configuration for the IDOR analysis.
+type Config struct {
+	// ParametersToTest specifies a list of request parameters to specifically target for IDOR checks.
+	ParametersToTest []string
+	// Session represents the authenticated user session to use for baseline requests.
+	Session Session
+	// SecondSession represents a different authenticated user session to test for authorization bypass.
+	SecondSession Session
+}
+
+// Finding represents a potential IDOR vulnerability that has been identified.
+type Finding struct {
+	// URL is the endpoint where the vulnerability was found.
+	URL string
+	// Parameter is the specific parameter that appears to be vulnerable.
+	Parameter string
+	// OriginalValue is the parameter value from the original authenticated request.
+	OriginalValue string
+	// TestedValue is the parameter value from the second session that illicitly accessed the resource.
+	TestedValue string
+	// Method is the HTTP method used (e.g., "GET", "POST").
+	Method string
+	// Evidence provides a brief description of why this is considered a finding.
+	Evidence string
 }
