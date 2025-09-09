@@ -19,15 +19,17 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
-	"go.uber.org/zaptest"
+	"go.uber.org/zap/zaptest"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
-// -- Mock Definitions --
+// ====================================================================================
+// Mock Definitions
+// ====================================================================================
 
-// Mocks the core.Reporter interface, capturing findings concurrently
-// and providing safe access for verification.
+// MockReporter mocks the core.Reporter interface.
+// It captures findings concurrently and provides safe access for verification.
 type MockReporter struct {
 	mock.Mock
 	findings []core.AnalysisResult
@@ -45,7 +47,7 @@ func (m *MockReporter) Publish(finding core.AnalysisResult) error {
 	return args.Error(0)
 }
 
-// Safely retrieves the recorded findings.
+// GetFindings safely retrieves the recorded findings.
 func (m *MockReporter) GetFindings() []core.AnalysisResult {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -55,7 +57,9 @@ func (m *MockReporter) GetFindings() []core.AnalysisResult {
 	return findings
 }
 
-// -- Test Setup Helpers --
+// ====================================================================================
+// Test Setup Helpers
+// ====================================================================================
 
 const (
 	RolePrimary   = "UserA_Victim"
@@ -63,7 +67,7 @@ const (
 	RoleUnrelated = "UserC_Other"
 )
 
-// Creates a standard Analyzer instance for testing, along with its mocks.
+// setupAnalyzer creates a standard Analyzer instance for testing, along with its mocks.
 func setupAnalyzer(t *testing.T, concurrency int) (*Analyzer, *MockReporter, *zap.Logger) {
 	t.Helper()
 	logger := zaptest.NewLogger(t)
@@ -81,7 +85,7 @@ func setupAnalyzer(t *testing.T, concurrency int) (*Analyzer, *MockReporter, *za
 	return analyzer, reporter, logger
 }
 
-// Initializes the analyzer with standard roles (Primary and Secondary).
+// setupInitializedAnalyzer initializes the analyzer and standard roles (Primary and Secondary).
 func setupInitializedAnalyzer(t *testing.T) (*Analyzer, *MockReporter) {
 	t.Helper()
 	// Use default concurrency (5)
@@ -93,7 +97,7 @@ func setupInitializedAnalyzer(t *testing.T) (*Analyzer, *MockReporter) {
 	return analyzer, reporter
 }
 
-// Creates a mock HTTP server for testing request execution and application behavior.
+// setupObservationServer creates a mock HTTP server for testing request execution and application behavior.
 func setupObservationServer(t *testing.T, handler func(w http.ResponseWriter, r *http.Request)) *httptest.Server {
 	t.Helper()
 	// Use a robust handler that recovers from panics within the specific test handler,
@@ -112,9 +116,11 @@ func setupObservationServer(t *testing.T, handler func(w http.ResponseWriter, r 
 	return server
 }
 
-// -- Test Cases: Initialization and Configuration --
+// ====================================================================================
+// Test Cases: Initialization and Configuration
+// ====================================================================================
 
-// Verifies constructor behavior and default settings.
+// TestNewAnalyzer_Defaults verifies constructor behavior and default settings.
 func TestNewAnalyzer_Defaults(t *testing.T) {
 	scanID := uuid.New()
 	logger := zaptest.NewLogger(t)
@@ -122,7 +128,7 @@ func TestNewAnalyzer_Defaults(t *testing.T) {
 
 	// Test 1: Default concurrency when provided 0 (as defined in NewAnalyzer implementation)
 	analyzer1 := NewAnalyzer(scanID, logger, reporter, 0)
-	// White box access to the unexported 'concurrency' field.
+	// White-box access to the unexported 'concurrency' field.
 	assert.Equal(t, 10, analyzer1.concurrency, "Concurrency should default to 10 if 0 is provided")
 
 	// Test 2: Default concurrency when provided negative value
@@ -138,7 +144,7 @@ func TestNewAnalyzer_Defaults(t *testing.T) {
 	assert.NotNil(t, analyzer3.sessions, "Sessions map should be initialized")
 }
 
-// Verifies session creation and HTTP client configuration.
+// TestInitializeSession_Success verifies session creation and HTTP client configuration.
 func TestInitializeSession_Success(t *testing.T) {
 	analyzer, _, _ := setupAnalyzer(t, 5)
 	role := "TestRole"
@@ -146,7 +152,7 @@ func TestInitializeSession_Success(t *testing.T) {
 	err := analyzer.InitializeSession(role)
 	require.NoError(t, err)
 
-	// Verify session exists (Thread safe access)
+	// Verify session exists (Thread-safe access)
 	analyzer.mu.RLock()
 	session, exists := analyzer.sessions[role]
 	analyzer.mu.RUnlock()
@@ -166,7 +172,7 @@ func TestInitializeSession_Success(t *testing.T) {
 	assert.Equal(t, http.ErrUseLastResponse, err, "Client must be configured to not follow redirects")
 }
 
-// Verifies that roles must be unique.
+// TestInitializeSession_DuplicateRole verifies that roles must be unique.
 func TestInitializeSession_DuplicateRole(t *testing.T) {
 	analyzer, _, _ := setupAnalyzer(t, 5)
 	role := "TestRole"
@@ -180,7 +186,7 @@ func TestInitializeSession_DuplicateRole(t *testing.T) {
 	assert.Contains(t, err.Error(), "already initialized")
 }
 
-// Verifies thread safe session initialization.
+// TestInitializeSession_ConcurrencySafety verifies thread-safe session initialization.
 func TestInitializeSession_ConcurrencySafety(t *testing.T) {
 	analyzer, _, _ := setupAnalyzer(t, 5)
 	count := 50
@@ -193,7 +199,7 @@ func TestInitializeSession_ConcurrencySafety(t *testing.T) {
 			defer wg.Done()
 			role := fmt.Sprintf("Role_%d", i)
 			err := analyzer.InitializeSession(role)
-			// Use require fail fast if initialization fails, as it indicates a potential data race or locking issue.
+			// Use require fail-fast if initialization fails, as it indicates a potential data race or locking issue.
 			require.NoError(t, err, "Concurrent initialization failed for %s", role)
 		}(i)
 	}
@@ -205,9 +211,11 @@ func TestInitializeSession_ConcurrencySafety(t *testing.T) {
 	assert.Len(t, analyzer.sessions, count)
 }
 
-// -- Test Cases: Observation Phase (ObserveAndExecute) --
+// ====================================================================================
+// Test Cases: Observation Phase (ObserveAndExecute)
+// ====================================================================================
 
-// Verifies request execution and storage when identifiers are found.
+// TestObserveAndExecute_Success_WithIdentifiers verifies request execution and storage when IDs are found.
 func TestObserveAndExecute_Success_WithIdentifiers(t *testing.T) {
 	analyzer, _ := setupInitializedAnalyzer(t)
 	ctx := context.Background()
@@ -228,7 +236,7 @@ func TestObserveAndExecute_Success_WithIdentifiers(t *testing.T) {
 	// Execute
 	resp, err := analyzer.ObserveAndExecute(ctx, RolePrimary, req, nil)
 	require.NoError(t, err)
-	// Crucial: ensure the response body is closed by the caller (the test in this case).
+	// Crucial: Ensure the response body is closed by the caller (the test in this case).
 	defer resp.Body.Close()
 
 	// Verify Response (Ensuring the analyzer correctly proxies the response and resets the body)
@@ -237,7 +245,7 @@ func TestObserveAndExecute_Success_WithIdentifiers(t *testing.T) {
 	require.NoError(t, err)
 	assert.Equal(t, expectedBody, string(respBody))
 
-	// Verify Observation Storage (Thread safe white box access)
+	// Verify Observation Storage (Thread-safe white-box access)
 	session := analyzer.sessions[RolePrimary]
 	session.mu.RLock()
 	defer session.mu.RUnlock()
@@ -254,10 +262,10 @@ func TestObserveAndExecute_Success_WithIdentifiers(t *testing.T) {
 	// Verify Identifier extraction results
 	require.Len(t, observed.Identifiers, 1)
 	assert.Equal(t, "12345", observed.Identifiers[0].Value)
-	assert.Equal(t, core.TypeNumericID, observed.Identifiers[0].Type)
+	assert.Equal(t, TypeNumericID, observed.Identifiers[0].Type)
 }
 
-// Verifies that requests without interesting identifiers are executed but not stored.
+// TestObserveAndExecute_NoIdentifiers verifies that requests without interesting IDs are executed but not stored.
 func TestObserveAndExecute_NoIdentifiers(t *testing.T) {
 	analyzer, _ := setupInitializedAnalyzer(t)
 	ctx := context.Background()
@@ -284,7 +292,7 @@ func TestObserveAndExecute_NoIdentifiers(t *testing.T) {
 	assert.Empty(t, session.ObservedRequests, "Requests without identifiers should not be stored")
 }
 
-// Verifies handling of requests with bodies (e.g., JSON) and identifier extraction.
+// TestObserveAndExecute_PostRequest verifies handling of requests with bodies (e.g., JSON) and identifier extraction.
 func TestObserveAndExecute_PostRequest(t *testing.T) {
 	analyzer, _ := setupInitializedAnalyzer(t)
 	ctx := context.Background()
@@ -329,10 +337,10 @@ func TestObserveAndExecute_PostRequest(t *testing.T) {
 	// Verify Identifier extraction from JSON
 	require.Len(t, observed.Identifiers, 1)
 	assert.Equal(t, "998877", observed.Identifiers[0].Value)
-	assert.Equal(t, core.LocationJSONBody, observed.Identifiers[0].Location)
+	assert.Equal(t, LocationJSONBody, observed.Identifiers[0].Location)
 }
 
-// Verifies error handling for missing sessions.
+// TestObserveAndExecute_UninitializedRole verifies error handling for missing sessions.
 func TestObserveAndExecute_UninitializedRole(t *testing.T) {
 	analyzer, _, _ := setupAnalyzer(t, 5) // Analyzer not initialized with roles
 	ctx := context.Background()
@@ -345,7 +353,7 @@ func TestObserveAndExecute_UninitializedRole(t *testing.T) {
 	assert.Contains(t, err.Error(), "not initialized")
 }
 
-// Verifies handling of connection failures during observation.
+// TestObserveAndExecute_NetworkError verifies handling of connection failures during observation.
 func TestObserveAndExecute_NetworkError(t *testing.T) {
 	analyzer, _ := setupInitializedAnalyzer(t)
 	ctx := context.Background()
@@ -369,7 +377,7 @@ func TestObserveAndExecute_NetworkError(t *testing.T) {
 	assert.Empty(t, session.ObservedRequests)
 }
 
-// Verifies thread safe observation recording for the same session.
+// TestObserveAndExecute_ConcurrencySafety verifies thread-safe observation recording for the same session.
 func TestObserveAndExecute_ConcurrencySafety(t *testing.T) {
 	analyzer, _ := setupInitializedAnalyzer(t)
 	ctx := context.Background()
@@ -406,29 +414,318 @@ func TestObserveAndExecute_ConcurrencySafety(t *testing.T) {
 	assert.Len(t, session.ObservedRequests, count)
 }
 
-// -- Test Cases: Analysis - Horizontal IDOR (User A vs User B) --
-// Tests the strategy of replaying Victim's requests using the Attacker's session.
+// ====================================================================================
+// Test Cases: Identifier Handling (idor.go Unit Tests)
+// Comprehensive tests for the critical helper functions: Classification, Extraction, Generation, and Application.
+// ====================================================================================
 
-// Verifies detection when the attacker successfully accesses the victim's resource.
+// TestClassifyIdentifier comprehensively tests the classification logic and heuristics.
+func TestClassifyIdentifier(t *testing.T) {
+	tests := []struct {
+		name  string
+		input string
+		want  IdentifierType
+	}{
+		// UUIDs (Case-insensitive)
+		{"UUIDv4", "f47ac10b-58cc-4372-a567-0e02b2c3d479", TypeUUID},
+		{"UUID uppercase", "F47AC10B-58CC-4372-A567-0E02B2C3D479", TypeUUID},
+
+		// MongoDB ObjectIDs (Case-insensitive, 24 hex chars)
+		{"ObjectID", "507f1f77bcf86cd799439011", TypeObjectID},
+		{"ObjectID uppercase", "507F1F77BCF86CD799439011", TypeObjectID},
+
+		// Numeric IDs (1-19 digits)
+		{"Numeric Short", "12345", TypeNumericID},
+		{"Numeric Long (Max Int64)", "9223372036854775807", TypeNumericID},
+		{"Numeric 1 digit", "1", TypeNumericID},
+
+		// Base64 (Length >= 8, matches regex, and passes decoding heuristic)
+		{"Base64 Std (Padded)", "aGVsbG8gd29ybGQ=", TypeBase64}, // "hello world"
+		{"Base64 URL-Safe", "aGVsbG8tMTIzNA==", TypeBase64},
+		{"Base64 Raw (No padding)", "aGVsbG8xMjM0", TypeBase64},
+
+		// False Positives and Heuristics
+		{"Empty String", "", TypeUnknown},
+		{"Non-ID String", "username", TypeUnknown},
+		{"Numeric Too Long (>19 digits)", "12345678901234567890", TypeUnknown},
+		{"Base64 too short (<8)", "YQ==", TypeUnknown}, // "a"
+		{"Invalid Base64 characters", "invalid!@#", TypeUnknown},
+
+		// Numeric Heuristics (Filtering common non-IDs)
+		{"Year (1980-2100)", "2023", TypeUnknown},
+		{"Year (Boundary)", "1980", TypeUnknown},
+		{"Year (Outside boundary)", "1979", TypeNumericID},
+		{"Common Port (80)", "80", TypeUnknown},
+		{"Common Port (8080)", "8080", TypeUnknown},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ClassifyIdentifier(tt.input)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestExtractIdentifiers_Comprehensive verifies extraction from all supported locations (URL, Query, JSON Body, Headers).
+func TestExtractIdentifiers_Comprehensive(t *testing.T) {
+	// 1. Setup Request
+	// URL Path: /api/users/12345/posts/f47ac10b-58cc-4372-a567-0e02b2c3d479 (Numeric and UUID)
+	// Query Param: session_id=507f1f77bcf86cd799439011 (ObjectID)
+	targetURL := "http://example.com/api/users/12345/posts/f47ac10b-58cc-4372-a567-0e02b2c3d479?session_id=507f1f77bcf86cd799439011&filter=recent"
+
+	// JSON Body (Nested structure, arrays, different types)
+	// Includes Numeric, Base64. Uses UseNumber() internally for precision.
+	body := `{
+		"request_id": 67890,
+		"metadata": {
+			"auth_token": "aGVsbG8gd29ybGQ=",
+			"details": [
+				{"item_id": 1001},
+				{"item_id": 1002}
+			]
+		},
+		"filter": "none"
+	}`
+
+	req, _ := http.NewRequest(http.MethodPost, targetURL, nil)
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set("X-Correlation-ID", "99999")
+	// Standard auth/cookie headers should be ignored by ExtractIdentifiers
+	req.Header.Set("Authorization", "Bearer ignored_token")
+	req.Header.Set("Cookie", "ignored_cookie")
+
+	// 2. Execute
+	identifiers := ExtractIdentifiers(req, []byte(body))
+
+	// 3. Verify (Use ElementsMatch for order-independent comparison)
+	expected := []ObservedIdentifier{
+		// URL Path (Note the PathIndex which is crucial for correct replacement)
+		{Value: "12345", Type: TypeNumericID, Location: LocationURLPath, PathIndex: 3},
+		{Value: "f47ac10b-58cc-4372-a567-0e02b2c3d479", Type: TypeUUID, Location: LocationURLPath, PathIndex: 5},
+		// Query Param
+		{Value: "507f1f77bcf86cd799439011", Type: TypeObjectID, Location: LocationQueryParam, Key: "session_id"},
+		// JSON Body (Note the dot-separated keys for nested access)
+		{Value: "67890", Type: TypeNumericID, Location: LocationJSONBody, Key: "request_id"},
+		{Value: "aGVsbG8gd29ybGQ=", Type: TypeBase64, Location: LocationJSONBody, Key: "metadata.auth_token"},
+		{Value: "1001", Type: TypeNumericID, Location: LocationJSONBody, Key: "metadata.details.0.item_id"},
+		{Value: "1002", Type: TypeNumericID, Location: LocationJSONBody, Key: "metadata.details.1.item_id"},
+		// Headers
+		{Value: "99999", Type: TypeNumericID, Location: LocationHeader, Key: "X-Correlation-ID"},
+	}
+
+	assert.ElementsMatch(t, expected, identifiers)
+}
+
+// TestExtractIdentifiers_NonJSONBody verifies that non-JSON content types are skipped during body analysis.
+func TestExtractIdentifiers_NonJSONBody(t *testing.T) {
+	targetURL := "http://example.com/api/data"
+	// Body contains identifiers, but Content-Type is XML
+	body := `<data><id>12345</id></data>`
+	req, _ := http.NewRequest(http.MethodPost, targetURL, nil)
+	req.Header.Set("Content-Type", "application/xml")
+
+	identifiers := ExtractIdentifiers(req, []byte(body))
+	assert.Empty(t, identifiers, "Should not extract IDs from non-JSON bodies (e.g., XML)")
+}
+
+// TestGenerateTestValue verifies the logic for creating plausible, predictable alternative IDs for testing.
+func TestGenerateTestValue(t *testing.T) {
+	tests := []struct {
+		name       string
+		identifier ObservedIdentifier
+		want       string
+		wantErr    bool
+	}{
+		// Numeric (Simple increment)
+		{"Numeric Increment", ObservedIdentifier{Type: TypeNumericID, Value: "100"}, "101", false},
+		{"Numeric Large", ObservedIdentifier{Type: TypeNumericID, Value: "9223372036854775806"}, "9223372036854775807", false},
+
+		// Base64 (Decode, flip last bit, re-encode)
+		// "hello" (aGVsbG8=) -> flip last bit of 'o' -> "helln" (aGVsbG4=)
+		{"Base64 Std", ObservedIdentifier{Type: TypeBase64, Value: "aGVsbG8="}, "aGVsbG4=", false},
+		// "test-1" (dGVzdC0x) -> flip last bit of '1' -> "test-0" (dGVzdC0w)
+		{"Base64 RawURL", ObservedIdentifier{Type: TypeBase64, Value: "dGVzdC0x"}, "dGVzdC0w", false},
+
+		// ObjectID (Hex cycle modification of the last character)
+		{"ObjectID Increment (0-9)", ObservedIdentifier{Type: TypeObjectID, Value: "507f1f77bcf86cd799439011"}, "507f1f77bcf86cd799439012", false},
+		{"ObjectID Increment (a-f)", ObservedIdentifier{Type: TypeObjectID, Value: "507f1f77bcf86cd79943901a"}, "507f1f77bcf86cd79943901b", false},
+		{"ObjectID Wrap (f->0)", ObservedIdentifier{Type: TypeObjectID, Value: "507f1f77bcf86cd79943901f"}, "507f1f77bcf86cd799439010", false},
+
+		// Unsupported Types (Predictive testing must skip these)
+		{"UUID (Unsupported)", ObservedIdentifier{Type: TypeUUID, Value: "f47ac10b-58cc-4372-a567-0e02b2c3d479"}, "", true},
+		{"Unknown (Unsupported)", ObservedIdentifier{Type: TypeUnknown, Value: "test"}, "", true},
+
+		// Error cases
+		{"Invalid Numeric (Parse error)", ObservedIdentifier{Type: TypeNumericID, Value: "abc"}, "", true},
+		{"Undecodable Base64", ObservedIdentifier{Type: TypeBase64, Value: "invalid!"}, "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := GenerateTestValue(tt.identifier)
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				assert.NoError(t, err)
+				assert.Equal(t, tt.want, got)
+			}
+		})
+	}
+}
+
+// TestApplyTestValue_Comprehensive verifies the modification of the request object in all locations.
+func TestApplyTestValue_Comprehensive(t *testing.T) {
+	// Setup baseline request
+	originalURL := "http://example.com/api/resource/100?id=200"
+	originalBody := `{"data": {"key": 300}}`
+	req, _ := http.NewRequest(http.MethodPost, originalURL, bytes.NewReader([]byte(originalBody)))
+	req.Header.Set("X-Test-ID", "400")
+
+	testValue := "999"
+
+	tests := []struct {
+		name           string
+		identifier     ObservedIdentifier
+		expectedURL    string
+		expectedHeader string
+		expectedBody   string
+	}{
+		{
+			"URL Path (Index based)",
+			// PathIndex 3 corresponds to "100" in /api/resource/100
+			ObservedIdentifier{Location: LocationURLPath, Value: "100", PathIndex: 3},
+			"http://example.com/api/resource/999?id=200", "", originalBody,
+		},
+		{
+			"Query Param (Key based)",
+			ObservedIdentifier{Location: LocationQueryParam, Key: "id", Value: "200"},
+			// Note: URL encoding might change the order, but Query().Get() handles this. We check the full URL string here for simplicity assuming standard encoding order.
+			"http://example.com/api/resource/100?id=999", "", originalBody,
+		},
+		{
+			"Header (Key based)",
+			ObservedIdentifier{Location: LocationHeader, Key: "X-Test-ID", Value: "400"},
+			originalURL, "999", originalBody,
+		},
+		{
+			"JSON Body (Path based, Numeric)",
+			// TypeNumericID ensures the replacement value is treated as a number in JSON.
+			ObservedIdentifier{Location: LocationJSONBody, Key: "data.key", Value: "300", Type: TypeNumericID},
+			originalURL, "", `{"data":{"key":999}}`,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Execute
+			modifiedReq, modifiedBody, err := ApplyTestValue(req, []byte(originalBody), tt.identifier, testValue)
+			require.NoError(t, err)
+
+			// Verify URL modification
+			assert.Equal(t, tt.expectedURL, modifiedReq.URL.String())
+
+			// Verify Header modification
+			if tt.expectedHeader != "" {
+				assert.Equal(t, tt.expectedHeader, modifiedReq.Header.Get("X-Test-ID"))
+			}
+
+			// Verify Body modification (Use JSONEq for structured comparison, ignoring formatting differences)
+			assert.JSONEq(t, tt.expectedBody, string(modifiedBody))
+
+			// Verify Content-Length update if body changed
+			if string(modifiedBody) != originalBody {
+				assert.Equal(t, int64(len(modifiedBody)), modifiedReq.ContentLength)
+			}
+		})
+	}
+}
+
+// TestModifyJSONPayload_StructuredModification verifies the robustness of the internal JSON modification helper.
+// This tests the logic of navigating and updating the JSON structure (maps/slices) securely.
+func TestModifyJSONPayload_StructuredModification(t *testing.T) {
+	// Complex payload including arrays and nested objects.
+	original := `{
+		"users": [
+			{"id": 101, "name": "Alice"},
+			{"id": 102, "name": "Bob"}
+		],
+		"config": {"setting": "value", "id": 201}
+	}`
+
+	tests := []struct {
+		name       string
+		path       string
+		testValue  string
+		idType     IdentifierType
+		expected   string
+		wantErr    bool
+	}{
+		// Modification in Array (Index based access)
+		{
+			"Array Element (Numeric)", "users.1.id", "999", TypeNumericID,
+			`{"users": [{"id": 101, "name": "Alice"}, {"id": 999, "name": "Bob"}], "config": {"setting": "value", "id": 201}}`,
+			false,
+		},
+		// Modification in Object (Key based access)
+		{
+			"Nested Object (String)", "config.setting", "new_value", TypeUnknown,
+			`{"users": [{"id": 101, "name": "Alice"}, {"id": 102, "name": "Bob"}], "config": {"setting": "new_value", "id": 201}}`,
+			false,
+		},
+		// Type Preservation (Crucial: Numeric ID should remain a JSON number, not converted to a string)
+		{
+			"Type Preservation (Numeric)", "config.id", "888", TypeNumericID,
+			`{"users": [{"id": 101, "name": "Alice"}, {"id": 102, "name": "Bob"}], "config": {"setting": "value", "id": 888}}`,
+			false,
+		},
+		// Type Change (If TypeNumericID is not specified, it defaults to string replacement)
+		{
+			"Type Change (Numeric to String)", "config.id", "888", TypeUnknown,
+			`{"users": [{"id": 101, "name": "Alice"}, {"id": 102, "name": "Bob"}], "config": {"setting": "value", "id": "888"}}`,
+			false,
+		},
+		// Error Cases (Robustness against invalid paths)
+		{"Invalid Path (Key not found)", "config.nonexistent", "val", TypeUnknown, "", true},
+		{"Invalid Path (Array index out of bounds)", "users.5.id", "val", TypeUnknown, "", true},
+		{"Invalid Path (Non-integer array index)", "users.abc.id", "val", TypeUnknown, "", true},
+		{"Invalid Path (Type mismatch)", "config.setting.id", "val", TypeUnknown, "", true}, // Trying to index a string value
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Test the unexported modifyJSONPayload function
+			identifier := ObservedIdentifier{Key: tt.path, Location: LocationJSONBody, Type: tt.idType}
+			modified, err := modifyJSONPayload([]byte(original), identifier, tt.testValue)
+
+			if tt.wantErr {
+				assert.Error(t, err)
+			} else {
+				require.NoError(t, err)
+				// Use JSONEq for structured comparison
+				assert.JSONEq(t, tt.expected, string(modified))
+			}
+		})
+	}
+}
+
+// ====================================================================================
+// Test Cases: Analysis - Horizontal IDOR (User A vs User B)
+// Tests the strategy of replaying Victim's requests using the Attacker's session.
+// ====================================================================================
+
+// TestRunAnalysis_Horizontal_Vulnerable verifies detection when the attacker successfully accesses the victim's resource.
 func TestRunAnalysis_Horizontal_Vulnerable(t *testing.T) {
 	analyzer, reporter := setupInitializedAnalyzer(t)
 	ctx := context.Background()
 
 	// --- Setup Scenario ---
-	// A vulnerable endpoint that checks for authentication (any valid session) but lacks authorization (object level checks).
+	// A vulnerable endpoint that checks for authentication (any valid session) but lacks authorization (object-level checks).
 	server := setupObservationServer(t, func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie("session_id")
 		if err != nil {
 			w.WriteHeader(http.StatusUnauthorized)
 			w.Write([]byte("Unauthorized"))
-			return
-		}
-
-		// Only respond positively to the specific resource path to isolate the horizontal test.
-		// This prevents the predictive test (which tries /api/resource/12346) from also succeeding.
-		if r.URL.Path != "/api/resource/12345" {
-			w.WriteHeader(http.StatusNotFound)
-			w.Write([]byte("Not Found"))
 			return
 		}
 
@@ -485,13 +782,13 @@ func TestRunAnalysis_Horizontal_Vulnerable(t *testing.T) {
 	assert.Contains(t, finding.Evidence.Response.Body, fmt.Sprintf("Accessed by %s", RoleSecondary))
 }
 
-// Verifies no findings when the attacker is correctly blocked (e.g., 403 Forbidden).
+// TestRunAnalysis_Horizontal_Secure verifies no findings when the attacker is correctly blocked (e.g., 403 Forbidden).
 func TestRunAnalysis_Horizontal_Secure(t *testing.T) {
 	analyzer, reporter := setupInitializedAnalyzer(t)
 	ctx := context.Background()
 
 	// --- Setup Scenario ---
-	// A secure endpoint that correctly implements object level authorization.
+	// A secure endpoint that correctly implements object-level authorization.
 	server := setupObservationServer(t, func(w http.ResponseWriter, r *http.Request) {
 		cookie, err := r.Cookie("session_id")
 		if err != nil {
@@ -531,7 +828,7 @@ func TestRunAnalysis_Horizontal_Secure(t *testing.T) {
 	assert.Empty(t, reporter.GetFindings())
 }
 
-// Verifies handling of authorization via redirects (e.g., 302 Found).
+// TestRunAnalysis_Horizontal_RedirectBehavior verifies handling of authorization via redirects (e.g., 302 Found).
 // This tests the configuration where the HTTP client does not follow redirects.
 func TestRunAnalysis_Horizontal_RedirectBehavior(t *testing.T) {
 	analyzer, reporter := setupInitializedAnalyzer(t)
@@ -576,7 +873,7 @@ func TestRunAnalysis_Horizontal_RedirectBehavior(t *testing.T) {
 	assert.Empty(t, reporter.GetFindings())
 }
 
-// Verifies the detection logic handles minor variations in content length (e.g., dynamic content).
+// TestRunAnalysis_Horizontal_LengthTolerance verifies the detection logic handles minor variations in content length (e.g., dynamic content).
 func TestRunAnalysis_Horizontal_LengthTolerance(t *testing.T) {
 	analyzer, reporter := setupInitializedAnalyzer(t)
 	ctx := context.Background()
@@ -619,7 +916,7 @@ func TestRunAnalysis_Horizontal_LengthTolerance(t *testing.T) {
 	assert.Len(t, reporter.GetFindings(), 1, "Should detect IDOR when content length variation is within tolerance")
 }
 
-// Verifies no detection if content length varies significantly, even if status codes match.
+// TestRunAnalysis_Horizontal_LengthExceeded verifies no detection if content length varies significantly, even if status codes match.
 func TestRunAnalysis_Horizontal_LengthExceeded(t *testing.T) {
 	analyzer, reporter := setupInitializedAnalyzer(t)
 	ctx := context.Background()
@@ -658,10 +955,12 @@ func TestRunAnalysis_Horizontal_LengthExceeded(t *testing.T) {
 	assert.Empty(t, reporter.GetFindings(), "Should not detect IDOR if content length differs significantly")
 }
 
-// -- Test Cases: Analysis - Predictive IDOR (Resource Enumeration) --
+// ====================================================================================
+// Test Cases: Analysis - Predictive IDOR (Resource Enumeration)
 // Tests the strategy of modifying identifiers (e.g., incrementing IDs) and checking if the modified request succeeds.
+// ====================================================================================
 
-// Verifies detection when an incremented numeric ID returns a valid resource.
+// TestRunAnalysis_Predictive_Vulnerable_Numeric verifies detection when an incremented numeric ID returns a valid resource.
 func TestRunAnalysis_Predictive_Vulnerable_Numeric(t *testing.T) {
 	// Predictive analysis uses the original user's session.
 	analyzer, reporter := setupInitializedAnalyzer(t)
@@ -670,19 +969,9 @@ func TestRunAnalysis_Predictive_Vulnerable_Numeric(t *testing.T) {
 	// --- Setup Scenario ---
 	// An endpoint where resources are sequentially numbered (100, 101) and authorization checks are missing.
 	server := setupObservationServer(t, func(w http.ResponseWriter, r *http.Request) {
-		// Added an authorization check to isolate this test to *predictive* vulnerabilities.
-		// This prevents the horizontal replay by the secondary user from succeeding and causing a panic
-		// because the test only expects one finding (the predictive one).
-		cookie, err := r.Cookie("session_id")
-		if err != nil || cookie.Value != RolePrimary {
-			w.WriteHeader(http.StatusForbidden)
-			w.Write([]byte("Forbidden"))
-			return
-		}
-
 		resourceID := r.URL.Path[len("/api/items/"):]
 
-		// Vulnerable logic: Allows access to specific sequential IDs *for the primary user*.
+		// Vulnerable logic: Allows access to specific sequential IDs.
 		if resourceID == "100" || resourceID == "101" {
 			w.WriteHeader(http.StatusOK)
 			w.Write([]byte(fmt.Sprintf("Success: Details for item %s", resourceID)))
@@ -695,11 +984,6 @@ func TestRunAnalysis_Predictive_Vulnerable_Numeric(t *testing.T) {
 	// --- Observation Phase ---
 	// Observe access to item 100.
 	targetURL := server.URL + "/api/items/100"
-	// Set a session cookie for the primary user to pass the new authorization check.
-	// The secondary user's session remains clean, so their horizontal replay will fail.
-	u, _ := url.Parse(targetURL)
-	analyzer.sessions[RolePrimary].Client.Jar.SetCookies(u, []*http.Cookie{{Name: "session_id", Value: RolePrimary}})
-
 	req, _ := http.NewRequest(http.MethodGet, targetURL, nil)
 	resp, err := analyzer.ObserveAndExecute(ctx, RolePrimary, req, nil)
 	require.NoError(t, err)
@@ -708,7 +992,7 @@ func TestRunAnalysis_Predictive_Vulnerable_Numeric(t *testing.T) {
 	// Verify observation and identifier type
 	observed := analyzer.sessions[RolePrimary].ObservedRequests["GET /api/items/100"]
 	require.Len(t, observed.Identifiers, 1)
-	assert.Equal(t, core.TypeNumericID, observed.Identifiers[0].Type)
+	assert.Equal(t, TypeNumericID, observed.Identifiers[0].Type)
 
 	// --- Analysis Phase ---
 	// The analyzer should generate a test value (101) and attempt to access it.
@@ -738,7 +1022,7 @@ func TestRunAnalysis_Predictive_Vulnerable_Numeric(t *testing.T) {
 	assert.Contains(t, finding.Description, "modified to '101'")
 }
 
-// Verifies no findings when the predicted ID returns 404 or 403.
+// TestRunAnalysis_Predictive_Secure verifies no findings when the predicted ID returns 404 or 403.
 func TestRunAnalysis_Predictive_Secure(t *testing.T) {
 	analyzer, reporter := setupInitializedAnalyzer(t)
 	ctx := context.Background()
@@ -768,11 +1052,11 @@ func TestRunAnalysis_Predictive_Secure(t *testing.T) {
 	require.NoError(t, err)
 
 	// --- Verification ---
-	// No findings because the predicted request resulted in a non successful status (404).
+	// No findings because the predicted request resulted in a non-successful status (404).
 	assert.Empty(t, reporter.GetFindings())
 }
 
-// Verifies that UUIDs are correctly skipped for predictive testing as they are non enumerable.
+// TestRunAnalysis_Predictive_SkipUUID verifies that UUIDs are correctly skipped for predictive testing as they are non-enumerable.
 func TestRunAnalysis_Predictive_SkipUUID(t *testing.T) {
 	analyzer, reporter := setupInitializedAnalyzer(t)
 	ctx := context.Background()
@@ -797,7 +1081,7 @@ func TestRunAnalysis_Predictive_SkipUUID(t *testing.T) {
 
 	// Verify identifier type
 	observed := analyzer.sessions[RolePrimary].ObservedRequests["GET /api/resource/"+uuidVal]
-	assert.Equal(t, core.TypeUUID, observed.Identifiers[0].Type)
+	assert.Equal(t, TypeUUID, observed.Identifiers[0].Type)
 
 	// --- Analysis Phase ---
 	err = analyzer.RunAnalysis(ctx, RolePrimary, RoleSecondary)
@@ -812,7 +1096,7 @@ func TestRunAnalysis_Predictive_SkipUUID(t *testing.T) {
 	mu.Unlock()
 }
 
-// Verifies predictive testing works correctly for identifiers within JSON payloads.
+// TestRunAnalysis_Predictive_JSONBody verifies predictive testing works correctly for identifiers within JSON payloads.
 func TestRunAnalysis_Predictive_JSONBody(t *testing.T) {
 	analyzer, reporter := setupInitializedAnalyzer(t)
 	ctx := context.Background()
@@ -873,9 +1157,11 @@ func TestRunAnalysis_Predictive_JSONBody(t *testing.T) {
 	assert.Contains(t, findings[0].Description, "modified to '501'")
 }
 
-// -- Test Cases: Concurrency, Robustness, and Edge Cases --
+// ====================================================================================
+// Test Cases: Concurrency, Robustness, and Edge Cases
+// ====================================================================================
 
-// Verifies the worker pool implementation handles many concurrent tests correctly and efficiently.
+// TestRunAnalysis_Concurrency_HighLoad verifies the worker pool implementation handles many concurrent tests correctly and efficiently.
 func TestRunAnalysis_Concurrency_HighLoad(t *testing.T) {
 	// Setup analyzer with high concurrency level
 	analyzer, reporter, _ := setupAnalyzer(t, 50)
@@ -902,7 +1188,7 @@ func TestRunAnalysis_Concurrency_HighLoad(t *testing.T) {
 
 		analyzer.sessions[RolePrimary].ObservedRequests[fmt.Sprintf("GET /api/item/%d", id)] = ObservedRequest{
 			Request:        req,
-			Identifiers:    []core.ObservedIdentifier{{Type: core.TypeNumericID, Value: fmt.Sprintf("%d", id)}},
+			Identifiers:    []ObservedIdentifier{{Type: TypeNumericID, Value: fmt.Sprintf("%d", id)}},
 			BaselineStatus: http.StatusOK,
 			BaselineLength: 2, // Length of "OK"
 		}
@@ -928,7 +1214,7 @@ func TestRunAnalysis_Concurrency_HighLoad(t *testing.T) {
 	assert.Less(t, duration, 1*time.Second, "Analysis should complete efficiently using concurrent workers")
 }
 
-// Verifies that the analysis stops promptly when the context is cancelled, preventing deadlocks.
+// TestRunAnalysis_ContextCancellation verifies that the analysis stops promptly when the context is cancelled, preventing deadlocks.
 func TestRunAnalysis_ContextCancellation(t *testing.T) {
 	analyzer, reporter, _ := setupAnalyzer(t, 10)
 	analyzer.InitializeSession(RolePrimary)
@@ -951,7 +1237,7 @@ func TestRunAnalysis_ContextCancellation(t *testing.T) {
 		req, _ := http.NewRequest(http.MethodGet, targetURL, nil)
 		analyzer.sessions[RolePrimary].ObservedRequests[fmt.Sprintf("GET %d", i)] = ObservedRequest{
 			Request:        req,
-			Identifiers:    []core.ObservedIdentifier{{Type: core.TypeNumericID}},
+			Identifiers:    []ObservedIdentifier{{Type: TypeNumericID}},
 			BaselineStatus: http.StatusOK,
 		}
 	}
@@ -977,7 +1263,7 @@ func TestRunAnalysis_ContextCancellation(t *testing.T) {
 	assert.Less(t, len(reporter.GetFindings()), 100) // Max potential findings: 50 horizontal + 50 predictive
 }
 
-// Verifies behavior when no interesting requests were observed.
+// TestRunAnalysis_EmptyObservationSet verifies behavior when no interesting requests were observed.
 func TestRunAnalysis_EmptyObservationSet(t *testing.T) {
 	analyzer, reporter := setupInitializedAnalyzer(t)
 	ctx := context.Background()
@@ -990,7 +1276,7 @@ func TestRunAnalysis_EmptyObservationSet(t *testing.T) {
 	assert.Empty(t, reporter.GetFindings())
 }
 
-// Verifies that analysis requires both roles to be initialized before starting.
+// TestRunAnalysis_InitializationChecks verifies that analysis requires both roles to be initialized before starting.
 func TestRunAnalysis_InitializationChecks(t *testing.T) {
 	analyzer, _, _ := setupAnalyzer(t, 5)
 	ctx := context.Background()
@@ -1012,7 +1298,7 @@ func TestRunAnalysis_InitializationChecks(t *testing.T) {
 	assert.Error(t, err)
 }
 
-// Verifies that network errors during the analysis replay do not crash the analyzer.
+// TestHorizontalWorker_NetworkErrorRobustness verifies that network errors during the analysis replay do not crash the analyzer.
 func TestHorizontalWorker_NetworkErrorRobustness(t *testing.T) {
 	analyzer, reporter := setupInitializedAnalyzer(t)
 	ctx := context.Background()
@@ -1027,7 +1313,7 @@ func TestHorizontalWorker_NetworkErrorRobustness(t *testing.T) {
 	analyzer.sessions[RolePrimary].ObservedRequests["GET /api/fail"] = ObservedRequest{
 		Request:        req,
 		BaselineStatus: http.StatusOK,
-		Identifiers:    []core.ObservedIdentifier{{Type: core.TypeNumericID, Value: "1"}}, // Add identifier for predictive test robustness too
+		Identifiers:    []ObservedIdentifier{{Type: TypeNumericID, Value: "1"}}, // Add identifier for predictive test robustness too
 	}
 
 	// Run Analysis (Should not panic, deadlock, or return an error)

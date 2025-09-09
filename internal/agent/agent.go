@@ -1,3 +1,4 @@
+//internal/agent/agent.go
 package agent
 
 import "time"

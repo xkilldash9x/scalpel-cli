@@ -1,6 +1,5 @@
 // internal/worker/adapters/taint_analyzer_test.go
-package taint
-
+package adapters_test
 import (
 	"context"
 	"errors"

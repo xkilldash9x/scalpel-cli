@@ -1,159 +1,280 @@
-// internal/analysis/auth/ato/analyzer.go
-package ato
+// -- pkg/analysis/active/timeslip/analyzer.go --
+package timeslip
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
-	"fmt"
-	"io"
 	"net/http"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"go.uber.org/zap"
 )
 
-// ATOAnalyzer performs passive analysis for ATO risks on observed traffic.
-// It is now architecturally aware and uses the main application configuration.
-type ATOAnalyzer struct {
-	config config.ATOConfig
+
+// Analyzer orchestrates the TimeSlip module, managing strategy execution and result analysis.
+type Analyzer struct {
+	ScanID   uuid.UUID
+	config   *Config
+	logger   *zap.Logger
+	reporter core.Reporter
 }
 
-// NewATOAnalyzer creates a new passive ATOAnalyzer.
-// It accepts the active ATO configuration to reuse username/password field definitions.
-func NewATOAnalyzer(cfg config.ATOConfig) *ATOAnalyzer {
-	// If the user hasn't provided a password list for active spraying,
-	// we'll use a basic default list for our passive check.
-	if len(cfg.PasswordSprayWordlist) == 0 {
-		cfg.PasswordSprayWordlist = defaultWeakPasswords
+// NewAnalyzer initializes the TimeSlip Analyzer.
+// The signature is updated to return an error if the configuration, like its regex patterns, is invalid.
+func NewAnalyzer(scanID uuid.UUID, config *Config, logger *zap.Logger, reporter core.Reporter) (*Analyzer, error) {
+	if logger == nil {
+		logger = observability.NewNopLogger()
 	}
-	// Similarly, if field names aren't defined, use some sensible defaults.
-	if len(cfg.UsernameFields) == 0 {
-		cfg.UsernameFields = []string{"username", "email", "user", "login", "user_id"}
-	}
-	if len(cfg.PasswordFields) == 0 {
-		cfg.PasswordFields = []string{"password", "pass", "pwd", "secret", "passwd", "user_pass"}
+	log := logger.Named("timeslip_analyzer")
+
+	if config == nil {
+		// Provide a safe default configuration if none is supplied.
+		log.Info("Configuration missing, using default TimeSlip settings.")
+		config = &Config{
+			Concurrency: 20,
+			Timeout:     15 * time.Second,
+			ThresholdMs: 500,
+		}
 	}
 
-	return &ATOAnalyzer{config: cfg}
+	// Configuration validation is key.
+	if config.Concurrency < 2 {
+		log.Warn("Concurrency must be at least 2 for race condition testing. Adjusting to minimum.", zap.Int("configured_concurrency", config.Concurrency))
+		config.Concurrency = 2
+	}
+
+	// We'll try to initialize the Oracle here just to validate the configuration (especially the regexes).
+	// The actual Oracle used during the analysis will be specific to the candidate type (GraphQL or not).
+	_, err := NewSuccessOracle(config, false) // Test with standard HTTP config
+	if err != nil {
+		log.Error("Invalid TimeSlip configuration detected during initialization.", zap.Error(err))
+		return nil, err
+	}
+
+	return &Analyzer{
+		ScanID:   scanID,
+		config:   config,
+		logger:   log,
+		reporter: reporter,
+	}, nil
 }
 
-// Analyze checks for potential Account Takeover vulnerabilities based on passive observation.
-func (a *ATOAnalyzer) Analyze(req *http.Request, resp *http.Response) ([]schemas.Finding, error) {
-	var vulnerabilities []schemas.Finding
+// Analyze executes the analysis pipeline against a specific candidate request.
+func (a *Analyzer) Analyze(ctx context.Context, candidate *RaceCandidate) error {
+	a.logger.Info("Starting TimeSlip analysis",
+		zap.String("url", candidate.URL),
+		zap.String("method", candidate.Method),
+		zap.Int("concurrency", a.config.Concurrency))
 
-	createFinding := func(vulnType, severity, description, cwe string) schemas.Finding {
-		targetURL := "unknown"
-		if req != nil && req.URL != nil {
-			targetURL = req.URL.String()
-		}
-		return schemas.Finding{
-			ID:            uuid.New().String(),
-			Timestamp:     time.Now().UTC(),
-			Target:        targetURL,
-			Module:        "ATOAnalyzer (Passive)",
-			Vulnerability: vulnType,
-			Severity:      schemas.Severity(severity),
-			Description:   description,
-			CWE:           cwe,
-		}
+	// Initialize the SuccessOracle specific to this candidate which handles the IsGraphQL flag.
+	oracle, err := NewSuccessOracle(a.config, candidate.IsGraphQL)
+	if err != nil {
+		// This indicates an internal inconsistency.
+		a.logger.Error("Internal Error: Failed to initialize SuccessOracle despite prior validation.", zap.Error(err))
+		return fmt.Errorf("internal error initializing SuccessOracle: %w", err)
 	}
 
-	// Check for weak credentials in transit (Passive observation)
-	if req != nil && req.Method == "POST" && isLoginEndpoint(req.URL.Path) {
-		bodyBytes, _ := readRequestBody(req)
+	strategies := a.determineStrategies(candidate)
 
-		// This logic intelligently parses the request body using the configured field names.
-		if password, found := a.extractPasswordFromRequest(req, bodyBytes); found {
-			for _, weakPass := range a.config.PasswordSprayWordlist {
-				if password == weakPass {
-					vulnerabilities = append(vulnerabilities, createFinding(
-						"Weak Credentials Observed in Transit",
-						"Low", // Severity is low because we don't know if they were accepted.
-						fmt.Sprintf("The application transmitted a known weak password ('%s') during an authentication attempt.", weakPass),
-						"CWE-521", // Weak Password Requirements
-					))
-					break // Found a weak password, no need to check others.
-				}
+	for _, strategy := range strategies {
+		// Check for context cancellation before kicking off a new strategy.
+		if ctx.Err() != nil {
+			a.logger.Info("TimeSlip analysis cancelled", zap.Error(ctx.Err()))
+			return ctx.Err()
+		}
+
+		a.logger.Debug("Executing strategy", zap.String("strategy", string(strategy)))
+
+		var result *RaceResult
+		var execErr error
+
+		// Execute the selected strategy, passing the configuration and the oracle.
+		switch strategy {
+		case H1Concurrent:
+			result, execErr = ExecuteH1Concurrent(ctx, candidate, a.config, oracle)
+		case H1SingleByteSend:
+			result, execErr = ExecuteH1SingleByteSend(ctx, candidate, a.config, oracle)
+		case H2Multiplexing:
+			result, execErr = ExecuteH2Multiplexing(ctx, candidate, a.config, oracle)
+		case AsyncGraphQL:
+			result, execErr = ExecuteGraphQLAsync(ctx, candidate, a.config, oracle)
+		}
+
+		if execErr != nil {
+			// If a strategy fails, we need to know why so we can decide whether to continue.
+			if errors.Is(execErr, ErrH2Unsupported) || errors.Is(execErr, ErrPipeliningRejected) {
+				a.logger.Info("Strategy not supported by target or intermediate proxy.", zap.String("strategy", string(strategy)), zap.Error(execErr))
+			} else if errors.Is(execErr, ErrTargetUnreachable) {
+				a.logger.Warn("Strategy failed due to target being unreachable or timing out.", zap.String("strategy", string(strategy)), zap.Error(execErr))
+				// Could consider breaking here if the target seems completely down.
+			} else if errors.Is(execErr, ErrConfigurationError) || errors.Is(execErr, ErrPayloadMutationFail) {
+				a.logger.Error("Strategy failed due to configuration or payload issues. Halting analysis for this candidate.", zap.String("strategy", string(strategy)), zap.Error(execErr))
+				break // Stop analysis for this candidate if the input or config is just plain wrong.
+			} else {
+				a.logger.Warn("Strategy execution encountered an unexpected error.", zap.String("strategy", string(strategy)), zap.Error(execErr))
+			}
+			continue // Try the next strategy.
+		}
+
+		// Analyze the results.
+		analysis := AnalyzeResults(result, a.config)
+
+		// Report findings if vulnerable or if confidence indicates an informational finding (>= 0.3).
+		if analysis.Vulnerable || analysis.Confidence >= 0.3 {
+			a.logger.Info("Race condition indicator detected",
+				zap.Float64("confidence", analysis.Confidence),
+				zap.Bool("vulnerable", analysis.Vulnerable),
+				zap.String("details", analysis.Details))
+
+			// Only report as a security vulnerability if it's explicitly marked as such.
+			if analysis.Vulnerable {
+				a.reportFinding(candidate, analysis, result)
+			}
+
+			// Optimization: If Confidence is 1.0 (a confirmed TOCTOU), we can stop further analysis.
+			if analysis.Confidence == 1.0 {
+				a.logger.Info("Critical TOCTOU detected (Confidence 1.0). Halting further strategies.")
+				break
 			}
 		}
 	}
 
-	// Check for predictable password recovery tokens
-	if req != nil && isPasswordResetEndpoint(req.URL.Path) {
-		token := req.URL.Query().Get("token")
-		if token == "" {
-			token = req.URL.Query().Get("reset_token")
-		}
-
-		if len(token) > 0 {
-			if len(token) < 20 {
-				vulnerabilities = append(vulnerabilities, createFinding(
-					"Potentially Predictable Password Recovery Token (Short Length)",
-					"Medium",
-					"The password recovery token is short (less than 20 characters) and may be susceptible to brute-force attacks.",
-					"CWE-330",
-				))
-			}
-
-			entropy := calculateShannonEntropy(token)
-			if entropy < 3.0 {
-				vulnerabilities = append(vulnerabilities, createFinding(
-					"Potentially Predictable Password Recovery Token (Low Entropy)",
-					"Medium",
-					fmt.Sprintf("The password recovery token has low entropy (%.2f bits/character), suggesting it may be predictable.", entropy),
-					"CWE-330",
-				))
-			}
-		}
-	}
-
-	return vulnerabilities, nil
+	return nil
 }
 
-// extractPasswordFromRequest parses the request body based on Content-Type
-// and looks for common password field names from the analyzer's config.
-func (a *ATOAnalyzer) extractPasswordFromRequest(req *http.Request, bodyBytes []byte) (string, bool) {
-	if len(bodyBytes) == 0 {
-		return "", false
+// determineStrategies selects the appropriate attack strategies based on the candidate characteristics.
+func (a *Analyzer) determineStrategies(candidate *RaceCandidate) []RaceStrategy {
+	// GraphQL endpoints get a specialized strategy all to themselves.
+	if candidate.IsGraphQL {
+		return []RaceStrategy{AsyncGraphQL}
 	}
 
-	contentType := req.Header.Get("Content-Type")
-	passwordFields := a.config.PasswordFields
+	// For standard HTTP endpoints, we attempt all applicable strategies in order of preference.
+	return []RaceStrategy{
+		H2Multiplexing,   // Preferred for efficiency if the target supports it.
+		H1SingleByteSend, // The most precise technique for HTTP/1.1.
+		H1Concurrent,     // The classic brute force fallback.
+	}
+}
 
-	// Use an if/else if structure to ensure content type handlers are mutually exclusive.
-	if strings.Contains(contentType, "application/json") {
-		var data map[string]interface{}
-		if err := json.Unmarshal(bodyBytes, &data); err != nil {
-			return "", false // Not valid JSON
-		}
+// TimeSlipEvidence provides structured data for race condition findings.
+type TimeSlipEvidence struct {
+	Strategy        RaceStrategy            `json:"strategy"`
+	TotalDurationMs int64                   `json:"total_duration_ms"`
+	Statistics      ResponseStatistics      `json:"statistics"`
+	SampleResponses []core.SerializedResponse `json:"sample_responses"`
+}
 
-		for key, value := range data {
-			lowerKey := strings.ToLower(key)
-			for _, fieldName := range passwordFields {
-				if lowerKey == fieldName {
-					if password, ok := value.(string); ok {
-						return password, true
-					}
-				}
-			}
-		}
-	} else if strings.Contains(contentType, "application/x-www-form-urlencoded") {
-		// Handle form-urlencoded bodies
-		values, err := url.ParseQuery(string(bodyBytes))
-		if err != nil {
-			return "", false // Malformed query string
-		}
+// reportFinding formats the vulnerability details and publishes them via the core reporter interface.
+func (a *Analyzer) reportFinding(candidate *RaceCandidate, analysis *AnalysisResult, result *RaceResult) {
+	title := fmt.Sprintf("Race Condition Detected (%s)", analysis.Strategy)
+	description := analysis.Details
+	vulnerabilityType := "CWE-362: Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')"
 
-		for _, fieldName := range passwordFields {
-			if password := values.Get(fieldName); password != "" {
-				return password, true
-			}
-		}
+	// Determine severity based on the Confidence Score.
+	var severity schemas.Severity
+
+	if analysis.Confidence == 1.0 {
+		severity = schemas.SeverityCritical
+		title = fmt.Sprintf("Critical TOCTOU Race Condition Detected (%s)", analysis.Strategy)
+		vulnerabilityType = "CWE-367: Time-of-check Time-of-use (TOCTOU) Race Condition"
+	} else if analysis.Confidence >= 0.8 {
+		severity = schemas.SeverityHigh
+	} else if analysis.Confidence >= 0.6 {
+		severity = schemas.SeverityMedium
+	} else {
+		severity = schemas.SeverityLow
 	}
 
-	return "", false
+	// Compile all the juicy evidence.
+	evidenceData := TimeSlipEvidence{
+		Strategy:        analysis.Strategy,
+		TotalDurationMs: result.Duration.Milliseconds(),
+		Statistics:      analysis.Stats,
+		SampleResponses: a.sampleUniqueResponses(result.Responses),
+	}
+	evidence, _ := json.Marshal(evidenceData)
+
+	finding := schemas.Finding{
+		ID:             uuid.NewString(),
+		Timestamp:      time.Now().UTC(),
+		Target:         candidate.URL,
+		Module:         "TimeSlipAnalyzer",
+		Vulnerability:  title,
+		Severity:       severity,
+		Description:    description,
+		Evidence:       evidence,
+		Recommendation: "Implement proper synchronization mechanisms such as atomic transactions, database constraints (e.g., uniqueness constraints), or pessimistic/optimistic locking to ensure operations on shared resources are processed safely and consistently.",
+		CWE:            vulnerabilityType,
+	}
+
+	// If a reporter is configured, this is where we use it.
+	if a.reporter != nil {
+		// Let's get this finding packaged up for delivery in a ResultEnvelope.
+		// The envelope provides scan-level context around the individual finding.
+		envelope := &schemas.ResultEnvelope{
+			Timestamp: time.Now().UTC(),
+			ScanID:    a.ScanID.String(),
+			Findings:  []schemas.Finding{finding},
+		}
+
+		// Fire it off to the reporter. If something goes wrong, we need to log it
+		// so we don't silently fail to report a vulnerability.
+		if err := a.reporter.Write(envelope); err != nil {
+			a.logger.Error("Failed to report finding via reporter",
+				zap.String("finding_id", finding.ID),
+				zap.Error(err),
+			)
+		}
+	}
+}
+
+// sampleUniqueResponses selects a representative sample of unique responses for the evidence report.
+func (a *Analyzer) sampleUniqueResponses(responses []*RaceResponse) []core.SerializedResponse {
+	samples := make([]core.SerializedResponse, 0)
+	maxSamples := 5
+	sampledFingerprints := make(map[string]bool)
+
+	for _, resp := range responses {
+		if len(samples) >= maxSamples {
+			break
+		}
+
+		// Skip if we already sampled this fingerprint, or if the response is invalid or errored out.
+		if resp.Fingerprint == "" || sampledFingerprints[resp.Fingerprint] || resp.ParsedResponse == nil || resp.Error != nil {
+			continue
+		}
+
+		// SpecificBody holds the relevant data for both standard and batched GraphQL responses.
+		bodyStr := string(resp.SpecificBody)
+
+		const maxBodyLen = 1024
+		if len(bodyStr) > maxBodyLen {
+			originalByteLen := len(bodyStr)
+			endIndex := maxBodyLen
+
+			// Ensure we don't slice in the middle of a UTF-8 character.
+			// If the byte at endIndex is not the start of a rune (i.e., it's a continuation byte), backtrack.
+			// Indexing a string (bodyStr[endIndex]) yields the byte value.
+			for ; endIndex > 0 && !utf8.RuneStart(bodyStr[endIndex]); endIndex-- {
+				// Backtrack until we find the start of a rune.
+			}
+
+			// If endIndex is 0, the first rune is longer than maxBodyLen; we truncate it entirely.
+			truncatedBody := bodyStr[:endIndex]
+
+			// Create a more informative suffix.
+			suffix := fmt.Sprintf("... [TRUNCATED - %d bytes omitted]", originalByteLen-len(truncatedBody))
+			bodyStr = truncatedBody + suffix
+		}
+
+		samples = append(samples, core.SerializedResponse{
+			StatusCode: resp.StatusCode,
+			Headers:    resp.Headers,
+			Body:       bodyStr,
+		})
+		sampledFingerprints[resp.Fingerprint] = true
+	}
+	return samples
 }

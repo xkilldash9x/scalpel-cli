@@ -1,3 +1,4 @@
+// internal/agent/cognitive_bus.go
 package agent
 
 import (

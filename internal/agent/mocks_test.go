@@ -6,7 +6,7 @@ import (
 
 	"github.com/stretchr/testify/mock"
 	"github.com/xkilldash9x/scalpel-cli/internal/interfaces"
-	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph/graphmodel"
+	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
 )
 
 

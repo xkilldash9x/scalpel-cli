@@ -1,4 +1,4 @@
-// Filename: internal/humanoid/potentialfield.go
+// pkg/humanoid/potentialfield.go
 package humanoid
 
 import "math"
@@ -37,14 +37,11 @@ func (pf *PotentialField) CalculateNetForce(cursorPos Vector2D) Vector2D {
 	for _, source := range pf.sources {
 		vecToSource := source.Position.Sub(cursorPos)
 		dist := vecToSource.Mag()
-
 		if dist < 1e-9 {
 			continue // Avoid division by zero.
 		}
-
 		// Exponential decay function: F = S * exp(-d/L)
 		magnitude := source.Strength * math.Exp(-dist/source.Falloff)
-
 		// Calculate the force vector.
 		force := vecToSource.Mul(magnitude / dist)
 		netForce = netForce.Add(force)
