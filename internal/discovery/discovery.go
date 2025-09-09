@@ -3,7 +3,7 @@ package discovery
 
 import (
 	"context"
-	// removed chromedp dependency. interfaces must be implementation agnostic.
+
 )
 
 // Technology represents a detected web technology.

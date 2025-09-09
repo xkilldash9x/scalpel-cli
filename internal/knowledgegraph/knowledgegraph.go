@@ -1,58 +1,61 @@
-// internal/knowledgegraph/knowledgegraph.go
 package knowledgegraph
 
 import (
+	"context"
+	"fmt"
+	"sync"
+
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"go.uber.org/zap"
 )
 
-// KnowledgeGraph implements the interfaces.KnowledgeGraph interface.
-type KnowledgeGraph struct {
-	// For now, this is a placeholder. In a real implementation,
-	// this would hold a database connection or other storage client.
-	nodes map[string]*schemas.Node
-	edges map[string][]*schemas.Edge
+type InMemoryKG struct {
+	nodes map[string]schemas.Node
+	edges map[string][]schemas.Edge
+	mu    sync.RWMutex
+	log   *zap.Logger
 }
 
-// NewKnowledgeGraph creates a new in-memory knowledge graph.
-func NewKnowledgeGraph() *KnowledgeGraph {
-	return &KnowledgeGraph{
-		nodes: make(map[string]*schemas.Node),
-		edges: make(map[string][]*schemas.Edge),
+func NewInMemoryKG(logger *zap.Logger) (*InMemoryKG, error) {
+	if logger == nil {
+		return nil, fmt.Errorf("logger cannot be nil")
 	}
+	return &InMemoryKG{
+		nodes: make(map[string]schemas.Node),
+		edges: make(map[string][]schemas.Edge),
+		log:   logger.Named("InMemoryKG"),
+	}, nil
 }
 
-// AddNode adds a node to the graph.
-func (kg *KnowledgeGraph) AddNode(node *schemas.Node) error {
+func (kg *InMemoryKG) AddNode(ctx context.Context, node schemas.Node) error {
+	kg.mu.Lock()
+	defer kg.mu.Unlock()
+
+	if _, exists := kg.nodes[node.ID]; exists {
+		// idempotency
+		return nil
+	}
 	kg.nodes[node.ID] = node
+	kg.log.Debug("Node added", zap.String("ID", node.ID), zap.String("Type", node.Type))
 	return nil
 }
 
-// AddEdge adds an edge to the graph.
-func (kg *KnowledgeGraph) AddEdge(edge *schemas.Edge) error {
+func (kg *InMemoryKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
+	kg.mu.Lock()
+	defer kg.mu.Unlock()
+
 	kg.edges[edge.From] = append(kg.edges[edge.From], edge)
+	kg.log.Debug("Edge added", zap.String("From", edge.From), zap.String("To", edge.To), zap.String("Type", edge.Type))
 	return nil
 }
 
-// GetNode retrieves a node by its ID.
-func (kg *KnowledgeGraph) GetNode(id string) (*schemas.Node, error) {
-	return kg.nodes[id], nil
-}
+func (kg *InMemoryKG) GetNode(ctx context.Context, id string) (schemas.Node, error) {
+	kg.mu.RLock()
+	defer kg.mu.RUnlock()
 
-// GetEdge retrieves an edge by its ID (not implemented for this in-memory example).
-func (kg *KnowledgeGraph) GetEdge(id string) (*schemas.Edge, error) {
-	return nil, nil
-}
-
-// GetNeighbors retrieves the neighbors of a given node.
-func (kg *KnowledgeGraph) GetNeighbors(nodeID string) ([]*schemas.Node, error) {
-	var neighbors []*schemas.Node
-	for _, edge := range kg.edges[nodeID] {
-		neighbors = append(neighbors, kg.nodes[edge.To])
+	node, ok := kg.nodes[id]
+	if !ok {
+		return schemas.Node{}, fmt.Errorf("node not found: %s", id)
 	}
-	return neighbors, nil
-}
-
-// GetEdges retrieves the edges of a given node.
-func (kg *KnowledgeGraph) GetEdges(nodeID string) ([]*schemas.Edge, error) {
-	return kg.edges[nodeID], nil
+	return node, nil
 }

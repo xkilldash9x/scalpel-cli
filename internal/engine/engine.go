@@ -1,7 +1,6 @@
-// File:         internal/engine/engine.go
-// Description:  This file contains the core task engine, refactored for graceful shutdown,
+// internal/engine/engine.go
+// This file contains the core task engine, refactored for graceful shutdown,
 //               concurrency safety, and correct context propagation.
-//
 package engine
 
 import (

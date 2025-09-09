@@ -1,14 +1,8 @@
 package schemas
 
-import (
-	"encoding/json"
-	"fmt"
-	"time"
-)
+import "time"
 
-// -- Task and Finding Definitions --
-
-// TaskType defines the valid types of tasks the engine can process.
+// TaskType defines the type of task to be performed.
 type TaskType string
 
 const (
@@ -22,7 +16,7 @@ const (
 	TaskAnalyzeJWT            TaskType = "ANALYZE_JWT"
 )
 
-// Severity defines the severity level of a finding for consistency.
+// Severity defines the severity level of a finding.
 type Severity string
 
 const (
@@ -33,117 +27,64 @@ const (
 	SeverityInformational Severity = "INFORMATIONAL"
 )
 
-// Task defines the unit of work to be performed by a worker.
-type Task struct {
-	ScanID     string      `json:"scan_id"`
-	TaskID     string      `json:"task_id"`
-	Type       TaskType    `json:"type"`
-	TargetURL  string      `json:"target_url"`
-	Parameters interface{} `json:"parameters,omitempty"`
+// NodeType defines the type of a node in the knowledge graph.
+type NodeType string
+
+// RelationshipType defines the type of a relationship (edge) in the knowledge graph.
+type RelationshipType string
+
+// Vulnerability holds details about a specific vulnerability.
+type Vulnerability struct {
+	Name        string `json:"name"`
+	Description string `json:"description"`
 }
 
-// ResultEnvelope is the container for data sent from workers to the central store.
-type ResultEnvelope struct {
-	ScanID    string          `json:"scan_id"`
-	TaskID    string          `json:"task_id"`
-	Timestamp time.Time       `json:"timestamp"`
-	Findings  []Finding       `json:"findings"`
-	KGUpdates *KGUpdates      `json:"kg_updates,omitempty"`
-	Artifacts json.RawMessage `json:"artifacts,omitempty"`
-}
-
-// Finding represents a specific security vulnerability or observation.
+// Finding represents a security finding.
 type Finding struct {
-	ID             string          `json:"id"`
-	ScanID         string          `json:"-"`
-	TaskID         string          `json:"task_id"`
-	Timestamp      time.Time       `json:"timestamp"`
-	Target         string          `json:"target"`
-	Module         string          `json:"module"`
-	Vulnerability  string          `json:"vulnerability"`
-	Severity       Severity        `json:"severity"`
-	Description    string          `json:"description"`
-	Evidence       json.RawMessage `json:"evidence,omitempty"`
-	Recommendation string          `json:"recommendation,omitempty"`
-	CWE            string          `json:"cwe,omitempty"`
+	Vulnerability  Vulnerability     `json:"vulnerability"`
+	Severity       Severity          `json:"severity"`
+	Recommendation string            `json:"recommendation"`
+	CWE            []string          `json:"cwe"`
+	Properties     map[string]string `json:"properties"`
 }
 
-// -- Knowledge Graph Definitions --
-// CORRECTED: Added KGNode and KGEdge to resolve the undefined type error.
+// ResultEnvelope contains the results of an analysis task.
+type ResultEnvelope struct {
+	TaskID    string    `json:"task_id"`
+	Findings  []Finding `json:"findings"`
+	Timestamp time.Time `json:"timestamp"`
+}
 
-// KGNode represents a node in the knowledge graph.
-type KGNode struct {
+// Node represents a node in the knowledge graph.
+type Node struct {
 	ID         string                 `json:"id"`
-	Type       string                 `json:"type"`
-	Label      string                 `json:"label"`
+	Type       NodeType               `json:"type"`
+	Properties map[string]interface{} `json:"properties"`
+	Status     string                 `json:"status"`
+	CreatedAt  time.Time              `json:"created_at"`
+	LastSeen   time.Time              `json:"last_seen"`
+}
+
+// Edge represents a relationship between two nodes in the knowledge graph.
+type Edge struct {
+	ID         string                 `json:"id"`
+	From       string                 `json:"from"`
+	To         string                 `json:"to"`
+	Label      RelationshipType       `json:"label"`
+	Properties map[string]interface{} `json:"properties"`
+	CreatedAt  time.Time              `json:"created_at"`
+}
+
+// NodeInput is used for creating or updating nodes.
+type NodeInput struct {
+	ID         string                 `json:"id"`
+	Type       NodeType               `json:"type"`
 	Properties map[string]interface{} `json:"properties"`
 }
 
-// KGEdge represents a directed edge between two nodes in the knowledge graph.
-type KGEdge struct {
-	Source     string                 `json:"source"`
-	Target     string                 `json:"target"`
-	Label      string                 `json:"label"`
-	Properties map[string]interface{} `json:"properties"`
+// EdgeInput is used for creating or updating edges.
+type EdgeInput struct {
+	From  string           `json:"from"`
+	To    string           `json:"to"`
+	Label RelationshipType `json:"label"`
 }
-
-// KGUpdates represents a batch of nodes and edges to be added to the knowledge graph.
-type KGUpdates struct {
-	Nodes []KGNode `json:"nodes"`
-	Edges []KGEdge `json:"edges"`
-}
-
-// -- Task Parameter Deserialization Logic --
-
-// paramsFactory is a function type that returns a pointer to a new instance of a parameter struct.
-type paramsFactory func() interface{}
-
-// paramsRegistry maps TaskTypes to their corresponding factory functions.
-var paramsRegistry = map[TaskType]paramsFactory{
-	TaskAgentMission:          func() interface{} { return &AgentMissionParams{} },
-	TaskAnalyzeWebPageTaint:   func() interface{} { return &TaintTaskParams{} },
-	TaskAnalyzeWebPageProtoPP: func() interface{} { return &ProtoPollutionTaskParams{} },
-	TaskTestAuthATO:           func() interface{} { return &ATOTaskParams{} },
-	TaskTestAuthIDOR:          func() interface{} { return &IDORTaskParams{} },
-	TaskAnalyzeJWT:            func() interface{} { return &JWTTaskParams{} },
-	TaskTestRaceCondition:     func() interface{} { return &RaceConditionTaskParams{} },
-	TaskAnalyzeHeaders:        func() interface{} { return &HeadersTaskParams{} },
-}
-
-// UnmarshalJSON provides custom deserialization logic for the Task struct.
-// This allows us to have strongly-typed parameter structs based on the TaskType.
-func (t *Task) UnmarshalJSON(data []byte) error {
-	type TaskAlias Task
-	aux := struct {
-		*TaskAlias
-		Parameters json.RawMessage `json:"parameters,omitempty"`
-	}{
-		TaskAlias: (*TaskAlias)(t),
-	}
-
-	if err := json.Unmarshal(data, &aux); err != nil {
-		return fmt.Errorf("failed to unmarshal base task structure: %w", err)
-	}
-
-	// If there are no parameters, we're done.
-	if len(aux.Parameters) == 0 || string(aux.Parameters) == "null" {
-		return nil
-	}
-
-	// Look up the correct parameter struct type in our registry.
-	factory, ok := paramsRegistry[t.Type]
-	if !ok {
-		// No specific struct for this task type, so we leave Parameters as raw JSON.
-		return nil
-	}
-
-	// Create a new instance of the parameter struct.
-	params := factory()
-	if err := json.Unmarshal(aux.Parameters, params); err != nil {
-		return fmt.Errorf("failed to unmarshal parameters for task type %s: %w", t.Type, err)
-	}
-
-	t.Parameters = params
-	return nil
-}
-

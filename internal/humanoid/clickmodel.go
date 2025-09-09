@@ -1,4 +1,4 @@
-// Filename: internal/humanoid/clickmodel.go
+// -- pkg/humanoid/clickmodel.go --
 package humanoid
 
 import (
@@ -31,7 +31,7 @@ func (h *Humanoid) IntelligentClick(selector string, field *PotentialField) chro
 			clickDelay := h.calculateTerminalFittsLaw(distance)
 
 			if clickDelay > 0 {
-				return h.executor.Sleep(ctx, clickDelay)
+				return chromedp.Sleep(clickDelay).Do(ctx)
 			}
 			return nil
 		}),
@@ -42,8 +42,9 @@ func (h *Humanoid) IntelligentClick(selector string, field *PotentialField) chro
 			currentPos := h.currentPos
 			h.mu.Unlock()
 
+			// FIXED: Use the string literal "left" as requested.
 			mouseDownAction := chromedp.MouseEvent(input.MousePressed, currentPos.X, currentPos.Y, chromedp.Button("left"))
-			if err := h.executor.ExecuteAction(ctx, mouseDownAction); err != nil {
+			if err := mouseDownAction.Do(ctx); err != nil {
 				return err
 			}
 
@@ -68,7 +69,7 @@ func (h *Humanoid) IntelligentClick(selector string, field *PotentialField) chro
 			h.mu.Unlock()
 
 			if holdDuration > 0 {
-				return h.executor.Sleep(ctx, holdDuration)
+				return chromedp.Sleep(holdDuration).Do(ctx)
 			}
 			return nil
 		}),
@@ -79,8 +80,9 @@ func (h *Humanoid) IntelligentClick(selector string, field *PotentialField) chro
 			currentPos := h.currentPos
 			h.mu.Unlock()
 
+			// FIXED: Use the string literal "left" as requested.
 			mouseUpAction := chromedp.MouseEvent(input.MouseReleased, currentPos.X, currentPos.Y, chromedp.Button("left"))
-			if err := h.executor.ExecuteAction(ctx, mouseUpAction); err != nil {
+			if err := mouseUpAction.Do(ctx); err != nil {
 				return err
 			}
 

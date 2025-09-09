@@ -1,4 +1,4 @@
-// Filename: internal/humanoid/movement.go
+// -- pkg/humanoid/movement.go --
 package humanoid
 
 import (
@@ -6,7 +6,9 @@ import (
 	"fmt"
 	"math"
 
+	// Required for BoxModel (necessary low-level access)
 	"github.com/chromedp/cdproto/dom"
+	// Required for input.MouseButton type for simulateTrajectory
 	"github.com/chromedp/cdproto/input"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
@@ -79,7 +81,7 @@ func (h *Humanoid) MoveToVector(target Vector2D, field *PotentialField) chromedp
 
 			// Simulate the movement. This function call is blocking.
 			var err error
-
+			
 			// Cast our internal MouseButton type to the required input.MouseButton type.
 			finalVelocity, err = h.simulateTrajectory(ctx, start, target, field, input.MouseButton(buttonState))
 

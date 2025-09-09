@@ -1,4 +1,4 @@
-// Filename: internal/humanoid/keyboard.go
+// -- pkg/humanoid/keyboard.go --
 package humanoid
 
 import (
@@ -105,6 +105,7 @@ func (h *Humanoid) sendKey(ctx context.Context, key rune) error {
 }
 
 // sendControlKey dispatches control characters (like Backspace).
+// FIXED: Updated signature to accept string as requested to resolve type mismatch.
 func (h *Humanoid) sendControlKey(ctx context.Context, key string) error {
 	// Use SendKeys targeted at the active element.
 	action := chromedp.SendKeys(
@@ -220,7 +221,7 @@ func (h *Humanoid) introduceTypo(ctx context.Context, cfg Config, runes []rune, 
 	return h.introduceInsertion(ctx, char)
 }
 
-// -- Typo Implementations --
+// --- Typo Implementations ---
 
 func (h *Humanoid) introduceNeighborTypo(ctx context.Context, char rune) (bool, error) {
 	lowerChar := unicode.ToLower(char)
@@ -242,6 +243,7 @@ func (h *Humanoid) introduceNeighborTypo(ctx context.Context, char rune) (bool, 
 			return true, err
 		}
 		// Backspace
+		// kb.Backspace is compatible with the string signature (type Key string).
 		if err := h.sendControlKey(ctx, kb.Backspace); err != nil {
 			return true, err
 		}

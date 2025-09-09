@@ -1,4 +1,7 @@
-// internal/orchestrator/orchestrator.go
+// File: internal/orchestrator/orchestrator.go
+// Description: Manages the high-level lifecycle of a scan. It is injected with
+// fully configured engine components via interfaces, making it decoupled and testable.
+
 package orchestrator
 
 import (
@@ -22,14 +25,21 @@ type Orchestrator struct {
 	taskEngine      interfaces.TaskEngine
 }
 
-// New creates a new Orchestrator.
-// It now accepts interfaces for its core components.
+// New creates a new Orchestrator with its dependencies provided as interfaces.
+// This decoupling is crucial for testability and architectural flexibility.
 func New(
 	cfg *config.Config,
 	logger *zap.Logger,
 	discoveryEngine interfaces.DiscoveryEngine,
 	taskEngine interfaces.TaskEngine,
 ) (*Orchestrator, error) {
+	if cfg == nil |
+
+| logger == nil |
+| discoveryEngine == nil |
+| taskEngine == nil {
+		return nil, fmt.Errorf("cannot initialize orchestrator with nil dependencies")
+	}
 	return &Orchestrator{
 		cfg:             cfg,
 		logger:          logger,
@@ -38,30 +48,44 @@ func New(
 	}, nil
 }
 
-// StartScan runs the scan to completion using the injected engines.
-func (o *Orchestrator) StartScan(ctx context.Context, targets []string, scanID string) error {
+// StartScan executes the main scanning workflow.
+func (o *Orchestrator) StartScan(ctx context.Context, targetsstring, scanID string) error {
 	o.logger.Info("Orchestrator starting scan", zap.String("scanID", scanID))
 
-	// 1. Start Engine Workers in the background.
-	// The scan context is passed to allow for graceful shutdown.
-	o.taskEngine.Start(ctx)
-
-	// 2. Start Discovery (This is a blocking call).
-	discoveryErr := o.discoveryEngine.Run(ctx, targets[0]) // Assuming one primary target for now
-	if discoveryErr != nil {
-		o.logger.Error("Discovery phase failed", zap.Error(discoveryErr))
-		// We still proceed to shutdown gracefully to process any partial results.
-	} else {
-		o.logger.Info("Discovery phase completed.")
+	// 1. Start the discovery engine. It will return a channel from which the
+	//    orchestrator can read newly discovered tasks.
+	taskChan, err := o.discoveryEngine.Start(ctx, targets)
+	if err!= nil {
+		return fmt.Errorf("failed to start discovery engine: %w", err)
 	}
+	o.logger.Info("Discovery engine started")
 
-	// 3. Stop the Task Engine. This blocks until all queued tasks are drained.
-	o.logger.Info("Waiting for task engine to drain...")
+	// 2. Start the task engine. It will begin consuming tasks from the channel
+	//    as they are produced by the discovery engine.
+	o.taskEngine.Start(ctx, taskChan)
+	o.logger.Info("Task engine started and waiting for tasks")
+
+	// 3. Wait for the context to be cancelled (e.g., by signal or timeout).
+	//    The engines are designed to run until the context is done.
+	<-ctx.Done()
+	o.logger.Info("Orchestrator received context cancellation signal")
+
+	// 4. Gracefully stop the engines.
+	o.logger.Info("Shutting down engines...")
+	o.discoveryEngine.Stop()
 	o.taskEngine.Stop()
 
-	o.logger.Info("Orchestration complete.", zap.String("scanID", scanID))
+	// Allow a brief moment for final logs or cleanup to complete.
+	time.Sleep(500 * time.Millisecond)
 
-	// Return the error from discovery, if any.
-	return discoveryErr
+	o.logger.Info("Scan orchestration finished", zap.String("scanID", scanID))
+
+	// The discovery engine might have encountered a non-fatal error during its run.
+	// If the context was cancelled due to an error from one of the components,
+	// that error should be propagated up.
+	if err := ctx.Err(); err!= nil && err!= context.Canceled && err!= context.DeadlineExceeded {
+		return err
+	}
+
+	return nil
 }
-

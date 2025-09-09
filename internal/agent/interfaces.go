@@ -1,4 +1,4 @@
-// File:         pkg/agent/interfaces.go
+// File:         internal/agent/interfaces.go
 // Description:  This file defines the updated, more robust interfaces for the agent's LLM client.
 //
 package agent

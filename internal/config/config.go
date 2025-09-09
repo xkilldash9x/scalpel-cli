@@ -1,7 +1,6 @@
-// ----------------- REFACTORED FILE -----------------
-//
-// File:         pkg/config/config.go
-// Description:  The application's root configuration, updated with an expanded list of supported LLM providers.
+
+// internal/config/config.go
+// The application's root configuration, updated with an expanded list of supported LLM providers.
 //
 package config
 

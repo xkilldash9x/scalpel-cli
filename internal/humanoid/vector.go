@@ -1,4 +1,4 @@
-// Filename: internal/humanoid/vector.go
+// pkg/humanoid/vector.go
 package humanoid
 
 import "math"

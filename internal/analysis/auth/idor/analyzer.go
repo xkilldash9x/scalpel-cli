@@ -17,25 +17,24 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
-// Note: The local structs SessionContext, ObservedRequest, and PredictiveJob
-// have been moved to types.go to resolve redeclaration and scope errors.
+// Note: Core data structures for this package, such as SessionContext
+// and ObservedRequest, are defined in the types.go file.
 
-// Analyzer orchestrates the IDOR testing process, pitting one user's session
-// against another's resources.
+// Analyzer orchestrates the IDOR testing process (User A vs User B).
 type Analyzer struct {
 	ScanID      uuid.UUID
 	logger      *zap.Logger
 	sessions    map[string]*SessionContext
 	reporter    core.Reporter
-	mu          sync.RWMutex // Protects the sessions map from concurrent access shenanigans.
+	mu          sync.RWMutex // Mutex for protecting the sessions map
 	concurrency int
 }
 
-// Initializes a new IDOR analyzer.
-// The concurrency level dictates how many test requests can run in parallel.
+// NewAnalyzer initializes the IDOR analyzer.
+// Concurrency level determines the number of parallel test requests.
 func NewAnalyzer(scanID uuid.UUID, logger *zap.Logger, reporter core.Reporter, concurrency int) *Analyzer {
 	if concurrency <= 0 {
-		concurrency = 10 // Sensible default for concurrency.
+		concurrency = 10 // Default concurrency
 	}
 	return &Analyzer{
 		ScanID:      scanID,
@@ -46,7 +45,7 @@ func NewAnalyzer(scanID uuid.UUID, logger *zap.Logger, reporter core.Reporter, c
 	}
 }
 
-// Creates a new user persona for testing, complete with its own dedicated cookie jar.
+// InitializeSession creates a new user persona for testing, with its own cookie jar.
 func (a *Analyzer) InitializeSession(role string) error {
 	jar, err := cookiejar.New(nil)
 	if err != nil {
@@ -55,14 +54,13 @@ func (a *Analyzer) InitializeSession(role string) error {
 	client := &http.Client{
 		Jar:     jar,
 		Timeout: 15 * time.Second,
-		// This is critical. We need to disable redirects to actually see the initial
-		// authorization responses, like a 302 vs a 403.
+		// Crucial: Disable redirects to observe authorization responses (e.g., 302 vs 403).
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
 	}
 
-	// Gotta lock the analyzer before we start messing with the sessions map.
+	// Lock the Analyzer before modifying the sessions map
 	a.mu.Lock()
 	defer a.mu.Unlock()
 
@@ -78,10 +76,9 @@ func (a *Analyzer) InitializeSession(role string) error {
 	return nil
 }
 
-// Called during the crawl phase to execute requests within a session and save
-// any that look interesting for later analysis.
+// ObserveAndExecute is called during the crawl phase. It executes requests within a session and saves interesting ones.
 func (a *Analyzer) ObserveAndExecute(ctx context.Context, role string, req *http.Request, body []byte) (*http.Response, error) {
-	// Grab a read lock to safely access the session.
+	// RLock Analyzer to safely access the session
 	a.mu.RLock()
 	session, exists := a.sessions[role]
 	a.mu.RUnlock()
@@ -90,40 +87,39 @@ func (a *Analyzer) ObserveAndExecute(ctx context.Context, role string, req *http
 		return nil, fmt.Errorf("session role %s not initialized", role)
 	}
 
-	// Get the request body ready.
+	// Prepare request body
 	if len(body) > 0 {
 		req.Body = io.NopCloser(bytes.NewReader(body))
 	}
 
-	// Let's send it.
+	// Execute the request
 	resp, err := session.Client.Do(req.WithContext(ctx))
 	if err != nil {
 		return resp, err
 	}
 	defer resp.Body.Close()
 
-	// Read the response body so we can analyze it.
+	// Read response body
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
 		a.logger.Warn("Failed to read response body during observation, skipping", zap.Error(err), zap.String("url", req.URL.String()))
-		// Don't return the error, but don't process the observation either.
+		// Do not return the error, but also do not process the observation.
 		// We still need to give back the response object with a reset body.
 		resp.Body = io.NopCloser(bytes.NewReader(respBody))
 		return resp, nil
 	}
-	// Reset the body so it can be read again downstream.
-	resp.Body = io.NopCloser(bytes.NewReader(respBody))
+	resp.Body = io.NopCloser(bytes.NewReader(respBody)) // Reset body
 
-	// Sniff out any identifiers in the request.
+	// Analyze the request for identifiers
 	identifiers := ExtractIdentifiers(req, body)
 
 	if len(identifiers) > 0 {
 		requestKey := fmt.Sprintf("%s %s", req.Method, req.URL.Path)
 
-		// Clone the request before acquiring the lock to keep contention low.
+		// Clone the request before acquiring the lock to reduce contention
 		clonedReq := req.Clone(ctx)
 
-		// Lock the session itself for safe concurrent writes.
+		// Lock the SessionContext for safe concurrent writes during observation
 		session.mu.Lock()
 		defer session.mu.Unlock()
 
@@ -139,9 +135,9 @@ func (a *Analyzer) ObserveAndExecute(ctx context.Context, role string, req *http
 	return resp, nil
 }
 
-// Kicks off the main testing phase, optimized for concurrent execution.
+// RunAnalysis is the main testing phase. Optimized for concurrent execution.
 func (a *Analyzer) RunAnalysis(ctx context.Context, primaryRole, secondaryRole string) error {
-	// Grab a read lock to safely peek at the sessions.
+	// RLock Analyzer to safely access sessions
 	a.mu.RLock()
 	primarySession, okP := a.sessions[primaryRole]
 	secondarySession, okS := a.sessions[secondaryRole]
@@ -151,7 +147,7 @@ func (a *Analyzer) RunAnalysis(ctx context.Context, primaryRole, secondaryRole s
 		return fmt.Errorf("both primary (%s) and secondary (%s) roles must be initialized", primaryRole, secondaryRole)
 	}
 
-	// Safely grab the count of observed requests for logging.
+	// Safely access the count of observed requests
 	primarySession.mu.RLock()
 	observedCount := len(primarySession.ObservedRequests)
 	primarySession.mu.RUnlock()
@@ -163,14 +159,14 @@ func (a *Analyzer) RunAnalysis(ctx context.Context, primaryRole, secondaryRole s
 
 	var wg sync.WaitGroup
 
-	// Strategy 1: Horizontal IDOR (Attacker tries to access Victim's resources).
+	// Strategy 1: Horizontal IDOR (Attacker accesses Victim's resources)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
 		a.testHorizontal(ctx, primarySession, secondarySession)
 	}()
 
-	// Strategy 2: Predictive IDOR (Can we just guess the IDs of other resources?).
+	// Strategy 2: Predictive IDOR (Can we guess IDs of other resources?)
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
@@ -183,12 +179,12 @@ func (a *Analyzer) RunAnalysis(ctx context.Context, primaryRole, secondaryRole s
 	return nil
 }
 
-// Replays User A's requests using User B's session, using a worker pool
-// pattern for efficiency.
+// testHorizontal replays User A's requests using User B's session.
+// Optimized using a worker pool pattern.
 func (a *Analyzer) testHorizontal(ctx context.Context, primarySession *SessionContext, secondarySession *SessionContext) {
 	jobs := make(chan ObservedRequest, len(primarySession.ObservedRequests))
 
-	// Load up the job channel, ensuring read access is safe.
+	// Fill the job channel (safe read access)
 	primarySession.mu.RLock()
 	for _, observed := range primarySession.ObservedRequests {
 		jobs <- observed
@@ -198,7 +194,7 @@ func (a *Analyzer) testHorizontal(ctx context.Context, primarySession *SessionCo
 
 	var wg sync.WaitGroup
 
-	// Spin up the worker goroutines.
+	// Start worker Goroutines
 	for i := 0; i < a.concurrency; i++ {
 		wg.Add(1)
 		go func() {
@@ -210,7 +206,7 @@ func (a *Analyzer) testHorizontal(ctx context.Context, primarySession *SessionCo
 	wg.Wait()
 }
 
-// Processes jobs from the channel to test for horizontal IDOR vulnerabilities.
+// horizontalWorker processes jobs from the channel for horizontal IDOR testing.
 func (a *Analyzer) horizontalWorker(ctx context.Context, primarySession *SessionContext, secondarySession *SessionContext, jobs <-chan ObservedRequest) {
 	for observed := range jobs {
 		select {
@@ -219,7 +215,7 @@ func (a *Analyzer) horizontalWorker(ctx context.Context, primarySession *Session
 		default:
 		}
 
-		// Prepare a clone of the original request.
+		// Prepare the request clone
 		req := observed.Request.Clone(ctx)
 		var reqBody []byte
 		if len(observed.Body) > 0 {
@@ -227,32 +223,31 @@ func (a *Analyzer) horizontalWorker(ctx context.Context, primarySession *Session
 			req.Body = io.NopCloser(bytes.NewReader(observed.Body))
 		}
 
-		// Replay the request using the secondary (attacker's) session.
+		// Replay the request using the secondary session (Attacker's context)
 		resp, err := secondarySession.Client.Do(req)
 		if err != nil {
 			a.logger.Debug("Network error during IDOR replay", zap.Error(err), zap.String("url", req.URL.String()))
 			continue
 		}
-		// Crucial: guarantee the body is closed to prevent connection leaks.
+		// Crucial: Guarantee the body is closed to prevent connection leaks
 		defer resp.Body.Close()
 
-		// Analyze what we got back.
+		// Analyze the response
 		respBody, err := io.ReadAll(resp.Body)
 		if err != nil {
 			a.logger.Warn("Failed to read response body during IDOR analysis", zap.Error(err), zap.String("url", req.URL.String()))
-			continue // Can't analyze without the full body.
+			continue // Cannot analyze without the full body
 		}
 
 		currentLength := int64(len(respBody))
 
-		// Detection Logic: Is the status code the same and the content length similar?
+		// Detection Logic: Same status code and similar content length.
 		if resp.StatusCode == observed.BaselineStatus {
 			lengthDiff := abs(currentLength - observed.BaselineLength)
-			// Allow for a 10% tolerance to account for dynamic content.
-			tolerance := int64(float64(observed.BaselineLength) * 0.1)
+			tolerance := int64(float64(observed.BaselineLength) * 0.1) // 10% tolerance for dynamic content
 
 			if lengthDiff <= tolerance {
-				// Bingo. We might have found a vulnerability.
+				// Vulnerability found
 				key := fmt.Sprintf("%s %s", req.Method, req.URL.Path)
 				description := fmt.Sprintf("A resource belonging to %s (Victim) was successfully accessed by %s (Attacker). The status code (%d) and content length (%d vs baseline %d) match the original request, indicating an access control failure (BOLA).",
 					primarySession.Role, secondarySession.Role, resp.StatusCode, currentLength, observed.BaselineLength)
@@ -285,30 +280,35 @@ func (a *Analyzer) horizontalWorker(ctx context.Context, primarySession *Session
 	}
 }
 
-// Checks if modifying identifiers leads to accessing other valid resources.
-// This is also optimized using a worker pool pattern.
+//  checks if modifying identifiers leads to accessing other valid resources.
+// Optimized using a worker pool pattern.
 func (a *Analyzer) testPredictive(ctx context.Context, session *SessionContext) {
-	// The local `PredictiveJob` struct was moved to types.go.
-
-	// Prep the job list with safe read access.
-	session.mu.RLock()
-	var jobList []PredictiveJob
-	for _, observed := range session.ObservedRequests {
-		for _, identifier := range observed.Identifiers {
-			jobList = append(jobList, PredictiveJob{Observed: observed, Identifier: identifier})
-		}
-	}
-	session.mu.RUnlock()
-
-	jobs := make(chan PredictiveJob, len(jobList))
-	for _, job := range jobList {
-		jobs <- job
-	}
-	close(jobs)
+	// PredictiveJob is defined in types.go
+	jobs := make(chan PredictiveJob, 100) // Buffer the channel
 
 	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Prepare job list (safe read access)
+		session.mu.RLock()
+		for _, observed := range session.ObservedRequests {
+			for _, identifier := range observed.Identifiers {
+				job := PredictiveJob{Observed: observed, Identifier: identifier}
+				select {
+				case jobs <- job:
+				case <-ctx.Done():
+					session.mu.RUnlock()
+					close(jobs)
+					return
+				}
+			}
+		}
+		session.mu.RUnlock()
+		close(jobs)
+	}()
 
-	// Fire up the predictive workers.
+	// Start worker Goroutines
 	for i := 0; i < a.concurrency; i++ {
 		wg.Add(1)
 		go func() {
@@ -320,7 +320,7 @@ func (a *Analyzer) testPredictive(ctx context.Context, session *SessionContext) 
 	wg.Wait()
 }
 
-// Processes jobs from the channel to test for predictive IDORs.
+//  processes jobs from the channel for predictive IDOR testing.
 func (a *Analyzer) predictiveWorker(ctx context.Context, session *SessionContext, jobs <-chan PredictiveJob) {
 	for job := range jobs {
 		select {
@@ -332,14 +332,14 @@ func (a *Analyzer) predictiveWorker(ctx context.Context, session *SessionContext
 		observed := job.Observed
 		identifier := job.Identifier
 
-		// Try to generate a new, predictable value.
+		// Generate the test value
 		testValue, err := GenerateTestValue(identifier)
 		if err != nil {
-			// Skip if we can't generate a predictable value (e.g., for UUIDs).
+			// Skip if we cannot generate a predictable value (e.g., UUIDs)
 			continue
 		}
 
-		// Create the modified request with our new value.
+		// Create the modified request
 		testReq, testBody, err := ApplyTestValue(observed.Request, observed.Body, identifier, testValue)
 		if err != nil {
 			a.logger.Debug("Failed to apply test value", zap.Error(err))
@@ -350,7 +350,7 @@ func (a *Analyzer) predictiveWorker(ctx context.Context, session *SessionContext
 			testReq.Body = io.NopCloser(bytes.NewReader(testBody))
 		}
 
-		// Send the modified request using the original user's session.
+		// Send the modified request using the original user's session
 		resp, err := session.Client.Do(testReq.WithContext(ctx))
 		if err != nil {
 			continue
@@ -363,9 +363,9 @@ func (a *Analyzer) predictiveWorker(ctx context.Context, session *SessionContext
 			continue
 		}
 
-		// Detection Logic: A successful response (2xx) is a strong indicator.
+		// Detection Logic: A successful response (2xx).
 		if resp.StatusCode >= 200 && resp.StatusCode < 300 {
-			// Looks like we've got a live one.
+			// Vulnerability found
 			key := fmt.Sprintf("%s %s", observed.Request.Method, observed.Request.URL.Path)
 			description := fmt.Sprintf("The application granted access to a resource by predicting an identifier. The original identifier '%s' (Type: %s) at location '%s' (Key: %s) was modified to '%s', and the request succeeded (Status: %d).",
 				identifier.Value, identifier.Type, identifier.Location, identifier.Key, testValue, resp.StatusCode)
@@ -397,28 +397,28 @@ func (a *Analyzer) predictiveWorker(ctx context.Context, session *SessionContext
 	}
 }
 
-// Publishes the vulnerability details via the core reporter interface.
+//  publishes the vulnerability details via the core reporter interface.
 func (a *Analyzer) reportFinding(title, description string, severity core.SeverityLevel, targetURL string, evidence *core.Evidence, cwe string) {
 	finding := core.AnalysisResult{
-		ScanID:          a.ScanID,
-		AnalyzerName:    "IDORAnalyzer",
-		Timestamp:       time.Now().UTC(),
+		ScanID:            a.ScanID,
+		AnalyzerName:      "IDORAnalyzer",
+		Timestamp:         time.Now().UTC(),
 		VulnerabilityType: "BrokenObjectLevelAuthorization",
-		Title:           title,
-		Description:     description,
-		Severity:        severity,
-		Status:          core.StatusOpen,
-		Confidence:      0.95, // High confidence for these active tests.
-		TargetURL:       targetURL,
-		Evidence:        evidence,
-		CWE:             cwe,
+		Title:             title,
+		Description:       description,
+		Severity:          severity,
+		Status:            core.StatusOpen,
+		Confidence:        0.95, // High confidence for active tests.
+		TargetURL:         targetURL,
+		Evidence:          evidence,
+		CWE:               cwe,
 	}
 	if err := a.reporter.Publish(finding); err != nil {
 		a.logger.Error("Failed to publish finding", zap.Error(err), zap.String("title", title))
 	}
 }
 
-// Calculates the absolute value of an int64.
+// Helper function for absolute value of int64
 func abs(n int64) int64 {
 	if n < 0 {
 		return -n

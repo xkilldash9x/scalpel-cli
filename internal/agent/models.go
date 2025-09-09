@@ -1,9 +1,8 @@
-// internal/agent/models.go --
+// internal/agent/models.go 
 package agent
 
 import (
 	"time"
-	// Removed dependency on knowledgegraph/graphmodel as CognitiveMessage is moved to cognitive_bus.go.
 )
 
 // AgentState represents the current status of the agent within the OODA loop.
