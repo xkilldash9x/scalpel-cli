@@ -1,3 +1,4 @@
+// internal/results/results_test.go
 package results
 
 import (
@@ -13,10 +14,8 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
-
 // Mock Definitions
 // Comprehensive mocks for isolating logic from external dependencies.
-
 
 // Mocks the CWEProvider interface.
 type MockCWEProvider struct {
@@ -43,9 +42,7 @@ func (m *MockCWEProvider) GetFullName(ctx context.Context, cweID string) (string
 	return args.String(0), args.Bool(1)
 }
 
-
 // Test Helpers and Fixtures
-
 
 // Creates a sample schemas.Finding for testing input.
 func newRawFinding(id, severity, cwe, description string) schemas.Finding {
@@ -71,9 +68,7 @@ func defaultTestScoreConfig() ScoreConfig {
 	}
 }
 
-
 // Test Cases: Normalization (normalize.go)
-
 
 // Rigorously verifies the internal mapping logic.
 // This critical white box test ensures robustness against diverse tool outputs.
@@ -140,9 +135,7 @@ func TestNormalize_Integration(t *testing.T) {
 	assert.Equal(t, 0.0, normalized.Score)
 }
 
-
 // Test Cases: Enrichment (enrich.go)
-
 
 // Verifies that findings are correctly updated when CWE data is available.
 func TestEnrich_Success(t *testing.T) {
@@ -253,7 +246,9 @@ func TestEnrich_Cancellation_DuringProviderCall(t *testing.T) {
 	// Configure the mock to acknowledge the call.
 	// We use .WaitUntil() to simulate work that takes longer than the context timeout.
 	// The robust mock implementation itself detects the cancellation during this wait.
-	mockProvider.On("GetFullName", ctx, "CWE-79").Return("XSS", true).Once().WaitUntil(time.After(100 * time.Millisecond))
+	mockProvider.On("GetFullName", mock.Anything, "CWE-79").Return("XSS", true).Run(func(args mock.Arguments) {
+		<-ctx.Done() // Simulate work being cancelled
+	}).Once()
 
 	// Execute
 	enrichedFindings, err := Enrich(ctx, findings, mockProvider)
@@ -270,9 +265,7 @@ func TestEnrich_Cancellation_DuringProviderCall(t *testing.T) {
 	mockProvider.AssertExpectations(t)
 }
 
-
 // Test Cases: Prioritization (prioritize.go)
-
 
 // Verifies correct score calculation and descending sort order.
 func TestPrioritize_ScoringAndSorting(t *testing.T) {
@@ -347,9 +340,7 @@ func TestPrioritize_Stability(t *testing.T) {
 	assert.Equal(t, "F_C", prioritized[2].ID)
 }
 
-
 // Test Cases: Reporting (report.go)
-
 
 // Verifies the structure and summary text.
 func TestGenerateReport(t *testing.T) {
@@ -368,9 +359,7 @@ func TestGenerateReport(t *testing.T) {
 	assert.Equal(t, "Generated report with 2 prioritized findings.", report.Summary)
 }
 
-
 // Test Cases: Pipeline Integration (pipeline.go)
-
 
 // Verifies the entire orchestration:
 // Normalization (Mapping) -> Enrichment (Mocked) -> Prioritization (Sorting/Scoring).
@@ -447,6 +436,7 @@ func TestRunPipeline_Cancellation_Normalization(t *testing.T) {
 // Verifies cancellation during the second stage propagates correctly.
 func TestRunPipeline_Cancellation_Enrichment(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
 	mockProvider := new(MockCWEProvider)
 
 	// We need a finding to pass normalization and reach enrichment.
@@ -457,19 +447,17 @@ func TestRunPipeline_Cancellation_Enrichment(t *testing.T) {
 	}
 
 	// Configure the mock provider to cancel the context when called.
-	mockProvider.On("GetFullName", mock.Anything, "CWE-79").Return("XSS", true).Once().Run(func(args mock.Arguments) {
+	mockProvider.On("GetFullName", mock.Anything, "CWE-79").Return("XSS", true).Run(func(args mock.Arguments) {
 		cancel() // Cancel the context mid-process
-	})
+	}).Once()
 
 	// Execute
 	report, err := RunPipeline(ctx, rawFindings, config)
 
 	// Verify
-	// The Enrich function detects the cancellation (either in its loop check or because the robust mock returns false)
-	// and the pipeline should report the error from the enrichment stage.
+	// The Enrich function detects the cancellation and the pipeline should report the error.
 	assert.Error(t, err)
 	assert.Nil(t, report)
-	// The exact error message depends on the race condition between the loop check and the provider call detection.
-	// We check for the stage wrapper error.
 	assert.Contains(t, err.Error(), "error enriching findings")
+	assert.ErrorIs(t, err, context.Canceled)
 }

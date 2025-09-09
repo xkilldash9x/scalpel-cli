@@ -13,7 +13,6 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
-
 // Store provides a PostgreSQL implementation of the Repository interface.
 type Store struct {
 	pool *pgxpool.Pool
@@ -29,7 +28,7 @@ func New(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) (*Store, e
 }
 
 // handles the database transaction for inserting all data from a result envelope.
-func (s *Store) PersistData(ctx context.Context, envelope *schemasss.ResultEnvelope) error {
+func (s *Store) PersistData(ctx context.Context, envelope *schemas.ResultEnvelope) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
@@ -60,9 +59,9 @@ func (s *Store) PersistData(ctx context.Context, envelope *schemasss.ResultEnvel
 			edgeInputs := make([]schemas.EdgeInput, len(envelope.KGUpdates.Edges))
 			for i, e := range envelope.KGUpdates.Edges {
 				edgeInputs[i] = schemas.EdgeInput{
-					SourceID:     e.From,
-					TargetID:     e.To,
-					Relationship: schemas.RelationshipType(e.Type),
+					SourceID:     e.Source,
+					TargetID:     e.Target,
+					Relationship: schemas.RelationshipType(e.Label),
 					Properties:   e.Properties,
 				}
 			}
@@ -94,7 +93,6 @@ func (s *Store) persistFindings(ctx context.Context, tx pgx.Tx, scanID string, f
 	)
 	return err
 }
-
 
 // upserts knowledge graph nodes.
 func (s *Store) persistNodes(ctx context.Context, tx pgx.Tx, nodes []schemas.NodeInput) error {
