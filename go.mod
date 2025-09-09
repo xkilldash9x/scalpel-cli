@@ -1,3 +1,4 @@
+// xkilldash9x/scalpel-cli//go.mod
 module github.com/xkilldash9x/scalpel-cli
 
 go 1.25.1
@@ -12,6 +13,7 @@ require (
 	github.com/jackc/pgx/v5 v5.7.5
 	github.com/spf13/cobra v1.10.1
 	github.com/spf13/viper v1.20.1
+	github.com/stretchr/testify v1.10.0
 	go.uber.org/zap v1.27.0
 	golang.org/x/net v0.43.0
 	golang.org/x/time v0.12.0
@@ -20,7 +22,7 @@ require (
 
 require (
 	github.com/chromedp/chromedp v0.14.1
-	github.com/stretchr/testify v1.10.0
+	github.com/google/go-cmp v0.6.0 // indirect
 )
 
 require (
@@ -50,7 +52,7 @@ require (
 	golang.org/x/sync v0.16.0 // indirect
 	golang.org/x/sys v0.36.0 // indirect
 	golang.org/x/text v0.28.0 // indirect
-	gopkg.in/yaml.v3 v3.0.1 // indirect
+	gopkg.in/yaml.v3 v3.0.1
 )
 
 replace github.com/xkilldash9x/scalpel-cli => ./

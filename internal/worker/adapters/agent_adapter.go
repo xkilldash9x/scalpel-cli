@@ -4,37 +4,37 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/xkilldash9x/scalpel-cli/api/schemas" // Import schemas
+	"github.com/xkilldash9x/scalpel-cli/api/schemas" 
 	"github.com/xkilldash9x/scalpel-cli/internal/agent"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"go.uber.org/zap"
 )
 
-// AgentAdapter is the bridge that lets our autonomous agent play nice as a standard worker module.
+// the bridge that lets our autonomous agent play nice as a standard worker module.
 type AgentAdapter struct {
 	core.BaseAnalyzer
 }
 
-// NewAgentAdapter creates a new adapter for agent missions.
+//  creates a new adapter for agent missions.
 func NewAgentAdapter() *AgentAdapter {
 	return &AgentAdapter{
 		BaseAnalyzer: core.NewBaseAnalyzer("AgentAdapter", core.TypeAgent),
 	}
 }
 
-// Analyze kicks off an agent mission.
+// kicks off an agent mission.
 func (a *AgentAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
 	analysisCtx.Logger.Info("Agent mission received. Initializing agent...")
 
 	// Use strongly typed parameters for robustness and clarity.
 	// This assumes schemas.AgentMissionParams exists and replaces the original map lookup.
-	params, ok := analysisCtx.Task.Parameters.(schemas.AgentMissionParams)
+	params, ok := analysisCtx.Task.Parameters.(*schemas.AgentMissionParams)
 	if !ok {
 		actualType := fmt.Sprintf("%T", analysisCtx.Task.Parameters)
 		analysisCtx.Logger.Error("Invalid parameter type assertion for Agent mission",
-			zap.String("expected", "schemas.AgentMissionParams"),
+			zap.String("expected", "*schemas.AgentMissionParams"),
 			zap.String("actual", actualType))
-		return fmt.Errorf("invalid parameters type for Agent mission; expected schemas.AgentMissionParams, got %s", actualType)
+		return fmt.Errorf("invalid parameters type for Agent mission; expected *schemas.AgentMissionParams, got %s", actualType)
 	}
 
 	// Validate required parameters.
@@ -71,7 +71,7 @@ func (a *AgentAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 	}
 
 	// Integrate the results from the agent back into the analysis context.
-	analysisCtx.Logger.Info("Agent mission completed.", "summary", missionResult.Summary)
+	analysisCtx.Logger.Info("Agent mission completed.", zap.String("summary", missionResult.Summary))
 
 	// Merge findings and Knowledge Graph updates.
 	if len(missionResult.Findings) > 0 {
@@ -80,8 +80,10 @@ func (a *AgentAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 		}
 	}
 
-	analysisCtx.KGUpdates.Nodes = append(analysisCtx.KGUpdates.Nodes, missionResult.KGUpdates.Nodes...)
-	analysisCtx.KGUpdates.Edges = append(analysisCtx.KGUpdates.Edges, missionResult.KGUpdates.Edges...)
+	if missionResult.KGUpdates != nil {
+		analysisCtx.KGUpdates.Nodes = append(analysisCtx.KGUpdates.Nodes, missionResult.KGUpdates.Nodes...)
+		analysisCtx.KGUpdates.Edges = append(analysisCtx.KGUpdates.Edges, missionResult.KGUpdates.Edges...)
+	}
 
 	return nil
 }

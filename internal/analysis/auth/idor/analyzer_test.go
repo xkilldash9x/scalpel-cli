@@ -14,15 +14,16 @@ import (
 	"testing"
 	"time"
 
-	"github.com.com/google/uuid"
-	"github.com.com/stretchr/testify/assert"
-	"github.com.com/stretchr/testify/mock"
-	"github.com.com/stretchr/testify/require"
+	"github.com/google/uuid"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zaptest"
 
-	"github.com.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
+
 
 // ====================================================================================
 // Mock Definitions

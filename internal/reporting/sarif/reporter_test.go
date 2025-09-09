@@ -1,4 +1,4 @@
-package reporting
+package sarif
 
 import (
 	"bytes"
@@ -9,6 +9,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xkilldash9x/scalpel-cli/internal/reporting"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -16,7 +17,7 @@ import (
 
 // Verifies that providing a nil logger to the factory function results in an error.
 func TestNew_LoggerRequirement(t *testing.T) {
-	reporter, err := New("sarif", "stdout", nil)
+	reporter, err := reporting.New("sarif", "stdout", nil)
 	assert.Error(t, err)
 	assert.Nil(t, reporter)
 	assert.Contains(t, err.Error(), "logger cannot be nil")
@@ -29,7 +30,7 @@ func TestNew_SupportedFormat_SARIF_File(t *testing.T) {
 	outputPath := filepath.Join(tmpDir, "test_report.sarif")
 
 	// Execute
-	reporter, err := New("sarif", outputPath, logger)
+	reporter, err := reporting.New("sarif", outputPath, logger)
 	require.NoError(t, err)
 	require.NotNil(t, reporter)
 
@@ -60,7 +61,7 @@ func TestNew_Output_Stdout(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			reporter, err := New("sarif", tt.outputPath, logger)
+			reporter, err := reporting.New("sarif", tt.outputPath, logger)
 			require.NoError(t, err)
 
 			// White box inspection
@@ -96,7 +97,7 @@ func TestNew_UnsupportedAndUnimplementedFormats(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(fmt.Sprintf("Format_%s", tt.format), func(t *testing.T) {
 			outputPath := filepath.Join(tmpDir, fmt.Sprintf("report_%s.out", tt.format))
-			reporter, err := New(tt.format, outputPath, logger)
+			reporter, err := reporting.New(tt.format, outputPath, logger)
 
 			assert.Nil(t, reporter)
 			require.Error(t, err)
@@ -120,7 +121,7 @@ func TestNew_Failure_FileCreation(t *testing.T) {
 	// Scenario: Attempting to write to an invalid path (e.g., using a directory path as a filename)
 	tmpDir := t.TempDir()
 
-	reporter, err := New("sarif", tmpDir, logger)
+	reporter, err := reporting.New("sarif", tmpDir, logger)
 
 	assert.Nil(t, reporter)
 	require.Error(t, err)
