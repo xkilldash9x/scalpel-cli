@@ -7,7 +7,7 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	// Import the interface from the central interfaces package to break the cycle.
-	"github.com/xkilldash9x/scalpel-cli/internal/interfaces"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
 // NewClient is our factory for spitting out the right LLMClient based on the config.

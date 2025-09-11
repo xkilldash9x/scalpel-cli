@@ -14,7 +14,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
-	"github.com/xkilldash9x/scalpel-cli/internal/interfaces"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
