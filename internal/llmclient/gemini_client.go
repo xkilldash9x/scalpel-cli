@@ -1,4 +1,4 @@
-// internal/llmclient/gemini_client.go
+// internal/llmclient/google_client.go
 package llmclient
 
 import (
@@ -13,18 +13,21 @@ import (
 	"github.com/cenkalti/backoff/v4"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
-// GeminiClient implements the interfaces.LLMClient interface for Google Gemini APIs.
-type GeminiClient struct {
+// GoogleClient implements the schemas.LLMClient interface for Google Gemini APIs.
+type GoogleClient struct {
 	apiKey     string
 	endpoint   string
 	httpClient *http.Client
 	logger     *zap.Logger
 	config     config.LLMModelConfig
 }
+
+// Ensures GoogleClient implements the LLMClient interface.
+var _ schemas.LLMClient = (*GoogleClient)(nil)
 
 // -- Gemini API Request/Response Structures (Internal to this file) --
 type GeminiContent struct {
@@ -54,10 +57,10 @@ type GeminiGenerationConfig struct {
 }
 
 type GeminiRequestPayload struct {
-	Contents          []GeminiContent          `json:"contents"`
+	Contents         []GeminiContent         `json:"contents"`
 	SystemInstruction *GeminiSystemInstruction `json:"system_instruction,omitempty"`
-	SafetySettings    []GeminiSafetySetting    `json:"safetySettings,omitempty"`
-	GenerationConfig  GeminiGenerationConfig   `json:"generationConfig,omitempty"`
+	SafetySettings   []GeminiSafetySetting   `json:"safetySettings,omitempty"`
+	GenerationConfig GeminiGenerationConfig  `json:"generationConfig,omitempty"`
 }
 
 type GeminiResponsePayload struct {
@@ -72,11 +75,10 @@ type GeminiResponsePayload struct {
 	} `json:"usageMetadata"`
 }
 
-
-// NewGeminiClient initializes the client.
-func NewGeminiClient(cfg config.LLMModelConfig, logger *zap.Logger) (*GeminiClient, error) {
+// NewGoogleClient initializes the client for the Gemini API.
+func NewGoogleClient(cfg config.LLMModelConfig, logger *zap.Logger) (*GoogleClient, error) {
 	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("Gemini API Key is required")
+		return nil, fmt.Errorf("Google/Gemini API Key is required")
 	}
 
 	endpoint := cfg.Endpoint
@@ -84,20 +86,33 @@ func NewGeminiClient(cfg config.LLMModelConfig, logger *zap.Logger) (*GeminiClie
 		endpoint = fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", cfg.Model)
 	}
 
-	return &GeminiClient{
+	return &GoogleClient{
 		apiKey:   cfg.APIKey,
 		endpoint: endpoint,
 		config:   cfg,
 		httpClient: &http.Client{
 			Timeout: cfg.APITimeout,
 		},
-		logger: logger.Named("llm_client.gemini"),
+		logger: logger.Named("llm_client.google"),
 	}, nil
 }
 
+// Generate sends a simple prompt to the Gemini API and returns the generated content with retries.
+// This method implements the standard schemas.LLMClient interface.
+func (c *GoogleClient) Generate(ctx context.Context, prompt string) (string, error) {
+	// Adapt the simple string prompt to the required structured request format.
+	generationRequest := schemas.GenerationRequest{
+		SystemPrompt: "You are a helpful and concise assistant.", // A default system prompt
+		UserPrompt:   prompt,
+		Options: schemas.GenerationOptions{
+			Temperature: 0.2, // A default temperature
+		},
+	}
+	return c.generateResponse(ctx, generationRequest)
+}
 
-// GenerateResponse sends the prompts to the Gemini API and returns the generated content with retries.
-func (c *GeminiClient) GenerateResponse(ctx context.Context, req schemas.GenerationRequest) (string, error) {
+// generateResponse handles the detailed logic of sending prompts to the Gemini API.
+func (c *GoogleClient) generateResponse(ctx context.Context, req schemas.GenerationRequest) (string, error) {
 	payload := c.buildRequestPayload(req)
 
 	body, err := json.Marshal(payload)
@@ -174,7 +189,7 @@ func (c *GeminiClient) GenerateResponse(ctx context.Context, req schemas.Generat
 	return responseContent, nil
 }
 
-func (c *GeminiClient) buildRequestPayload(req schemas.GenerationRequest) GeminiRequestPayload {
+func (c *GoogleClient) buildRequestPayload(req schemas.GenerationRequest) GeminiRequestPayload {
 	genConfig := GeminiGenerationConfig{
 		Temperature:     float64(req.Options.Temperature),
 		TopP:            c.config.TopP,
@@ -206,7 +221,7 @@ func (c *GeminiClient) buildRequestPayload(req schemas.GenerationRequest) Gemini
 	return payload
 }
 
-func (c *GeminiClient) handleAPIError(statusCode int, body []byte) error {
+func (c *GoogleClient) handleAPIError(statusCode int, body []byte) error {
 	c.logger.Error("Gemini API returned error status", zap.Int("status", statusCode), zap.String("response", string(body)))
 	err := fmt.Errorf("gemini API error: status %d, body: %s", statusCode, string(body))
 
@@ -218,7 +233,7 @@ func (c *GeminiClient) handleAPIError(statusCode int, body []byte) error {
 	}
 }
 
-func (c *GeminiClient) getSafetySettings() []GeminiSafetySetting {
+func (c *GoogleClient) getSafetySettings() []GeminiSafetySetting {
 	settings := make([]GeminiSafetySetting, 0, len(c.config.SafetyFilters))
 	for category, threshold := range c.config.SafetyFilters {
 		settings = append(settings, GeminiSafetySetting{

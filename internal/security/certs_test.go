@@ -1,10 +1,15 @@
 package certs
 
 import (
+	"crypto/rand"
+	"crypto/rsa"
 	"crypto/x509"
+	"crypto/x509/pkix"
+	"math/big"
 	"testing"
+	"time"
 
-	"github.com/stretchr/testify/assert"
+	"github.comcom/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
 
@@ -63,4 +68,3 @@ func TestNewCA(t *testing.T) {
 	assert.NoError(t, err, "Verification of a certificate signed by the CA should succeed")
 	assert.Len(t, chains, 1, "Should find exactly one valid certificate chain")
 }
-

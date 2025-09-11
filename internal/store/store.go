@@ -58,10 +58,11 @@ func (s *Store) PersistData(ctx context.Context, envelope *schemas.ResultEnvelop
 		if len(envelope.KGUpdates.Edges) > 0 {
 			edgeInputs := make([]schemas.EdgeInput, len(envelope.KGUpdates.Edges))
 			for i, e := range envelope.KGUpdates.Edges {
+				// Updated to use the new field names from the refactored concept
 				edgeInputs[i] = schemas.EdgeInput{
-					SourceID:     e.Source,
-					TargetID:     e.Target,
-					Relationship: schemas.RelationshipType(e.Label),
+					SourceID:     e.SourceID,
+					TargetID:     e.TargetID,
+					Relationship: e.Relationship,
 					Properties:   e.Properties,
 				}
 			}
