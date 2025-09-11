@@ -6,8 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"go.uber.org/zap"
-	"github.com/xkilldash9x/scalpel-cli/internal/interfaces" 
-	"github.com/xkilldash9x/scalpel-cli/api/schemas"    
+	"github.com/xkilldash9x/scalpel-cli/api/schemas" 
 )
 
 // ActionExecutor is defined in pkg/interfaces

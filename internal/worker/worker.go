@@ -1,49 +1,43 @@
-// internal/worker/worker.go 
 package worker
 
 import (
 	"context"
 	"fmt"
-	"net/url"
-	"time"
 
 	"go.uber.org/zap"
 
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
-	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/store"
 	"github.com/xkilldash9x/scalpel-cli/internal/worker/adapters"
 )
 
-// processes tasks directly without a message queue.
-// It acts as a dispatcher to various analysis modules/adapaters.
+// MonolithicWorker processes tasks in-process.
+// It serves as a central dispatcher, routing analysis tasks to the appropriate,
+// specialized adapters based on the task type.
 type MonolithicWorker struct {
 	cfg             *config.Config
 	logger          *zap.Logger
 	globalCtx       *core.GlobalContext
-	storeService    *store.Store
-	adapterRegistry map[string]core.Analyzer
+	adapterRegistry map[schemas.TaskType]core.Analyzer
 }
 
-// creates a new worker instance for the monolithic architecture.
+// NewMonolithicWorker initializes and returns a new worker instance.
+// It sets up the internal registry of all available analysis adapters.
 func NewMonolithicWorker(
 	cfg *config.Config,
 	logger *zap.Logger,
 	globalCtx *core.GlobalContext,
-	storeService *store.Store,
 ) (*MonolithicWorker, error) {
 
 	w := &MonolithicWorker{
 		cfg:             cfg,
-		logger:          logger.With(zap.String("component", "monolithic_worker")),
+		logger:          logger.With(zap.String("component", "worker")),
 		globalCtx:       globalCtx,
-		storeService:    storeService,
-		adapterRegistry: make(map[string]core.Analyzer),
+		adapterRegistry: make(map[schemas.TaskType]core.Analyzer),
 	}
 
-	// The adapter registry is the key to modularity. It maps a task type
-	// to the specific analyzer that can handle it.
+	// Populates the adapter registry, mapping task types to their handlers.
 	if err := w.registerAdapters(); err != nil {
 		return nil, fmt.Errorf("failed to register worker adapters: %w", err)
 	}
@@ -51,42 +45,49 @@ func NewMonolithicWorker(
 	return w, nil
 }
 
-// populates the worker's registry of available analyzers.
+// registerAdapters builds the map of task types to their corresponding analyzers.
+// This modular design allows new analysis capabilities to be added easily
+// by simply creating a new adapter and registering it here.
 func (w *MonolithicWorker) registerAdapters() error {
-	// Each adapter is initialized and mapped to the TaskType it handles.
+	// Initialize and register each analysis adapter.
+	// More complex adapters can receive dependencies here during instantiation.
 	w.adapterRegistry[schemas.TaskAnalyzeWebPageTaint] = adapters.NewTaintAdapter()
 	w.adapterRegistry[schemas.TaskTestAuthATO] = adapters.NewATOAdapter()
 	w.adapterRegistry[schemas.TaskTestAuthIDOR] = adapters.NewIDORAdapter()
 	w.adapterRegistry[schemas.TaskAnalyzeHeaders] = adapters.NewHeadersAdapter()
 	w.adapterRegistry[schemas.TaskAnalyzeJWT] = adapters.NewJWTAdapter()
-    w.adapterRegistry[schemas.TaskAgentMission] = adapters.NewAgentAdapter() // The agent is just another module!
+
+	// The agent adapter requires access to shared application state and configuration.
+	w.adapterRegistry[schemas.TaskAgentMission] = adapters.NewAgentAdapter(w.cfg, w.logger, w.globalCtx)
 
 	w.logger.Info("Analyzer adapters registered", zap.Int("count", len(w.adapterRegistry)))
 	return nil
 }
 
-// main entry point for executing an analysis task.
-// It finds the correct adapter and runs the analysis.
+// ProcessTask executes a single analysis task.
+// It looks up the correct adapter and delegates the analysis execution. Results
+// are communicated back by modifying the provided AnalysisContext.
 func (w *MonolithicWorker) ProcessTask(ctx context.Context, analysisCtx *core.AnalysisContext) error {
 	task := analysisCtx.Task
 
-	// 1. Find the right tool for the job from our registry.
+	// Find the appropriate adapter from the registry for the given task type.
 	adapter, exists := w.adapterRegistry[task.Type]
 	if !exists {
-		return fmt.Errorf("monolithic worker has no adapter for task type '%s'", task.Type)
+		// This indicates a logic error or a misconfigured task.
+		return fmt.Errorf("no adapter registered for task type '%s'", task.Type)
 	}
 
 	analysisCtx.Logger.Info("Dispatching task to adapter", zap.String("adapter_name", adapter.Name()))
 
-	// 2. Run the analysis.
-	// The adapter will populate the Findings and KGUpdates in the analysisCtx.
+	// Delegate the core analysis logic to the selected adapter.
 	if err := adapter.Analyze(ctx, analysisCtx); err != nil {
+		// Wrap the error to provide context about which adapter failed.
 		return fmt.Errorf("adapter '%s' failed during analysis: %w", adapter.Name(), err)
 	}
 
 	analysisCtx.Logger.Info("Adapter finished analysis", zap.String("adapter_name", adapter.Name()))
 
-	// 3. Results are returned via the modified analysisCtx.
-	// The TaskEngine is responsible for persisting them.
+	// A nil return indicates successful execution. The orchestrator is responsible
+	// for handling the results now present in the analysisCtx.
 	return nil
 }

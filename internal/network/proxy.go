@@ -16,7 +16,7 @@ import (
 	"github.com/elazarl/goproxy"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+
 )
 
 // Global lock for protecting global goproxy state modification.
@@ -45,7 +45,7 @@ func NewInterceptionProxy(caCert, caKey []byte, clientConfig *ClientConfig, logg
 	proxy := goproxy.NewProxyHttpServer()
 
 	if logger == nil {
-		logger = observability.NewNopLogger()
+		logger = zap.NewNop()
 	}
 	log := logger.Named("interception_proxy")
 

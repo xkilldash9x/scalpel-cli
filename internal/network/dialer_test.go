@@ -1,4 +1,4 @@
-package network_test
+package network
 
 import (
 	"context"
@@ -69,6 +69,7 @@ func TestNewDialerConfig_Defaults(t *testing.T) {
 	expectedCiphers := []uint16{
 		tls.TLS_AES_256_GCM_SHA384,
 		tls.TLS_CHACHA20_POLY1305_SHA256,
+		tls.TLS_AES_128_GCM_SHA256,
 		tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
 		tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 		tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
@@ -237,7 +238,12 @@ func TestDialContext_TLS_Success(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	conn, err := DialContext(ctx, "tcp", helper.serverAddr, clientConfig)
+	// FIX: Connect to "localhost" to ensure SNI is sent, not the raw IP address.
+	_, port, err := net.SplitHostPort(helper.serverAddr)
+	require.NoError(t, err)
+	connectAddr := net.JoinHostPort("localhost", port)
+
+	conn, err := DialContext(ctx, "tcp", connectAddr, clientConfig)
 	require.NoError(t, err)
 	defer conn.Close()
 
@@ -248,8 +254,8 @@ func TestDialContext_TLS_Success(t *testing.T) {
 	// Verify handshake details
 	state := tlsConn.ConnectionState()
 	assert.True(t, state.HandshakeComplete)
-	// SNI should match the IP address used to connect, as ServerName was not explicitly set in the config.
-	expectedHost, _, _ := net.SplitHostPort(helper.serverAddr)
+	// SNI should now be "localhost"
+	expectedHost := "localhost"
 	assert.Equal(t, expectedHost, state.ServerName)
 	// Check that a strong cipher was negotiated
 	assert.Contains(t, NewDialerConfig().TLSConfig.CipherSuites, state.CipherSuite)
@@ -319,17 +325,20 @@ func TestDialContext_TLS_SNI_AutomaticPopulation(t *testing.T) {
 	defer helper.close()
 
 	ctx := context.Background()
-	conn, err := DialContext(ctx, "tcp", helper.serverAddr, clientConfig)
 
-	// The connection should succeed as the helper includes the IP (127.0.0.1) in the SANs.
+	// FIX: Connect to "localhost" to ensure SNI is sent correctly.
+	_, port, err := net.SplitHostPort(helper.serverAddr)
+	require.NoError(t, err)
+	connectAddr := net.JoinHostPort("localhost", port)
+
+	conn, err := DialContext(ctx, "tcp", connectAddr, clientConfig)
+
+	// The connection should succeed as the helper includes "localhost" in the SANs.
 	require.NoError(t, err)
 	conn.Close()
 
-	// Extract the expected host (IP address) from the address string
-	expectedHost, _, err := net.SplitHostPort(helper.serverAddr)
-	require.NoError(t, err)
-
 	// Verify the SNI captured by the server matches the host part of the address.
+	expectedHost := "localhost"
 	assert.Equal(t, expectedHost, capturedSNI)
 }
 
@@ -379,11 +388,13 @@ func TestDialContext_TLS_CipherMismatch(t *testing.T) {
 	helper, clientConfig := setupTLSTest(t, func(dc *DialerConfig) {
 		// Client only supports AES 128 GCM (TLS 1.2)
 		dc.TLSConfig.CipherSuites = []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256}
+		// FIX: Force TLS 1.2 to prevent a successful TLS 1.3 negotiation.
+		dc.TLSConfig.MaxVersion = tls.VersionTLS12
 	}, func(sc *tls.Config) {
 		// Server only supports ChaCha20 Poly1305 (TLS 1.2)
 		sc.CipherSuites = []uint16{tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305}
-		// Ensure certificates are set for the server config override
-		sc.Certificates = []tls.Certificate{helper.serverCert}
+		// FIX: Force TLS 1.2 to prevent a successful TLS 1.3 negotiation.
+		sc.MaxVersion = tls.VersionTLS12
 	})
 	defer helper.close()
 

@@ -1,13 +1,13 @@
-package network_test
+package network
 
 import (
-	"bytes"
-	"compress/gzip"
+	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net/http"
-	"strconv"
-	"strings"
+	"net/http/httptest"
+	"net/url"
 	"testing"
 	"time"
 
@@ -15,265 +15,305 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// -- Test Setup Helpers --
+func TestNewDefaultClientConfig_Optimizations(t *testing.T) {
+	config := NewDefaultClientConfig()
 
-// Generates a raw byte stream containing multiple HTTP responses.
-func createPipelinedResponseStream(responses []string) io.Reader {
-	// Use strings.Join with an empty separator as the responses already contain necessary CRLF.
-	return bytes.NewBufferString(strings.Join(responses, ""))
+	// Verifies that key performance optimizations are enabled by default.
+	assert.True(t, config.Dialer.EnableKeepAlives, "Keep-Alives should be enabled for performance")
+	assert.True(t, config.HTTP2.Enabled, "HTTP/2 should be enabled by default")
+	assert.False(t, config.DisableConnectionPooling, "Connection pooling should be enabled by default")
 }
 
-// Define standard response formats for testing. Adherence to CRLF is critical.
-const (
-	responseTemplateCL      = "HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nContent-Length: %d\r\nConnection: keep-alive\r\n\r\n%s"
-	responseTemplateChunked = "HTTP/1.1 %d %s\r\nContent-Type: text/plain\r\nTransfer-Encoding: chunked\r\nConnection: keep-alive\r\n\r\n%s"
-)
+func TestConfigureTLS_Defaults(t *testing.T) {
+	var cfg ClientConfig
+	tlsConfig := ConfigureTLS(&cfg)
 
-func formatResponseCL(status int, body string) string {
-	return fmt.Sprintf(responseTemplateCL, status, http.StatusText(status), len(body), body)
+	// Verifies that default TLS settings are sane.
+	assert.NotNil(t, tlsConfig, "TLS config should never be nil")
+	assert.False(t, tlsConfig.InsecureSkipVerify, "InsecureSkipVerify should be false by default")
+	assert.Equal(t, tls.VersionTLS12, int(tlsConfig.MinVersion), "Minimum TLS version should be 1.2")
 }
 
-func formatResponseChunked(status int, chunks []string) string {
-	var chunkedBody string
-	for _, chunk := range chunks {
-		// Format: <length in hex>\r\n<data>\r\n
-		chunkedBody += fmt.Sprintf("%x\r\n%s\r\n", len(chunk), chunk)
+func TestConfigureTLS_CustomConfigClone(t *testing.T) {
+	customCipher := []uint16{tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256}
+	cfg := ClientConfig{
+		TLS: &tls.Config{
+			CipherSuites: customCipher,
+		},
 	}
-	chunkedBody += "0\r\n\r\n" // End chunk
-	return fmt.Sprintf(responseTemplateChunked, status, http.StatusText(status), chunkedBody)
+
+	tlsConfig := ConfigureTLS(&cfg)
+
+	// Verifies that a user-provided TLS config is cloned and used.
+	assert.NotSame(t, cfg.TLS, tlsConfig, "The returned TLS config should be a clone, not the same pointer")
+	assert.Equal(t, customCipher, tlsConfig.CipherSuites, "Custom cipher suites should be preserved")
+
+	// Modifying the returned config should not affect the original.
+	tlsConfig.InsecureSkipVerify = true
+	assert.False(t, cfg.TLS.InsecureSkipVerify, "Modifying the clone should not affect the original config")
 }
 
-// -- Test Cases: Pipelined Response Parsing (Success Scenarios) --
+func TestNewHTTPTransport_ConfigurationMapping(t *testing.T) {
+	cfg := &ClientConfig{
+		Dialer: DialerConfig{
+			Timeout:             15 * time.Second,
+			KeepAlive:           45 * time.Second,
+			DualStack:           true,
+			EnableKeepAlives:    true,
+			ResponseHeaderLimit: 2048,
+		},
+		ResponseHeaderTimeout: 10 * time.Second,
+		ExpectContinueTimeout: 2 * time.Second,
+		MaxIdleConns:          50,
+		MaxIdleConnsPerHost:   5,
+		IdleConnTimeout:       120 * time.Second,
+		DisableConnectionPooling: true,
+	}
 
-// Verifies parsing of standard responses defined by Content-Length.
-func TestParsePipelinedResponses_Success_ContentLength(t *testing.T) {
-	SetupObservability(t)
-	response1 := formatResponseCL(200, "Response Body 1")
-	response2 := formatResponseCL(404, "Not Found")
-	response3 := formatResponseCL(201, "Created Resource XYZ")
+	transport := NewHTTPTransport(cfg)
+	require.NotNil(t, transport)
 
-	stream := createPipelinedResponseStream([]string{response1, response2, response3})
-	expectedCount := 3
+	// Verifies that all config fields correctly map to the http.Transport struct.
+	assert.Equal(t, cfg.ResponseHeaderTimeout, transport.ResponseHeaderTimeout)
+	assert.Equal(t, cfg.ExpectContinueTimeout, transport.ExpectContinueTimeout)
+	assert.Equal(t, cfg.MaxIdleConns, transport.MaxIdleConns)
+	assert.Equal(t, cfg.MaxIdleConnsPerHost, transport.MaxIdleConnsPerHost)
+	assert.Equal(t, cfg.IdleConnTimeout, transport.IdleConnTimeout)
+	assert.True(t, transport.DisableKeepAlives, "DisableConnectionPooling should translate to DisableKeepAlives")
+	assert.Equal(t, cfg.Dialer.ResponseHeaderLimit, transport.MaxResponseHeaderBytes)
+}
 
-	// Execute
-	parsedResponses, err := ParsePipelinedResponses(stream, http.MethodGet, expectedCount)
+func TestNewHTTPTransport_Robustness_NilConfig(t *testing.T) {
+	// Verifies the function doesn't panic with a nil config.
+	assert.NotPanics(t, func() {
+		transport := NewHTTPTransport(nil)
+		assert.NotNil(t, transport, "Transport should not be nil even with a nil config")
+		assert.NotNil(t, transport.DialContext, "DialContext should be configured with default dialer")
+	})
+}
 
-	// Verify
+func TestNewHTTPTransport_ProxyConfiguration(t *testing.T) {
+	proxyURL, _ := url.Parse("http://user:pass@localhost:8080")
+	cfg := &ClientConfig{
+		ProxyURL: proxyURL,
+	}
+	transport := NewHTTPTransport(cfg)
+	require.NotNil(t, transport.Proxy)
+
+	req, _ := http.NewRequest("GET", "http://example.com", nil)
+	p, err := transport.Proxy(req)
+
+	// Verifies that the proxy setting is correctly configured.
+	assert.NoError(t, err)
+	assert.Equal(t, proxyURL, p)
+}
+
+func TestNewHTTPTransport_HTTP2_Enabled(t *testing.T) {
+	cfg := &ClientConfig{
+		HTTP2: HTTP2Config{Enabled: true},
+	}
+	transport := NewHTTPTransport(cfg)
+	// In Go's http.Transport, enabling HTTP/2 is implicit. The real check
+	// is ensuring that the TLSNextProto map is NOT explicitly cleared.
+	// An empty map disables HTTP/2. A nil map uses the default, which includes "h2".
+	assert.Nil(t, transport.TLSNextProto, "TLSNextProto should be nil to allow default HTTP/2 negotiation")
+}
+
+func TestNewHTTPTransport_HTTP2_Disabled(t *testing.T) {
+	cfg := &ClientConfig{
+		HTTP2: HTTP2Config{Enabled: false},
+	}
+	transport := NewHTTPTransport(cfg)
+	// Disabling HTTP/2 is done by providing a non-nil, empty map for TLSNextProto.
+	assert.NotNil(t, transport.TLSNextProto, "TLSNextProto should not be nil when disabling HTTP/2")
+	assert.Empty(t, transport.TLSNextProto, "TLSNextProto map should be empty to disable HTTP/2")
+}
+
+func TestNewClient_RedirectPolicy(t *testing.T) {
+	var redirectCount int
+	// A test server that redirects exactly twice.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if redirectCount < 2 {
+			redirectCount++
+			http.Redirect(w, r, r.URL.String(), http.StatusFound)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	// Test case 1: Follow up to 5 redirects (default behavior).
+	redirectCount = 0
+	clientDefault := NewClient(nil) // Use default config.
+	resp, err := clientDefault.Get(server.URL)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, 2, redirectCount, "Should have followed 2 redirects")
+
+	// Test case 2: Do not follow any redirects.
+	redirectCount = 0
+	clientNoRedirect := NewClient(&ClientConfig{FollowRedirects: false})
+	resp, err = clientNoRedirect.Get(server.URL)
+	assert.NoError(t, err)
+	assert.Equal(t, http.StatusFound, resp.StatusCode)
+	assert.Equal(t, 1, redirectCount, "Should have stopped after the first redirect response")
+
+	// Test case 3: Custom redirect limit.
+	redirectCount = 0
+	clientCustomRedirect := NewClient(&ClientConfig{
+		MaxRedirects: 1, // Only allow one redirect.
+	})
+	// We expect an error here because the client will try to follow the second redirect,
+	// exceed its limit, and return an error.
+	_, err = clientCustomRedirect.Get(server.URL)
+	assert.Error(t, err, "Should return an error after exceeding max redirects")
+	assert.Contains(t, err.Error(), "stopped after 1 redirects", "Error message should indicate why it stopped")
+	assert.Equal(t, 2, redirectCount, "The server would still see 2 requests before the client gives up")
+}
+
+func TestClient_TimeoutBehavior(t *testing.T) {
+	// A server that waits for 200ms before responding.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		time.Sleep(200 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	// Client with a 500ms total timeout, should succeed.
+	clientSucceed := NewClient(&ClientConfig{
+		TotalTimeout: 500 * time.Millisecond,
+	})
+	_, err := clientSucceed.Get(server.URL)
+	assert.NoError(t, err, "Request should succeed with a 500ms timeout")
+
+	// Client with a 100ms total timeout, should fail.
+	clientFail := NewClient(&ClientConfig{
+		TotalTimeout: 100 * time.Millisecond,
+	})
+	_, err = clientFail.Get(server.URL)
+	assert.Error(t, err, "Request should fail with a 100ms timeout")
+	// Check if the error is a timeout error.
+	netErr, ok := err.(net.Error)
+	assert.True(t, ok && netErr.Timeout(), "Error should be a network timeout error")
+}
+
+func TestClient_Behavior_ResponseHeaderTimeout(t *testing.T) {
+	// A server that accepts the connection but never sends a response header.
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Hijack the connection to prevent the server from automatically sending headers.
+		hijacker, ok := w.(http.Hijacker)
+		require.True(t, ok, "Server must support hijacking")
+		conn, _, err := hijacker.Hijack()
+		require.NoError(t, err)
+		// Just keep the connection open without writing anything.
+		time.Sleep(500 * time.Millisecond)
+		conn.Close()
+	}))
+	defer server.Close()
+
+	client := NewClient(&ClientConfig{
+		ResponseHeaderTimeout: 100 * time.Millisecond,
+		Dialer: DialerConfig{
+			Timeout: 50 * time.Millisecond,
+		},
+	})
+
+	_, err := client.Get(server.URL)
+	assert.Error(t, err, "Request should fail due to response header timeout")
+	assert.Contains(t, err.Error(), "timeout awaiting response headers", "Error message should be specific to header timeout")
+}
+
+func TestClient_HTTPS_Integration(t *testing.T) {
+	// A handler for our test server.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "Hello, client")
+	})
+
+	// -- Correction for TestClient_HTTPS_Integration --
+	// The default httptest.NewTLSServer does not enable HTTP/2. To test HTTP/2,
+	// we must create an unstarted server, explicitly enable HTTP/2, and then start it.
+	// This ensures the server can negotiate "h2" during the TLS handshake.
+	server := httptest.NewUnstartedServer(handler)
+	server.EnableHTTP2 = true
+	server.StartTLS()
+	defer server.Close()
+
+	// Create a client that trusts the test server's certificate.
+	client := NewClient(&ClientConfig{
+		// We can use the server's client to get a pre-configured http.Client
+		// that trusts the server's self-signed certificate.
+		TLS: server.Client().Transport.(*http.Transport).TLSClientConfig,
+	})
+
+	resp, err := client.Get(server.URL)
 	require.NoError(t, err)
-	require.Len(t, parsedResponses, expectedCount)
+	defer resp.Body.Close()
 
-	// Verify Response 1 details
-	assert.Equal(t, 200, parsedResponses[0].StatusCode)
-	assert.Equal(t, "Response Body 1", string(parsedResponses[0].Body))
-	assert.Equal(t, "text/plain", parsedResponses[0].Headers.Get("Content-Type"))
-	assert.Greater(t, parsedResponses[0].Duration, time.Duration(0), "Duration should be recorded")
-	assert.NotNil(t, parsedResponses[0].Raw)
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	// This is the core assertion that was failing. It now passes because the server is H2-enabled.
+	assert.Equal(t, "HTTP/2.0", resp.Proto, "The protocol should be HTTP/2.0")
 
-	// Verify Response 2
-	assert.Equal(t, 404, parsedResponses[1].StatusCode)
-	assert.Equal(t, "Not Found", string(parsedResponses[1].Body))
-
-	// Verify Response 3
-	assert.Equal(t, 201, parsedResponses[2].StatusCode)
-}
-
-// Verifies parsing of responses that use Transfer-Encoding: chunked.
-func TestParsePipelinedResponses_Success_ChunkedEncoding(t *testing.T) {
-	SetupObservability(t)
-	response1 := formatResponseChunked(200, []string{"Chunk1", "Part2", "FinalPart"})
-	response2 := formatResponseCL(500, "Internal Error") // Mixed encodings are valid
-
-	stream := createPipelinedResponseStream([]string{response1, response2})
-	expectedCount := 2
-
-	// Execute
-	parsedResponses, err := ParsePipelinedResponses(stream, http.MethodGet, expectedCount)
-
-	// Verify
+	body, err := io.ReadAll(resp.Body)
 	require.NoError(t, err)
-	require.Len(t, parsedResponses, expectedCount)
-
-	// Verify Response 1 (Chunked). The parser should automatically de-chunk the body.
-	assert.Equal(t, 200, parsedResponses[0].StatusCode)
-	assert.Equal(t, "Chunk1Part2FinalPart", string(parsedResponses[0].Body))
-	// Verify raw response details
-	require.NotNil(t, parsedResponses[0].Raw)
-	assert.Equal(t, "chunked", parsedResponses[0].Raw.TransferEncoding[0])
+	assert.Equal(t, "Hello, client\n", string(body))
 }
 
-// Verifies correct handling of HEAD requests, where no body is expected.
-func TestParsePipelinedResponses_HEADMethod(t *testing.T) {
-	SetupObservability(t)
-	// Server sends Content-Length but the parser must know not to read the body for HEAD.
-	response1 := formatResponseCL(200, "This body should not be read")
-	// Manually strip the body to simulate a correct HEAD response stream
-	response1 = response1[:strings.Index(response1, "\r\n\r\n")+4]
+func TestClient_InsecureSkipVerify_Integration(t *testing.T) {
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
 
-	response2 := formatResponseCL(200, "Another body")
-	response2 = response2[:strings.Index(response2, "\r\n\r\n")+4]
+	// A client that does NOT trust the server's CA. This should fail.
+	clientFail := NewClient(nil) // Default config
+	_, err := clientFail.Get(server.URL)
+	assert.Error(t, err, "Request should fail without trusting the server's certificate")
 
-	stream := createPipelinedResponseStream([]string{response1, response2})
-	expectedCount := 2
-
-	// Execute using http.MethodHead
-	parsedResponses, err := ParsePipelinedResponses(stream, http.MethodHead, expectedCount)
-
-	// Verify
-	require.NoError(t, err)
-	require.Len(t, parsedResponses, expectedCount)
-
-	// Verify Response 1
-	assert.Empty(t, parsedResponses[0].Body, "Body must be empty for HEAD requests")
-	// Verify headers are still present and correct
-	assert.Equal(t, strconv.Itoa(len("This body should not be read")), parsedResponses[0].Headers.Get("Content-Length"))
-
-	// Verify Response 2
-	assert.Empty(t, parsedResponses[1].Body)
+	// A client configured to skip certificate verification. This should succeed.
+	clientSucceed := NewClient(&ClientConfig{
+		TLS: &tls.Config{InsecureSkipVerify: true},
+	})
+	resp, err := clientSucceed.Get(server.URL)
+	assert.NoError(t, err, "Request should succeed when InsecureSkipVerify is true")
+	if resp != nil {
+		assert.Equal(t, http.StatusOK, resp.StatusCode)
+		resp.Body.Close()
+	}
 }
 
-// Verifies efficient handling of responses that are larger than the internal buffer.
-func TestParsePipelinedResponses_LargeResponse(t *testing.T) {
-	SetupObservability(t)
-	// Generate a body larger than parserBufferSize (32KB), e.g., 100KB.
-	largeBodySize := 100 * 1024
-	largeBody := strings.Repeat("A", largeBodySize)
+func TestClient_Behavior_ConnectionPooling(t *testing.T) {
+	var connCount int
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+	}))
+	server.Config.ConnState = func(conn net.Conn, state http.ConnState) {
+		if state == http.StateNew {
+			connCount++
+		}
+	}
+	defer server.Close()
 
-	response1 := formatResponseCL(200, largeBody)
-	stream := createPipelinedResponseStream([]string{response1})
+	// Client with pooling enabled.
+	client := NewClient(nil)
+	for i := 0; i < 3; i++ {
+		resp, err := client.Get(server.URL)
+		require.NoError(t, err)
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	// With connection pooling, only one connection should have been made for 3 requests.
+	assert.Equal(t, 1, connCount, "Should reuse the same connection for multiple requests")
 
-	// Execute
-	startTime := time.Now()
-	parsedResponses, err := ParsePipelinedResponses(stream, http.MethodGet, 1)
-	duration := time.Since(startTime)
-
-	// Verify
-	require.NoError(t, err)
-	require.Len(t, parsedResponses, 1)
-	assert.Equal(t, largeBodySize, len(parsedResponses[0].Body))
-	assert.Equal(t, largeBody, string(parsedResponses[0].Body))
-	assert.Less(t, duration, 500*time.Millisecond, "Parsing large response should be efficient")
+	// Client with pooling disabled.
+	connCount = 0
+	clientNoPool := NewClient(&ClientConfig{DisableConnectionPooling: true})
+	for i := 0; i < 3; i++ {
+		resp, err := clientNoPool.Get(server.URL)
+		require.NoError(t, err)
+		io.Copy(io.Discard, resp.Body)
+		resp.Body.Close()
+	}
+	// Without pooling, a new connection should be made for each request.
+	assert.Equal(t, 3, connCount, "Should create a new connection for each request when pooling is disabled")
 }
 
-// -- Test Cases: Error Handling and Robustness --
-
-// Verifies behavior when the stream contains invalid HTTP data.
-func TestParsePipelinedResponses_MalformedResponse(t *testing.T) {
-	SetupObservability(t)
-	response1 := formatResponseCL(200, "Valid Response")
-	// Invalid status line (HTP instead of HTTP)
-	response2_Malformed := "HTP/1.1 200 OK\r\nContent-Length: 4\r\n\r\nBody"
-
-	stream := createPipelinedResponseStream([]string{response1, response2_Malformed})
-
-	// Execute
-	parsedResponses, err := ParsePipelinedResponses(stream, http.MethodGet, 2)
-
-	// Verify error
-	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to parse response 2/2")
-	// Verify that the successfully parsed response (Response 1) is still returned.
-	require.Len(t, parsedResponses, 1)
-	assert.Equal(t, 200, parsedResponses[0].StatusCode)
-}
-
-// Verifies detection of a premature connection closure signaled by the server.
-func TestParsePipelinedResponses_ConnectionCloseHeader(t *testing.T) {
-	SetupObservability(t)
-	response1 := formatResponseCL(200, "Response 1")
-	// Modify Response 2 to include Connection: close
-	response2_Close := strings.Replace(formatResponseCL(200, "Response 2"), "Connection: keep-alive", "Connection: close", 1)
-	// Response 3 might still be in the buffer, but the parser should stop after Response 2.
-	response3 := formatResponseCL(200, "Response 3")
-
-	stream := createPipelinedResponseStream([]string{response1, response2_Close, response3})
-
-	// Execute expecting 3 responses
-	parsedResponses, err := ParsePipelinedResponses(stream, http.MethodGet, 3)
-
-	// Verify specific error indicating premature closure
-	assert.Error(t, err)
-	assert.Equal(t, "connection closed by server after 2 of 3 expected responses", err.Error())
-	assert.Len(t, parsedResponses, 2, "Should have parsed until the closure signal")
-}
-
-// Verifies behavior when the stream ends before headers are completely read.
-func TestParsePipelinedResponses_IncompleteRead_Headers(t *testing.T) {
-	SetupObservability(t)
-	response1 := formatResponseCL(200, "Response 1")
-	// Incomplete Response 2 (truncated mid-header)
-	response2_Incomplete := "HTTP/1.1 200 OK\r\nContent-Len"
-
-	stream := createPipelinedResponseStream([]string{response1, response2_Incomplete})
-
-	// Execute
-	parsedResponses, err := ParsePipelinedResponses(stream, http.MethodGet, 2)
-
-	// Verify error (should be EOF or unexpected EOF)
-	assert.Error(t, err)
-	assert.Len(t, parsedResponses, 1)
-	assert.Contains(t, err.Error(), "failed to parse response 2/2")
-	// Check if the underlying error is EOF related
-	assert.True(t, strings.Contains(err.Error(), io.EOF.Error()) || strings.Contains(err.Error(), io.ErrUnexpectedEOF.Error()))
-}
-
-// Verifies behavior when the stream ends in the middle of a response body.
-func TestParsePipelinedResponses_IncompleteRead_Body(t *testing.T) {
-	SetupObservability(t)
-	// Response 1 advertises length 20, but only provides less data before EOF.
-	response1_IncompleteBody := fmt.Sprintf(responseTemplateCL, 200, "OK", 20, "Incomplete")
-
-	stream := createPipelinedResponseStream([]string{response1_IncompleteBody})
-
-	// Execute
-	parsedResponses, err := ParsePipelinedResponses(stream, http.MethodGet, 1)
-
-	// Verify: Parsing the headers (http.ReadResponse) succeeds, but reading the body (io.ReadAll) encounters EOF.
-	// The implementation handles this gracefully by returning the partial data and logging a warning.
-	require.NoError(t, err, "Parsing should not fail on incomplete body read, only warn internally")
-	require.Len(t, parsedResponses, 1)
-
-	// Verify the partial data is captured
-	assert.Equal(t, 200, parsedResponses[0].StatusCode)
-	assert.Equal(t, "Incomplete", string(parsedResponses[0].Body))
-}
-
-// -- Test Cases: Advanced Scenarios --
-
-// Verifies correct handling of compressed content.
-func TestParsePipelinedResponses_CompressedBody(t *testing.T) {
-	SetupObservability(t)
-	// 1. Compress the body
-	originalBody := "This is a compressed response body."
-	var buf bytes.Buffer
-	gz := gzip.NewWriter(&buf)
-	_, err := gz.Write([]byte(originalBody))
-	require.NoError(t, err)
-	gz.Close()
-	compressedBody := buf.Bytes()
-
-	// 2. Create the response manually to set Content-Encoding
-	// We must use bytes.Buffer for the stream to handle the binary compressed data correctly.
-	var stream bytes.Buffer
-	header := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n", len(compressedBody))
-	stream.WriteString(header)
-	stream.Write(compressedBody)
-
-	// Execute
-	parsedResponses, err := ParsePipelinedResponses(&stream, http.MethodGet, 1)
-
-	// Verify
-	require.NoError(t, err)
-	require.Len(t, parsedResponses, 1)
-
-	// CRITICAL: The parser (http.ReadResponse) does NOT automatically decompress.
-	// It reads the raw bytes from the stream.
-	assert.Equal(t, compressedBody, parsedResponses[0].Body)
-	assert.Equal(t, "gzip", parsedResponses[0].Headers.Get("Content-Encoding"))
-
-	// Verify the consumer can decompress it
-	gzReader, err := gzip.NewReader(bytes.NewReader(parsedResponses[0].Body))
-	require.NoError(t, err)
-	decompressedBody, err := io.ReadAll(gzReader)
-	require.NoError(t, err)
-	assert.Equal(t, originalBody, string(decompressedBody))
-}

@@ -12,7 +12,6 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/interfaces"
 )
 
 // -- Test Setup Helper --
