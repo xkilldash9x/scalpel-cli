@@ -1,3 +1,47 @@
+<div align="center">
+
+```svg
+<svg width="300" height="100" xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" viewBox="0 0 300 100">
+  <style>
+    /* Base styles for the logo */
+    .title { font: bold 60px monospace; }
+    .blade { stroke-width: 1; }
+
+    /* Default (Dark Theme) */
+    :root {
+      --bg-color: #1e1e1e;
+      --title-color: #e0e0e0;
+      --blade-fill: #a0a0a0;
+      --blade-stroke: #ffffff;
+    }
+
+    /* Light Theme Adaptation */
+    @media (prefers-color-scheme: light) {
+      :root {
+        --bg-color: #ffffff;
+        --title-color: #1e1e1e;
+        --blade-fill: #cccccc;
+        --blade-stroke: #333333;
+      }
+    }
+    
+    .title { fill: var(--title-color); }
+    .blade { fill: var(--blade-fill); stroke: var(--blade-stroke); }
+    
+  </style>
+  <defs>
+    <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="0%">
+      <stop offset="0%" style="stop-color:#ff4136;stop-opacity:1" />
+      <stop offset="100%" style="stop-color:#0074d9;stop-opacity:1" />
+    </linearGradient>
+  </defs>
+  
+  <path d="M10 50 Q 30 40, 50 50 Q 70 60, 50 70 L 30 60 Z" class="blade"/>
+  <line x1="50" y1="50" x2="80" y2="30" stroke="url(#grad1)" stroke-width="4"/>
+
+  <text x="90" y="65" class="title">SCALPEL</text>
+</svg>
+
 ![Project Status](https://img.shields.io/badge/status-in_development-black)
 ![Go Version](https://img.shields.io/badge/Go-1.22%2B-blue?logo=go&logoColor=green)
 ![License](https://img.shields.io/badge/license-MIT-purple)
