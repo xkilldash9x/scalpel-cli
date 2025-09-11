@@ -20,8 +20,6 @@ github.com/fsnotify/fsnotify v1.7.0 h1:wQaj5ESHzupazT253+2C3fM8243gqZt9vjZns21rZ
 github.com/fsnotify/fsnotify v1.7.0/go.mod h1:iSpvStmSK22HkCSwdo4A08o2n5a0Vd2DNtGvPPAWBdM=
 github.com/google/generative-ai-go v0.15.0 h1:6K3oD27Fq7iL7e+9lJ5L+L7h7E1Q1I1C+O1G+g7Q3q4=
 github.com/google/generative-ai-go v0.15.0/go.mod h1:3e7M+g5s0O3P+A5k5T1X8z1f5v7s8c5k2m8w8g4c0Y4=
-github.com/google/uuid v1.6.0 h1:NIhscvKOPWRfiM1Kj7/dK+mxxbM34y2b/l/wUhS+mZE=
-github.com/google/uuid v1.6.0/go.mod h1:CA2j51Pu73LOp4b2sI2g2OV3B4jLhT6g1v35/3iL3XI=
 github.com/gookit/color v1.5.4 h1:SOO5S5hDhgYl0zLh/d0EXz3t3E8aJk/M8yC0wECJkR8=
 github.com/gookit/color v1.5.4/go.mod h1:C5G9eGvF2QpxlA6z3k11h+9+jOaO0K2J6xVd/C2m8lY=
 github.com/gorilla/websocket v1.5.3 h1:tH1iF5rZ9fO7bS7hWSTr1+hTLfO8wVpYnCj6d8a4fDs=
