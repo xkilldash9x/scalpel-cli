@@ -1,5 +1,5 @@
 // internal/network/httpclient_test.go
-package network_test
+package network // CHANGED: from network_test to network
 
 import (
 	"context"
@@ -392,3 +392,4 @@ func TestClient_Behavior_ConnectionPooling(t *testing.T) {
 	assert.Less(t, len(remoteAddrs), iterations, "Connections should have been reused")
 	assert.Greater(t, len(remoteAddrs), 0)
 }
+

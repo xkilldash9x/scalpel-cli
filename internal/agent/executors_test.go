@@ -14,7 +14,6 @@ import (
 
 	// The implementation uses schemas.ActionType, so we must import it for the tests.
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/interfaces"
 )
 
 

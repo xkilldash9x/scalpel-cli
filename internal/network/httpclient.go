@@ -96,7 +96,7 @@ func NewHTTPTransport(config *ClientConfig) *http.Transport {
 
 	// Ensure logger is never nil
 	if config.Logger == nil {
-		config.Logger = observability.NewNopLogger()
+		config.Logger = zap.NewNop		()
 	}
 
 	// Ensure DialerConfig is initialized

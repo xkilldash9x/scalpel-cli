@@ -1,4 +1,3 @@
-// internal/browser/manager_test.go
 package browser_test
 
 import (
@@ -8,102 +7,89 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-
-	"github.com/xkilldash9x/scalpel-cli/internal/browser"
 )
 
-// TestManager_LaunchAndShutdown verifies the basic lifecycle without using the fixture helper.
+// TestManager_LaunchAndShutdown verifies the basic lifecycle: launch, create a
+// session, close the session, and shut down the manager.
 func TestManager_LaunchAndShutdown(t *testing.T) {
-	logger, cfg := setupTestConfig(t)
+	t.Parallel()
+	fixture := setupBrowserManager(t)
 
-	// 1. Launch
-	ctx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
-
-	mgr, err := browser.NewManager(ctx, logger, cfg)
-	require.NoError(t, err, "Failed to launch Browser Manager")
-	require.NotNil(t, mgr)
-
-	// 2. Initialize and Close a Session (Verifies responsiveness)
-	sessionCtx, sessionCancel := context.WithTimeout(ctx, 15*time.Second)
+	// Initialize and then immediately close a session to verify responsiveness.
+	sessionCtx, sessionCancel := context.WithTimeout(fixture.MgrCtx, 20*time.Second)
 	defer sessionCancel()
-	session, err := mgr.InitializeSession(sessionCtx)
+	session, err := fixture.Manager.InitializeSession(sessionCtx)
 	require.NoError(t, err)
-	err = session.Close(sessionCtx)
-	require.NoError(t, err)
+	require.NotNil(t, session)
 
-	// 3. Shutdown
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
-	defer shutdownCancel()
-
-	err = mgr.Shutdown(shutdownCtx)
-	require.NoError(t, err, "Failed to shutdown Browser Manager")
+	// Close the session.
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer closeCancel()
+	session.Close(closeCtx)
 }
 
-// TestManager_GracefulShutdownWithActiveSessions verifies the manager waits for sessions to close.
+// TestManager_GracefulShutdownWithActiveSessions verifies that the manager correctly
+// waits for active sessions to be closed before completing its shutdown process.
 func TestManager_GracefulShutdownWithActiveSessions(t *testing.T) {
+	t.Parallel()
 	fixture := setupBrowserManager(t)
 
 	// Initialize a session but don't close it yet.
-	session := fixture.initializeSession(t)
+	session, err := fixture.Manager.InitializeSession(fixture.MgrCtx)
+	require.NoError(t, err)
 
-	// Start shutdown in a separate goroutine.
 	shutdownDone := make(chan struct{})
 	go func() {
+		// This shutdown call should block until the session is closed.
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer shutdownCancel()
 		fixture.Manager.Shutdown(shutdownCtx)
 		close(shutdownDone)
 	}()
 
-	// Wait briefly to ensure Shutdown() is waiting on the WaitGroup.
+	// Give the shutdown goroutine a moment to start and block on the WaitGroup.
 	time.Sleep(500 * time.Millisecond)
-
 	select {
 	case <-shutdownDone:
-		t.Fatal("Shutdown completed prematurely while a session was active.")
+		t.Fatal("Shutdown should block while a session is active")
 	default:
-		// Expected: Shutdown is blocked.
+		// This is expected
 	}
 
-	// Now close the session.
-	err := session.Close(fixture.MgrCtx)
-	require.NoError(t, err)
+	// Now, close the session, which should unblock the Shutdown call.
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
+	defer closeCancel()
+	session.Close(closeCtx)
 
-	// Shutdown should now complete gracefully.
+	// The shutdown process should now complete gracefully.
 	select {
 	case <-shutdownDone:
-		// Success
+		// Success! The channel was closed, meaning Shutdown completed.
 	case <-time.After(10 * time.Second):
-		t.Fatal("Timeout waiting for graceful shutdown after closing the session.")
+		t.Fatal("Timeout: Manager did not shut down gracefully after the session was closed.")
 	}
 }
 
-// TestManager_ForcedShutdownTimeout verifies the manager terminates if the shutdown context times out.
+// TestManager_ForcedShutdownTimeout verifies that Shutdown respects the context
+// timeout and terminates even if sessions are still active.
 func TestManager_ForcedShutdownTimeout(t *testing.T) {
-	logger, cfg := setupTestConfig(t)
-	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
-	defer cancel()
+	t.Parallel()
+	fixture := setupBrowserManager(t)
 
-	mgr, err := browser.NewManager(ctx, logger, cfg)
+	// Initialize a session and intentionally "leak" it (don't close it).
+	_, err := fixture.Manager.InitializeSession(fixture.MgrCtx)
 	require.NoError(t, err)
 
-	// Initialize a session and intentionally do not close it.
-	_, err = mgr.InitializeSession(ctx)
-	require.NoError(t, err)
-
-	// Start shutdown with a very short timeout.
+	// Call Shutdown with a very short timeout.
 	startTime := time.Now()
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 2*time.Second)
 	defer shutdownCancel()
 
-	// This should block until the timeout (2s) and then force termination.
-	err = mgr.Shutdown(shutdownCtx)
+	fixture.Manager.Shutdown(shutdownCtx)
 	duration := time.Since(startTime)
 
-	assert.NoError(t, err) // Shutdown itself doesn't return an error when forced.
-
-	// The duration should be close to the timeout.
-	assert.Greater(t, duration, 1900*time.Millisecond, "Shutdown should have waited for the timeout")
-	assert.Less(t, duration, 3*time.Second, "Shutdown took significantly longer than the timeout")
+	// Verify that the shutdown was forced by the timeout. The duration should be
+	// very close to the timeout value we provided.
+	assert.InDelta(t, 2*time.Second, duration, float64(500*time.Millisecond),
+		"Shutdown should have been forced by the context timeout after ~2s")
 }

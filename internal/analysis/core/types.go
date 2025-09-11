@@ -1,8 +1,6 @@
-// internal/analysis/core/types.go
 package core
 
 import (
-	"net/http"
 	"time"
 
 	"github.com/google/uuid"
@@ -78,27 +76,11 @@ type AnalysisResult struct {
 	CWE               string
 }
 
-// Evidence holds the raw data supporting a finding.
+// Evidence struct (required by ato/models.go provided in the prompt)
 type Evidence struct {
-	Summary        string
-	Request        *SerializedRequest
-	Response       *SerializedResponse
-	AdditionalData map[string]interface{}
-}
-
-// SerializedRequest holds a representation of the HTTP request.
-type SerializedRequest struct {
-	Method  string
-	URL     string
-	Headers http.Header
-	Body    string
-}
-
-// SerializedResponse holds a representation of the HTTP response.
-type SerializedResponse struct {
-	StatusCode int
-	Headers    http.Header
-	Body       string
+	Details  string
+	Request  string
+	Response string
 }
 
 // Reporter is the interface for publishing analysis results.

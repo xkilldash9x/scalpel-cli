@@ -1,7 +1,5 @@
-# -- config.yaml --
-# Completed configuration for the modular monolith version of scalpel-cli.
+# Default configuration for scalpel-cli
 
-# logger configuration
 logger:
   service_name: "scalpel-cli"
   log_file: "logs/scalpel.log"
@@ -12,7 +10,6 @@ logger:
   max_backups: 3
   max_age: 7
   compress: true
-  # Here's the new section for custom terminal colors.
   colors:
     debug: "cyan"
     info: "green"
@@ -22,17 +19,14 @@ logger:
     panic: "magenta"
     fatal: "magenta"
 
-# postgresql database configuration for storing findings
 postgres:
   url: "postgres://user:password@localhost:5432/scalpeldb?sslmode=disable"
 
-# monolithic task engine configuration
 engine:
   queue_size: 1000
-  worker_concurrency: 8 # Number of concurrent analysis tasks
+  worker_concurrency: 8
   default_task_timeout: "15m"
 
-# headless browser settings
 browser:
   headless: true
   ignore_tls_errors: false
@@ -45,78 +39,85 @@ browser:
     width: 1920
     height: 1080
 
-# global network settings
 network:
   timeout: "30s"
+  postLoadWait: "2s" # Wait 2 seconds for JS to settle after page load
   headers:
     User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 ScalpelV2/1.0"
 
+# IAST script paths required by the browser manager
+iast:
+  shimPath: "internal/browser/shim/pinnacle.js"
+  configPath: "internal/browser/shim/pinnacle.json"
+
 # -- scanner module configuration --
 scanners:
-  # Passive scanners inspect traffic without sending new requests.
   passive:
     headers:
       enabled: true
 
-  # Static scanners analyze code and artifacts without executing them.
   static:
     jwt:
       enabled: true
-      # A list of common, weak secrets for quick checks against JWT signatures.
       known_secrets:
         - "secret"
         - "password"
-      # Enable dictionary attacks using a curated wordlist.
       brute_force_enabled: true
-      # A curated list of common secrets used in JWTs.
       dictionary_file: "~/SecLists/Fuzzing/JSON-Web-Tokens/jwt.secrets.list"
 
-  # Active scanners send new, potentially malicious requests to the target.
   active:
     taint:
       enabled: true
-      # How many levels deep the interactive crawler should go.
       depth: 3
-      # How many concurrent browser instances to use for taint analysis.
       concurrency: 2
     protopollution:
       enabled: true
     timeslip: # Race Condition Analyzer
       enabled: true
-      # The number of requests to send in a single race attempt.
       request_count: 25
-      # The number of concurrent workers for strategies that use them.
       max_concurrency: 10
-      # The time difference in ms between the fastest and slowest response
-      # to flag as potential resource contention.
       threshold_ms: 500
     auth:
-      ato: # Account Takeover Analyzer
+      # -- This is the updated ATO configuration section --
+      ato:
         enabled: true
-        # Default field names to look for in login forms.
-        username_fields: ["username", "email", "user", "login", "user_id"]
-        password_fields: ["password", "pass", "secret", "user_pass"]
-        # File paths for enumeration and password spraying attacks.
-        username_wordlist: "~/SecLists/Usernames/top-usernames-shortlist.txt"
-        password_spray_wordlist: "~/SecLists/Passwords/Common-Credentials/Top-100-passwords-2023-by-@hAPI_hacker.txt"
-        # Regex patterns to detect login outcomes from response bodies.
-        success_regex: '(?i)welcome|redirecting|logged in|authentication successful'
-        failure_regex: '(?i)invalid credentials|login failed|incorrect username or password'
-        lockout_regex: '(?i)account locked|too many failed attempts|please try again later'
-        # A small delay between login attempts.
-        delay_between_attempts_ms: 250
-      idor: # Insecure Direct Object Reference Analyzer
+        credentialFile: "" # Leaving empty uses the internal default list
+        concurrency: 4
+        minRequestDelayMs: 500    # 0.5s base delay between requests per worker
+        requestDelayJitterMs: 500 # Add up to 0.5s of random delay
+
+        # Keywords for response analysis
+        successKeywords:
+          - "welcome"
+          - "redirect"
+          - "dashboard"
+          - "logout"
+          - '"success":true'
+        userFailureKeywords:
+          - "user not found"
+          - "invalid user"
+          - "no such account"
+          - "user does not exist"
+        passFailureKeywords:
+          - "invalid password"
+          - "incorrect password"
+          - "authentication failed"
+        genericFailureKeywords:
+          - "login failed"
+          - "invalid credentials"
+        lockoutKeywords:
+          - "account locked"
+          - "too many attempts"
+
+      idor:
         enabled: true
-        # A list of parameter or header names to explicitly ignore during testing.
         ignore_list:
           - "csrf_token"
           - "X-CSRF-Token"
           - "nonce"
           - "viewstate"
-        # Heuristics for how to test different identifier types.
         test_strategies:
           NumericID: ["increment", "decrement"]
           UUID: ["horizontal_swap"]
           Base64Encoded: ["bit_flip"]
           ObjectID: ["increment_char"]
-

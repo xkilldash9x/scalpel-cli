@@ -12,8 +12,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
-	// CORRECTED: All dependencies are now abstract interfaces.
-	"github.com/xkilldash9x/scalpel-cli/internal/interfaces"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
 // Orchestrator manages the high-level lifecycle of a scan.
@@ -21,23 +20,23 @@ import (
 type Orchestrator struct {
 	cfg             *config.Config
 	logger          *zap.Logger
-	discoveryEngine interfaces.DiscoveryEngine
-	taskEngine      interfaces.TaskEngine
+	discoveryEngine schemas.DiscoveryEngine
+	taskEngine      schemas.TaskEngine
 }
-
-// New creates a new Orchestrator with its dependencies provided as interfaces.
+s
+// New creates a new Orchestrator with its dependencies provided as schemas.
 // This decoupling is crucial for testability and architectural flexibility.
 func New(
 	cfg *config.Config,
 	logger *zap.Logger,
-	discoveryEngine interfaces.DiscoveryEngine,
-	taskEngine interfaces.TaskEngine,
+	discoveryEngine schemas.DiscoveryEngine,
+	taskEngine schemas.TaskEngine,
 ) (*Orchestrator, error) {
-	if cfg == nil |
-
-| logger == nil |
-| discoveryEngine == nil |
-| taskEngine == nil {
+	// Fixed: Changed bitwise OR (|) to logical OR (||) and fixed formatting.
+	if cfg == nil ||
+		logger == nil ||
+		discoveryEngine == nil ||
+		taskEngine == nil {
 		return nil, fmt.Errorf("cannot initialize orchestrator with nil dependencies")
 	}
 	return &Orchestrator{
@@ -54,8 +53,9 @@ func (o *Orchestrator) StartScan(ctx context.Context, targetsstring, scanID stri
 
 	// 1. Start the discovery engine. It will return a channel from which the
 	//    orchestrator can read newly discovered tasks.
-	taskChan, err := o.discoveryEngine.Start(ctx, targets)
-	if err!= nil {
+	// Fixed: Used the 'targetsstring' parameter instead of the undefined 'targets'.
+	taskChan, err := o.discoveryEngine.Start(ctx, targetsstring)
+	if err != nil {
 		return fmt.Errorf("failed to start discovery engine: %w", err)
 	}
 	o.logger.Info("Discovery engine started")
@@ -83,7 +83,7 @@ func (o *Orchestrator) StartScan(ctx context.Context, targetsstring, scanID stri
 	// The discovery engine might have encountered a non-fatal error during its run.
 	// If the context was cancelled due to an error from one of the components,
 	// that error should be propagated up.
-	if err := ctx.Err(); err!= nil && err!= context.Canceled && err!= context.DeadlineExceeded {
+	if err := ctx.Err(); err != nil && err != context.Canceled && err != context.DeadlineExceeded {
 		return err
 	}
 

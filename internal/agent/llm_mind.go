@@ -16,7 +16,6 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
-	"github.com/xkilldash9x/scalpel-cli/internal/interfaces"
 )
 
 // NOTE: These types are used throughout this file. Ensure they are correctly defined

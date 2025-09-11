@@ -1,10 +1,12 @@
-// internal/browser/browser_test_setup.go
+// internal/browser/browser_set_test.go
 package browser_test
 
 import (
 	"context"
+	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"testing"
 	"time"
 
@@ -16,16 +18,18 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/browser"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/humanoid"
-	"github.com/xkilldash9x/scalpel-cli/internal/interfaces"
 )
 
 // testFixture holds the environment for browser integration tests.
 type testFixture struct {
-	Manager *browser.Manager
-	Logger  *zap.Logger
-	Config  *config.Config
-	// Context used for the manager's lifecycle (allocator).
-	MgrCtx context.Context
+	Manager    *browser.Manager
+	Logger     *zap.Logger
+	Config     *config.Config
+	MgrCtx     context.Context
+	cancel     context.CancelFunc
+	tempDir    string
+	shimPath   string
+	configPath string
 }
 
 // setupTestConfig initializes the configuration and logger.
@@ -33,21 +37,27 @@ func setupTestConfig(t *testing.T) (*zap.Logger, *config.Config) {
 	t.Helper()
 	logger := zaptest.NewLogger(t, zaptest.Level(zap.DebugLevel))
 
+	// Get the default humanoid config to modify it for testing.
+	humanoidCfg := humanoid.DefaultConfig()
+	// Speed up humanoid actions significantly for testing.
+	humanoidCfg.FittsAMean = 20.0    // Drastically reduce base movement delay
+	humanoidCfg.FittsBMean = 30.0    // Drastically reduce distance-based movement delay
+	humanoidCfg.KeyHoldMeanMs = 10.0 // Make typing almost instant
+
 	// Default configuration optimized for testing.
 	cfg := &config.Config{
 		Browser: config.BrowserConfig{
 			Headless:        true, // Run headless in tests.
 			DisableCache:    true,
 			IgnoreTLSErrors: true,
+			Humanoid:        humanoidCfg, // Use the modified config
 		},
 		Network: config.NetworkConfig{
-			PostLoadWait:          200 * time.Millisecond, // Faster waits for tests.
+			PostLoadWait:          50 * time.Millisecond, // Faster waits for tests
 			CaptureResponseBodies: true,
 		},
-		Humanoid: humanoid.DefaultConfig(),
+		IAST: config.IASTConfig{},
 	}
-	// Speed up humanoid actions significantly.
-	cfg.Humanoid.SpeedMultiplier = 10.0
 
 	return logger, cfg
 }
@@ -57,7 +67,23 @@ func setupBrowserManager(t *testing.T) *testFixture {
 	t.Helper()
 	logger, cfg := setupTestConfig(t)
 
-	// Use a generous timeout for the manager's context.
+	// The manager requires valid paths for IAST files at initialization.
+	tempDir, err := ioutil.TempDir("", "manager-test-*")
+	require.NoError(t, err)
+
+	shimFile, err := ioutil.TempFile(tempDir, "shim-*.js")
+	require.NoError(t, err)
+	_, _ = shimFile.WriteString("/* mock shim */")
+	shimFile.Close()
+
+	configFile, err := ioutil.TempFile(tempDir, "config-*.json")
+	require.NoError(t, err)
+	_, _ = configFile.WriteString("{}")
+	configFile.Close()
+
+	cfg.IAST.ShimPath = shimFile.Name()
+	cfg.IAST.ConfigPath = configFile.Name()
+
 	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
 
 	mgr, err := browser.NewManager(ctx, logger, cfg)
@@ -67,46 +93,44 @@ func setupBrowserManager(t *testing.T) *testFixture {
 	}
 
 	fixture := &testFixture{
-		Manager: mgr,
-		Logger:  logger,
-		Config:  cfg,
-		MgrCtx:  ctx,
+		Manager:    mgr,
+		Logger:     logger,
+		Config:     cfg,
+		MgrCtx:     ctx,
+		cancel:     cancel,
+		tempDir:    tempDir,
+		shimPath:   shimFile.Name(),
+		configPath: configFile.Name(),
 	}
 
 	// Ensure the manager is shutdown when the test finishes.
 	t.Cleanup(func() {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer shutdownCancel()
-		if err := mgr.Shutdown(shutdownCtx); err != nil {
-			t.Logf("Error during Browser Manager shutdown: %v", err)
-		}
-		cancel() // Cancel the main allocator context.
+		fixture.Manager.Shutdown(shutdownCtx)
+		fixture.cancel()
+		_ = os.RemoveAll(fixture.tempDir)
 	})
 
 	return fixture
 }
 
 // initializeSession creates a new browser session using the fixture's manager.
-func (f *testFixture) initializeSession(t *testing.T) interfaces.SessionContext {
+func (f *testFixture) initializeSession(t *testing.T) *browser.AnalysisContext {
 	t.Helper()
 
 	// Use a specific timeout for session initialization, derived from the manager context.
 	sessionInitCtx, cancelInit := context.WithTimeout(f.MgrCtx, 30*time.Second)
+	defer cancelInit()
 
 	session, err := f.Manager.InitializeSession(sessionInitCtx)
-	if err != nil {
-		cancelInit()
-		t.Fatalf("Failed to initialize session: %v", err)
-	}
+	require.NoError(t, err)
 
 	// Ensure the session is closed when the test finishes.
 	t.Cleanup(func() {
-		cancelInit() // Cancel the initialization context.
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer closeCancel()
-		if err := session.Close(closeCtx); err != nil {
-			t.Logf("Error closing session %s: %v", session.ID(), err)
-		}
+		session.Close(closeCtx)
 	})
 	return session
 }
@@ -118,3 +142,4 @@ func createTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	t.Cleanup(server.Close)
 	return server
 }
+

@@ -17,7 +17,7 @@ import (
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/interfaces"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
 // PassiveRunner handles passive discovery techniques. less noise, high value intel.
