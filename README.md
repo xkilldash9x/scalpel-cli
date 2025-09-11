@@ -26,8 +26,8 @@
     
     .title { fill: var(--title-color); }
     .blade { fill: var(--blade-fill); stroke: var(--blade-stroke); }
-    
   </style>
+  
   <defs>
     <linearGradient id="grad1" x1="0%" y1="0%" x2="100%" y2="0%">
       <stop offset="0%" style="stop-color:#ff4136;stop-opacity:1" />
@@ -40,7 +40,6 @@
 
   <text x="90" y="65" class="title">SCALPEL</text>
 </svg>
-
 ![Project Status](https://img.shields.io/badge/status-in_development-black)
 ![Go Version](https://img.shields.io/badge/Go-1.22%2B-blue?logo=go&logoColor=green)
 ![License](https://img.shields.io/badge/license-MIT-purple)
