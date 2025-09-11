@@ -1,7 +1,6 @@
 <div align="center">
 
-```svg
-<svg width="300" height="100" xmlns="[http://www.w3.org/2000/svg](http://www.w3.org/2000/svg)" viewBox="0 0 300 100">
+<svg width="300" height="100" xmlns="http://www.w3.org/2000/svg" viewBox="0 0 300 100">
   <style>
     /* Base styles for the logo */
     .title { font: bold 60px monospace; }
