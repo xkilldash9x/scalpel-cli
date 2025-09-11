@@ -7,13 +7,23 @@ package orchestrator
 import (
 	"context"
 	"fmt"
+	"log"
 	"time"
 
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
+
+// Global variable to track package initialization status.
+var InitializationStatus string
+
+// init is called by the Go runtime when the package is initialized.
+func init() {
+	log.Println("Orchestrator package initializing.")
+	InitializationStatus = "Initialized"
+}
 
 // Orchestrator manages the high-level lifecycle of a scan.
 // It is injected with fully configured engine components.
@@ -23,7 +33,7 @@ type Orchestrator struct {
 	discoveryEngine schemas.DiscoveryEngine
 	taskEngine      schemas.TaskEngine
 }
-s
+
 // New creates a new Orchestrator with its dependencies provided as schemas.
 // This decoupling is crucial for testability and architectural flexibility.
 func New(

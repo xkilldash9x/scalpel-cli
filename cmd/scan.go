@@ -142,7 +142,7 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	// CORRECTED: All dependencies are now abstract interfaces.
-	"github.com/xkilldash9x/scalpel-cli/internal/interfaces"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
 // Orchestrator manages the high-level lifecycle of a scan.

@@ -18,11 +18,11 @@ import (
 
 // Constants for tool identification in the SARIF report.
 const (
-	ToolName    = "Scalpel CLI"
-	ToolVersion = "2.0.0"
-	ToolInfoURI = "https://github.com/xkilldash9x/scalpel-cli"
+	ToolName     = "Scalpel CLI"
+	ToolVersion  = "2.0.0"
+	ToolInfoURI  = "https://github.com/xkilldash9x/scalpel-cli"
 	SARIFVersion = "2.1.0"
-	SARIFSchema = "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.5.json"
+	SARIFSchema  = "https://schemastore.azurewebsites.net/schemas/json/sarif-2.1.0-rtm.5.json"
 )
 
 // ruleIDSanitizer replaces characters not typically safe or allowed in SARIF Rule IDs.
@@ -84,9 +84,15 @@ func (r *SARIFReporter) Write(result *schemas.ResultEnvelope) error {
 	for _, finding := range result.Findings {
 		ruleID := r.ensureRule(finding)
 
+		// Determine the message text, falling back to the vulnerability name if description is empty.
+		messageText := finding.Vulnerability.Description
+		if messageText == "" {
+			messageText = finding.Vulnerability.Name
+		}
+
 		sarifResult := &sarif.Result{
 			RuleID:    ruleID,
-			Message:   &sarif.Message{Text: pString(finding.Description)},
+			Message:   &sarif.Message{Text: pString(messageText)},
 			Level:     sarif.Level(mapSeverityToSARIFLevel(finding.Severity)),
 			Locations: r.createLocations(finding),
 		}
@@ -154,8 +160,14 @@ func (r *SARIFReporter) Close() error {
 // Implements robust sanitization for the Rule ID.
 // NOTE: Must be called while holding the mutex.
 func (r *SARIFReporter) ensureRule(finding schemas.Finding) string {
+	// Use the structured vulnerability ID if available, otherwise fall back to its name.
+	baseID := finding.Vulnerability.ID
+	if baseID == "" {
+		baseID = finding.Vulnerability.Name
+	}
+
 	// 1. Convert to uppercase.
-	sanitizedName := strings.ToUpper(finding.Vulnerability)
+	sanitizedName := strings.ToUpper(baseID)
 	// 2. Sanitize invalid characters using regex.
 	sanitizedName = ruleIDSanitizer.ReplaceAllString(sanitizedName, "-")
 	// 3. Trim potential leading/trailing hyphens resulting from sanitization.
@@ -179,14 +191,14 @@ func (r *SARIFReporter) ensureRule(finding schemas.Finding) string {
 	driver := r.log.Runs[0].Tool.Driver
 
 	// Create enhanced Markdown help text.
-	markdownHelp := fmt.Sprintf("**Vulnerability:** %s\n\n**Recommendation:**\n%s",
-		finding.Vulnerability, finding.Recommendation)
+	markdownHelp := fmt.Sprintf("**Vulnerability:** %s\n\n**Description:**\n%s\n\n**Recommendation:**\n%s",
+		finding.Vulnerability.Name, finding.Vulnerability.Description, finding.Recommendation)
 
 	// Create a new rule.
 	newRule := &sarif.ReportingDescriptor{
 		ID:               ruleID,
-		Name:             pString(finding.Vulnerability),
-		ShortDescription: &sarif.MultiformatMessageString{Text: pString(finding.Vulnerability)},
+		Name:             pString(finding.Vulnerability.Name),
+		ShortDescription: &sarif.MultiformatMessageString{Text: pString(finding.Vulnerability.Name)},
 		FullDescription:  &sarif.MultiformatMessageString{Text: pString(finding.Recommendation)},
 		Help: &sarif.MultiformatMessageString{
 			Text:     pString(finding.Recommendation),

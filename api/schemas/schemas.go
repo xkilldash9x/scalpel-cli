@@ -1,6 +1,7 @@
 package schemas
 
 import (
+	"context"
 	"time"
 
 	"github.com/chromedp/cdproto/network"
@@ -8,19 +9,21 @@ import (
 
 // -- Task & Finding Schemas --
 
+// TaskType defines the type of task to be executed by a module.
 type TaskType string
 
 const (
-	TaskAgentMission          TaskType = "AGENT_MISSION"
-	TaskAnalyzeWebPageTaint   TaskType = "ANALYZE_WEB_PAGE_TAINT"
+	TaskAgentMission        TaskType = "AGENT_MISSION"
+	TaskAnalyzeWebPageTaint TaskType = "ANALYZE_WEB_PAGE_TAINT"
 	TaskAnalyzeWebPageProtoPP TaskType = "ANALYZE_WEB_PAGE_PROTOPP"
-	TaskTestRaceCondition     TaskType = "TEST_RACE_CONDITION"
-	TaskTestAuthATO           TaskType = "TEST_AUTH_ATO"
-	TaskTestAuthIDOR          TaskType = "TEST_AUTH_IDOR"
-	TaskAnalyzeHeaders        TaskType = "ANALYZE_HEADERS"
-	TaskAnalyzeJWT            TaskType = "ANALYZE_JWT"
+	TaskTestRaceCondition   TaskType = "TEST_RACE_CONDITION"
+	TaskTestAuthATO         TaskType = "TEST_AUTH_ATO"
+	TaskTestAuthIDOR        TaskType = "TEST_AUTH_IDOR"
+	TaskAnalyzeHeaders      TaskType = "ANALYZE_HEADERS"
+	TaskAnalyzeJWT          TaskType = "ANALYZE_JWT"
 )
 
+// Severity defines the severity level of a finding.
 type Severity string
 
 const (
@@ -31,43 +34,73 @@ const (
 	SeverityInformational Severity = "INFORMATIONAL"
 )
 
+// Vulnerability defines a general class of vulnerability.
 type Vulnerability struct {
 	Name        string `json:"name"`
 	Description string `json:"description"`
 }
 
+// Finding represents a specific instance of a vulnerability discovered during a scan.
 type Finding struct {
 	ID             string        `json:"id"`
 	TaskID         string        `json:"task_id"`
 	Timestamp      time.Time     `json:"timestamp"`
-	Target         string        `json:"target"`
-	Module         string        `json:"module"`
+	Target         string        `json:"target"` // The specific URL or asset where the finding was discovered.
+	Module         string        `json:"module"` // The name of the module/engine that produced the finding.
 	Vulnerability  Vulnerability `json:"vulnerability"`
 	Severity       Severity      `json:"severity"`
-	Description    string        `json:"description"`
-	Evidence       string        `json:"evidence"`
-	Recommendation string        `json:"recommendation"`
-	CWE            []string      `json:"cwe"`
+	Description    string        `json:"description"`     // Specific details about this particular finding.
+	Evidence       string        `json:"evidence"`        // Concrete evidence, like a request/response pair or log entry.
+	Recommendation string        `json:"recommendation"`  // Steps to mitigate or fix the vulnerability.
+	CWE            []string      `json:"cwe,omitempty"` // Associated CWEs.
 }
 
 // -- Knowledge Graph Schemas --
 
+// NodeType defines the type of a node in the knowledge graph.
 type NodeType string
+
+// Example NodeType constants.
+const (
+	NodeHost        NodeType = "HOST"
+	NodeIPAddress   NodeType = "IP_ADDRESS"
+	NodeURL         NodeType = "URL"
+	NodeCookie      NodeType = "COOKIE"
+	NodeHeader      NodeType = "HEADER"
+	NodeTechnology  NodeType = "TECHNOLOGY"
+	NodeVulnerability NodeType = "VULNERABILITY"
+)
+
+// RelationshipType defines the type of an edge between nodes in the knowledge graph.
 type RelationshipType string
 
+// Example RelationshipType constants.
+const (
+	RelationshipResolvesTo RelationshipType = "RESOLVES_TO"
+	RelationshipLinksTo    RelationshipType = "LINKS_TO"
+	RelationshipUses       RelationshipType = "USES"
+	RelationshipHas        RelationshipType = "HAS"
+	RelationshipExposes    RelationshipType = "EXPOSES"
+)
+
+// NodeInput is the structure for creating or updating a node in the knowledge graph.
 type NodeInput struct {
-	ID         string                 `json:"id"`
-	Type       NodeType               `json:"type"`
+	ID   string   `json:"id"`   // A unique identifier for the node.
+	Type NodeType `json:"type"` // The type of the node.
+	// Properties contains arbitrary key-value data about the node.
+	// Using map[string]interface{} provides flexibility at the cost of type safety.
 	Properties map[string]interface{} `json:"properties"`
 }
 
+// EdgeInput is the structure for creating or updating an edge in the knowledge graph.
 type EdgeInput struct {
-	SourceID     string                 `json:"source_id"`
-	TargetID     string                 `json:"target_id"`
-	Relationship RelationshipType       `json:"relationship"`
-	Properties   map[string]interface{} `json:"properties"`
+	SourceID     string           `json:"source_id"`
+	TargetID     string           `json:"target_id"`
+	Relationship RelationshipType `json:"relationship"`
+	Properties   map[string]interface{} `json:"properties,omitempty"`
 }
 
+// KnowledgeGraphUpdate represents a batch of updates to be applied to the knowledge graph.
 type KnowledgeGraphUpdate struct {
 	Nodes []NodeInput `json:"nodes"`
 	Edges []EdgeInput `json:"edges"`
@@ -75,25 +108,27 @@ type KnowledgeGraphUpdate struct {
 
 // -- Communication & Result Schemas --
 
+// ResultEnvelope is the top-level wrapper for all results produced by a single task.
 type ResultEnvelope struct {
 	ScanID    string                `json:"scan_id"`
 	TaskID    string                `json:"task_id"`
 	Timestamp time.Time             `json:"timestamp"`
 	Findings  []Finding             `json:"findings"`
-	KGUpdates *KnowledgeGraphUpdate `json:"kg_updates"`
+	KGUpdates *KnowledgeGraphUpdate `json:"kg_updates,omitempty"`
 }
 
 // -- Browser & Artifact Schemas --
 
 // InteractionConfig defines the parameters for the automated page interactor.
 type InteractionConfig struct {
-	MaxDepth                int               `json:"maxDepth"`
-	MaxInteractionsPerDepth int               `json:"maxInteractionsPerDepth"`
-	InteractionDelayMs      int               `json:"interactionDelayMs"`
-	PostInteractionWaitMs   int               `json:"postInteractionWaitMs"`
-	CustomInputData         map[string]string `json:"customInputData,omitempty"` // User-provided data for specific inputs (key: 'id' or 'name' attribute).
+	MaxDepth                int               `json:"max_depth"`
+	MaxInteractionsPerDepth int               `json:"max_interactions_per_depth"`
+	InteractionDelayMs      int               `json:"interaction_delay_ms"`
+	PostInteractionWaitMs   int               `json:"post_interaction_wait_ms"`
+	CustomInputData         map[string]string `json:"custom_input_data,omitempty"` // User-provided data for specific inputs (key: 'id' or 'name' attribute).
 }
 
+// ConsoleLog represents a single entry from the browser's console.
 type ConsoleLog struct {
 	Type      string    `json:"type"`
 	Timestamp time.Time `json:"timestamp"`
@@ -103,12 +138,14 @@ type ConsoleLog struct {
 	Line      int64     `json:"line,omitempty"`
 }
 
+// StorageState captures the state of browser storage at a point in time.
 type StorageState struct {
 	Cookies        []*network.Cookie `json:"cookies"`
 	LocalStorage   map[string]string `json:"local_storage"`
 	SessionStorage map[string]string `json:"session_storage"`
 }
 
+// Artifacts is a collection of all data gathered during a browser interaction.
 type Artifacts struct {
 	HAR         *HAR         `json:"har"`
 	DOM         string       `json:"dom"`
@@ -116,6 +153,7 @@ type Artifacts struct {
 	Storage     StorageState `json:"storage"`
 }
 
+// Credential holds a username and password pair.
 type Credential struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
@@ -123,6 +161,7 @@ type Credential struct {
 
 // -- HAR (HTTP Archive) Schemas --
 
+// HAR represents the root of the HTTP Archive format.
 type HAR struct {
 	Log HARLog `json:"log"`
 }
@@ -223,6 +262,7 @@ type Content struct {
 	Encoding string `json:"encoding,omitempty"`
 }
 
+// NewHAR creates and initializes a new HAR object with default values.
 func NewHAR() *HAR {
 	return &HAR{
 		Log: HARLog{
@@ -234,4 +274,47 @@ func NewHAR() *HAR {
 			Entries: make([]Entry, 0),
 		},
 	}
+}
+
+// -- LLM Client Schemas & Interface --
+
+// ModelTier specifies a preference for performance vs. capability.
+type ModelTier string
+
+const (
+	TierFast     ModelTier = "fast"     // Optimized for speed and cost.
+	TierPowerful ModelTier = "powerful" // Optimized for reasoning and accuracy.
+)
+
+type GenerationOptions struct {
+	Temperature     float32
+	ForceJSONFormat bool
+}
+
+type GenerationRequest struct {
+	SystemPrompt string
+	UserPrompt   string
+	Tier         ModelTier
+	Options      GenerationOptions
+}
+
+// LLMClient defines the interface for interacting with a Large Language Model.
+type LLMClient interface {
+	Generate(ctx context.Context, req GenerationRequest) (string, error)
+}
+
+// -- Engine Interfaces --
+
+// DiscoveryEngine defines the interface for an engine that discovers potential targets or tasks.
+type DiscoveryEngine interface {
+	// Start begins the discovery process, returning a channel that will stream findings.
+	Start(ctx context.Context, targets string) (<-chan Finding, error)
+	Stop()
+}
+
+// TaskEngine defines the interface for an engine that executes tasks based on findings.
+type TaskEngine interface {
+	// Start begins processing findings from a channel.
+	Start(ctx context.Context, taskChan <-chan Finding)
+	Stop()
 }

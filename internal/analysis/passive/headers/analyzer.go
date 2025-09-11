@@ -20,26 +20,39 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
+// Define the analyzer's unique ID
+const AnalyzerID = "passive_security_headers"
+
 // Define the minimum acceptable HSTS max-age (6 months in seconds)
 const MinHstsMaxAge = 15552000
 
 // Pre-compile regex for extracting max-age
 var regexMaxAge = regexp.MustCompile(`(?i)max-age=(\d+)`)
 
-type HeadersAnalyzer struct {
-	core.BaseAnalyzer
+type Analyzer struct {
+	*core.BaseAnalyzer
 	logger *zap.Logger
 }
 
-func NewHeadersAnalyzer(logger *zap.Logger) *HeadersAnalyzer {
-	return &HeadersAnalyzer{
-		BaseAnalyzer: core.NewBaseAnalyzer("Security Headers Analyzer", core.TypePassive),
-		logger:       logger.Named("headers_analyzer"),
+// NewAnalyzer creates a new security headers analyzer.
+func NewAnalyzer(logger *zap.Logger) *Analyzer {
+	namedLogger := logger.Named(AnalyzerID)
+
+	base := core.NewBaseAnalyzer(
+		"Security Headers Analyzer",
+		AnalyzerID,
+		core.TypePassive,
+		namedLogger,
+	)
+
+	return &Analyzer{
+		BaseAnalyzer: base,
+		logger:       namedLogger,
 	}
 }
 
 // Analyze passively inspects HTTP response headers collected in the AnalysisContext artifacts.
-func (a *HeadersAnalyzer) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
+func (a *Analyzer) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
 	if analysisCtx.Artifacts == nil || len(analysisCtx.Artifacts.Responses) == 0 {
 		return nil // No responses to analyze
 	}
@@ -69,7 +82,7 @@ func (a *HeadersAnalyzer) Analyze(ctx context.Context, analysisCtx *core.Analysi
 }
 
 // checkHeaders evaluates the security posture based on the presence and configuration of headers.
-func (a *HeadersAnalyzer) checkHeaders(analysisCtx *core.AnalysisContext, targetURL *url.URL, headers http.Header, isHTML bool) {
+func (a *Analyzer) checkHeaders(analysisCtx *core.AnalysisContext, targetURL *url.URL, headers http.Header, isHTML bool) {
 	urlString := targetURL.String()
 
 	// 1. Content-Security-Policy (CSP) - Primarily relevant for HTML
@@ -130,7 +143,7 @@ func (a *HeadersAnalyzer) checkHeaders(analysisCtx *core.AnalysisContext, target
 }
 
 // analyzeHSTS parses the HSTS header to ensure max-age is sufficient.
-func (a *HeadersAnalyzer) analyzeHSTS(analysisCtx *core.AnalysisContext, targetURL string, hstsValues []string) {
+func (a *Analyzer) analyzeHSTS(analysisCtx *core.AnalysisContext, targetURL string, hstsValues []string) {
 	hstsValue := strings.Join(hstsValues, "; ")
 	matches := regexMaxAge.FindStringSubmatch(hstsValue)
 
@@ -162,7 +175,7 @@ func (a *HeadersAnalyzer) analyzeHSTS(analysisCtx *core.AnalysisContext, targetU
 }
 
 // analyzeCSP performs a basic analysis of the CSP directives for weaknesses.
-func (a *HeadersAnalyzer) analyzeCSP(analysisCtx *core.AnalysisContext, targetURL string, cspValues []string) {
+func (a *Analyzer) analyzeCSP(analysisCtx *core.AnalysisContext, targetURL string, cspValues []string) {
 	cspContent := strings.Join(cspValues, ",")
 	cspLower := strings.ToLower(cspContent)
 
@@ -187,7 +200,7 @@ func (a *HeadersAnalyzer) analyzeCSP(analysisCtx *core.AnalysisContext, targetUR
 	}
 }
 
-func (a *HeadersAnalyzer) checkInformationLeakage(analysisCtx *core.AnalysisContext, targetURL string, headers http.Header, headerName string) {
+func (a *Analyzer) checkInformationLeakage(analysisCtx *core.AnalysisContext, targetURL string, headers http.Header, headerName string) {
 	values := headers.Values(headerName)
 	if len(values) > 0 && values[0] != "" {
 		value := strings.Join(values, ", ")
@@ -200,7 +213,7 @@ func (a *HeadersAnalyzer) checkInformationLeakage(analysisCtx *core.AnalysisCont
 }
 
 // Helper function for missing headers.
-func (a *HeadersAnalyzer) createMissingHeaderFinding(analysisCtx *core.AnalysisContext, targetURL, headerName string, severity schemas.Severity, description, cwe string) {
+func (a *Analyzer) createMissingHeaderFinding(analysisCtx *core.AnalysisContext, targetURL, headerName string, severity schemas.Severity, description, cwe string) {
 	evidence, _ := json.Marshal(map[string]string{
 		"header": headerName,
 		"status": "Missing",
@@ -228,7 +241,7 @@ func (a *HeadersAnalyzer) createMissingHeaderFinding(analysisCtx *core.AnalysisC
 }
 
 // Helper function for weak or misconfigured headers.
-func (a *HeadersAnalyzer) createWeakHeaderFinding(analysisCtx *core.AnalysisContext, targetURL, headerName string, severity schemas.Severity, description, headerValue, cwe string) {
+func (a *Analyzer) createWeakHeaderFinding(analysisCtx *core.AnalysisContext, targetURL, headerName string, severity schemas.Severity, description, headerValue, cwe string) {
 	evidence, _ := json.Marshal(map[string]string{
 		"header": headerName,
 		"status": "Weak or Misconfigured",

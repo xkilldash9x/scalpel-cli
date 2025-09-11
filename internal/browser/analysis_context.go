@@ -104,7 +104,7 @@ func (ac *AnalysisContext) Initialize(ctx context.Context) error {
 	}
 
 	// 3. Create the final session context that connects to the new tab's target ID.
-	sessionCtx, cancelSession := chromedp.NewContext(ac.parentBrowserCtx, chromedp.WithTargetID(targetID.TargetID))
+	sessionCtx, cancelSession := chromedp.NewContext(ac.parentBrowserCtx, chromedp.WithTargetID(targetID))
 
 	ac.mu.Lock()
 	ac.sessionContext = sessionCtx
@@ -384,4 +384,3 @@ func (ac *AnalysisContext) internalClose(ctx context.Context) {
 	ac.mu.Lock()
 	ac.isClosed = true
 }
-
