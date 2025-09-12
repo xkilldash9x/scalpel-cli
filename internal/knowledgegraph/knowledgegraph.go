@@ -1,4 +1,3 @@
-// internal/knowledgegraph/knowledgegraph.go
 package knowledgegraph
 
 import (
@@ -164,4 +163,3 @@ func (kg *InMemoryKG) GetEdges(ctx context.Context, nodeID string) ([]schemas.Ed
 
 	return edges, nil
 }
-
