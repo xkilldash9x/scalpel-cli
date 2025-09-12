@@ -2,63 +2,57 @@
 package results
 
 import (
-	"context"
-	"fmt"
-
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	// Assuming a provider package for CWE lookups
 	"github.com/xkilldash9x/scalpel-cli/internal/results/providers"
+	"go.uber.org/zap"
 )
 
-// Enricher enhances findings by adding external context, such as CWE names.
+// Enricher is responsible for enhancing findings with additional context.
 type Enricher struct {
 	cweProvider providers.CWEProvider
+	logger      *zap.Logger
 }
 
-// NewEnricher creates a new enricher with the given CWE provider.
-func NewEnricher(provider providers.CWEProvider) *Enricher {
+// NewEnricher creates a new Enricher instance.
+func NewEnricher(cweProvider providers.CWEProvider, logger *zap.Logger) *Enricher {
 	return &Enricher{
-		cweProvider: provider,
+		cweProvider: cweProvider,
+		logger:      logger.Named("enricher"),
 	}
 }
 
-// EnrichFindings iterates over findings and adds enrichment data.
-func (e *Enricher) EnrichFindings(ctx context.Context, findings []schemas.Finding) ([]schemas.Finding, error) {
-	// Gracefully skip enrichment if no provider is configured.
-	if e.cweProvider == nil {
-		return findings, nil
-	}
-
-	for i := range findings {
-		// Check for cancellation before processing each item.
-		select {
-		case <-ctx.Done():
-			return nil, fmt.Errorf("enrichment cancelled: %w", ctx.Err())
-		default:
-			// Continue processing
-		}
-		// Enrich the finding in place.
-		e.enrichCWE(ctx, &findings[i])
-	}
-	return findings, nil
+// EnrichFinding enhances a single finding.
+func (e *Enricher) EnrichFinding(finding *schemas.Finding) {
+	e.enrichCWE(finding)
+	// Add other enrichment steps here (e.g., CVSS calculation, asset context from KG)
 }
 
-// enrichCWE adds CWE information to a single finding.
-func (e *Enricher) enrichCWE(ctx context.Context, finding *schemas.Finding) {
-	// Check if there are any CWEs to process.
-	if len(finding.CWE) == 0 {
+func (e *Enricher) enrichCWE(finding *schemas.Finding) {
+	if len(finding.CWE) == 0 || e.cweProvider == nil {
 		return
 	}
 
-	// Use the primary CWE ID (first element) for enrichment.
-	primaryCWE := finding.CWE[0]
+	// We only use the first CWE ID for enrichment currently.
+	cweID := finding.CWE[0]
 
-	// Get the full name from the provider, passing the context.
-	if fullName, ok := e.cweProvider.GetFullName(ctx, primaryCWE); ok {
-		// If the finding's vulnerability name is not already set,
-		// populate it with the full CWE name for better context.
-		if finding.Vulnerability.Name == "" {
-			finding.Vulnerability.Name = fullName
-		}
+	entry, err := e.cweProvider.GetCWE(cweID)
+	if err != nil {
+		// CWEProvider implementation changed to not return error on not found, but keeping check for safety.
+		e.logger.Debug("Could not retrieve CWE details", zap.String("cwe_id", cweID), zap.Error(err))
+		return
+	}
+
+	// Update the vulnerability name/description if the current one is generic and we have a better one from CWE data.
+	isGenericName := finding.Vulnerability.Name == "" || finding.Vulnerability.Name == "Unclassified Vulnerability"
+	// Example of a specific name from HeadersAnalyzer: "Missing Security Header: X-Frame-Options"
+
+	// If the name is very generic, replace it. If it's specific (like the header example), keep it but enrich description.
+	if isGenericName && entry.Name != "" {
+		finding.Vulnerability.Name = entry.Name
+	}
+
+	// Enrich description if the current one is empty or very short.
+	if len(finding.Vulnerability.Description) < 20 && entry.Description != "" {
+		finding.Vulnerability.Description = entry.Description
 	}
 }

@@ -1,3 +1,4 @@
+// internal/knowledgegraph/knowledgegraph.go
 package knowledgegraph
 
 import (
@@ -22,7 +23,9 @@ type InMemoryKG struct {
 // NewInMemoryKG creates a new, empty in-memory knowledge graph.
 func NewInMemoryKG(logger *zap.Logger) (*InMemoryKG, error) {
 	if logger == nil {
-		return nil, fmt.Errorf("logger cannot be nil")
+		// Fallback to Nop logger if none provided.
+		// This makes initialization more robust.
+		logger = zap.NewNop()
 	}
 	return &InMemoryKG{
 		nodes:         make(map[string]schemas.Node),
@@ -39,7 +42,9 @@ func (kg *InMemoryKG) AddNode(ctx context.Context, node schemas.Node) error {
 	defer kg.mu.Unlock()
 
 	kg.nodes[node.ID] = node
-	kg.log.Debug("Node added or updated", zap.String("ID", node.ID), zap.String("Type", node.Type))
+	// Fixed a type casting issue here. The logger expects a string,
+	// so we need to explicitly cast node.Type.
+	kg.log.Debug("Node added or updated", zap.String("ID", node.ID), zap.String("Type", string(node.Type)))
 	return nil
 }
 
@@ -51,6 +56,8 @@ func (kg *InMemoryKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 
 	// Check if both nodes for the edge exist.
 	if _, exists := kg.nodes[edge.From]; !exists {
+		// For now, we enforce consistency. In a high-throughput system, we might relax this
+		// if nodes are expected to arrive shortly after their corresponding edges.
 		return fmt.Errorf("source node with id '%s' not found for edge", edge.From)
 	}
 	if _, exists := kg.nodes[edge.To]; !exists {
@@ -157,3 +164,4 @@ func (kg *InMemoryKG) GetEdges(ctx context.Context, nodeID string) ([]schemas.Ed
 
 	return edges, nil
 }
+

@@ -14,24 +14,58 @@ import (
 type TaskType string
 
 const (
-	TaskAgentMission        TaskType = "AGENT_MISSION"
-	TaskAnalyzeWebPageTaint TaskType = "ANALYZE_WEB_PAGE_TAINT"
+	TaskAgentMission          TaskType = "AGENT_MISSION"
+	TaskAnalyzeWebPageTaint   TaskType = "ANALYZE_WEB_PAGE_TAINT"
 	TaskAnalyzeWebPageProtoPP TaskType = "ANALYZE_WEB_PAGE_PROTOPP"
-	TaskTestRaceCondition   TaskType = "TEST_RACE_CONDITION"
-	TaskTestAuthATO         TaskType = "TEST_AUTH_ATO"
-	TaskTestAuthIDOR        TaskType = "TEST_AUTH_IDOR"
-	TaskAnalyzeHeaders      TaskType = "ANALYZE_HEADERS"
-	TaskAnalyzeJWT          TaskType = "ANALYZE_JWT"
+	TaskTestRaceCondition     TaskType = "TEST_RACE_CONDITION"
+	TaskTestAuthATO           TaskType = "TEST_AUTH_ATO"
+	TaskTestAuthIDOR          TaskType = "TEST_AUTH_IDOR"
+	TaskAnalyzeHeaders        TaskType = "ANALYZE_HEADERS"
+	TaskAnalyzeJWT            TaskType = "ANALYZE_JWT"
 )
+
+// Task represents a unit of work to be executed by the engine.
+// This is central to how the system decouples discovery from execution.
+type Task struct {
+	TaskID     string      `json:"task_id"`
+	ScanID     string      `json:"scan_id"`
+	Type       TaskType    `json:"type"`
+	TargetURL  string      `json:"target_url"`
+	Parameters interface{} `json:"parameters"` // Holds task specific configuration.
+}
+
+// -- Task Parameter Definitions --
+
+// ATOTaskParams defines parameters for the Account Takeover task.
+type ATOTaskParams struct {
+	Usernames []string `json:"usernames"`
+}
+
+// IDORTaskParams defines parameters for the IDOR task.
+type IDORTaskParams struct {
+	HTTPMethod  string            `json:"http_method"`
+	HTTPBody    string            `json:"http_body"`
+	HTTPHeaders map[string]string `json:"http_headers"`
+}
+
+// JWTTaskParams defines parameters for the JWT analysis task.
+type JWTTaskParams struct {
+	Token string `json:"token"`
+}
+
+// AgentMissionParams defines parameters for the Agent mission task.
+type AgentMissionParams struct {
+	MissionBrief string `json:"mission_brief"`
+}
 
 // Severity defines the severity level of a finding.
 type Severity string
 
 const (
-	SeverityCritical    Severity = "CRITICAL"
-	SeverityHigh        Severity = "HIGH"
-	SeverityMedium      Severity = "MEDIUM"
-	SeverityLow         Severity = "LOW"
+	SeverityCritical      Severity = "CRITICAL"
+	SeverityHigh          Severity = "HIGH"
+	SeverityMedium        Severity = "MEDIUM"
+	SeverityLow           Severity = "LOW"
 	SeverityInformational Severity = "INFORMATIONAL"
 )
 
@@ -44,25 +78,101 @@ type Vulnerability struct {
 // Finding represents a specific instance of a vulnerability discovered during a scan.
 type Finding struct {
 	ID             string        `json:"id"`
+	ScanID         string        `json:"scan_id"`
 	TaskID         string        `json:"task_id"`
 	Timestamp      time.Time     `json:"timestamp"`
-	Target         string        `json:"target"` // The specific URL or asset where the finding was discovered.
-	Module         string        `json:"module"` // The name of the module/engine that produced the finding.
+	Target         string        `json:"target"`
+	Module         string        `json:"module"`
 	Vulnerability  Vulnerability `json:"vulnerability"`
 	Severity       Severity      `json:"severity"`
-	Description    string        `json:"description"`    // Specific details about this particular finding.
-	Evidence       string        `json:"evidence"`       // Concrete evidence, like a request/response pair or log entry.
-	Recommendation string        `json:"recommendation"` // Steps to mitigate or fix the vulnerability.
-	CWE            []string      `json:"cwe,omitempty"`  // Associated CWEs.
+	Description    string        `json:"description"`
+	Evidence       string        `json:"evidence"`
+	Recommendation string        `json:"recommendation"`
+	CWE            []string      `json:"cwe,omitempty"`
 }
+
+// -- IAST (Interactive Application Security Testing) Schemas --
+
+// ProbeType defines the category of the attack payload.
+type ProbeType string
+
+const (
+	ProbeTypeXSS                ProbeType = "XSS"
+	ProbeTypeSSTI               ProbeType = "SSTI" // Server-Side Template Injection
+	ProbeTypeSQLi               ProbeType = "SQLI" // SQL Injection
+	ProbeTypeCmdInjection       ProbeType = "CMD_INJECTION"
+	ProbeTypeOAST               ProbeType = "OAST" // Out-of-Band Application Security Testing
+	ProbeTypeDOMClobbering      ProbeType = "DOM_CLOBBERING"
+	ProbeTypePrototypePollution ProbeType = "PROTOTYPE_POLLUTION"
+	ProbeTypeGeneric            ProbeType = "GENERIC" // For generic data flow tracking.
+)
+
+// TaintSource identifies where the tainted data originated.
+type TaintSource string
+
+const (
+	// Client side persistent storage
+	SourceCookie         TaintSource = "COOKIE"
+	SourceLocalStorage   TaintSource = "LOCAL_STORAGE"
+	SourceSessionStorage TaintSource = "SESSION_STORAGE"
+
+	// Client side transient sources
+	SourceURLParam     TaintSource = "URL_PARAM"
+	SourceHashFragment TaintSource = "HASH_FRAGMENT"
+	SourceReferer      TaintSource = "REFERER"
+	SourceDOMInput     TaintSource = "DOM_INPUT" // Data entered via forms/interaction.
+	SourceDOM          TaintSource = "DOM"       // Data read from existing DOM (e.g., window.name).
+
+	// Communication channels
+	SourceWebSocket   TaintSource = "WEB_SOCKET"   // Data received from server via WebSocket.
+	SourcePostMessage TaintSource = "POST_MESSAGE" // Data received from other windows/workers.
+)
+
+// TaintSink identifies the dangerous function or property where tainted data landed.
+type TaintSink string
+
+const (
+	// Execution Sinks
+	SinkEval                TaintSink = "EVAL"
+	SinkFunctionConstructor TaintSink = "FUNCTION_CONSTRUCTOR"
+
+	// DOM Manipulation Sinks
+	SinkInnerHTML     TaintSink = "INNER_HTML"
+	SinkOuterHTML     TaintSink = "OUTER_HTML"
+	SinkDocumentWrite TaintSink = "DOCUMENT_WRITE"
+
+	// Resource Loading Sinks
+	SinkScriptSrc    TaintSink = "SCRIPT_SRC"
+	SinkIframeSrc    TaintSink = "IFRAME_SRC"
+	SinkIframeSrcDoc TaintSink = "IFRAME_SRCDOC"
+	SinkWorkerSrc    TaintSink = "WORKER_SRC"
+
+	// Navigation Sinks
+	SinkNavigation TaintSink = "NAVIGATION" // e.g., location.href, window.open
+
+	// Network/Exfiltration Sinks
+	SinkFetch              TaintSink = "FETCH_BODY"
+	SinkFetch_URL          TaintSink = "FETCH_URL"
+	SinkXMLHTTPRequest     TaintSink = "XHR_BODY"
+	SinkXMLHTTPRequest_URL TaintSink = "XHR_URL"
+	SinkWebSocketSend      TaintSink = "WEBSOCKET_SEND"
+	SinkSendBeacon         TaintSink = "SEND_BEACON"
+
+	// IPC Sinks
+	SinkPostMessage       TaintSink = "POST_MESSAGE"
+	SinkWorkerPostMessage TaintSink = "WORKER_POST_MESSAGE"
+
+	// Special Confirmation Sinks (High Confidence)
+	SinkExecution          TaintSink = "EXECUTION_PROOF"
+	SinkOASTInteraction    TaintSink = "OAST_INTERACTION"
+	SinkPrototypePollution TaintSink = "PROTOTYPE_POLLUTION_CONFIRMED"
+)
 
 // -- Canonical Knowledge Graph Data Model --
 
 // NodeType defines the type of a node in the knowledge graph.
-// Using a dedicated type enhances clarity and allows for compile time checks.
 type NodeType string
 
-// These provide a controlled vocabulary for node types.
 const (
 	NodeHost          NodeType = "HOST"
 	NodeIPAddress     NodeType = "IP_ADDRESS"
@@ -75,12 +185,12 @@ const (
 	NodeObservation   NodeType = "OBSERVATION"
 	NodeTool          NodeType = "TOOL"
 	NodeFile          NodeType = "FILE"
+	NodeDomain        NodeType = "DOMAIN"
 )
 
-// RelationshipType defines the type of an edge between nodes in the knowledge graph.
+// RelationshipType defines the type of an edge between nodes.
 type RelationshipType string
 
-// These establish a formal set of relationship labels.
 const (
 	RelationshipResolvesTo     RelationshipType = "RESOLVES_TO"
 	RelationshipLinksTo        RelationshipType = "LINKS_TO"
@@ -89,6 +199,8 @@ const (
 	RelationshipExposes        RelationshipType = "EXPOSES"
 	RelationshipExecuted       RelationshipType = "EXECUTED"
 	RelationshipHasObservation RelationshipType = "HAS_OBSERVATION"
+	RelationshipHostsURL       RelationshipType = "HOSTS_URL"
+	RelationshipHasSubdomain   RelationshipType = "HAS_SUBDOMAIN"
 )
 
 // NodeStatus defines the state of a node, useful for tracking analysis progress.
@@ -102,68 +214,58 @@ const (
 )
 
 // Node represents a single entity in the Knowledge Graph.
-// This struct is the canonical representation for ALL nodes.
-// It is aligned with the KnowledgeGraph interface and database schema.
 type Node struct {
-	// A universally unique identifier for the node.
-	// Stored as a string to be compatible with the KG interface.
-	ID string `json:"id"`
-
-	// Type categorizes the node, using the predefined NodeType constants.
-	Type NodeType `json:"type"`
-
-	// A human readable label for the node.
-	Label string `json:"label"`
-
-	// Status tracks the analysis state of the node.
-	Status NodeStatus `json:"status"`
-
-	// An open map to store any additional properties.
-	// Using json.RawMessage is a robust way to handle arbitrary JSON data
-	// without the performance hit of map[string]interface{}.
+	ID         string          `json:"id"`
+	Type       NodeType        `json:"type"`
+	Label      string          `json:"label"`
+	Status     NodeStatus      `json:"status"`
 	Properties json.RawMessage `json:"properties"`
-
-	// Timestamps for tracking when the node was first created and last seen.
-	CreatedAt time.Time `json:"created_at"`
-	LastSeen  time.Time `json:"last_seen"`
+	CreatedAt  time.Time       `json:"created_at"`
+	LastSeen   time.Time       `json:"last_seen"`
 }
 
-// Edge represents a directed, labeled relationship between two nodes in the Knowledge Graph.
-// This struct is the canonical representation for ALL edges.
+// Edge represents a directed, labeled relationship between two nodes.
 type Edge struct {
-	// A universally unique identifier for the edge.
-	ID string `json:"id"`
-
-	// The ID of the node where the edge originates. Renamed from Source for consistency.
-	From string `json:"from"`
-
-	// The ID of the node where the edge terminates. Renamed from Target for consistency.
-	To string `json:"to"`
-
-	// Type describes the nature of the relationship, using predefined RelationshipType constants.
-	// Renamed from Label for clarity and consistency with the database schema.
-	Type RelationshipType `json:"type"`
-
-	// A human readable label for the edge, for display or contextual purposes.
-	Label string `json:"label"`
-
-	// An open map to store additional properties, such as weights or timestamps.
-	Properties json.RawMessage `json:"properties"`
-
-	// Timestamps for tracking when the edge was first created and last seen.
-	CreatedAt time.Time `json:"created_at"`
-	LastSeen  time.Time `json:"last_seen"`
+	ID         string           `json:"id"`
+	From       string           `json:"from"`
+	To         string           `json:"to"`
+	Type       RelationshipType `json:"type"`
+	Label      string           `json:"label"`
+	Properties json.RawMessage  `json:"properties"`
+	CreatedAt  time.Time        `json:"created_at"`
+	LastSeen   time.Time        `json:"last_seen"`
 }
 
-// KnowledgeGraphUpdate represents a batch of updates to be applied to the knowledge graph.
+// KnowledgeGraphUpdate represents a batch of updates for the knowledge graph.
 type KnowledgeGraphUpdate struct {
 	Nodes []Node `json:"nodes"`
 	Edges []Edge `json:"edges"`
 }
 
+// -- Input Schemas for Bulk Operations --
+
+// NodeInput is a helper struct for bulk inserting or updating nodes.
+type NodeInput struct {
+	ID         string
+	Type       NodeType
+	Label      string
+	Status     NodeStatus
+	Properties json.RawMessage
+}
+
+// EdgeInput is a helper struct for bulk inserting or updating edges.
+type EdgeInput struct {
+	ID         string
+	From       string // Source Node ID
+	To         string // Target Node ID
+	Type       RelationshipType
+	Label      string
+	Properties json.RawMessage
+}
+
 // -- Communication & Result Schemas --
 
-// ResultEnvelope is the top-level wrapper for all results produced by a single task.
+// ResultEnvelope is the top level wrapper for all results from a single task.
 type ResultEnvelope struct {
 	ScanID    string                `json:"scan_id"`
 	TaskID    string                `json:"task_id"`
@@ -174,13 +276,13 @@ type ResultEnvelope struct {
 
 // -- Browser & Artifact Schemas --
 
-// InteractionConfig defines the parameters for the automated page interactor.
+// InteractionConfig defines parameters for the automated page interactor.
 type InteractionConfig struct {
-	MaxDepth              int               `json:"max_depth"`
+	MaxDepth                int               `json:"max_depth"`
 	MaxInteractionsPerDepth int               `json:"max_interactions_per_depth"`
-	InteractionDelayMs    int               `json:"interaction_delay_ms"`
-	PostInteractionWaitMs int               `json:"post_interaction_wait_ms"`
-	CustomInputData       map[string]string `json:"custom_input_data,omitempty"` // User provided data for specific inputs (key: 'id' or 'name' attribute).
+	InteractionDelayMs      int               `json:"interaction_delay_ms"`
+	PostInteractionWaitMs   int               `json:"post_interaction_wait_ms"`
+	CustomInputData         map[string]string `json:"custom_input_data,omitempty"`
 }
 
 // ConsoleLog represents a single entry from the browser's console.
@@ -246,13 +348,13 @@ type PageTimings struct {
 }
 
 type Entry struct {
-	Pageref         string    `json:"pageref"`
+	Pageref         string   `json:"pageref"`
 	StartedDateTime time.Time `json:"startedDateTime"`
-	Time            float64   `json:"time"`
-	Request         Request   `json:"request"`
-	Response        Response  `json:"response"`
-	Cache           struct{}  `json:"cache"`
-	Timings         Timings   `json:"timings"`
+	Time            float64  `json:"time"`
+	Request         Request  `json:"request"`
+	Response        Response `json:"response"`
+	Cache           struct{} `json:"cache"`
+	Timings         Timings  `json:"timings"`
 }
 
 type Request struct {
@@ -360,16 +462,16 @@ type LLMClient interface {
 
 // -- Engine Interfaces --
 
-// DiscoveryEngine defines the interface for an engine that discovers potential targets or tasks.
+// DiscoveryEngine defines the interface for an engine that discovers potential tasks.
 type DiscoveryEngine interface {
-	// Start begins the discovery process, returning a channel that will stream findings.
-	Start(ctx context.Context, targets string) (<-chan Finding, error)
+	// Start kicks off the discovery process, returning a channel that will stream tasks.
+	Start(ctx context.Context, targets []string) (<-chan Task, error)
 	Stop()
 }
 
-// TaskEngine defines the interface for an engine that executes tasks based on findings.
+// TaskEngine defines the interface for an engine that executes tasks.
 type TaskEngine interface {
-	// Start begins processing findings from a channel.
-	Start(ctx context.Context, taskChan <-chan Finding)
+	// Start begins processing tasks from a channel.
+	Start(ctx context.Context, taskChan <-chan Task)
 	Stop()
 }
