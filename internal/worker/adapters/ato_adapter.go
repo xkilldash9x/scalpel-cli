@@ -25,13 +25,13 @@ type ATOAdapter struct {
 // NewATOAdapter creates a new ATOAdapter with a default HTTP client.
 func NewATOAdapter() *ATOAdapter {
 	defaultClient := &http.Client{
-			Timeout:       15 * time.Second,
-			CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
+		Timeout:       15 * time.Second,
+		CheckRedirect: func(req *http.Request, via []*http.Request) error { return http.ErrUseLastResponse },
 	}
 
 	return &ATOAdapter{
 		BaseAnalyzer: core.NewBaseAnalyzer("ATO Adapter (Password Spraying)", core.TypeActive),
-		httpClient: defaultClient,
+		httpClient:   defaultClient,
 	}
 }
 
@@ -49,11 +49,20 @@ func (a *ATOAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCont
 	analysisCtx.Logger.Info("Starting active password spraying attack.")
 
 	// Use the specific parameter struct for type safety.
-	params, ok := analysisCtx.Task.Parameters.(schemas.ATOTaskParams)
-	if !ok {
+	// FIX: Use robust type assertion.
+	var params schemas.ATOTaskParams
+	switch p := analysisCtx.Task.Parameters.(type) {
+	case schemas.ATOTaskParams:
+		params = p
+	case *schemas.ATOTaskParams:
+		if p == nil {
+			return fmt.Errorf("invalid parameters: nil pointer for ATO task")
+		}
+		params = *p
+	default:
 		actualType := fmt.Sprintf("%T", analysisCtx.Task.Parameters)
-		analysisCtx.Logger.Error("Invalid parameter type assertion", zap.String("expected", "schemas.ATOTaskParams"), zap.String("actual", actualType))
-		return fmt.Errorf("invalid parameters type for ATO task; expected schemas.ATOTaskParams, got %s", actualType)
+		analysisCtx.Logger.Error("Invalid parameter type assertion", zap.String("expected", "schemas.ATOTaskParams or pointer"), zap.String("actual", actualType))
+		return fmt.Errorf("invalid parameters type for ATO task; expected schemas.ATOTaskParams or *schemas.ATOTaskParams, got %s", actualType)
 	}
 
 	if len(params.Usernames) == 0 {
@@ -69,7 +78,7 @@ func (a *ATOAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCont
 	for _, attempt := range payloads {
 		// Wait for throttle tick.
 		<-throttle
-		
+
 		// Check for cancellation signal before each attempt.
 		select {
 		case <-ctx.Done():
@@ -138,13 +147,13 @@ func (a *ATOAdapter) createAtoFinding(analysisCtx *core.AnalysisContext, vuln st
 	if len(responseBodyEvidence) > 2048 {
 		responseBodyEvidence = responseBodyEvidence[:2048] + "... [TRUNCATED]"
 	}
-	
+
 	evidenceMap := map[string]interface{}{
-		"username":      result.Attempt.Username,
+		"username":       result.Attempt.Username,
 		// Password intentionally omitted from evidence logs.
-		"statusCode":   result.StatusCode,
-		"responseBody": responseBodyEvidence,
-		"detail":       result.EnumerationDetail,
+		"statusCode":     result.StatusCode,
+		"responseBody":   responseBodyEvidence,
+		"detail":         result.EnumerationDetail,
 		"responseTimeMs": result.ResponseTimeMs,
 	}
 	evidence, err := json.Marshal(evidenceMap)

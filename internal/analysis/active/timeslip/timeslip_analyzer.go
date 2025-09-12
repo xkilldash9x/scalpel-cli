@@ -1,4 +1,4 @@
-// pkg/analysis/active/timeslip/analysis.go
+// internal/analysis/active/timeslip/analysis.go
 package timeslip
 
 import (

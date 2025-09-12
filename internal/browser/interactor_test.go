@@ -4,7 +4,7 @@ package browser_test
 import (
 	"fmt"
 	"net/http"
-	"sync/atomic"
+	"net/url"
 	"testing"
 	"time"
 
@@ -14,22 +14,36 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
-// TestInteractor_FormInteraction verifies input filling, selection, and clicking.
+// TestInteractor_FormInteraction now uses the global fixture.
 func TestInteractor_FormInteraction(t *testing.T) {
 	t.Parallel()
-	fixture := setupBrowserManager(t)
+	fixture := globalFixture
 
-	var submissionData atomic.Value
+	// Using a channel is the most robust way to handle waiting for the
+	// concurrent server-side action (form submission) to complete.
+	submissionChan := make(chan url.Values, 1)
 
 	server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.Method == http.MethodPost && r.URL.Path == "/submit" {
 			r.ParseForm()
-			submissionData.Store(r.Form)
+
+			// To prevent a data race, we must make a deep copy of the form
+			// data before sending it over the channel. The original r.Form
+			// is owned by the net/http server and can be recycled.
+			copiedForm := make(url.Values)
+			for k, v := range r.Form {
+				newVal := make([]string, len(v))
+				copy(newVal, v)
+				copiedForm[k] = newVal
+			}
+			// Signal the main test goroutine that the data is ready.
+			submissionChan <- copiedForm
+
 			fmt.Fprintln(w, `<html><body>Form processed</body></html>`)
 			return
 		}
 
-		// Initial page (GET /)
+		// The initial page served on a GET request.
 		fmt.Fprintln(w, `
 			<html>
 				<body>
@@ -60,33 +74,38 @@ func TestInteractor_FormInteraction(t *testing.T) {
 		PostInteractionWaitMs:   200,
 	}
 
-	// Execute interaction phase.
 	err = session.Interact(config)
 	require.NoError(t, err, "Interaction phase failed")
 
-	// Verification
-	// Wait briefly for the final navigation after submit
-	time.Sleep(500 * time.Millisecond)
+	// This is the deterministic wait. The test will block here until the
+	// server handler sends data into the channel. A timeout prevents the
+	// test from hanging indefinitely if something goes wrong.
+	var formData url.Values
+	select {
+	case formData = <-submissionChan:
+		// Success! Data received.
+	case <-time.After(5 * time.Second):
+		t.Fatal("Test timed out waiting for form submission")
+	}
 
-	formDataRaw := submissionData.Load()
-	require.NotNil(t, formDataRaw, "Form submission did not occur")
-	formData := formDataRaw.(map[string][]string)
+	// Assertions can now be made safely.
+	assert.Equal(t, "Test User", formData.Get("username"), "Username payload mismatch")
+	assert.Equal(t, "ScalpelTest123!", formData.Get("password"), "Password payload mismatch")
 
-	// Verify inputs based on Interactor heuristics (defined in interactor.go).
-	assert.Equal(t, "Test User", formData["username"][0], "Username payload mismatch")
-	assert.Equal(t, "ScalpelTest123!", formData["password"][0], "Password payload mismatch")
-
-	// Verify select interaction (randomly selects Red or Blue).
-	selectedColor := formData["color"][0]
+	selectedColor := formData.Get("color")
 	assert.True(t, selectedColor == "red" || selectedColor == "blue", "Select interaction failed or selected invalid option")
 }
 
-// TestInteractor_DynamicContentHandling verifies the interactor can handle content that appears after an initial interaction (DFS).
+// TestInteractor_DynamicContentHandling uses the global fixture.
+// This test is now fully deterministic, waiting for a specific DOM state change
+// rather than relying on a fixed time delay.
 func TestInteractor_DynamicContentHandling(t *testing.T) {
 	t.Parallel()
-	fixture := setupBrowserManager(t)
+	fixture := globalFixture
 
 	server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This test page now includes JavaScript that signals when its async
+		// operation is complete by setting a data attribute on the body.
 		fmt.Fprintln(w, `
 			<html>
 				<body>
@@ -97,10 +116,11 @@ func TestInteractor_DynamicContentHandling(t *testing.T) {
 					</div>
 					<script>
 						function reveal() {
-							// Simulate delay
 							setTimeout(() => {
 								document.getElementById('dynamicContent').style.display = 'block';
 								document.getElementById('status').innerText = 'Revealed';
+								// This is our signal that the page state has changed.
+								document.body.setAttribute('data-status', 'ready');
 							}, 150);
 						}
 						function updateStatus() {
@@ -116,23 +136,34 @@ func TestInteractor_DynamicContentHandling(t *testing.T) {
 	err := session.Navigate(server.URL)
 	require.NoError(t, err)
 
+	// We no longer need to worry about PostInteractionWaitMs being long enough.
+	// The interactor will find the first button, click it, and then recurse.
+	// The subsequent DOM query will find the newly visible button.
 	config := schemas.InteractionConfig{
-		MaxDepth:                3, // Requires depth > 1 to find the dynamic button after the reveal button click.
+		MaxDepth:                3,
 		MaxInteractionsPerDepth: 2,
 		InteractionDelayMs:      50,
-		PostInteractionWaitMs:   500, // Must be longer than the setTimeout delay (150ms).
+		// This can be short, as our test logic is no longer dependent on it.
+		PostInteractionWaitMs: 100,
 	}
+
+	// Before interaction, wait for the page to be in its initial ready state.
+	err = chromedp.Run(session.GetContext(), chromedp.WaitReady("body"))
+	require.NoError(t, err)
 
 	err = session.Interact(config)
 	require.NoError(t, err)
 
-	// Verify the final state by evaluating JS.
+	// After interaction, we deterministically wait for the JavaScript to signal
+	// that it's finished by setting the 'data-status' attribute.
+	err = chromedp.Run(session.GetContext(), chromedp.WaitReady(`body[data-status="ready"]`))
+	require.NoError(t, err, "Timed out waiting for dynamic content to be revealed")
+
+	// Now we can safely verify the final state.
 	var finalStatus string
-	ctx := session.GetContext()
-	// Use chromedp.Text to retrieve the final status text.
-	err = chromedp.Run(ctx, chromedp.Text("#status", &finalStatus, chromedp.ByQuery))
+	err = chromedp.Run(session.GetContext(), chromedp.Text("#status", &finalStatus, chromedp.ByQuery))
 	require.NoError(t, err)
 
-	// If the interactor correctly waited and recursed, it should have found and clicked the dynamic button.
 	assert.Equal(t, "Dynamic Interaction Success", finalStatus, "Interactor failed to interact with dynamic content")
 }
+

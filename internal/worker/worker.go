@@ -57,8 +57,8 @@ func (w *MonolithicWorker) registerAdapters() error {
 	w.adapterRegistry[schemas.TaskAnalyzeHeaders] = adapters.NewHeadersAdapter()
 	w.adapterRegistry[schemas.TaskAnalyzeJWT] = adapters.NewJWTAdapter()
 
-	// The agent adapter requires access to shared application state and configuration.
-	w.adapterRegistry[schemas.TaskAgentMission] = adapters.NewAgentAdapter(w.cfg, w.logger, w.globalCtx)
+	// The agent adapter is a stateless component.
+	w.adapterRegistry[schemas.TaskAgentMission] = adapters.NewAgentAdapter()
 
 	w.logger.Info("Analyzer adapters registered", zap.Int("count", len(w.adapterRegistry)))
 	return nil

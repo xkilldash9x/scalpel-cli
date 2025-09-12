@@ -3,16 +3,10 @@ package adapters
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
-	"strings"
-	"time"
-
-	"github.com/google/uuid"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/static/jwt"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"go.uber.org/zap"
 )
 
 type JWTAdapter struct {
@@ -28,12 +22,20 @@ func NewJWTAdapter() *JWTAdapter {
 func (a *JWTAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
 	analysisCtx.Logger.Info("Starting JWT static analysis via adapter.")
 
-	// CORRECTED: Use the specific parameter struct.
-	params, ok := analysisCtx.Task.Parameters.(schemas.JWTTaskParams)
-	if !ok {
-		return fmt.Errorf("invalid parameters type for JWT task; expected schemas.JWTTaskParams")
+	// CORRECTED: Use robust type assertion.
+	var params schemas.JWTTaskParams
+	switch p := analysisCtx.Task.Parameters.(type) {
+	case schemas.JWTTaskParams:
+		params = p
+	case *schemas.JWTTaskParams:
+		if p == nil {
+			return fmt.Errorf("invalid parameters: nil pointer for JWT task")
+		}
+		params = *p
+	default:
+		return fmt.Errorf("invalid parameters type for JWT task; expected schemas.JWTTaskParams or *schemas.JWTTaskParams, got %T", analysisCtx.Task.Parameters)
 	}
-	
+
 	analyzer := jwt.NewAnalyzer(analysisCtx.Global.Config.Scanners.Static.JWT)
 	findings, err := analyzer.Analyze(params.Token)
 	if err != nil {

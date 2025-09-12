@@ -9,7 +9,7 @@ import (
 
 	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/chromedp"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser"
+	interfaces "github.com/xkilldash9x/scalpel-cli/internal/agent" // using an interface for the session
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"go.uber.org/zap"
 )
@@ -51,7 +51,7 @@ func NewDOMTechnologyDiscoverer() *DOMTechnologyDiscoverer {
 }
 
 // Discover concurrently checks for web technologies on the page for high performance.
-func (d *DOMTechnologyDiscoverer) Discover(ctx context.Context, session browser.SessionContext) ([]Technology, error) {
+func (d *DOMTechnologyDiscoverer) Discover(ctx context.Context, session interfaces.SessionContext) ([]Technology, error) {
 	logger := observability.GetLogger().Named("dom-discoverer")
 	cdpCtx := session.GetContext()
 	if cdpCtx == nil {
@@ -62,7 +62,7 @@ func (d *DOMTechnologyDiscoverer) Discover(ctx context.Context, session browser.
 	techSet := &sync.Map{}
 	var wg sync.WaitGroup
 
-	// --- 1. Concurrently check for JavaScript global variables ---
+	// -- 1. Concurrently check for JavaScript global variables --
 	for techName, method := range technologyChecks {
 		// Avoid closing over loop variables in a goroutine.
 		name := techName
@@ -88,13 +88,13 @@ func (d *DOMTechnologyDiscoverer) Discover(ctx context.Context, session browser.
 		}()
 	}
 
-	// --- 2. Get all script tags once ---
+	// -- 2. Get all script tags once --
 	var nodes []*cdp.Node
 	if err := chromedp.Run(cdpCtx, chromedp.Nodes(`script[src]`, &nodes, chromedp.ByQueryAll)); err != nil {
 		// If we can't get script nodes, we can't check them, but we should still wait for JS checks.
 		logger.Warn("Could not retrieve script nodes for technology discovery", zap.Error(err))
 	} else {
-		// --- 3. Concurrently check script sources (simple iteration is fast enough here) ---
+		// -- 3. Concurrently check script sources (simple iteration is fast enough here) --
 		for _, node := range nodes {
 			src := node.AttributeValue("src")
 			for techName, method := range technologyChecks {
@@ -111,7 +111,7 @@ func (d *DOMTechnologyDiscoverer) Discover(ctx context.Context, session browser.
 	// Wait for all the JavaScript evaluation goroutines to finish.
 	wg.Wait()
 
-	// --- 4. Compile the results ---
+	// -- 4. Compile the results --
 	var technologies []Technology
 	techSet.Range(func(key, value interface{}) bool {
 		if techName, ok := key.(string); ok {
@@ -122,4 +122,3 @@ func (d *DOMTechnologyDiscoverer) Discover(ctx context.Context, session browser.
 
 	return technologies, nil
 }
-

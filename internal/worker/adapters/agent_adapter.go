@@ -4,7 +4,7 @@ import (
 	"context"
 	"fmt"
 
-	"github.com/xkilldash9x/scalpel-cli/api/schemas" 
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/agent"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"go.uber.org/zap"
@@ -27,14 +27,22 @@ func (a *AgentAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 	analysisCtx.Logger.Info("Agent mission received. Initializing agent...")
 
 	// Use strongly typed parameters for robustness and clarity.
-	// This assumes schemas.AgentMissionParams exists and replaces the original map lookup.
-	params, ok := analysisCtx.Task.Parameters.(*schemas.AgentMissionParams)
-	if !ok {
+	// FIX: Use robust type assertion to handle both value and pointer types.
+	var params schemas.AgentMissionParams
+	switch p := analysisCtx.Task.Parameters.(type) {
+	case schemas.AgentMissionParams:
+		params = p
+	case *schemas.AgentMissionParams:
+		if p == nil {
+			return fmt.Errorf("invalid parameters: nil pointer for Agent mission")
+		}
+		params = *p
+	default:
 		actualType := fmt.Sprintf("%T", analysisCtx.Task.Parameters)
 		analysisCtx.Logger.Error("Invalid parameter type assertion for Agent mission",
-			zap.String("expected", "*schemas.AgentMissionParams"),
+			zap.String("expected", "schemas.AgentMissionParams or pointer"),
 			zap.String("actual", actualType))
-		return fmt.Errorf("invalid parameters type for Agent mission; expected *schemas.AgentMissionParams, got %s", actualType)
+		return fmt.Errorf("invalid parameters type for Agent mission; expected schemas.AgentMissionParams or *schemas.AgentMissionParams, got %s", actualType)
 	}
 
 	// Validate required parameters.

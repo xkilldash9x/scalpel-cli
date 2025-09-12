@@ -1,4 +1,4 @@
-// internal/network/proxy.go 
+// internal/network/proxy.go
 package network
 
 import (
@@ -11,16 +11,19 @@ import (
 	"io"
 	"net/http"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/elazarl/goproxy"
 	"go.uber.org/zap"
-
-
 )
 
-// Global lock for protecting global goproxy state modification.
-var mitmConfigMutex sync.Mutex
+var (
+	// Global lock for protecting goproxy global state modification.
+	mitmConfigMutex sync.Mutex
+	// Ensures configureMITM is only called once.
+	mitmInitialized uint32
+)
 
 // RequestHandler defines the signature for functions that inspect or modify requests.
 type RequestHandler func(*http.Request, *goproxy.ProxyCtx) (*http.Request, *http.Response)
@@ -32,7 +35,7 @@ type ResponseHandler func(*http.Response, *goproxy.ProxyCtx) *http.Response
 type InterceptionProxy struct {
 	proxy         *goproxy.ProxyHttpServer
 	server        *http.Server
-	serverMutex   sync.Mutex // Add mutex for server state management
+	serverMutex   sync.Mutex
 	clientConfig  *ClientConfig
 	requestHooks  []RequestHandler
 	responseHooks []ResponseHandler
@@ -49,12 +52,16 @@ func NewInterceptionProxy(caCert, caKey []byte, clientConfig *ClientConfig, logg
 	}
 	log := logger.Named("interception_proxy")
 
+	// Create a defensive copy of the client config to prevent external mutation after initialization.
+	var cfgCopy ClientConfig
 	if clientConfig == nil {
-		clientConfig = NewDefaultClientConfig()
-		clientConfig.IgnoreTLSErrors = true
+		cfgCopy = *NewDefaultClientConfig()
+		cfgCopy.IgnoreTLSErrors = true
 		log.Info("Using default client config with IgnoreTLSErrors enabled for upstream connections.")
+	} else {
+		cfgCopy = *clientConfig
 	}
-	proxy.Tr = NewHTTPTransport(clientConfig)
+	proxy.Tr = NewHTTPTransport(&cfgCopy)
 
 	if caCert != nil && caKey != nil {
 		if err := configureMITM(caCert, caKey); err != nil {
@@ -67,7 +74,7 @@ func NewInterceptionProxy(caCert, caKey []byte, clientConfig *ClientConfig, logg
 
 	ip := &InterceptionProxy{
 		proxy:        proxy,
-		clientConfig: clientConfig,
+		clientConfig: &cfgCopy,
 		logger:       log,
 	}
 
@@ -92,22 +99,26 @@ func (ip *InterceptionProxy) AddResponseHook(handler ResponseHandler) {
 
 // setupHandlers configures the core interception logic.
 func (ip *InterceptionProxy) setupHandlers() {
-	ip.proxy.OnRequest().HandleConnectFunc(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-		if goproxy.GoproxyCa.PrivateKey != nil {
+	ip.proxy.OnRequest().HandleConnect(goproxy.FuncHttpsHandler(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
+		mitmConfigMutex.Lock()
+		isMITMConfigured := goproxy.GoproxyCa.PrivateKey != nil
+		mitmConfigMutex.Unlock()
+
+		if isMITMConfigured {
 			return goproxy.MitmConnect, host
 		}
 		return goproxy.OkConnect, host
-	})
+	}))
 
 	ip.proxy.OnRequest().DoFunc(ip.handleRequest)
 	ip.proxy.OnResponse().DoFunc(ip.handleResponse)
 }
 
-// handleRequest processes the incoming request through the registered hooks.
+// handleRequest processes an incoming request through the registered hooks.
 func (ip *InterceptionProxy) handleRequest(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
-	ip.logger.Debug("Proxy intercepted request", zap.String("method", r.Method), zap.String("url", r.URL.String()))
+	reqURL := getRequestURL(ctx)
+	ip.logger.Debug("Proxy intercepted request", zap.String("method", r.Method), zap.String("url", reqURL))
 
-	// Acquire RLock just long enough to copy the slice reference.
 	ip.hooksMutex.RLock()
 	hooks := ip.requestHooks
 	ip.hooksMutex.RUnlock()
@@ -117,13 +128,13 @@ func (ip *InterceptionProxy) handleRequest(r *http.Request, ctx *goproxy.ProxyCt
 		newReq, resp := hook(currentReq, ctx)
 
 		if resp != nil {
-			ip.logger.Debug("Request short-circuited by hook", zap.String("url", r.URL.String()))
+			ip.logger.Debug("Request short-circuited by a hook", zap.String("url", reqURL))
 			return newReq, resp
 		}
 
 		if newReq == nil {
-			ip.logger.Error("Request hook returned nil request without a response, breaking chain", zap.String("url", r.URL.String()))
-			return currentReq, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusInternalServerError, "Proxy error: request hook malfunction")
+			ip.logger.Error("A request hook returned a nil request, breaking chain. This indicates a faulty hook implementation.", zap.String("url", reqURL))
+			return currentReq, goproxy.NewResponse(r, goproxy.ContentTypeText, http.StatusInternalServerError, "Proxy Error: A request processing hook failed by returning a nil request.")
 		}
 		currentReq = newReq
 	}
@@ -131,20 +142,19 @@ func (ip *InterceptionProxy) handleRequest(r *http.Request, ctx *goproxy.ProxyCt
 	return currentReq, nil
 }
 
-// handleResponse processes the upstream response through the registered hooks.
+// handleResponse processes an upstream response through the registered hooks.
 func (ip *InterceptionProxy) handleResponse(r *http.Response, ctx *goproxy.ProxyCtx) *http.Response {
+	reqURL := getRequestURL(ctx)
+
 	if r == nil {
-		errorMsg := "unknown error"
+		var errorMsg string
 		if ctx.Error != nil {
 			errorMsg = ctx.Error.Error()
+		} else {
+			errorMsg = "unknown error"
 		}
 
-		reqURL := "unknown"
-		if ctx.Req != nil && ctx.Req.URL != nil {
-			reqURL = ctx.Req.URL.String()
-		}
-
-		ip.logger.Warn("Proxy received nil response from upstream", zap.String("url", reqURL), zap.Error(ctx.Error))
+		ip.logger.Warn("Proxy received nil response from upstream", zap.String("url", reqURL), zap.String("error", errorMsg))
 
 		if ctx.Req == nil {
 			ip.logger.Error("Critical proxy error: ctx.Req is nil during upstream failure handling.")
@@ -153,18 +163,11 @@ func (ip *InterceptionProxy) handleResponse(r *http.Response, ctx *goproxy.Proxy
 				ProtoMajor: 1,
 				ProtoMinor: 1,
 				Header:     make(http.Header),
-				Body:       io.NopCloser(bytes.NewBufferString(fmt.Sprintf("Proxy error: upstream connection failed and request context lost: %v", errorMsg))),
+				Body:       io.NopCloser(bytes.NewBufferString(fmt.Sprintf("Proxy error: upstream connection failed and request context was lost: %s", errorMsg))),
 			}
 		}
 
-		return goproxy.NewResponse(ctx.Req, goproxy.ContentTypeText, http.StatusBadGateway, fmt.Sprintf("Proxy error: upstream connection failed: %v", errorMsg))
-	}
-
-	reqURL := "unknown"
-	if ctx.Req != nil && ctx.Req.URL != nil {
-		reqURL = ctx.Req.URL.String()
-	} else if r.Request != nil && r.Request.URL != nil {
-		reqURL = r.Request.URL.String()
+		return goproxy.NewResponse(ctx.Req, goproxy.ContentTypeText, http.StatusBadGateway, fmt.Sprintf("Proxy error: upstream connection failed: %s", errorMsg))
 	}
 
 	ip.logger.Debug("Proxy received response", zap.Int("status", r.StatusCode), zap.String("url", reqURL))
@@ -173,22 +176,21 @@ func (ip *InterceptionProxy) handleResponse(r *http.Response, ctx *goproxy.Proxy
 	hooks := ip.responseHooks
 	ip.hooksMutex.RUnlock()
 
-	currentResp := r
+	lastValidResp := r
 	for _, hook := range hooks {
-		currentResp = hook(currentResp, ctx)
+		currentResp := hook(lastValidResp, ctx)
 
 		if currentResp == nil {
-			ip.logger.Error("Response hook returned nil response, breaking chain", zap.String("url", reqURL))
-			return r
+			ip.logger.Error("A response hook returned a nil response, breaking chain. Returning last valid state.", zap.String("url", reqURL))
+			return lastValidResp
 		}
+		lastValidResp = currentResp
 	}
-	return currentResp
+	return lastValidResp
 }
 
-// Start runs the proxy server. This function blocks until the server stops.
-func (ip *InterceptionProxy) Start(addr string) error {
-	ip.logger.Info("Starting interception proxy", zap.String("address", addr))
-
+// Start runs the proxy server and blocks until the context is cancelled or a fatal error occurs.
+func (ip *InterceptionProxy) Start(ctx context.Context, addr string) error {
 	ip.serverMutex.Lock()
 	if ip.server != nil {
 		ip.serverMutex.Unlock()
@@ -206,7 +208,28 @@ func (ip *InterceptionProxy) Start(addr string) error {
 	ip.server = server
 	ip.serverMutex.Unlock()
 
+	shutdownErr := make(chan error)
+	go func() {
+		// Wait for the context to be cancelled.
+		<-ctx.Done()
+		ip.logger.Info("Shutdown signal received, stopping interception proxy...")
+
+		// Create a new context for the shutdown process with a timeout.
+		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+		defer cancel()
+
+		// Call the server's Shutdown method.
+		shutdownErr <- server.Shutdown(shutdownCtx)
+	}()
+
+	ip.logger.Info("Starting interception proxy", zap.String("address", addr))
 	err := server.ListenAndServe()
+
+	// If ListenAndServe returns ErrServerClosed, it's a graceful shutdown.
+	// We then wait for the result from our shutdown goroutine.
+	if errors.Is(err, http.ErrServerClosed) {
+		err = <-shutdownErr
+	}
 
 	ip.serverMutex.Lock()
 	if ip.server == server {
@@ -214,33 +237,24 @@ func (ip *InterceptionProxy) Start(addr string) error {
 	}
 	ip.serverMutex.Unlock()
 
-	if err != nil && !errors.Is(err, http.ErrServerClosed) {
-		ip.logger.Error("Proxy server error", zap.Error(err))
+	if err != nil {
+		ip.logger.Error("Proxy server stopped with an error", zap.Error(err))
 		return fmt.Errorf("proxy server failed: %w", err)
 	}
 
-	ip.logger.Info("Interception proxy stopped.")
+	ip.logger.Info("Interception proxy stopped gracefully.")
 	return nil
-}
-
-// Stop gracefully shuts down the proxy server.
-func (ip *InterceptionProxy) Stop(ctx context.Context) error {
-	ip.serverMutex.Lock()
-	server := ip.server
-	ip.serverMutex.Unlock()
-
-	if server == nil {
-		return errors.New("proxy server not started or already stopped")
-	}
-	ip.logger.Info("Stopping interception proxy...")
-	return server.Shutdown(ctx)
 }
 
 // configureMITM sets up the certificate authority for the proxy.
 // CRITICAL: This function modifies global state within the goproxy library.
-// Due to library limitations, only one MITM CA configuration can be active per Go process.
-// Calling this function overrides any previous configuration globally.
+// It is intended to be called ONLY ONCE during application startup.
+// This implementation enforces the single-call rule; subsequent calls will return an error.
 func configureMITM(caCert, caKey []byte) error {
+	if !atomic.CompareAndSwapUint32(&mitmInitialized, 0, 1) {
+		return errors.New("MITM capabilities can only be configured once per process")
+	}
+
 	mitmConfigMutex.Lock()
 	defer mitmConfigMutex.Unlock()
 
@@ -263,4 +277,12 @@ func configureMITM(caCert, caKey []byte) error {
 	goproxy.RejectConnect = &goproxy.ConnectAction{Action: goproxy.ConnectReject, TLSConfig: tlsConfig}
 
 	return nil
+}
+
+// getRequestURL is a helper to safely extract the request URL from the context for logging.
+func getRequestURL(ctx *goproxy.ProxyCtx) string {
+	if ctx != nil && ctx.Req != nil && ctx.Req.URL != nil {
+		return ctx.Req.URL.String()
+	}
+	return "unknown"
 }

@@ -1,9 +1,10 @@
 package core
 
 import (
-	"time"
+	"net/http"
+	// Removed imports time and github.com/google/uuid as they are no longer used.
 
-	"github.com/google/uuid"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
 // -- Identifier Definitions --
@@ -41,50 +42,20 @@ type ObservedIdentifier struct {
 
 // -- General Analysis Definitions --
 
-// SeverityLevel defines the severity of a finding.
-type SeverityLevel string
+// Removed deprecated types: SeverityLevel, Status, AnalysisResult, Evidence.
+// Analyzers should use the canonical schemas defined in api/schemas.
 
-const (
-	SeverityCritical SeverityLevel = "Critical"
-	SeverityHigh     SeverityLevel = "High"
-	SeverityMedium   SeverityLevel = "Medium"
-	SeverityLow      SeverityLevel = "Low"
-	SeverityInfo     SeverityLevel = "Info"
-)
-
-// Status defines the status of a finding.
-type Status string
-
-const (
-	StatusOpen   Status = "Open"
-	StatusClosed Status = "Closed"
-)
-
-// AnalysisResult represents a finding discovered during active analysis.
-type AnalysisResult struct {
-	ScanID            uuid.UUID
-	AnalyzerName      string
-	Timestamp         time.Time
-	VulnerabilityType string
-	Title             string
-	Description       string
-	Severity          SeverityLevel
-	Status            Status
-	Confidence        float64
-	TargetURL         string
-	Evidence          *Evidence
-	CWE               string
-}
-
-// Evidence struct (required by ato/models.go provided in the prompt)
-type Evidence struct {
-	Details  string
-	Request  string
-	Response string
+// SerializedResponse is a structure used for embedding HTTP responses in findings evidence.
+// It ensures the body is a string (potentially truncated) for safe JSON serialization.
+type SerializedResponse struct {
+	StatusCode int         `json:"status_code"`
+	Headers    http.Header `json:"headers"`
+	Body       string      `json:"body"`
 }
 
 // Reporter is the interface for publishing analysis results.
 // Implementations MUST be safe for concurrent use by multiple goroutines.
 type Reporter interface {
-	Publish(finding AnalysisResult) error
+	// Write accepts a ResultEnvelope containing Findings and/or KGUpdates.
+	Write(envelope *schemas.ResultEnvelope) error
 }

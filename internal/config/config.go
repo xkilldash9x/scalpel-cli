@@ -19,7 +19,7 @@ var (
 // This is the root configuration structure.
 type Config struct {
 	Logger    LoggerConfig    `mapstructure:"logger" yaml:"logger"`
-	Postgres  PostgresConfig  `mapstructure:"postgres" yaml:"postgres"`
+	Database  PostgresConfig  `mapstructure:"database" yaml:"database"`
 	Engine    EngineConfig    `mapstructure:"engine" yaml:"engine"`
 	Browser   BrowserConfig   `mapstructure:"browser" yaml:"browser"`
 	Network   NetworkConfig   `mapstructure:"network" yaml:"network"`
@@ -27,6 +27,8 @@ type Config struct {
 	Scanners  ScannersConfig  `mapstructure:"scanners" yaml:"scanners"`
 	Agent     AgentConfig     `mapstructure:"agent" yaml:"agent"`
 	Discovery DiscoveryConfig `mapstructure:"discovery" yaml:"discovery"`
+	// ScanConfig is populated dynamically from CLI flags, not from the config file.
+	Scan ScanConfig `mapstructure:"-"`
 }
 
 // LoggerConfig holds all the configuration for the logger.

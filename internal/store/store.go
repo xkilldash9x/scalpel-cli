@@ -1,11 +1,12 @@
-// internal/store/store.go
 package store
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"time"
 
+	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5"
 	"github.com/jackc/pgx/v5/pgxpool"
 	"go.uber.org/zap"
@@ -21,19 +22,29 @@ type Store struct {
 
 // New creates a new store instance and verifies the connection.
 func New(ctx context.Context, pool *pgxpool.Pool, logger *zap.Logger) (*Store, error) {
+	// Verify the connection
+	if err := pool.Ping(ctx); err != nil {
+		return nil, fmt.Errorf("failed to ping database: %w", err)
+	}
+
 	return &Store{
 		pool: pool,
 		log:  logger.Named("store"),
 	}, nil
 }
 
-// handles the database transaction for inserting all data from a result envelope.
+// PersistData handles the database transaction for inserting all data from a result envelope.
 func (s *Store) PersistData(ctx context.Context, envelope *schemas.ResultEnvelope) error {
 	tx, err := s.pool.Begin(ctx)
 	if err != nil {
 		return fmt.Errorf("failed to begin transaction: %w", err)
 	}
-	defer tx.Rollback(ctx)
+	// This deferred function safely rolls back the transaction if it hasn't been committed.
+	defer func() {
+		if rollbackErr := tx.Rollback(ctx); rollbackErr != nil && rollbackErr != pgx.ErrTxClosed {
+			s.log.Error("Failed to rollback transaction", zap.Error(rollbackErr))
+		}
+	}()
 
 	if len(envelope.Findings) > 0 {
 		if err := s.persistFindings(ctx, tx, envelope.ScanID, envelope.Findings); err != nil {
@@ -43,11 +54,14 @@ func (s *Store) PersistData(ctx context.Context, envelope *schemas.ResultEnvelop
 
 	if envelope.KGUpdates != nil {
 		if len(envelope.KGUpdates.Nodes) > 0 {
+			// Convert schemas.Node to schemas.NodeInput
 			nodeInputs := make([]schemas.NodeInput, len(envelope.KGUpdates.Nodes))
 			for i, n := range envelope.KGUpdates.Nodes {
 				nodeInputs[i] = schemas.NodeInput{
 					ID:         n.ID,
-					Type:       schemas.NodeType(n.Type),
+					Type:       n.Type,
+					Label:      n.Label,
+					Status:     n.Status,
 					Properties: n.Properties,
 				}
 			}
@@ -56,14 +70,16 @@ func (s *Store) PersistData(ctx context.Context, envelope *schemas.ResultEnvelop
 			}
 		}
 		if len(envelope.KGUpdates.Edges) > 0 {
+			// Convert schemas.Edge to schemas.EdgeInput
 			edgeInputs := make([]schemas.EdgeInput, len(envelope.KGUpdates.Edges))
 			for i, e := range envelope.KGUpdates.Edges {
-				// Updated to use the new field names from the refactored concept
 				edgeInputs[i] = schemas.EdgeInput{
-					SourceID:     e.SourceID,
-					TargetID:     e.TargetID,
-					Relationship: e.Relationship,
-					Properties:   e.Properties,
+					ID:         e.ID,
+					From:       e.From,
+					To:         e.To,
+					Type:       e.Type,
+					Label:      e.Label,
+					Properties: e.Properties,
 				}
 			}
 			if err := s.persistEdges(ctx, tx, edgeInputs); err != nil {
@@ -72,53 +88,163 @@ func (s *Store) PersistData(ctx context.Context, envelope *schemas.ResultEnvelop
 		}
 	}
 
-	return tx.Commit(ctx)
+	if err := tx.Commit(ctx); err != nil {
+		return fmt.Errorf("failed to commit transaction: %w", err)
+	}
+	return nil
 }
 
-// inserts findings using the high performance pgx CopyFrom protocol.
+// persistFindings inserts findings using the high performance pgx CopyFrom protocol.
 func (s *Store) persistFindings(ctx context.Context, tx pgx.Tx, scanID string, findings []schemas.Finding) error {
 	rows := make([][]interface{}, len(findings))
 	for i, f := range findings {
+		// Marshal the Vulnerability struct to JSON for storage in a JSONB column.
+		vulnJSON, err := json.Marshal(f.Vulnerability)
+		if err != nil {
+			return fmt.Errorf("failed to marshal vulnerability details for finding %s: %w", f.ID, err)
+		}
+
 		rows[i] = []interface{}{
 			f.ID, scanID, f.TaskID, f.Timestamp, f.Target, f.Module,
-			f.Vulnerability, f.Severity, f.Description, f.Evidence,
+			vulnJSON,
+			string(f.Severity), f.Description,
+			f.Evidence,
 			f.Recommendation, f.CWE,
 		}
 	}
 
-	_, err := tx.CopyFrom(
+	// Ensure column names here match your database schema exactly.
+	copyCount, err := tx.CopyFrom(
 		ctx,
 		pgx.Identifier{"findings"},
 		[]string{"id", "scan_id", "task_id", "timestamp", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe"},
 		pgx.CopyFromRows(rows),
 	)
-	return err
+
+	if err != nil {
+		return fmt.Errorf("failed to copy findings: %w", err)
+	}
+	if int(copyCount) != len(findings) {
+		return fmt.Errorf("mismatch in copied findings count: expected %d, got %d", len(findings), copyCount)
+	}
+
+	return nil
 }
 
-// upserts knowledge graph nodes.
+// persistNodes performs a batch upsert of knowledge graph nodes using INSERT ON CONFLICT.
 func (s *Store) persistNodes(ctx context.Context, tx pgx.Tx, nodes []schemas.NodeInput) error {
-	rows := make([][]interface{}, len(nodes))
-	for i, n := range nodes {
-		propertiesJSON, err := json.Marshal(n.Properties)
-		if err != nil {
-			return fmt.Errorf("failed to marshal node properties for id %s: %w", n.ID, err)
+	batch := &pgx.Batch{}
+	// This SQL statement inserts a new node or updates it if the ID already exists.
+	// It also merges the new properties with existing ones.
+	sql := `
+		INSERT INTO kg_nodes (id, type, label, status, properties, created_at, last_seen)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		ON CONFLICT (id) DO UPDATE SET
+			type = EXCLUDED.type,
+			label = EXCLUDED.label,
+			status = EXCLUDED.status,
+			properties = kg_nodes.properties || EXCLUDED.properties,
+			last_seen = EXCLUDED.last_seen;
+	`
+	now := time.Now()
+
+	for _, n := range nodes {
+		if n.Properties == nil || len(n.Properties) == 0 {
+			n.Properties = json.RawMessage("{}")
 		}
-		rows[i] = []interface{}{n.ID, string(n.Type), propertiesJSON}
+		batch.Queue(sql, n.ID, string(n.Type), n.Label, string(n.Status), n.Properties, now, now)
 	}
-	_, err := tx.CopyFrom(ctx, pgx.Identifier{"kg_nodes"}, []string{"id", "type", "properties"}, pgx.CopyFromRows(rows))
-	return err
+
+	br := tx.SendBatch(ctx, batch)
+	defer br.Close()
+	for i := 0; i < len(nodes); i++ {
+		_, err := br.Exec()
+		if err != nil {
+			return fmt.Errorf("failed to execute batch insert for nodes (item %d): %w", i, err)
+		}
+	}
+	return nil
 }
 
-// upserts knowledge graph edges.
+// persistEdges performs a batch upsert of knowledge graph edges.
 func (s *Store) persistEdges(ctx context.Context, tx pgx.Tx, edges []schemas.EdgeInput) error {
-	rows := make([][]interface{}, len(edges))
-	for i, e := range edges {
-		propertiesJSON, err := json.Marshal(e.Properties)
-		if err != nil {
-			return fmt.Errorf("failed to marshal edge properties: %w", err)
+	batch := &pgx.Batch{}
+	sql := `
+		INSERT INTO kg_edges (id, source_id, target_id, relationship, label, properties, created_at, last_seen)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (id) DO UPDATE SET
+			label = EXCLUDED.label,
+			properties = kg_edges.properties || EXCLUDED.properties,
+			last_seen = EXCLUDED.last_seen;
+	`
+	now := time.Now()
+
+	for _, e := range edges {
+		edgeID := e.ID
+		if edgeID == "" {
+			edgeID = uuid.New().String()
 		}
-		rows[i] = []interface{}{e.SourceID, e.TargetID, string(e.Relationship), propertiesJSON}
+
+		if e.Properties == nil || len(e.Properties) == 0 {
+			e.Properties = json.RawMessage("{}")
+		}
+
+		// Map EdgeInput fields (From, To, Type) to SQL columns (source_id, target_id, relationship).
+		batch.Queue(sql, edgeID, e.From, e.To, string(e.Type), e.Label, e.Properties, now, now)
 	}
-	_, err := tx.CopyFrom(ctx, pgx.Identifier{"kg_edges"}, []string{"source_id", "target_id", "relationship", "properties"}, pgx.CopyFromRows(rows))
-	return err
+
+	br := tx.SendBatch(ctx, batch)
+	defer br.Close()
+	for i := 0; i < len(edges); i++ {
+		_, err := br.Exec()
+		if err != nil {
+			return fmt.Errorf("failed to execute batch insert for edges (item %d): %w", i, err)
+		}
+	}
+	return nil
+}
+
+// GetFindingsByScanID retrieves all findings associated with a specific scan ID.
+func (s *Store) GetFindingsByScanID(ctx context.Context, scanID string) ([]schemas.Finding, error) {
+	query := `
+		SELECT id, task_id, timestamp, target, module, vulnerability, severity, description, evidence, recommendation, cwe
+		FROM findings
+		WHERE scan_id = $1
+		ORDER BY timestamp ASC;
+	`
+	rows, err := s.pool.Query(ctx, query, scanID)
+	if err != nil {
+		return nil, fmt.Errorf("failed to query findings: %w", err)
+	}
+	defer rows.Close()
+
+	var findings []schemas.Finding
+	for rows.Next() {
+		var f schemas.Finding
+		var vulnJSON []byte
+
+		err := rows.Scan(
+			&f.ID, &f.TaskID, &f.Timestamp, &f.Target, &f.Module,
+			&vulnJSON,
+			&f.Severity, &f.Description, &f.Evidence, &f.Recommendation,
+			&f.CWE,
+		)
+		if err != nil {
+			return nil, fmt.Errorf("failed to scan finding row: %w", err)
+		}
+
+		// Unmarshal the vulnerability details from JSONB.
+		if err := json.Unmarshal(vulnJSON, &f.Vulnerability); err != nil {
+			return nil, fmt.Errorf("failed to unmarshal vulnerability details for finding %s: %w", f.ID, err)
+		}
+
+		f.ScanID = scanID
+		findings = append(findings, f)
+	}
+
+	if err := rows.Err(); err != nil {
+		return nil, fmt.Errorf("error during row iteration: %w", err)
+	}
+
+	return findings, nil
 }

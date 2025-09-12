@@ -1,6 +1,4 @@
 // internal/engine/engine.go
-// This file contains the core task engine, refactored for graceful shutdown,
-//               concurrency safety, and correct context propagation.
 package engine
 
 import (
@@ -13,10 +11,10 @@ import (
 
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser"
-	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/agent"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/store"
 	"github.com/xkilldash9x/scalpel-cli/internal/worker"
 )
@@ -30,7 +28,7 @@ type TaskEngine struct {
 	taskQueue    chan schemas.Task
 	wg           sync.WaitGroup
 	globalCtx    *core.GlobalContext
-	// isStopping is an atomic flag to prevent submissions after Stop() has been called.
+	// an atomic flag to prevent submissions after Stop() has been called.
 	isStopping atomic.Bool
 }
 
@@ -39,7 +37,7 @@ func New(
 	cfg *config.Config,
 	logger *zap.Logger,
 	storeService *store.Store,
-	browserManager *browser.Manager,
+	browserManager interfaces.BrowserManager, // using the interface for decoupling
 	kg core.KnowledgeGraphClient,
 ) (*TaskEngine, error) {
 
@@ -122,10 +120,9 @@ func (e *TaskEngine) runWorker(ctx context.Context, workerID int) {
 	logger := e.logger.With(zap.Int("worker_id", workerID))
 	logger.Info("Worker goroutine started")
 
-	// ARCHITECTURAL FIX: Use a `for range` loop on the channel.
-	// This is the idiomatic way to process tasks until a channel is closed and drained.
-	// It ensures a graceful shutdown, unlike the previous implementation that would exit
-	// immediately on context cancellation, potentially leaving tasks in the queue.
+	/* This is the idiomatic way to process tasks until a channel is closed and drained.
+	 It ensures a graceful shutdown, unlike the previous implementation that would exit
+	 immediately on context cancellation, potentially leaving tasks in the queue. **/
 	for task := range e.taskQueue {
 		// The parent context `ctx` is passed to `process` so that individual,
 		// long-running tasks can still be cancelled (e.g., by a global timeout or Ctrl+C).

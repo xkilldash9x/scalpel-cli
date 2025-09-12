@@ -5,6 +5,12 @@ scalpel-cli.exe
 # Go module vendor directory
 vendor/
 
+# Go build, test, coverage, and profiling artifacts
+*.out
+*.test
+*.prof
+coverage.txt
+
 # ## Project Specific ##
 # Log files and directory as defined in config.yaml
 logs/
@@ -13,13 +19,18 @@ logs/
 # Cache directory used by the discovery engine
 .scalpel_cache/
 
-# Local configuration overrides
+# Local configuration overrides and environment files
 # It's good practice to commit config.yaml as a template,
 # but ignore local versions with secrets.
 config.local.yaml
 *.local.yaml
-scalpel-cli/internal/browser/testing/
+.env
+.env.*
+
+# Corrected path based on project structure
+internal/browser/testing/
 test_imports.go
+
 # ## Common ##
 # IDE and editor directories
 .vscode/

@@ -58,13 +58,15 @@ func New(
 }
 
 // StartScan executes the main scanning workflow.
-func (o *Orchestrator) StartScan(ctx context.Context, targetsstring, scanID string) error {
-	o.logger.Info("Orchestrator starting scan", zap.String("scanID", scanID))
+// FIX: Changed signature to accept []string instead of a single string.
+func (o *Orchestrator) StartScan(ctx context.Context, targets []string, scanID string) error {
+	// FIX: Updated logging to include the targets slice.
+	o.logger.Info("Orchestrator starting scan", zap.String("scanID", scanID), zap.Strings("targets", targets))
 
 	// 1. Start the discovery engine. It will return a channel from which the
 	//    orchestrator can read newly discovered tasks.
-	// Fixed: Used the 'targetsstring' parameter instead of the undefined 'targets'.
-	taskChan, err := o.discoveryEngine.Start(ctx, targetsstring)
+	// FIX: Pass the 'targets' slice, which matches the expected type for o.discoveryEngine.Start.
+	taskChan, err := o.discoveryEngine.Start(ctx, targets)
 	if err != nil {
 		return fmt.Errorf("failed to start discovery engine: %w", err)
 	}

@@ -8,12 +8,10 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/passive/headers"
 )
 
-// HeadersAdapter adapts the passive HeadersAnalyzer to be used by a generic worker.
-// This is a pretty straightforward wrapper since the underlying analyzer's
-// signature already matches what the worker expects.
-type HeadersAdapter struct {
+/type HeadersAdapter struct {
 	core.BaseAnalyzer
-	headersAnalyzer *passive.HeadersAnalyzer
+    // FIX: Changed from *passive.HeadersAnalyzer to *headers.HeadersAnalyzer
+	headersAnalyzer *headers.HeadersAnalyzer
 }
 
 // NewHeadersAdapter creates a new adapter instance.
@@ -21,7 +19,8 @@ func NewHeadersAdapter() *HeadersAdapter {
 	return &HeadersAdapter{
 		// Give the adapter its own name for logging clarity.
 		BaseAnalyzer:    core.NewBaseAnalyzer("Headers Adapter", core.TypePassive),
-		headersAnalyzer: passive.NewHeadersAnalyzer(), // Creates an instance of the real analyzer.
+        // FIX: Changed from passive.NewHeadersAnalyzer() to headers.NewHeadersAnalyzer()
+		headersAnalyzer: headers.NewHeadersAnalyzer(), // Creates an instance of the real analyzer.
 	}
 }
 

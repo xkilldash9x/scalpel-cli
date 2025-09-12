@@ -36,9 +36,18 @@ func (a *IDORAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCon
 	analysisCtx.Logger.Info("Starting active IDOR analysis.")
 
 	// Use the specific parameter struct.
-	params, ok := analysisCtx.Task.Parameters.(schemas.IDORTaskParams)
-	if !ok {
-		return fmt.Errorf("invalid parameters type for IDOR task; expected schemas.IDORTaskParams")
+	// FIX: Use robust type assertion.
+	var params schemas.IDORTaskParams
+	switch p := analysisCtx.Task.Parameters.(type) {
+	case schemas.IDORTaskParams:
+		params = p
+	case *schemas.IDORTaskParams:
+		if p == nil {
+			return fmt.Errorf("invalid parameters: nil pointer for IDOR task")
+		}
+		params = *p
+	default:
+		return fmt.Errorf("invalid parameters type for IDOR task; expected schemas.IDORTaskParams or *schemas.IDORTaskParams, got %T", analysisCtx.Task.Parameters)
 	}
 
 	baseReq, err := http.NewRequestWithContext(ctx, params.HTTPMethod, analysisCtx.TargetURL.String(), bytes.NewReader([]byte(params.HTTPBody)))

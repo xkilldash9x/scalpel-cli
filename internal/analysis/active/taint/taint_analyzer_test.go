@@ -18,11 +18,9 @@ import (
 	"go.uber.org/zap/zaptest"
 )
 
-// ====================================================================================
 // Mock Definitions
 // Comprehensive mocks for isolating the Analyzer logic from external dependencies.
-// ====================================================================================
-
+//
 // MockBrowserInteractor mocks the BrowserInteractor interface.
 type MockBrowserInteractor struct {
 	mock.Mock
@@ -175,10 +173,8 @@ func (m *MockOASTProvider) GetServerURL() string {
 	return args.String(0)
 }
 
-// ====================================================================================
 // Test Setup Helper
-// ====================================================================================
-
+//
 // setupAnalyzer creates a standard Analyzer instance for testing, along with its mocks.
 // It allows customization of the configuration and enabling/disabling the OAST provider.
 func setupAnalyzer(t *testing.T, configMod func(*Config), oastEnabled bool) (*Analyzer, *MockBrowserInteractor, *MockResultsReporter, *MockOASTProvider) {
@@ -223,10 +219,8 @@ func setupAnalyzer(t *testing.T, configMod func(*Config), oastEnabled bool) (*An
 	return analyzer, browser, reporter, oastProvider
 }
 
-// ====================================================================================
 // Test Cases: Initialization and Configuration
-// ====================================================================================
-
+//
 // TestNewAnalyzer_Defaults verifies that the analyzer sets default values if none are provided.
 func TestNewAnalyzer_Defaults(t *testing.T) {
 	targetURL, _ := url.Parse("http://example.com")
@@ -250,10 +244,8 @@ func TestNewAnalyzer_Defaults(t *testing.T) {
 	assert.NotNil(t, analyzer.shimTemplate, "Shim template should be initialized from embedded FS")
 }
 
-// ====================================================================================
 // Test Cases: Shim Generation and Instrumentation
-// ====================================================================================
-
+//
 // TestGenerateShim verifies the JavaScript instrumentation code is generated correctly.
 func TestGenerateShim(t *testing.T) {
 	// Setup analyzer with a specific, minimal set of sinks to verify JSON serialization
@@ -322,10 +314,8 @@ func TestInstrument_Failure_ExposeFunction(t *testing.T) {
 	assert.ErrorIs(t, err, expectedError)
 }
 
-// ====================================================================================
 // Test Cases: Probing Mechanics (Unit Tests)
-// ====================================================================================
-
+//
 // TestGenerateCanary verifies the format and uniqueness of generated canaries.
 func TestGenerateCanary(t *testing.T) {
 	analyzer, _, _, _ := setupAnalyzer(t, nil, false)
@@ -412,11 +402,9 @@ func TestRegisterProbe_Concurrency(t *testing.T) {
 	assert.Len(t, analyzer.activeProbes, count)
 }
 
-// ====================================================================================
 // Test Cases: Probing Strategies (Integration Style)
 // These tests verify the interaction between the probing logic and the browser session.
-// ====================================================================================
-
+//
 // TestProbePersistentSources verifies injection into storage/cookies, focusing on encoding and the Secure flag logic.
 func TestProbePersistentSources(t *testing.T) {
 	// Use specific probes, including one requiring complex JSON encoding (quotes, slashes, tags).
@@ -551,10 +539,8 @@ func TestProbeURLSources(t *testing.T) {
 	assert.Contains(t, parsedH.Fragment, "&")
 }
 
-// ====================================================================================
 // Test Cases: Event Handling and Correlation (The Core Logic)
-// ====================================================================================
-
+//
 // Setup/Teardown helpers for correlation tests manage the lifecycle of the 'correlate' goroutine.
 func setupCorrelationTest(t *testing.T) (*Analyzer, *MockResultsReporter) {
 	t.Helper()
@@ -758,10 +744,8 @@ func TestProcessOASTInteraction_Valid(t *testing.T) {
 	assert.Equal(t, interactionTime, finding.OASTDetails.InteractionTime)
 }
 
-// ====================================================================================
 // Test Cases: False Positive Reduction Logic (Unit Tests)
-// ====================================================================================
-
+//
 // TestIsContextValid comprehensively tests the rules engine (ValidTaintFlows) and exceptions.
 func TestIsContextValid(t *testing.T) {
 	analyzer, _, _, _ := setupAnalyzer(t, nil, false)
@@ -868,10 +852,8 @@ func TestCheckSanitization(t *testing.T) {
 	}
 }
 
-// ====================================================================================
 // Test Cases: Background Workers (State Management)
-// ====================================================================================
-
+//
 // TestCleanupExpiredProbes verifies the periodic removal of old probes.
 func TestCleanupExpiredProbes(t *testing.T) {
 	// Configure short expiration and cleanup intervals for a fast test
@@ -951,10 +933,8 @@ func TestPollOASTInteractions_CanaryFiltering(t *testing.T) {
 	assert.GreaterOrEqual(t, len(analyzer.eventsChan), 1, "Should have enqueued at least 1 OAST interaction")
 }
 
-// ====================================================================================
 // Test Cases: Robustness and Error Handling
-// ====================================================================================
-
+//
 // TestHandleEvent_ChannelFull verifies that events are dropped if the buffer is full (non-blocking send).
 func TestHandleEvent_ChannelFull(t *testing.T) {
 	// Setup analyzer with a very small buffer
@@ -983,10 +963,8 @@ func TestHandleEvent_ChannelFull(t *testing.T) {
 	assert.Equal(t, "Event1", e1.(SinkEvent).Detail)
 }
 
-// ====================================================================================
 // Test Cases: Overall Analysis Flow (Analyze Method Integration)
-// ====================================================================================
-
+//
 // TestAnalyze_HappyPath verifies the full orchestration of the analysis process, including concurrent finding detection.
 func TestAnalyze_HappyPath(t *testing.T) {
 	// Setup with OAST enabled to test all phases

@@ -36,7 +36,6 @@ type requestData struct {
 }
 
 // Harvester listens to browser events and collects network traffic (HAR) and console logs.
-// It's the digital scribe for our browser session.
 type Harvester struct {
 	logger        *zap.Logger
 	sessionCtx    context.Context
@@ -367,8 +366,10 @@ func (h *Harvester) generateHAR() *schemas.HAR {
 		entry := h.processRequestDataToEntry(rd)
 		if entry != nil {
 			entries = append(entries, *entry)
-			if earliestTime.IsZero() || rd.requestSent.WallTime.Time().Before(earliestTime) {
-				earliestTime = rd.requestSent.WallTime.Time()
+			if rd.requestSent != nil {
+				if earliestTime.IsZero() || rd.requestSent.WallTime.Time().Before(earliestTime) {
+					earliestTime = rd.requestSent.WallTime.Time()
+				}
 			}
 		}
 	}

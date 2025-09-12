@@ -5,92 +5,142 @@ import (
 	"fmt"
 	"os"
 	"sync"
+	"sync/atomic"
 	"time"
 
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/chromedp/cdproto/browser"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/stealth"
-	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
-// Manager is responsible for the lifecycle of the headless browser instance
-// and the creation of isolated browsing sessions (AnalysisContexts).
-type Manager struct {
-	cfg             *config.Config
-	logger          *zap.Logger
-	allocatorCtx    context.Context
-	allocatorCancel context.CancelFunc
-	browserCtx      context.Context // Main context for browser commands
-	browserCancel   context.CancelFunc
-	wg              sync.WaitGroup
+// maxConcurrentSessions defines how many browser sessions we allow to be
+// initialized at the same time. This acts as a "start gate" to prevent race conditions.
+const maxConcurrentSessions = 4
 
-	// Pre-loaded instrumentation scripts
+type Manager struct {
+	cfg                     *config.Config
+	logger                  *zap.Logger
+	allocatorCtx            context.Context
+	allocatorCancel         context.CancelFunc
+	browserControllerCtx    context.Context
+	browserControllerCancel context.CancelFunc
+	wg                      sync.WaitGroup
+	sessionGate             chan struct{}
+
 	taintShimTemplate string
 	taintConfigJSON   string
+
+	// isShutdown is an atomic flag to prevent logging spurious errors during a planned shutdown.
+	isShutdown atomic.Bool
 }
 
-// NewManager initializes a new browser manager and starts the headless browser instance.
+// NewManager initializes the browser process and the main control connection.
 func NewManager(ctx context.Context, logger *zap.Logger, cfg *config.Config) (*Manager, error) {
 	l := logger.With(zap.String("component", "browser_manager"))
 
-	// Create an allocator context that will manage the lifecycle of the browser process.
 	allocatorOpts := append(chromedp.DefaultExecAllocatorOptions[:],
+		chromedp.CombinedOutput(os.Stderr),
 		chromedp.Flag("headless", cfg.Browser.Headless),
 		chromedp.Flag("disable-gpu", true),
-		// Add --no-sandbox flag for compatibility with Docker/CI environments.
 		chromedp.Flag("no-sandbox", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
 		chromedp.UserAgent(stealth.DefaultPersona.UserAgent),
 	)
 
-	// Allow overriding the executable path via an environment variable.
-	// This is a robust way to handle non-standard browser installations, especially in test environments.
 	if execPath := os.Getenv("CHROME_EXEC"); execPath != "" {
 		l.Debug("Using browser executable from CHROME_EXEC env var.", zap.String("path", execPath))
 		allocatorOpts = append(allocatorOpts, chromedp.ExecPath(execPath))
 	}
 
 	allocCtx, allocCancel := chromedp.NewExecAllocator(ctx, allocatorOpts...)
+	browserControllerCtx, browserControllerCancel := chromedp.NewContext(allocCtx)
 
-	// Create the main browser context from the allocator for sending commands.
-	browserCtx, browserCancel := chromedp.NewContext(allocCtx, chromedp.WithLogf(logger.Sugar().Debugf))
-
-	// Run an empty task to launch the browser and establish the connection.
-	if err := chromedp.Run(browserCtx); err != nil {
-		allocCancel() // Clean up allocator if browser fails to start.
-		return nil, fmt.Errorf("failed to start browser instance via chromedp: %w", err)
+	cleanup := func() {
+		browserControllerCancel()
+		allocCancel()
 	}
+
+	verifyCtx, verifyCancel := context.WithTimeout(browserControllerCtx, 15*time.Second)
+	defer verifyCancel()
+
+	var productVersion string
+	if err := chromedp.Run(verifyCtx,
+		chromedp.Navigate("about:blank"),
+		chromedp.ActionFunc(func(c context.Context) (err error) {
+			productVersion, _, _, _, _, err = browser.GetVersion().Do(c)
+			return err
+		}),
+	); err != nil {
+		l.Error("Failed to verify browser connection.", zap.Error(err))
+		cleanup()
+		return nil, fmt.Errorf("failed to connect to and verify browser instance. Ensure Chrome/Chromium is installed: %w", err)
+	}
+	l.Debug("Browser process connection verified.", zap.String("version", productVersion))
 
 	m := &Manager{
-		cfg:             cfg,
-		logger:          l,
-		allocatorCtx:    allocCtx,
-		allocatorCancel: allocCancel,
-		browserCtx:      browserCtx,
-		browserCancel:   browserCancel,
+		cfg:                     cfg,
+		logger:                  l,
+		allocatorCtx:            allocCtx,
+		allocatorCancel:         allocCancel,
+		browserControllerCtx:    browserControllerCtx,
+		browserControllerCancel: browserControllerCancel,
+		sessionGate:             make(chan struct{}, maxConcurrentSessions),
 	}
 
-	// Pre-load IAST scripts from disk to avoid file I/O for every new session.
+	// Launch our new "black box recorder" to monitor the contexts.
+	m.monitorContexts()
+
 	if err := m.loadInstrumentationFiles(); err != nil {
-		// If scripts can't be loaded, the manager can't function correctly.
-		m.Shutdown(context.Background()) // Attempt a cleanup
+		m.Shutdown(context.Background())
 		return nil, fmt.Errorf("failed to load instrumentation files: %w", err)
 	}
 
-	m.logger.Info("Browser manager initialized")
+	m.logger.Info("Browser manager initialized and ready for parallel sessions.", zap.Int("concurrency_limit", maxConcurrentSessions))
 	return m, nil
 }
 
-// loadInstrumentationFiles reads the IAST shim and config from disk once at startup.
+// monitorContexts runs in the background to provide diagnostics on premature context cancellation.
+func (m *Manager) monitorContexts() {
+	go func() {
+		select {
+		case <-m.allocatorCtx.Done():
+			// Check the isShutdown flag. If it's false, this was an unplanned event.
+			if !m.isShutdown.Load() {
+				m.logger.Warn(
+					"!!! Allocator context cancelled unexpectedly. The browser process likely crashed. !!!",
+					zap.Error(m.allocatorCtx.Err()),
+				)
+			}
+		case <-m.browserControllerCtx.Done():
+			if !m.isShutdown.Load() {
+				m.logger.Warn(
+					"!!! Browser controller context cancelled unexpectedly. !!!",
+					zap.Error(m.browserControllerCtx.Err()),
+				)
+			}
+		}
+	}()
+}
+
 func (m *Manager) loadInstrumentationFiles() error {
-	// Load the JavaScript taint shim template.
+	if m.cfg.IAST.ShimPath == "" {
+		m.logger.Debug("IAST ShimPath is empty, skipping instrumentation file load.")
+		return nil
+	}
 	templateBytes, err := os.ReadFile(m.cfg.IAST.ShimPath)
 	if err != nil {
 		return fmt.Errorf("could not read taint shim template at %s: %w", m.cfg.IAST.ShimPath, err)
 	}
 	m.taintShimTemplate = string(templateBytes)
 
-	// Load the taint tracking configuration.
+	if m.cfg.IAST.ConfigPath == "" {
+		m.logger.Debug("IAST ConfigPath is empty, skipping taint config load.")
+		m.taintConfigJSON = "[]"
+		return nil
+	}
 	configBytes, err := os.ReadFile(m.cfg.IAST.ConfigPath)
 	if err != nil {
 		return fmt.Errorf("could not read taint config at %s: %w", m.cfg.IAST.ConfigPath, err)
@@ -101,13 +151,27 @@ func (m *Manager) loadInstrumentationFiles() error {
 	return nil
 }
 
-// InitializeSession creates, instruments, and returns a new, isolated browser tab (AnalysisContext).
+// InitializeSession creates a new, isolated browser session (AnalysisContext).
 func (m *Manager) InitializeSession(ctx context.Context) (*AnalysisContext, error) {
-	m.logger.Debug("Initializing new browser session.")
+	if m.browserControllerCtx.Err() != nil {
+		return nil, fmt.Errorf("browser controller connection is closed before initialization: %w", m.browserControllerCtx.Err())
+	}
 
-	// Create a new analysis context for the session.
+	m.logger.Debug("Waiting for session gate to open...")
+	m.sessionGate <- struct{}{}
+	defer func() { <-m.sessionGate }()
+	m.logger.Debug("Session gate acquired. Initializing new browser session.")
+
+	if m.browserControllerCtx.Err() != nil {
+		if m.allocatorCtx.Err() != nil {
+			return nil, fmt.Errorf("cannot initialize session, browser process is closed: %w", m.allocatorCtx.Err())
+		}
+		return nil, fmt.Errorf("cannot initialize session, browser controller connection is closed: %w", m.browserControllerCtx.Err())
+	}
+
 	ac := NewAnalysisContext(
-		m.browserCtx, // Pass the valid browser command context.
+		m.allocatorCtx,
+		m.browserControllerCtx,
 		m.cfg,
 		m.logger,
 		stealth.DefaultPersona,
@@ -115,36 +179,28 @@ func (m *Manager) InitializeSession(ctx context.Context) (*AnalysisContext, erro
 		m.taintConfigJSON,
 	)
 
-	// Perform the heavyweight initialization (creating the tab, applying stealth, etc.).
+	m.wg.Add(1)
 	if err := ac.Initialize(ctx); err != nil {
+		m.wg.Done()
 		return nil, fmt.Errorf("failed to initialize analysis context: %w", err)
 	}
 
-	// Track the session's lifecycle to ensure graceful shutdown.
-	m.wg.Add(1)
 	go func() {
 		defer m.wg.Done()
-		// Wait until the session's internal context is done, then ensure it's closed.
 		<-ac.GetContext().Done()
-		// Use a background context for cleanup to ensure it runs even if the parent is cancelled.
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		ac.Close(cleanupCtx)
-		m.logger.Debug("Cleaned up closed session.", zap.String("session_id", ac.ID()))
+		m.logger.Debug("Detected closed session.", zap.String("session_id", ac.ID()))
 	}()
 
 	m.logger.Info("New browser session created and instrumented.", zap.String("session_id", ac.ID()))
 	return ac, nil
 }
 
-// Shutdown gracefully closes the browser allocator and all associated sessions.
+// Shutdown closes all active sessions and stops the browser process.
 func (m *Manager) Shutdown(ctx context.Context) {
+	// Set the flag to true so our monitor knows this is a planned shutdown.
+	m.isShutdown.Store(true)
 	m.logger.Info("Shutting down browser manager...")
 
-	// Cancel the allocator context, which signals all browser instances and tabs to close.
-	m.allocatorCancel()
-
-	// Wait for all session tracking goroutines to complete.
 	done := make(chan struct{})
 	go func() {
 		m.wg.Wait()
@@ -156,6 +212,16 @@ func (m *Manager) Shutdown(ctx context.Context) {
 		m.logger.Info("All browser sessions closed gracefully.")
 	case <-ctx.Done():
 		m.logger.Warn("Shutdown context cancelled before all sessions could close.", zap.Error(ctx.Err()))
+	}
+
+	if m.browserControllerCancel != nil {
+		m.logger.Debug("Closing browser controller connection.")
+		m.browserControllerCancel()
+	}
+
+	if m.allocatorCancel != nil {
+		m.logger.Debug("Stopping browser process.")
+		m.allocatorCancel()
 	}
 }
 

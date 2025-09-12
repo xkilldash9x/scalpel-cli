@@ -62,10 +62,10 @@ type AgentMissionParams struct {
 type Severity string
 
 const (
-	SeverityCritical      Severity = "CRITICAL"
-	SeverityHigh          Severity = "HIGH"
-	SeverityMedium        Severity = "MEDIUM"
-	SeverityLow           Severity = "LOW"
+	SeverityCritical    Severity = "CRITICAL"
+	SeverityHigh        Severity = "HIGH"
+	SeverityMedium      Severity = "MEDIUM"
+	SeverityLow         Severity = "LOW"
 	SeverityInformational Severity = "INFORMATIONAL"
 )
 
@@ -132,37 +132,46 @@ const (
 type TaintSink string
 
 const (
-	// Execution Sinks
+	// -- Execution Sinks --
 	SinkEval                TaintSink = "EVAL"
 	SinkFunctionConstructor TaintSink = "FUNCTION_CONSTRUCTOR"
+	SinkSetTimeout          TaintSink = "SET_TIMEOUT"          // When a string is passed.
+	SinkSetInterval         TaintSink = "SET_INTERVAL"         // When a string is passed.
+	SinkEventHandler        TaintSink = "EVENT_HANDLER"        // e.g., element.onload, setAttribute('onclick', ...)
 
-	// DOM Manipulation Sinks
-	SinkInnerHTML     TaintSink = "INNER_HTML"
-	SinkOuterHTML     TaintSink = "OUTER_HTML"
-	SinkDocumentWrite TaintSink = "DOCUMENT_WRITE"
+	// -- DOM Manipulation Sinks (XSS) --
+	SinkInnerHTML        TaintSink = "INNER_HTML"
+	SinkOuterHTML        TaintSink = "OUTER_HTML"
+	SinkInsertAdjacentHTML TaintSink = "INSERT_ADJACENT_HTML"
+	SinkDocumentWrite    TaintSink = "DOCUMENT_WRITE"
 
-	// Resource Loading Sinks
+	// -- Resource & Navigation Sinks --
 	SinkScriptSrc    TaintSink = "SCRIPT_SRC"
 	SinkIframeSrc    TaintSink = "IFRAME_SRC"
 	SinkIframeSrcDoc TaintSink = "IFRAME_SRCDOC"
 	SinkWorkerSrc    TaintSink = "WORKER_SRC"
+	SinkEmbedSrc     TaintSink = "EMBED_SRC"
+	SinkObjectData   TaintSink = "OBJECT_DATA"
+	SinkBaseHref     TaintSink = "BASE_HREF"  // Can lead to script gadget hijacking
+	SinkNavigation   TaintSink = "NAVIGATION" // e.g., location.href, window.open with javascript: URIs
 
-	// Navigation Sinks
-	SinkNavigation TaintSink = "NAVIGATION" // e.g., location.href, window.open
+	// -- Network/Exfiltration Sinks --
+	SinkFetch             TaintSink = "FETCH_BODY"
+	SinkFetchURL          TaintSink = "FETCH_URL"
+	SinkXMLHTTPRequest    TaintSink = "XHR_BODY"
+	SinkXMLHTTPRequestURL TaintSink = "XHR_URL"
+	SinkWebSocketSend     TaintSink = "WEBSOCKET_SEND"
+	SinkSendBeacon        TaintSink = "SEND_BEACON"
 
-	// Network/Exfiltration Sinks
-	SinkFetch              TaintSink = "FETCH_BODY"
-	SinkFetch_URL          TaintSink = "FETCH_URL"
-	SinkXMLHTTPRequest     TaintSink = "XHR_BODY"
-	SinkXMLHTTPRequest_URL TaintSink = "XHR_URL"
-	SinkWebSocketSend      TaintSink = "WEBSOCKET_SEND"
-	SinkSendBeacon         TaintSink = "SEND_BEACON"
-
-	// IPC Sinks
+	// -- IPC (Inter-Process Communication) Sinks --
 	SinkPostMessage       TaintSink = "POST_MESSAGE"
 	SinkWorkerPostMessage TaintSink = "WORKER_POST_MESSAGE"
 
-	// Special Confirmation Sinks (High Confidence)
+	// -- Style & CSS Sinks --
+	SinkStyleCSS        TaintSink = "STYLE_CSS"         // e.g., element.style.cssText, can be used for data exfil/UI redressing
+	SinkStyleInsertRule TaintSink = "STYLE_INSERT_RULE" // Can inject malicious CSS rules.
+
+	// -- Special Confirmation Sinks (High Confidence) --
 	SinkExecution          TaintSink = "EXECUTION_PROOF"
 	SinkOASTInteraction    TaintSink = "OAST_INTERACTION"
 	SinkPrototypePollution TaintSink = "PROTOTYPE_POLLUTION_CONFIRMED"
@@ -238,29 +247,29 @@ type Edge struct {
 
 // KnowledgeGraphUpdate represents a batch of updates for the knowledge graph.
 type KnowledgeGraphUpdate struct {
-	Nodes []Node `json:"nodes"`
-	Edges []Edge `json:"edges"`
+	Nodes []NodeInput `json:"nodes"`
+	Edges []EdgeInput `json:"edges"`
 }
 
 // -- Input Schemas for Bulk Operations --
 
 // NodeInput is a helper struct for bulk inserting or updating nodes.
 type NodeInput struct {
-	ID         string
-	Type       NodeType
-	Label      string
-	Status     NodeStatus
-	Properties json.RawMessage
+	ID         string          `json:"id"`
+	Type       NodeType        `json:"type"`
+	Label      string          `json:"label"`
+	Status     NodeStatus      `json:"status"`
+	Properties json.RawMessage `json:"properties"`
 }
 
 // EdgeInput is a helper struct for bulk inserting or updating edges.
 type EdgeInput struct {
-	ID         string
-	From       string // Source Node ID
-	To         string // Target Node ID
-	Type       RelationshipType
-	Label      string
-	Properties json.RawMessage
+	ID         string           `json:"id"`
+	From       string           `json:"from"` // Source Node ID
+	To         string           `json:"to"`   // Target Node ID
+	Type       RelationshipType `json:"type"`
+	Label      string           `json:"label"`
+	Properties json.RawMessage  `json:"properties"`
 }
 
 // -- Communication & Result Schemas --
@@ -348,13 +357,13 @@ type PageTimings struct {
 }
 
 type Entry struct {
-	Pageref         string   `json:"pageref"`
+	Pageref         string    `json:"pageref"`
 	StartedDateTime time.Time `json:"startedDateTime"`
-	Time            float64  `json:"time"`
-	Request         Request  `json:"request"`
-	Response        Response `json:"response"`
-	Cache           struct{} `json:"cache"`
-	Timings         Timings  `json:"timings"`
+	Time            float64   `json:"time"`
+	Request         Request   `json:"request"`
+	Response        Response  `json:"response"`
+	Cache           struct{}  `json:"cache"`
+	Timings         Timings   `json:"timings"`
 }
 
 type Request struct {
@@ -444,15 +453,15 @@ const (
 )
 
 type GenerationOptions struct {
-	Temperature     float32
-	ForceJSONFormat bool
+	Temperature     float32 `json:"temperature"`
+	ForceJSONFormat bool    `json:"force_json_format"`
 }
 
 type GenerationRequest struct {
-	SystemPrompt string
-	UserPrompt   string
-	Tier         ModelTier
-	Options      GenerationOptions
+	SystemPrompt string            `json:"system_prompt"`
+	UserPrompt   string            `json:"user_prompt"`
+	Tier         ModelTier         `json:"tier"`
+	Options      GenerationOptions `json:"options"`
 }
 
 // LLMClient defines the interface for interacting with a Large Language Model.
@@ -475,3 +484,4 @@ type TaskEngine interface {
 	Start(ctx context.Context, taskChan <-chan Task)
 	Stop()
 }
+

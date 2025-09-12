@@ -13,7 +13,6 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/cdp"
-	// "github.com/chromedp/cdproto/target" // Removed: imported and not used
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
 
@@ -40,7 +39,6 @@ var hasherPool = sync.Pool{
 // valueOnlyContext is a context that inherits values from its parent but not cancellation.
 // This is necessary for cleanup tasks that must run using the chromedp session information
 // stored in the parent context, even if the parent context is cancelled.
-// This pattern is standard in Go (and implemented as context.WithoutCancel in Go 1.21+).
 type valueOnlyContext struct{ context.Context }
 
 func (valueOnlyContext) Deadline() (time.Time, bool) { return time.Time{}, false }
@@ -328,23 +326,13 @@ func (i *Interactor) generateInputPayload(node *cdp.Node) string {
 
 // cleanupInteractionAttribute removes our temporary attribute using JavaScript.
 func (i *Interactor) cleanupInteractionAttribute(ctx context.Context, selector, attributeName string, log *zap.Logger) {
-	// This function runs a task that should complete even if the parent context is cancelled.
-
-	// In modern chromedp, we don't need to manually extract Browser/Target or use WithExecutor.
-	// We just need a context that preserves the values from the original 'ctx' (which holds the session info)
-	// but ignores the cancellation signal.
-
-	// Verify the original context is associated with chromedp before proceeding.
 	if chromedp.FromContext(ctx) == nil {
 		log.Debug("Could not get valid chromedp context for cleanup.")
 		return
 	}
 
-	// Create a new, detached context using the valueOnlyContext wrapper.
-	// This replaces the previous logic involving context.Background(), Browser.Target, and WithExecutor.
+	// Create a new, detached context that preserves values but ignores cancellation.
 	detachedCtx := valueOnlyContext{ctx}
-
-	// Create a context with our own short timeout for this specific task.
 	taskCtx, cancelTask := context.WithTimeout(detachedCtx, 2*time.Second)
 	defer cancelTask()
 
@@ -353,10 +341,8 @@ func (i *Interactor) cleanupInteractionAttribute(ctx context.Context, selector, 
          if (el) { el.removeAttribute('%s'); }`, selector, attributeName)
 
 	var res interface{}
-	// We use our new, independent context to run the cleanup.
 	err := chromedp.Run(taskCtx, chromedp.Evaluate(jsCleanup, &res))
 	
-	// Log errors, but ignore cancellations/timeouts as the browser might be closing anyway.
 	if err != nil && taskCtx.Err() == nil {
 		log.Debug("Failed to execute cleanup JS.", zap.String("selector", selector), zap.Error(err))
 	}
