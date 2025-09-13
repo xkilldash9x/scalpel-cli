@@ -2,20 +2,25 @@
 package taint
 
 import (
-	"bytes"
 	"context"
-	"embed"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"net/url"
 	"regexp"
 	"strings"
 	"sync"
-	"text/template"
+	"testing"
 	"time"
 
-	"github.com/google/uuid"
-	"go.uber.org/zap"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/mock"
+	"github.com/stretchr/testify/require"
+	"go.uber.org/zap/zaptest"
+
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser"
+	"github.com/xkilldash9x/scalpel-cli/internal/network"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 )
 
 //go:embed taint_shim.js

@@ -1,4 +1,4 @@
-// pkg/humanoid/helpers.go
+// internal/humanoid/helpers.go
 package humanoid
 
 import (
