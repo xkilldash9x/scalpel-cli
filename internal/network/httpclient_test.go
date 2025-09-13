@@ -17,9 +17,7 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// ====================================================================================
 // Test Cases: Configuration and Defaults (ClientConfig)
-// ====================================================================================
 
 // TestNewDefaultClientConfig_Optimizations verifies the defaults are optimized for scanning.
 func TestNewDefaultClientConfig_Optimizations(t *testing.T) {
@@ -46,9 +44,7 @@ func TestNewDefaultClientConfig_Optimizations(t *testing.T) {
 	assert.NotNil(t, config.Logger)
 }
 
-// ====================================================================================
 // Test Cases: TLS Configuration (configureTLS)
-// ====================================================================================
 
 // TestConfigureTLS_Defaults verifies the strong security defaults of the TLS configuration helper.
 func TestConfigureTLS_Defaults(t *testing.T) {
@@ -100,9 +96,7 @@ func TestConfigureTLS_CustomConfigClone(t *testing.T) {
 	assert.False(t, customTLS.InsecureSkipVerify, "Original object should not be modified")
 }
 
-// ====================================================================================
 // Test Cases: Transport Creation (NewHTTPTransport)
-// ====================================================================================
 
 // TestNewHTTPTransport_ConfigurationMapping verifies ClientConfig maps correctly to http.Transport.
 func TestNewHTTPTransport_ConfigurationMapping(t *testing.T) {
@@ -188,9 +182,7 @@ func TestNewHTTPTransport_HTTP2_Disabled(t *testing.T) {
 	assert.Equal(t, []string{"http/1.1"}, transport.TLSClientConfig.NextProtos)
 }
 
-// ====================================================================================
 // Test Cases: Client Behavior (NewClient and Integration)
-// ====================================================================================
 
 // TestNewClient_RedirectPolicy verifies the client does not automatically follow redirects (Security requirement).
 func TestNewClient_RedirectPolicy(t *testing.T) {

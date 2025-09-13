@@ -1,4 +1,4 @@
-// -- pkg/humanoid/behavior.go --
+// internal/humanoid/behavior.go --
 package humanoid
 
 import (

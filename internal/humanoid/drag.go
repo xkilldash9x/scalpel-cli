@@ -1,4 +1,4 @@
-// -- pkg/humanoid/drag.go --
+// internal/humanoid/drag.go --
 package humanoid
 
 import (

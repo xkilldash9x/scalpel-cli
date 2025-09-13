@@ -1,4 +1,4 @@
-// -- pkg/humanoid/movement.go --
+// internal/humanoid/movement.go --
 package humanoid
 
 import (

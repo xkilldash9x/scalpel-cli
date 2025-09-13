@@ -1,17 +1,21 @@
-// -- internal/analysis/active/timeslip/analyzer.go --
+// internal/analysis/active/timeslip/analyzer.go
 package timeslip
 
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"net/http"
+	"sort"
 	"time"
 	"unicode/utf8"
 
 	"github.com/google/uuid"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/network"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"go.uber.org/zap"
 )
@@ -124,7 +128,7 @@ func (a *Analyzer) Analyze(ctx context.Context, candidate *RaceCandidate) error 
 		}
 
 		// Analyze the results.
-		analysis := AnalyzeResults(result, a.config)
+		analysis := a.analyzeResults(result, a.config)
 
 		// Report findings if vulnerable or if confidence indicates an informational finding (>= 0.3).
 		if analysis.Vulnerable || analysis.Confidence >= 0.3 {
@@ -133,13 +137,11 @@ func (a *Analyzer) Analyze(ctx context.Context, candidate *RaceCandidate) error 
 				zap.Bool("vulnerable", analysis.Vulnerable),
 				zap.String("details", analysis.Details))
 
-			// Only report as a security vulnerability if it's explicitly marked as such.
-			if analysis.Vulnerable {
-				a.reportFinding(candidate, analysis, result)
-			}
+			// Report the finding (handles both vulnerable and informational).
+			a.reportFinding(candidate, analysis, result)
 
-			// Optimization: If Confidence is 1.0 (a confirmed TOCTOU), we can stop further analysis.
-			if analysis.Confidence == 1.0 {
+			// Optimization: If Confidence is 1.0 (a confirmed TOCTOU) and it is vulnerable, we can stop further analysis.
+			if analysis.Vulnerable && analysis.Confidence == 1.0 {
 				a.logger.Info("Critical TOCTOU detected (Confidence 1.0). Halting further strategies.")
 				break
 			}
@@ -166,9 +168,9 @@ func (a *Analyzer) determineStrategies(candidate *RaceCandidate) []RaceStrategy 
 
 // TimeSlipEvidence provides structured data for race condition findings.
 type TimeSlipEvidence struct {
-	Strategy        RaceStrategy             `json:"strategy"`
-	TotalDurationMs int64                    `json:"total_duration_ms"`
-	Statistics      ResponseStatistics       `json:"statistics"`
+	Strategy        RaceStrategy              `json:"strategy"`
+	TotalDurationMs int64                     `json:"total_duration_ms"`
+	Statistics      ResponseStatistics        `json:"statistics"`
 	SampleResponses []core.SerializedResponse `json:"sample_responses"`
 }
 
@@ -176,21 +178,37 @@ type TimeSlipEvidence struct {
 func (a *Analyzer) reportFinding(candidate *RaceCandidate, analysis *AnalysisResult, result *RaceResult) {
 	title := fmt.Sprintf("Race Condition Detected (%s)", analysis.Strategy)
 	description := analysis.Details
-	vulnerabilityType := "CWE-362: Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')"
 
-	// Determine severity based on the Confidence Score.
+	// Initialize CWEs and vulnerability description
+	var cwes []string
+	vulnDescription := "The application processes concurrent requests in a way that leads to an inconsistent or exploitable state, violating intended synchronization or atomicity."
+
+	// Determine severity based on the Confidence Score and Vulnerability status.
 	var severity schemas.Severity
 
-	if analysis.Confidence == 1.0 {
-		severity = schemas.SeverityCritical
-		title = fmt.Sprintf("Critical TOCTOU Race Condition Detected (%s)", analysis.Strategy)
-		vulnerabilityType = "CWE-367: Time-of-check Time-of-use (TOCTOU) Race Condition"
-	} else if analysis.Confidence >= 0.8 {
-		severity = schemas.SeverityHigh
-	} else if analysis.Confidence >= 0.6 {
-		severity = schemas.SeverityMedium
+	if analysis.Vulnerable {
+		cweGeneric := "CWE-362: Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')"
+
+		if analysis.Confidence == 1.0 {
+			severity = schemas.SeverityCritical
+			title = fmt.Sprintf("Critical TOCTOU Race Condition Detected (%s)", analysis.Strategy)
+			cwes = append(cwes, "CWE-367: Time-of-check Time-of-use (TOCTOU) Race Condition")
+		} else if analysis.Confidence >= 0.8 {
+			severity = schemas.SeverityHigh
+			cwes = append(cwes, cweGeneric)
+		} else if analysis.Confidence >= 0.6 {
+			severity = schemas.SeverityMedium
+			cwes = append(cwes, cweGeneric)
+		} else {
+			severity = schemas.SeverityLow
+			cwes = append(cwes, cweGeneric)
+		}
 	} else {
-		severity = schemas.SeverityLow
+		// Informational findings (e.g., timing anomalies, Confidence >= 0.3 but Vulnerable=false)
+		severity = schemas.SeverityInformational
+		title = fmt.Sprintf("Informational: Concurrency Anomaly Detected (%s)", analysis.Strategy)
+		vulnDescription = "Observed behavior suggests potential resource contention or sequential locking under load, but a direct security vulnerability was not confirmed."
+		cwes = append(cwes, "CWE-362") // Contextual CWE
 	}
 
 	// Compile all the juicy evidence.
@@ -200,19 +218,32 @@ func (a *Analyzer) reportFinding(candidate *RaceCandidate, analysis *AnalysisRes
 		Statistics:      analysis.Stats,
 		SampleResponses: a.sampleUniqueResponses(result.Responses),
 	}
-	evidence, _ := json.Marshal(evidenceData)
+
+	// Marshal evidence. Use MarshalIndent for better readability in reports.
+	evidenceBytes, err := json.MarshalIndent(evidenceData, "", "  ")
+	if err != nil {
+		a.logger.Error("Failed to marshal evidence data", zap.Error(err))
+		// Fallback if marshalling fails.
+		evidenceBytes = []byte(fmt.Sprintf("{\"error\": \"Failed to serialize evidence: %v\"}", err))
+	}
+
+	// Define the vulnerability details (using the schemas.Vulnerability struct).
+	vulnerability := schemas.Vulnerability{
+		Name:        title,
+		Description: vulnDescription,
+	}
 
 	finding := schemas.Finding{
 		ID:             uuid.NewString(),
 		Timestamp:      time.Now().UTC(),
 		Target:         candidate.URL,
 		Module:         "TimeSlipAnalyzer",
-		Vulnerability:  title,
+		Vulnerability:  vulnerability, // Use the struct
 		Severity:       severity,
 		Description:    description,
-		Evidence:       evidence,
+		Evidence:       string(evidenceBytes), // Use the string representation
 		Recommendation: "Implement proper synchronization mechanisms such as atomic transactions, database constraints (e.g., uniqueness constraints), or pessimistic/optimistic locking to ensure operations on shared resources are processed safely and consistently.",
-		CWE:            vulnerabilityType,
+		CWE:            cwes, // Use the slice
 	}
 
 	// If a reporter is configured, this is where we use it.
@@ -261,7 +292,6 @@ func (a *Analyzer) sampleUniqueResponses(responses []*RaceResponse) []core.Seria
 			endIndex := maxBodyLen
 
 			// Ensure we don't slice in the middle of a UTF-8 character.
-			// If the byte at endIndex is not the start of a rune (i.e., it's a continuation byte), backtrack.
 			// Indexing a string (bodyStr[endIndex]) yields the byte value.
 			for ; endIndex > 0 && !utf8.RuneStart(bodyStr[endIndex]); endIndex-- {
 				// Backtrack until we find the start of a rune.
@@ -276,11 +306,186 @@ func (a *Analyzer) sampleUniqueResponses(responses []*RaceResponse) []core.Seria
 		}
 
 		samples = append(samples, core.SerializedResponse{
-			StatusCode: resp.StatusCode,
-			Headers:    resp.Headers,
+			StatusCode: resp.ParsedResponse.StatusCode,
+			Headers:    resp.ParsedResponse.Headers,
 			Body:       bodyStr,
 		})
 		sampledFingerprints[resp.Fingerprint] = true
 	}
 	return samples
+}
+
+// analyzeResults is the core logic for processing the raw results of a race attempt.
+func (a *Analyzer) analyzeResults(result *RaceResult, config *Config) *AnalysisResult {
+	analysis := &AnalysisResult{
+		Strategy:        result.Strategy,
+		UniqueResponses: make(map[string]int),
+	}
+
+	if len(result.Responses) == 0 {
+		analysis.Details = "No responses received."
+		return analysis
+	}
+
+	validResponses := a.prepareAndAggregate(result, analysis)
+
+	if len(validResponses) == 0 {
+		analysis.Details = fmt.Sprintf("All %d requests resulted in errors or unprocessable responses.", len(result.Responses))
+		return analysis
+	}
+
+	if len(validResponses) > 1 {
+		analysis.Stats = a.calculateStatistics(validResponses)
+	}
+
+	for _, heuristic := range heuristicsPipeline {
+		if heuristic(result, config, analysis) {
+			break
+		}
+	}
+
+	if analysis.Details == "" {
+		analysis.Details = "No clear indication of a race condition vulnerability found."
+		if analysis.Stats.StdDevMs > 0 && analysis.Stats.AvgDurationMs > 50 && (analysis.Stats.StdDevMs/analysis.Stats.AvgDurationMs) > 0.3 {
+			analysis.Confidence = 0.1
+			analysis.Details += fmt.Sprintf(" Note: High standard deviation observed (%.2fms).", analysis.Stats.StdDevMs)
+		}
+	}
+
+	return analysis
+}
+
+// prepareAndAggregate filters valid responses and counts successes/unique fingerprints.
+func (a *Analyzer) prepareAndAggregate(result *RaceResult, analysis *AnalysisResult) []*RaceResponse {
+	validResponses := make([]*RaceResponse, 0, len(result.Responses))
+
+	for _, resp := range result.Responses {
+		if resp.Error != nil || resp.ParsedResponse == nil {
+			continue
+		}
+
+		if resp.Fingerprint == "" {
+			continue
+		}
+
+		validResponses = append(validResponses, resp)
+		analysis.UniqueResponses[resp.Fingerprint]++
+
+		if resp.IsSuccess {
+			analysis.SuccessCount++
+		}
+	}
+	return validResponses
+}
+
+// calculateStatistics computes Min, Max, Avg, Median, and Standard Deviation of response durations.
+func (a *Analyzer) calculateStatistics(responses []*RaceResponse) ResponseStatistics {
+	durationsMs := make([]int64, 0, len(responses))
+
+	for _, resp := range responses {
+		if resp.ParsedResponse != nil && resp.Duration > 0 {
+			durationsMs = append(durationsMs, resp.Duration.Milliseconds())
+		}
+	}
+
+	if len(durationsMs) < 2 {
+		return ResponseStatistics{}
+	}
+
+	sort.Slice(durationsMs, func(i, j int) bool {
+		return durationsMs[i] < durationsMs[j]
+	})
+
+	stats := ResponseStatistics{
+		MinDurationMs: durationsMs[0],
+		MaxDurationMs: durationsMs[len(durationsMs)-1],
+	}
+	stats.TimingDeltaMs = stats.MaxDurationMs - stats.MinDurationMs
+
+	var sum int64
+	for _, d := range durationsMs {
+		sum += d
+	}
+	stats.AvgDurationMs = float64(sum) / float64(len(durationsMs))
+
+	n := len(durationsMs)
+	if n%2 == 0 {
+		stats.MedDurationMs = float64(durationsMs[n/2-1]+durationsMs[n/2]) / 2.0
+	} else {
+		stats.MedDurationMs = float64(durationsMs[n/2])
+	}
+
+	var varianceSum float64
+	for _, d := range durationsMs {
+		varianceSum += math.Pow(float64(d)-stats.AvgDurationMs, 2)
+	}
+	variance := varianceSum / float64(len(durationsMs))
+	stats.StdDevMs = math.Sqrt(variance)
+
+	return stats
+}
+
+// analysisHeuristic defines a function that checks for a specific indicator of a race condition.
+type analysisHeuristic func(result *RaceResult, config *Config, analysis *AnalysisResult) bool
+
+var heuristicsPipeline = []analysisHeuristic{
+	checkTOCTOU,
+	checkDifferentialState,
+	checkStateFlutter,
+	checkTimingAnomalies,
+}
+
+// --- Heuristics ---
+
+func checkTOCTOU(result *RaceResult, config *Config, analysis *AnalysisResult) bool {
+	expectedSuccesses := 1
+	if config.ExpectedSuccesses > 0 {
+		expectedSuccesses = config.ExpectedSuccesses
+	}
+
+	if analysis.SuccessCount > expectedSuccesses {
+		analysis.Vulnerable = true
+		analysis.Confidence = 1.0
+		analysis.Details = fmt.Sprintf("VULNERABLE: Confirmed TOCTOU race condition. %d operations succeeded (expected <= %d).", analysis.SuccessCount, expectedSuccesses)
+
+		if len(analysis.UniqueResponses) > 1 {
+			analysis.Details += " Differential responses observed."
+		}
+		return true
+	}
+	return false
+}
+
+func checkDifferentialState(result *RaceResult, config *Config, analysis *AnalysisResult) bool {
+	if len(analysis.UniqueResponses) > 1 && analysis.SuccessCount >= 1 {
+		analysis.Vulnerable = true
+		analysis.Confidence = 0.8
+		analysis.Details = fmt.Sprintf("VULNERABLE: Differential responses detected (%d unique responses) including successful operations. Indicates inconsistent state during concurrent processing.", len(analysis.UniqueResponses))
+		return true
+	}
+	return false
+}
+
+func checkStateFlutter(result *RaceResult, config *Config, analysis *AnalysisResult) bool {
+	if len(analysis.UniqueResponses) > 1 && analysis.SuccessCount == 0 {
+		analysis.Vulnerable = true
+		analysis.Confidence = 0.6
+		analysis.Details = fmt.Sprintf("VULNERABLE: State flutter detected. %d unique failure responses observed. Indicates unstable state under concurrency.", len(analysis.UniqueResponses))
+		return true
+	}
+	return false
+}
+
+func checkTimingAnomalies(result *RaceResult, config *Config, analysis *AnalysisResult) bool {
+	if result.Strategy == AsyncGraphQL {
+		return false
+	}
+
+	if config.ThresholdMs > 0 && analysis.Stats.TimingDeltaMs > int64(config.ThresholdMs) {
+		analysis.Vulnerable = false
+		analysis.Confidence = 0.3
+		analysis.Details = fmt.Sprintf("INFO: Significant timing delta detected (%dms). Suggests resource contention or sequential locking.", analysis.Stats.TimingDeltaMs)
+		return true
+	}
+	return false
 }

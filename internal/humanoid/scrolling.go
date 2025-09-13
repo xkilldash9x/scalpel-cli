@@ -1,4 +1,4 @@
-// -- pkg/humanoid/scroll.go --
+// internal/humanoid/scroll.go --
 package humanoid
 
 import (

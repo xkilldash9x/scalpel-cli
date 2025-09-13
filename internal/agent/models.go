@@ -1,8 +1,9 @@
-// internal/agent/models.go 
 package agent
 
 import (
 	"time"
+
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
 // AgentState represents the current status of the agent within the OODA loop.
@@ -45,6 +46,9 @@ const (
 	ActionAnalyzeElement ActionType = "ANALYZE_ELEMENT"
 	ActionInjectPayload  ActionType = "INJECT_PAYLOAD"
 
+	// Codebase Interaction
+	ActionGatherCodebaseContext ActionType = "GATHER_CODEBASE_CONTEXT"
+
 	// Mission Control
 	ActionConclude ActionType = "CONCLUDE"
 )
@@ -71,6 +75,7 @@ const (
 	ObservedConsoleMessage  ObservationType = "CONSOLE_MESSAGE"
 	ObservedTaintFlow       ObservationType = "TAINT_FLOW"
 	ObservedVulnerability   ObservationType = "VULNERABILITY"
+	ObservedCodebaseContext ObservationType = "CODEBASE_CONTEXT"
 	ObservedSystemState     ObservationType = "SYSTEM_STATE"
 )
 
@@ -80,11 +85,11 @@ type Observation struct {
 	MissionID      string          `json:"mission_id"`
 	SourceActionID string          `json:"source_action_id"`
 	Type           ObservationType `json:"type"`
-	Data           interface{}     `json:"data"`
+	Data           interface{}     `json:"data"`   // The raw result payload (e.g., codebase string).
+	Result         ExecutionResult `json:"result"` // The status of the execution itself.
 	Timestamp      time.Time       `json:"timestamp"`
 }
 
-// CORRECTED: Added a strongly-typed struct for executor results.
 // ExecutionResult is a structured return type for ActionExecutors.
 type ExecutionResult struct {
 	// Status can be "success" or "failed".
@@ -93,8 +98,9 @@ type ExecutionResult struct {
 	Error string `json:"error,omitempty"`
 	// ObservationType provides a hint to the Mind about how to categorize the resulting observation.
 	ObservationType ObservationType `json:"observation_type"`
+	// Data contains the primary output of the action (e.g., context from a research action).
+	Data interface{} `json:"data,omitempty"`
 }
-
 
 // CognitiveMessageType defines the message types used on the CognitiveBus.
 type CognitiveMessageType string
@@ -106,4 +112,10 @@ const (
 	MessageTypeInterrupt   CognitiveMessageType = "INTERRUPT"
 )
 
-// CognitiveMessage definition moved to cognitive_bus.go.
+// MissionResult summarizes the outcome of a completed mission.
+type MissionResult struct {
+	Summary   string
+	Findings  []schemas.Finding
+	KGUpdates *schemas.KnowledgeGraphUpdate
+}
+
