@@ -47,6 +47,7 @@ const (
 	ActionInjectPayload  ActionType = "INJECT_PAYLOAD"
 
 	// Codebase Interaction
+	// A new type of action for gathering context from a codebase.
 	ActionGatherCodebaseContext ActionType = "GATHER_CODEBASE_CONTEXT"
 
 	// Mission Control
@@ -74,8 +75,9 @@ const (
 	ObservedDOMChange       ObservationType = "DOM_CHANGE"
 	ObservedConsoleMessage  ObservationType = "CONSOLE_MESSAGE"
 	ObservedTaintFlow       ObservationType = "TAINT_FLOW"
-	ObservedVulnerability   ObservationType = "VULNERABILITY"
+	// This observation type is for returning context from a codebase.
 	ObservedCodebaseContext ObservationType = "CODEBASE_CONTEXT"
+	ObservedVulnerability   ObservationType = "VULNERABILITY"
 	ObservedSystemState     ObservationType = "SYSTEM_STATE"
 )
 
@@ -85,7 +87,7 @@ type Observation struct {
 	MissionID      string          `json:"mission_id"`
 	SourceActionID string          `json:"source_action_id"`
 	Type           ObservationType `json:"type"`
-	Data           interface{}     `json:"data"`   // The raw result payload (e.g., codebase string).
+	Data           interface{}     `json:"data"` // The raw result payload (e.g., codebase string).
 	Result         ExecutionResult `json:"result"` // The status of the execution itself.
 	Timestamp      time.Time       `json:"timestamp"`
 }
@@ -118,4 +120,3 @@ type MissionResult struct {
 	Findings  []schemas.Finding
 	KGUpdates *schemas.KnowledgeGraphUpdate
 }
-

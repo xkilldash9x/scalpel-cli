@@ -1,9 +1,11 @@
 // internal/network/httpclient_test.go
-package network // CHANGED: from network_test to network
+package network
 
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
+	"fmt"
 	"io"
 	"net"
 	"net/http"
@@ -17,11 +19,10 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// Test Cases: Configuration and Defaults (ClientConfig)
+// -- Test Cases: Configuration and Defaults (ClientConfig) --
 
 // TestNewDefaultClientConfig_Optimizations verifies the defaults are optimized for scanning.
 func TestNewDefaultClientConfig_Optimizations(t *testing.T) {
-	SetupObservability(t)
 	config := NewDefaultClientConfig()
 
 	// Verify Timeouts
@@ -44,15 +45,13 @@ func TestNewDefaultClientConfig_Optimizations(t *testing.T) {
 	assert.NotNil(t, config.Logger)
 }
 
-// Test Cases: TLS Configuration (configureTLS)
-
 // TestConfigureTLS_Defaults verifies the strong security defaults of the TLS configuration helper.
 func TestConfigureTLS_Defaults(t *testing.T) {
-	SetupObservability(t)
-	config := NewDefaultClientConfig()
-	tlsConfig := configureTLS(config)
+	// Using a nil config to ensure the helper applies defaults correctly.
+	tlsConfig := configureTLS(nil)
 
 	// Verify Security Parameters
+	require.NotNil(t, tlsConfig, "TLS config should never be nil")
 	assert.Equal(t, uint16(tls.VersionTLS12), tlsConfig.MinVersion)
 	assert.False(t, tlsConfig.InsecureSkipVerify)
 
@@ -73,7 +72,6 @@ func TestConfigureTLS_Defaults(t *testing.T) {
 
 // TestConfigureTLS_CustomConfigClone verifies that a provided custom TLSConfig is cloned and used, and overrides apply.
 func TestConfigureTLS_CustomConfigClone(t *testing.T) {
-	SetupObservability(t)
 	customTLS := &tls.Config{
 		MinVersion: tls.VersionTLS13,
 		ServerName: "custom.sni",
@@ -96,17 +94,17 @@ func TestConfigureTLS_CustomConfigClone(t *testing.T) {
 	assert.False(t, customTLS.InsecureSkipVerify, "Original object should not be modified")
 }
 
-// Test Cases: Transport Creation (NewHTTPTransport)
+// -- Test Cases: Transport Creation (NewHTTPTransport) --
 
 // TestNewHTTPTransport_ConfigurationMapping verifies ClientConfig maps correctly to http.Transport.
 func TestNewHTTPTransport_ConfigurationMapping(t *testing.T) {
-	SetupObservability(t)
 	config := NewDefaultClientConfig()
 	// Modify defaults to ensure custom values are propagated
 	config.MaxIdleConns = 55
 	config.IdleConnTimeout = 99 * time.Second
 	config.DisableCompression = true
 	config.ResponseHeaderTimeout = 5 * time.Second
+	config.DisableKeepAlives = true
 
 	transport := NewHTTPTransport(config)
 
@@ -115,11 +113,11 @@ func TestNewHTTPTransport_ConfigurationMapping(t *testing.T) {
 	assert.Equal(t, 99*time.Second, transport.IdleConnTimeout)
 	assert.True(t, transport.DisableCompression)
 	assert.Equal(t, 5*time.Second, transport.ResponseHeaderTimeout)
+	assert.True(t, transport.DisableKeepAlives, "DisableKeepAlives should be propagated")
 }
 
 // TestNewHTTPTransport_Robustness_NilConfig verifies handling of nil configuration.
 func TestNewHTTPTransport_Robustness_NilConfig(t *testing.T) {
-	SetupObservability(t)
 	// Should use defaults if config is nil
 	transport := NewHTTPTransport(nil)
 
@@ -131,7 +129,6 @@ func TestNewHTTPTransport_Robustness_NilConfig(t *testing.T) {
 
 // TestNewHTTPTransport_ProxyConfiguration verifies proxy settings are applied.
 func TestNewHTTPTransport_ProxyConfiguration(t *testing.T) {
-	SetupObservability(t)
 	proxyURL, _ := url.Parse("http://proxy.example.com:8080")
 	config := NewDefaultClientConfig()
 	config.ProxyURL = proxyURL
@@ -151,7 +148,6 @@ func TestNewHTTPTransport_ProxyConfiguration(t *testing.T) {
 
 // TestNewHTTPTransport_HTTP2_Enabled verifies H2 configuration and ALPN negotiation.
 func TestNewHTTPTransport_HTTP2_Enabled(t *testing.T) {
-	SetupObservability(t)
 	config := NewDefaultClientConfig()
 	config.ForceHTTP2 = true
 
@@ -168,7 +164,6 @@ func TestNewHTTPTransport_HTTP2_Enabled(t *testing.T) {
 
 // TestNewHTTPTransport_HTTP2_Disabled verifies H1-only configuration and ALPN restriction.
 func TestNewHTTPTransport_HTTP2_Disabled(t *testing.T) {
-	SetupObservability(t)
 	config := NewDefaultClientConfig()
 	config.ForceHTTP2 = false
 
@@ -182,12 +177,11 @@ func TestNewHTTPTransport_HTTP2_Disabled(t *testing.T) {
 	assert.Equal(t, []string{"http/1.1"}, transport.TLSClientConfig.NextProtos)
 }
 
-// Test Cases: Client Behavior (NewClient and Integration)
+// -- Test Cases: Client Behavior (NewClient and Integration) --
 
 // TestNewClient_RedirectPolicy verifies the client does not automatically follow redirects (Security requirement).
 func TestNewClient_RedirectPolicy(t *testing.T) {
-	SetupObservability(t)
-	// Setup server that issues a redirect
+	// Setup a server that issues a redirect
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
 			http.Redirect(w, r, "/redirected", http.StatusFound) // 302
@@ -209,7 +203,6 @@ func TestNewClient_RedirectPolicy(t *testing.T) {
 
 // TestClient_TimeoutBehavior verifies the overall client timeout (RequestTimeout).
 func TestClient_TimeoutBehavior(t *testing.T) {
-	SetupObservability(t)
 	// Setup server that delays the response
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(500 * time.Millisecond)
@@ -241,8 +234,7 @@ func TestClient_TimeoutBehavior(t *testing.T) {
 
 // TestClient_Behavior_ResponseHeaderTimeout verifies the specific timeout for waiting on headers.
 func TestClient_Behavior_ResponseHeaderTimeout(t *testing.T) {
-	SetupObservability(t)
-	// Setup a raw TCP server that accepts connection but slowly sends headers
+	// Setup a raw TCP server that accepts a connection but slowly sends headers
 	listener, err := net.Listen("tcp", "127.0.0.1:0")
 	require.NoError(t, err)
 	defer listener.Close()
@@ -287,25 +279,25 @@ func TestClient_Behavior_ResponseHeaderTimeout(t *testing.T) {
 
 // TestClient_HTTPS_Integration verifies end-to-end HTTPS communication and protocol negotiation.
 func TestClient_HTTPS_Integration(t *testing.T) {
-	// Use the tlsTestHelper for robust HTTPS server setup
-	helper := newTLSTestHelper(t)
-	defer helper.close()
+	// A handler for our test server.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		fmt.Fprintln(w, "Hello, client")
+	})
 
-	// Start an HTTPS server using the helper's configuration
-	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		w.Write([]byte("OK HTTPS"))
-	}))
-	server.TLS = &tls.Config{
-		Certificates: []tls.Certificate{helper.serverCert},
-	}
-	// Ensure H2 is enabled on the server (httptest does this automatically with StartTLS)
+	// Setup a standard HTTPS server with a self-signed certificate (httptest default)
+	server := httptest.NewUnstartedServer(handler)
+	server.TLS = &tls.Config{}
 	server.StartTLS()
 	defer server.Close()
+
+    // Get the CA cert from the server's TLS config
+	caCertPool := x509.NewCertPool()
+	caCertPool.AddCert(server.TLS.Certificates[0].Leaf)
 
 	// Configure the client to trust the server's CA
 	config := NewDefaultClientConfig()
 	config.TLSConfig = &tls.Config{
-		RootCAs: helper.caPool,
+		RootCAs: caCertPool,
 	}
 	// Ensure ForceHTTP2 is true (default)
 	config.ForceHTTP2 = true
@@ -319,7 +311,7 @@ func TestClient_HTTPS_Integration(t *testing.T) {
 	// Verify response
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	body, _ := io.ReadAll(resp.Body)
-	assert.Equal(t, "OK HTTPS", string(body))
+	assert.Equal(t, "Hello, client\n", string(body))
 
 	// Verify protocol negotiation (Should be H2)
 	assert.Equal(t, "HTTP/2.0", resp.Proto)
@@ -327,7 +319,6 @@ func TestClient_HTTPS_Integration(t *testing.T) {
 
 // TestClient_InsecureSkipVerify_Integration verifies the client can connect to servers with invalid certs if configured.
 func TestClient_InsecureSkipVerify_Integration(t *testing.T) {
-	SetupObservability(t)
 	// Start a standard HTTPS server with a self-signed certificate (httptest default)
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("OK Insecure"))
@@ -354,7 +345,6 @@ func TestClient_InsecureSkipVerify_Integration(t *testing.T) {
 
 // TestClient_Behavior_ConnectionPooling verifies that connections are reused (Keep-Alive).
 func TestClient_Behavior_ConnectionPooling(t *testing.T) {
-	SetupObservability(t)
 	// Use a map to track the unique remote addresses seen by the server
 	remoteAddrs := make(map[string]bool)
 	var mutex sync.Mutex
@@ -384,4 +374,3 @@ func TestClient_Behavior_ConnectionPooling(t *testing.T) {
 	assert.Less(t, len(remoteAddrs), iterations, "Connections should have been reused")
 	assert.Greater(t, len(remoteAddrs), 0)
 }
-
