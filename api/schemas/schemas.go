@@ -1,3 +1,4 @@
+// internal/schemas.go
 package schemas
 
 import (
@@ -177,6 +178,14 @@ const (
 	SinkPrototypePollution  TaintSink = "PROTOTYPE_POLLUTION_CONFIRMED"
 )
 
+// ObservationType defines the category of an observation made by an agent.
+type ObservationType string
+
+const (
+	ObservationSystemState     ObservationType = "SYSTEM_STATE"
+	ObservationCodebaseContext ObservationType = "CODEBASE_CONTEXT"
+)
+
 // -- Canonical Knowledge Graph Data Model --
 
 // NodeType defines the type of a node in the knowledge graph.
@@ -197,6 +206,7 @@ const (
 	NodeDomain        NodeType = "DOMAIN"
 	// A new node type for a function in a codebase.
 	NodeFunction      NodeType = "FUNCTION"
+	NodeMission       NodeType = "MISSION"
 )
 
 // RelationshipType defines the type of an edge between nodes.
@@ -239,20 +249,20 @@ type Node struct {
 
 // Edge represents a directed, labeled relationship between two nodes.
 type Edge struct {
-	ID          string          `json:"id"`
-	From        string          `json:"from"`
-	To          string          `json:"to"`
+	ID          string           `json:"id"`
+	From        string           `json:"from"` // Source Node ID
+	To          string           `json:"to"`   // Target Node ID
 	Type        RelationshipType `json:"type"`
-	Label       string          `json:"label"`
+	Label       string           `json:"label"`
 	Properties  json.RawMessage  `json:"properties"`
 	CreatedAt   time.Time        `json:"created_at"`
 	LastSeen    time.Time        `json:"last_seen"`
 }
 
-// KnowledgeGraphUpdate represents a batch of updates for the knowledge graph.
-type KnowledgeGraphUpdate struct {
-	Nodes []NodeInput `json:"nodes"`
-	Edges []EdgeInput `json:"edges"`
+// Subgraph represents a localized view of the Knowledge Graph, used for context passing.
+type Subgraph struct {
+	Nodes []Node `json:"nodes"`
+	Edges []Edge `json:"edges"`
 }
 
 // -- Input Schemas for Bulk Operations --
@@ -277,6 +287,13 @@ type EdgeInput struct {
 }
 
 // -- Communication & Result Schemas --
+
+// KnowledgeGraphUpdate is a container for bulk updates to the Knowledge Graph.
+// It's used within a ResultEnvelope to send back new entities discovered by a task.
+type KnowledgeGraphUpdate struct {
+	NodesToAdd []NodeInput `json:"nodes_to_add"`
+	EdgesToAdd []EdgeInput `json:"edges_to_add"`
+}
 
 // ResultEnvelope is the top level wrapper for all results from a single task.
 type ResultEnvelope struct {
@@ -459,6 +476,8 @@ const (
 type GenerationOptions struct {
 	Temperature     float32 `json:"temperature"`
 	ForceJSONFormat bool    `json:"force_json_format"`
+	TopP            float32
+	TopK            int
 }
 
 type GenerationRequest struct {

@@ -12,9 +12,9 @@ import (
 
 var (
 	instance *Config
+	loadErr  error // Cache the loading error globally
 	once     sync.Once
 )
-
 // Config holds the entire application configuration.
 // This is the root configuration structure.
 type Config struct {
@@ -192,10 +192,14 @@ type DiscoveryConfig struct {
 	PassiveConcurrency int           `mapstructure:"passiveConcurrency" yaml:"passiveConcurrency"`
 }
 
-// AgentConfig holds settings for the autonomous agent.
+// KnowledgeGraphConfig holds settings for the agent's knowledge graph.
+type KnowledgeGraphConfig struct {
+	Type string `yaml:"type"`
+}
+// AgentConfig holds all settings related to the autonomous agent.
 type AgentConfig struct {
-	Enabled bool            `mapstructure:"enabled"`
-	LLM     LLMRouterConfig `mapstructure:"llm"`
+	LLM            LLMRouterConfig      `yaml:"llm"`
+	KnowledgeGraph KnowledgeGraphConfig `yaml:"knowledge_graph"` // Add this field
 }
 
 type LLMProvider string
@@ -229,7 +233,6 @@ type LLMModelConfig struct {
 // Load initializes the configuration singleton from Viper.
 // Deprecated: Use Set() during initialization in the root command instead.
 func Load(v *viper.Viper) error {
-	var loadErr error
 	once.Do(func() {
 		var cfg Config
 		if err := v.Unmarshal(&cfg); err != nil {

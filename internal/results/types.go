@@ -31,9 +31,3 @@ type NormalizedFinding struct {
 	Score              float64
 	NormalizedSeverity string
 }
-
-// Aggregates the final, processed findings.
-type Report struct {
-	Findings []NormalizedFinding `json:"findings"`
-	Summary  string              `json:"summary"`
-}

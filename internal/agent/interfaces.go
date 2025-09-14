@@ -1,37 +1,38 @@
-// File:         internal/agent/interfaces.go
-// Description:  Defines the core internal interfaces for the agent's components.
-//
+// in: internal/agent/interfaces.go
 package agent
 
 import (
 	"context"
-
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
-// Mind defines the interface for the agent's cognitive core (The OODA loop implementation).
-type Mind interface {
-	// Start begins the cognitive processing loop.
-	Start(ctx context.Context) error
-
-	// SetMission updates the Mind's current objective.
-	SetMission(mission schemas.Mission)
-
-	// Stop gracefully shuts down the cognitive processes.
-	Stop()
+// GraphStore defines the interface the agent's mind uses to interact with the knowledge graph.
+type GraphStore interface {
+	AddNode(ctx context.Context, node schemas.Node) error
+	GetNode(ctx context.Context, id string) (schemas.Node, error)
+	AddEdge(ctx context.Context, edge schemas.Edge) error
+	GetEdges(ctx context.Context, nodeID string) ([]schemas.Edge, error)
+	GetNeighbors(ctx context.Context, nodeID string) ([]schemas.Node, error)
 }
 
-// SessionContext defines the interface for interacting with the environment (e.g., a browser session).
-// This interface is implemented by the component managing the browser (e.g., Humanoid controller).
+// Mind defines the cognitive core of the agent.
+type Mind interface {
+	Start(ctx context.Context) error
+	Stop()
+	SetMission(mission Mission)
+}
+
+// ActionExecutor defines the interface for a component that can execute a specific type of action.
+type ActionExecutor interface {
+	Execute(ctx context.Context, action Action) (*ExecutionResult, error)
+}
+
+// SessionContext defines the interface for interacting with a browser session.
 type SessionContext interface {
 	Navigate(url string) error
 	Click(selector string) error
-	Type(selector, text string) error
+	Type(selector string, text string) error
 	Submit(selector string) error
 	ScrollPage(direction string) error
-	// WaitForAsync waits for a specified duration for asynchronous activities to settle.
-	WaitForAsync(durationMs int) error
+	WaitForAsync(milliseconds int) error
 }
-
-// LLMClient and related types (ModelTier, GenerationRequest, GenerationOptions)
-// are defined in api/schemas/schemas.go as they are part of the public API contract.

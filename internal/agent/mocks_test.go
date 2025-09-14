@@ -6,70 +6,81 @@ import (
 
 	"github.com/stretchr/testify/mock"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
+	// Removed imports related to internal interfaces that are no longer mocked directly here.
 )
 
-
-// Mock Definitions
-// Comprehensive mocks for isolating the Agent components (Mind, Executors, Bus).
-
-
-// Mocks the interfaces.LLMClient interface.
-// Note: The LLMMind uses interfaces.LLMClient, which matches the definition in llm_mind.go,
-// even though agent/interfaces.go defines a slightly different agent.LLMClient.
+// Mocks the schemas.LLMClient interface used by LLMMind.
 type MockLLMClient struct {
 	mock.Mock
 }
 
-// Mocks the LLM generation call.
-func (m *MockLLMClient) GenerateResponse(ctx context.Context, req interfaces.GenerationRequest) (string, error) {
+// Generate mocks the LLM generation call (matching schemas.LLMClient.Generate).
+func (m *MockLLMClient) Generate(ctx context.Context, req schemas.GenerationRequest) (string, error) {
 	args := m.Called(ctx, req)
 	return args.String(0), args.Error(1)
 }
 
-// Mocks the knowledgegraph.GraphStore interface.
-// Includes robust handling for concurrent access, which is critical as the Mind calls it concurrently.
+// Mocks the knowledgegraph.GraphStore interface based on usage in llm_mind.go (BFS Traversal).
 type MockGraphStore struct {
 	mock.Mock
-	// Use a mutex to ensure the mock itself is thread safe.
 	mu sync.RWMutex
 }
 
-// Simulates adding or updating a node.
-func (m *MockGraphStore) AddNode(input graphmodel.NodeInput) (string, error) {
+// Implement methods used by LLMMind (AddNode, AddEdge, GetNode, GetNeighbors, GetEdges)
+
+// Mocks AddNode (using schemas.Node).
+func (m *MockGraphStore) AddNode(ctx context.Context, node schemas.Node) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	args := m.Called(input)
-	return args.String(0), args.Error(1)
+	args := m.Called(ctx, node)
+	return args.Error(0)
 }
 
-// Simulates adding an edge.
-func (m *MockGraphStore) AddEdge(input graphmodel.EdgeInput) (string, error) {
+// Mocks AddEdge (using schemas.Edge).
+func (m *MockGraphStore) AddEdge(ctx context.Context, edge schemas.Edge) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	args := m.Called(input)
-	return args.String(0), args.Error(1)
+	args := m.Called(ctx, edge)
+	return args.Error(0)
 }
 
-// Simulates extracting the localized context for the Mind.
-func (m *MockGraphStore) ExtractMissionSubgraph(ctx context.Context, missionID string, lookbackSteps int) (graphmodel.GraphExport, error) {
+// Mocks GetNode (required for BFS traversal).
+func (m *MockGraphStore) GetNode(ctx context.Context, id string) (schemas.Node, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
-	args := m.Called(ctx, missionID, lookbackSteps)
-	// Robustness: Handle nil return for error scenarios
+	args := m.Called(ctx, id)
 	if args.Get(0) == nil {
-		// Return empty struct instead of nil interface for the concrete type
-		return graphmodel.GraphExport{}, args.Error(1)
+		return schemas.Node{}, args.Error(1)
 	}
-	return args.Get(0).(graphmodel.GraphExport), args.Error(1)
+	return args.Get(0).(schemas.Node), args.Error(1)
 }
 
-// Mocks the interfaces.SessionContext interface (browser interaction).
+// Mocks GetNeighbors (required for BFS traversal).
+func (m *MockGraphStore) GetNeighbors(ctx context.Context, id string) ([]schemas.Node, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	args := m.Called(ctx, id)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]schemas.Node), args.Error(1)
+}
+
+// Mocks GetEdges (required for BFS traversal).
+func (m *MockGraphStore) GetEdges(ctx context.Context, id string) ([]schemas.Edge, error) {
+	m.mu.RLock()
+	defer m.mu.RUnlock()
+	args := m.Called(ctx, id)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).([]schemas.Edge), args.Error(1)
+}
+
+// Mocks the agent.SessionContext interface.
 type MockSessionContext struct {
 	mock.Mock
 }
-
-// Implement all methods required by interfaces.SessionContext used in executors.go
 
 func (m *MockSessionContext) Navigate(url string) error {
 	args := m.Called(url)

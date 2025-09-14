@@ -53,9 +53,9 @@ func TestNewLLMRouter_Failure_MissingClients(t *testing.T) {
 	expectedError := "both fast and powerful tier clients must be provided"
 
 	tests := []struct {
-		name       string
-		fast       interfaces.LLMClient
-		powerful   interfaces.LLMClient
+		name     string
+		fast     schemas.LLMClient
+		powerful schemas.LLMClient
 	}{
 		{"Missing Fast Client", nil, validClient},
 		{"Missing Powerful Client", validClient, nil},
@@ -72,10 +72,10 @@ func TestNewLLMRouter_Failure_MissingClients(t *testing.T) {
 	}
 }
 
-// -- Test Cases: Routing Logic (GenerateResponse) --
+// -- Test Cases: Routing Logic (Generate) --
 
 // Verifies requests are routed to the fast client.
-func TestGenerateResponse_Routing_TierFast(t *testing.T) {
+func TestGenerate_Routing_TierFast(t *testing.T) {
 	router, fastClient, powerfulClient, observedLogs := setupRouter(t)
 	ctx := context.Background()
 	req := schemas.GenerationRequest{
@@ -85,17 +85,17 @@ func TestGenerateResponse_Routing_TierFast(t *testing.T) {
 	expectedResponse := "response from fast client"
 
 	// Mock expectation: The fast client must be called with the exact request.
-	fastClient.On("GenerateResponse", ctx, req).Return(expectedResponse, nil).Once()
+	fastClient.On("Generate", ctx, req).Return(expectedResponse, nil).Once()
 
 	// Execute
-	response, err := router.GenerateResponse(ctx, req)
+	response, err := router.Generate(ctx, req)
 
 	// Verification
 	assert.NoError(t, err)
 	assert.Equal(t, expectedResponse, response)
 	fastClient.AssertExpectations(t)
 	// Ensure the powerful client was NOT involved
-	powerfulClient.AssertNotCalled(t, "GenerateResponse", mock.Anything, mock.Anything)
+	powerfulClient.AssertNotCalled(t, "Generate", mock.Anything, mock.Anything)
 
 	// Verify logging details
 	require.Equal(t, 1, observedLogs.Len(), "Expected one log entry for routing")
@@ -105,7 +105,7 @@ func TestGenerateResponse_Routing_TierFast(t *testing.T) {
 }
 
 // Verifies requests are routed to the powerful client.
-func TestGenerateResponse_Routing_TierPowerful(t *testing.T) {
+func TestGenerate_Routing_TierPowerful(t *testing.T) {
 	router, fastClient, powerfulClient, _ := setupRouter(t)
 	ctx := context.Background()
 	req := schemas.GenerationRequest{
@@ -115,20 +115,20 @@ func TestGenerateResponse_Routing_TierPowerful(t *testing.T) {
 	expectedResponse := "response from powerful client"
 
 	// Mock expectation
-	powerfulClient.On("GenerateResponse", ctx, req).Return(expectedResponse, nil).Once()
+	powerfulClient.On("Generate", ctx, req).Return(expectedResponse, nil).Once()
 
 	// Execute
-	response, err := router.GenerateResponse(ctx, req)
+	response, err := router.Generate(ctx, req)
 
 	// Verification
 	assert.NoError(t, err)
 	assert.Equal(t, expectedResponse, response)
 	powerfulClient.AssertExpectations(t)
-	fastClient.AssertNotCalled(t, "GenerateResponse", mock.Anything, mock.Anything)
+	fastClient.AssertNotCalled(t, "Generate", mock.Anything, mock.Anything)
 }
 
 // Verifies requests with an empty tier default to powerful.
-func TestGenerateResponse_Routing_Default(t *testing.T) {
+func TestGenerate_Routing_Default(t *testing.T) {
 	router, fastClient, powerfulClient, observedLogs := setupRouter(t)
 	ctx := context.Background()
 	// Request with empty Tier
@@ -141,16 +141,16 @@ func TestGenerateResponse_Routing_Default(t *testing.T) {
 	// Mock expectation: Powerful client handles the default case.
 	// Crucially, the router implementation passes the original request object (req) to the client,
 	// the tier is only determined locally for routing and logging.
-	powerfulClient.On("GenerateResponse", ctx, req).Return(expectedResponse, nil).Once()
+	powerfulClient.On("Generate", ctx, req).Return(expectedResponse, nil).Once()
 
 	// Execute
-	response, err := router.GenerateResponse(ctx, req)
+	response, err := router.Generate(ctx, req)
 
 	// Verification
 	assert.NoError(t, err)
 	assert.Equal(t, expectedResponse, response)
 	powerfulClient.AssertExpectations(t)
-	fastClient.AssertNotCalled(t, "GenerateResponse", mock.Anything, mock.Anything)
+	fastClient.AssertNotCalled(t, "Generate", mock.Anything, mock.Anything)
 
 	// Verify logging reflects the defaulted tier used for routing
 	logEntry := observedLogs.All()[0]
@@ -158,17 +158,17 @@ func TestGenerateResponse_Routing_Default(t *testing.T) {
 }
 
 // Verifies that errors from the underlying client are returned.
-func TestGenerateResponse_Error_Propagation(t *testing.T) {
+func TestGenerate_Error_Propagation(t *testing.T) {
 	router, fastClient, _, _ := setupRouter(t)
 	ctx := context.Background()
 	req := schemas.GenerationRequest{Tier: schemas.TierFast}
 	expectedError := errors.New("underlying client API failure")
 
 	// Mock failure
-	fastClient.On("GenerateResponse", ctx, req).Return("", expectedError).Once()
+	fastClient.On("Generate", ctx, req).Return("", expectedError).Once()
 
 	// Execute
-	response, err := router.GenerateResponse(ctx, req)
+	response, err := router.Generate(ctx, req)
 
 	// Verification
 	assert.Error(t, err)
@@ -177,14 +177,14 @@ func TestGenerateResponse_Error_Propagation(t *testing.T) {
 }
 
 // Verifies behavior when an unknown tier is requested.
-func TestGenerateResponse_Error_InvalidTier(t *testing.T) {
+func TestGenerate_Error_InvalidTier(t *testing.T) {
 	router, fastClient, powerfulClient, _ := setupRouter(t)
 	ctx := context.Background()
 	invalidTier := schemas.ModelTier("invalid-tier-xyz")
 	req := schemas.GenerationRequest{Tier: invalidTier}
 
 	// Execute
-	response, err := router.GenerateResponse(ctx, req)
+	response, err := router.Generate(ctx, req)
 
 	// Verification
 	assert.Error(t, err)
@@ -192,6 +192,6 @@ func TestGenerateResponse_Error_InvalidTier(t *testing.T) {
 	assert.Contains(t, err.Error(), "no LLM client configured for tier: invalid-tier-xyz")
 
 	// Ensure no clients were called
-	fastClient.AssertNotCalled(t, "GenerateResponse", mock.Anything, mock.Anything)
-	powerfulClient.AssertNotCalled(t, "GenerateResponse", mock.Anything, mock.Anything)
+	fastClient.AssertNotCalled(t, "Generate", mock.Anything, mock.Anything)
+	powerfulClient.AssertNotCalled(t, "Generate", mock.Anything, mock.Anything)
 }

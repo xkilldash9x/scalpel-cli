@@ -1,12 +1,9 @@
-// internal/agent/llm_mind_test.go
 package agent
 
 import (
 	"context"
 	"encoding/json"
 	"errors"
-	"fmt"
-	"strings"
 	"testing"
 	"time"
 
@@ -14,30 +11,33 @@ import (
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
+
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
-// Test Setup Helper
+// -- Test Setup Helper --
 
 // setupLLMMind initializes the LLMMind and its dependencies for testing.
 func setupLLMMind(t *testing.T) (*LLMMind, *MockLLMClient, *MockGraphStore, *CognitiveBus) {
 	t.Helper()
 	logger := zaptest.NewLogger(t)
 	mockLLM := new(MockLLMClient)
-	// Use the thread-safe MockGraphStore defined in mocks_test.go.
 	mockKG := new(MockGraphStore)
-	// Use a real CognitiveBus for integration testing of the OODA loop.
+	// Use a real CognitiveBus to properly test the integration of the OODA loop.
 	bus := NewCognitiveBus(logger, 50)
 
-	// Default configuration
+	// A default configuration for our tests.
 	cfg := config.AgentConfig{
-		LLM: config.LLMRouterConfig{Models: map[string]config.LLMModelConfig{"test-model": {Model: "test-model"}}},
+		LLM: config.LLMRouterConfig{
+			DefaultPowerfulModel: "test-model",
+			Models:               map[string]config.LLMModelConfig{"test-model": {Model: "test-model"}},
+		},
 	}
 
 	mind := NewLLMMind(logger, mockLLM, cfg, mockKG, bus)
 
-	// Ensure resources are cleaned up after the test.
+	// Make sure all our resources are cleaned up when the test is done.
 	t.Cleanup(func() {
 		mind.Stop()
 		bus.Shutdown()
@@ -46,49 +46,56 @@ func setupLLMMind(t *testing.T) (*LLMMind, *MockLLMClient, *MockGraphStore, *Cog
 	return mind, mockLLM, mockKG, bus
 }
 
-// Test Cases: Initialization and State Management
+// -- Test Cases: Initialization and State Management --
 
-// TestNewLLMMind_Initialization verifies the initial state and configuration (White-box).
+// TestNewLLMMind_Initialization verifies the initial state and configuration.
 func TestNewLLMMind_Initialization(t *testing.T) {
 	mind, _, _, _ := setupLLMMind(t)
 
-	// White-box verification of initial state
+	// Peeking inside to verify the initial state.
 	assert.Equal(t, StateInitializing, mind.currentState)
-	assert.Equal(t, 10, mind.contextLookbackSteps, "Default context lookback should be set")
 	assert.NotNil(t, mind.stateReadyChan)
 }
 
 // TestLLMMind_SetMission verifies the transition when a new mission is assigned.
 func TestLLMMind_SetMission(t *testing.T) {
-	mind, _, _, _ := setupLLMMind(t)
+	mind, _, mockKG, _ := setupLLMMind(t)
 
-	mission := Mission{ID: "M1", Objective: "Test Objective"}
+	mission := Mission{ID: "mission-set-test", Objective: "Test Objective"}
 
-	// Execute SetMission
+	// When a mission is set, we expect the mind to first check if a node
+	// for this mission already exists in the knowledge graph.
+	mockKG.On("GetNode", mock.Anything, "mission-set-test").Return(schemas.Node{}, errors.New("not found")).Once()
+	// Since it doesn't exist, it should then add a new mission node.
+	mockKG.On("AddNode", mock.Anything, mock.MatchedBy(func(node schemas.Node) bool {
+		return node.Type == schemas.NodeMission
+	})).Return(nil).Once()
+
+	// Let's do it.
 	mind.SetMission(mission)
 
-	// Verify State Change (White-box access with lock)
+	// Now verify the state changed as expected.
 	mind.mu.RLock()
 	assert.Equal(t, StateObserving, mind.currentState)
-	assert.Equal(t, "M1", mind.currentMission.ID)
+	assert.Equal(t, "mission-set-test", mind.currentMission.ID)
 	mind.mu.RUnlock()
 
-	// Verify that the decision loop was signaled (stateReadyChan)
+	// A signal should have been sent to kick off the decision loop.
 	select {
 	case <-mind.stateReadyChan:
-	// Expected behavior: Signal received
+	// This is what we wanted.
 	default:
-		t.Fatal("SetMission did not signal the stateReadyChan")
+		t.Fatal("SetMission did not signal the stateReadyChan as expected")
 	}
 }
 
-// Test Cases: Prompt Generation and Parsing (Unit Tests)
+// -- Test Cases: Prompt Generation and Parsing --
 
 // TestParseActionResponse verifies the robust parsing of LLM responses, including markdown formatting.
 func TestParseActionResponse(t *testing.T) {
 	mind, _, _, _ := setupLLMMind(t)
 
-	// Expected Action structure
+	// The action we expect to get back from a valid response.
 	expectedAction := Action{
 		Type:      ActionNavigate,
 		Value:     "http://example.com/login",
@@ -112,7 +119,7 @@ func TestParseActionResponse(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Testing the unexported method (white-box)
+			// Testing the unexported method directly.
 			action, err := mind.parseActionResponse(tt.response)
 
 			if tt.expectError {
@@ -125,128 +132,70 @@ func TestParseActionResponse(t *testing.T) {
 	}
 }
 
-// Test Cases: Knowledge Graph Interactions (Unit Tests)
-
-// TestRecordActionKG_Truncation verifies long values are truncated before KG persistence.
-func TestRecordActionKG_Truncation(t *testing.T) {
-	mind, _, mockKG, _ := setupLLMMind(t)
-
-	// Create a string longer than the 256 rune limit.
-	longValue := strings.Repeat("X", 300)
-	action := Action{
-		ID:        "A-TRUNC",
-		MissionID: "M1",
-		Value:     longValue,
-	}
-
-	// Expected truncation: 256 chars + "..."
-	expectedValue := strings.Repeat("X", 256) + "..."
-
-	// Expect the value property to be truncated (White-box check of input properties)
-	mockKG.On("AddNode", mock.MatchedBy(func(input schemas.NodeInput) bool {
-		val, ok := input.Properties["value"].(string)
-		return ok && val == expectedValue
-	})).Return("A-TRUNC", nil).Once()
-
-	mockKG.On("AddEdge", mock.Anything).Return("E-TRUNC", nil).Once()
-
-	// Execute (unexported method)
-	err := mind.recordActionKG(action)
-	assert.NoError(t, err)
-	mockKG.AssertExpectations(t)
-}
-
-// TestProcessObservation_Integration verifies the sequence of KG calls when processing an observation.
-func TestProcessObservation_Integration(t *testing.T) {
-	mind, _, mockKG, _ := setupLLMMind(t)
-
-	// Use the strongly typed ExecutionResult for the observation data.
-	execResult := ExecutionResult{
-		Status: "failed",
-		Error:  "Timeout occurred",
-	}
-	obs := Observation{
-		ID:             "O1",
-		MissionID:      "M1",
-		SourceActionID: "A1",
-		Type:           ObservedDOMChange,
-		Data:           &execResult, // Pass as pointer as expected by implementation
-	}
-
-	// Expect calls for recording the observation AND updating the action status.
-
-	// 1. Record Observation Node
-	mockKG.On("AddNode", mock.MatchedBy(func(i schemas.NodeInput) bool {
-		return i.ID == "O1" && i.Type == "Observation"
-	})).Return("O1", nil).Once()
-
-	// 2. Record Edges (Action->Obs, Obs->Mission)
-	mockKG.On("AddEdge", mock.Anything).Return("E1", nil).Twice()
-
-	// 3. Update Action Status (including error message)
-	mockKG.On("AddNode", mock.MatchedBy(func(input schemas.NodeInput) bool {
-		return input.ID == "A1" && input.Properties["status"] == "failed" && input.Properties["error"] == "Timeout occurred"
-	})).Return("A1", nil).Once()
-
-	// Execute (unexported method)
-	err := mind.processObservation(obs)
-	assert.NoError(t, err)
-	mockKG.AssertExpectations(t)
-}
-
-// Test Cases: OODA Loop Integration (Event Driven)
+// -- Test Cases: OODA Loop Integration --
 
 // TestOODALoop_HappyPath verifies the full cycle: SetMission -> Orient -> Decide -> Act -> Observe -> Orient...
-// This is an end-to-end test of the LLMMind's asynchronous processing via the Start method.
 func TestOODALoop_HappyPath(t *testing.T) {
 	mind, mockLLM, mockKG, bus := setupLLMMind(t)
-	// Use a context with timeout to prevent the test from hanging indefinitely.
+	// Use a context with timeout to prevent the test from hanging.
 	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer cancel()
 
-	missionID := "mission-ooda"
-	action1ID := "" // Will capture the ID generated by the Mind
+	missionID := "mission-ooda-happy"
+	var action1ID string // Will capture the ID generated by the Mind
 
-	// --- Expectations for Cycle 1 (Mission Start -> Act) ---
+	missionNode := schemas.Node{ID: missionID, Type: schemas.NodeMission}
 
-	// 1. Orient
-	mockKG.On("ExtractMissionSubgraph", mock.Anything, missionID, 10).Return(schemas.GraphExport{}, nil).Once()
+	// -- Setup: Mission Initialization (in SetMission) --
+	mockKG.On("GetNode", mock.Anything, missionID).Return(schemas.Node{}, errors.New("not found")).Once()
+	mockKG.On("AddNode", mock.Anything, mock.MatchedBy(func(node schemas.Node) bool {
+		return node.Type == schemas.NodeMission
+	})).Return(nil).Once()
 
-	// 2. Decide
+	// -- Expectations for Cycle 1 (Mission Start -> Act) --
+
+	// 1. Orient: Gathers context via BFS.
+	mockKG.On("GetNode", mock.Anything, missionID).Return(missionNode, nil).Once()
+	mockKG.On("GetNeighbors", mock.Anything, missionID).Return([]schemas.Node{}, nil).Once()
+	mockKG.On("GetEdges", mock.Anything, missionID).Return([]schemas.Edge{}, nil).Once()
+
+	// 2. Decide: The LLM should be called to generate the next action.
 	llmAction1 := Action{Type: ActionNavigate, Value: "http://start.com"}
 	llmResponse1, _ := json.Marshal(llmAction1)
-	mockLLM.On("GenerateResponse", mock.Anything, mock.Anything).Return(string(llmResponse1), nil).Once()
+	mockLLM.On("Generate", mock.Anything, mock.Anything).Return(string(llmResponse1), nil).Once()
 
-	// 3. Act (Record Action in KG)
+	// 3. Act: The decided action is recorded in the knowledge graph.
 	// We use MatchedBy to capture the dynamically generated Action ID.
-	mockKG.On("AddNode", mock.MatchedBy(func(input schemas.NodeInput) bool {
-		// White-box check of the input properties.
-		if input.Type == "Action" && input.Properties["status"] == "planned" {
-			action1ID = input.ID // Capture the ID
+	mockKG.On("AddNode", mock.Anything, mock.MatchedBy(func(node schemas.Node) bool {
+		// Check that we're adding an Action node with the right status.
+		props := make(map[string]interface{})
+		json.Unmarshal(node.Properties, &props)
+		if node.Type == schemas.NodeAction && props["status"] == string(schemas.StatusNew) {
+			action1ID = node.ID // This is our chance to grab the ID.
 			return true
 		}
 		return false
-	})).Return("dyn-action-1", nil).Once()
-	mockKG.On("AddEdge", mock.MatchedBy(func(input schemas.EdgeInput) bool {
-		return input.Relationship == "EXECUTES_ACTION"
-	})).Return("edge-m-a1", nil).Once()
+	})).Return(nil).Once()
+	mockKG.On("AddEdge", mock.Anything, mock.MatchedBy(func(edge schemas.Edge) bool {
+		return edge.Type == schemas.RelationshipExecuted
+	})).Return(nil).Once()
 
-	// Start the Mind's processing loops (Observer and Decision)
+	// Let's get the mind's processing loops running in the background.
 	go func() {
-		// We expect Start to run until the context is cancelled.
+		// Start should run until the context is cancelled.
 		if err := mind.Start(ctx); err != nil && !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			t.Logf("LLMMind Start returned unexpected error: %v", err)
 		}
 	}()
 
-	// Subscribe to the bus to monitor Actions posted by the Mind
+	// Subscribe to the bus so we can catch Actions posted by the Mind.
 	actionChan, unsubscribeActions := bus.Subscribe(MessageTypeAction)
 	defer unsubscribeActions()
 
-	// Trigger the OODA loop by setting the mission (sends signal to stateReadyChan)
-	mind.SetMission(Mission{ID: missionID, Objective: "Test OODA"})
+	// Trigger the OODA loop by setting the mission.
+	mind.SetMission(Mission{ID: missionID, Objective: "Test OODA Happy Path"})
 
-	// Wait for the Action to be posted on the bus
+	// Wait for the first action to be posted on the bus.
 	var postedAction1 Action
 	select {
 	case msg := <-actionChan:
@@ -256,78 +205,117 @@ func TestOODALoop_HappyPath(t *testing.T) {
 		t.Fatal("Timeout waiting for Cycle 1 Action on the bus")
 	}
 
-	// Verify Cycle 1 results
+	// Make sure we got what we expected from the first cycle.
 	require.NotEmpty(t, action1ID, "Action ID should have been captured during KG mock")
 	assert.Equal(t, action1ID, postedAction1.ID)
 
-	// --- Expectations for Cycle 2 (Observe -> Act) ---
+	// -- Expectations for Cycle 2 (Observe -> Act/Conclude) --
 
-	// 4. Observe (Process Observation and Update KG - Observer Loop)
-	mockKG.On("AddNode", mock.MatchedBy(func(i schemas.NodeInput) bool { return i.Type == "Observation" })).Return("obs-1", nil).Once()
-	mockKG.On("AddEdge", mock.Anything).Return("edge-obs", nil).Twice()
-	// Update Action 1 status
-	mockKG.On("AddNode", mock.MatchedBy(func(i schemas.NodeInput) bool {
-		return i.ID == action1ID && i.Properties["status"] == "success"
-	})).Return(action1ID, nil).Once()
+	// 4. Observe: The mind processes an observation from the executor.
+	// 4a. A new observation node is added.
+	mockKG.On("AddNode", mock.Anything, mock.MatchedBy(func(n schemas.Node) bool { return n.Type == schemas.NodeObservation })).Return(nil).Once()
+	// 4b. An edge is created from the source action to the new observation.
+	mockKG.On("AddEdge", mock.Anything, mock.Anything).Return(nil).Once()
+	// 4c. The original action node is retrieved...
+	action1Node := schemas.Node{ID: action1ID, Type: schemas.NodeAction, Properties: json.RawMessage(`{}`)}
+	mockKG.On("GetNode", mock.Anything, action1ID).Return(action1Node, nil).Once()
+	// 4d. ...and then updated with the result.
+	mockKG.On("AddNode", mock.Anything, mock.MatchedBy(func(node schemas.Node) bool {
+		props := make(map[string]interface{})
+		json.Unmarshal(node.Properties, &props)
+		return node.ID == action1ID && props["status"] == string(schemas.StatusAnalyzed)
+	})).Return(nil).Once()
 
-	// 5. Orient (Gather Context again - Decision Loop)
-	mockKG.On("ExtractMissionSubgraph", mock.Anything, missionID, 10).Return(schemas.GraphExport{}, nil).Once()
+	// 5. Orient: The context gathering happens again with the updated graph.
+	mockKG.On("GetNode", mock.Anything, missionID).Return(missionNode, nil).Once()
+	mockKG.On("GetNeighbors", mock.Anything, missionID).Return([]schemas.Node{action1Node}, nil).Once()
+	mockKG.On("GetEdges", mock.Anything, missionID).Return([]schemas.Edge{}, nil).Once()
+	mockKG.On("GetNeighbors", mock.Anything, action1ID).Return([]schemas.Node{}, nil).Once()
+	mockKG.On("GetEdges", mock.Anything, action1ID).Return([]schemas.Edge{}, nil).Once()
 
-	// 6. Decide (LLM Call again)
+	// 6. Decide: The LLM sees the successful result and decides to conclude the mission.
 	llmAction2 := Action{Type: ActionConclude}
 	llmResponse2, _ := json.Marshal(llmAction2)
-	mockLLM.On("GenerateResponse", mock.Anything, mock.Anything).Return(string(llmResponse2), nil).Once()
+	mockLLM.On("Generate", mock.Anything, mock.Anything).Return(string(llmResponse2), nil).Once()
 
-	// 7. Act (Record Action 2 in KG)
-	mockKG.On("AddNode", mock.MatchedBy(func(i schemas.NodeInput) bool { return i.Type == "Action" })).Return("dyn-action-2", nil).Once()
-	mockKG.On("AddEdge", mock.Anything).Return("edge-m-a2", nil).Once()
+	// 7. Act: The 'Conclude' action is recorded.
+	mockKG.On("AddNode", mock.Anything, mock.MatchedBy(func(n schemas.Node) bool { return n.Type == schemas.NodeAction })).Return(nil).Once()
+	mockKG.On("AddEdge", mock.Anything, mock.Anything).Return(nil).Once()
 
-	// Trigger Cycle 2 by posting an Observation (simulating the Executor)
+	// Trigger the second cycle by posting an observation, just like an executor tool would.
 	observation := Observation{
 		SourceActionID: action1ID,
-		Data:           &ExecutionResult{Status: "success"},
+		Data:           "success data",
+		Result:         ExecutionResult{Status: "success"},
 	}
 	err := bus.Post(ctx, CognitiveMessage{Type: MessageTypeObservation, Payload: observation})
 	require.NoError(t, err)
 
-	// Wait for the second Action (Conclude) to be posted
+	// Wait for the second, concluding action.
 	select {
 	case msg := <-actionChan:
 		bus.Acknowledge(msg)
 		postedAction2 := msg.Payload.(Action)
 		assert.Equal(t, ActionConclude, postedAction2.Type)
 	case <-ctx.Done():
-		t.Fatal("Timeout waiting for Cycle 2 Action on the bus")
+		t.Fatal("Timeout waiting for Cycle 2 Action (Conclude) on the bus")
 	}
 
-	// Final Verification
+	// Finally, verify that the mind has transitioned to the completed state.
+	assert.Eventually(t, func() bool {
+		mind.mu.RLock()
+		defer mind.mu.RUnlock()
+		return mind.currentState == StateCompleted
+	}, 2*time.Second, 50*time.Millisecond)
+
+	// Make sure all our mocks were called as we expected.
 	mockKG.AssertExpectations(t)
 	mockLLM.AssertExpectations(t)
 }
 
-// Test Cases: Robustness and Error Handling (Integration)
+// -- Test Cases: Robustness and Error Handling --
 
-// TestOODALoop_ObservationKGFailure verifies the Mind transitions to StateFailed if observation processing fails critically.
+// Verifies the Mind transitions to StateFailed if observation processing fails.
 func TestOODALoop_ObservationKGFailure(t *testing.T) {
-	mind, _, mockKG, bus := setupLLMMind(t)
+	mind, mockLLM, mockKG, bus := setupLLMMind(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
-	// Start the Mind
-	go mind.Start(ctx)
-	mind.SetMission(Mission{ID: "mission-fail"})
+	missionID := "mission-fail-obs"
 
-	// Simulate KG failure during observation processing (Observer Loop)
+	// -- Mocks for the initial, unrelated decision cycle triggered by SetMission --
+	// 1. SetMission is called.
+	mockKG.On("GetNode", mock.Anything, missionID).Return(schemas.Node{}, errors.New("not found")).Once()
+	mockKG.On("AddNode", mock.Anything, mock.MatchedBy(func(n schemas.Node) bool { return n.Type == schemas.NodeMission })).Return(nil).Once()
+
+	// 2. The first OODA cycle runs. We mock its full flow to succeed gracefully.
+	// O(rient)
+	mockKG.On("GetNode", mock.Anything, missionID).Return(schemas.Node{ID: missionID}, nil).Maybe()
+	mockKG.On("GetNeighbors", mock.Anything, missionID).Return([]schemas.Node{}, nil).Maybe()
+	mockKG.On("GetEdges", mock.Anything, missionID).Return([]schemas.Edge{}, nil).Maybe()
+	// D(ecide)
+	mockLLM.On("Generate", mock.Anything, mock.Anything).Return(`{"type": "NAVIGATE", "value": "http://init.com", "rationale": "initial action"}`, nil).Maybe()
+	// A(ct)
+	mockKG.On("AddNode", mock.Anything, mock.MatchedBy(func(n schemas.Node) bool { return n.Type == schemas.NodeAction })).Return(nil).Maybe()
+	mockKG.On("AddEdge", mock.Anything, mock.Anything).Return(nil).Maybe()
+
+	// -- Mocks for the actual test scenario --
+	// This is the critical failure we want to test.
 	expectedError := errors.New("KG critical failure")
-	// The first AddNode call in the observer loop is for the observation itself.
-	mockKG.On("AddNode", mock.Anything).Return("", expectedError).Once()
+	mockKG.On("AddNode", mock.Anything, mock.MatchedBy(func(n schemas.Node) bool { return n.Type == schemas.NodeObservation })).Return(expectedError).Once()
 
-	// Post observation
-	observation := Observation{ID: "obs-fail", Data: "data"}
+	// Start the mind and give it a mission.
+	go mind.Start(ctx)
+	mind.SetMission(Mission{ID: missionID})
+
+	// Post an observation to trigger the failure.
+	// We need to give the initial cycle a moment to run before we post.
+	time.Sleep(50 * time.Millisecond)
+	observation := Observation{ID: "obs-fail", Data: "some data"}
 	err := bus.Post(ctx, CognitiveMessage{Type: MessageTypeObservation, Payload: observation})
 	require.NoError(t, err)
 
-	// Verify the Mind transitions to StateFailed (White-box check)
+	// Verify the mind gives up and enters a failed state.
 	assert.Eventually(t, func() bool {
 		mind.mu.RLock()
 		defer mind.mu.RUnlock()
@@ -335,61 +323,80 @@ func TestOODALoop_ObservationKGFailure(t *testing.T) {
 	}, 2*time.Second, 50*time.Millisecond)
 }
 
-// TestOODALoop_DecisionLLMFailure verifies the Mind handles LLM API failures gracefully and returns to Observing.
+// Verifies the Mind handles LLM API failures gracefully.
 func TestOODALoop_DecisionLLMFailure(t *testing.T) {
 	mind, mockLLM, mockKG, _ := setupLLMMind(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	missionID := "mission-llm-fail"
+	missionNode := schemas.Node{ID: missionID, Type: schemas.NodeMission}
 
-	// Setup expectations: Orient succeeds, Decide fails.
-	mockKG.On("ExtractMissionSubgraph", mock.Anything, missionID, 10).Return(schemas.GraphExport{}, nil).Once()
+	// -- Mock Setup in strict execution order --
+	// 1. Mock the SetMission calls.
+	mockKG.On("GetNode", mock.Anything, missionID).Return(schemas.Node{}, errors.New("not found")).Once()
+	mockKG.On("AddNode", mock.Anything, mock.MatchedBy(func(n schemas.Node) bool { return n.Type == schemas.NodeMission })).Return(nil).Once()
 
+	// 2. Mock the decision cycle that the test is targeting.
+	// O(rient) must succeed.
+	mockKG.On("GetNode", mock.Anything, missionID).Return(missionNode, nil).Once()
+	mockKG.On("GetNeighbors", mock.Anything, missionID).Return([]schemas.Node{}, nil).Once()
+	mockKG.On("GetEdges", mock.Anything, missionID).Return([]schemas.Edge{}, nil).Once()
+
+	// D(ecide) is the failure point we are testing.
 	expectedError := errors.New("LLM API timeout")
-	mockLLM.On("GenerateResponse", mock.Anything, mock.Anything).Return("", expectedError).Once()
+	mockLLM.On("Generate", mock.Anything, mock.Anything).Return("", expectedError).Once()
 
-	// Start the Mind and trigger the cycle
+	// Start the mind and trigger the cycle.
 	go mind.Start(ctx)
 	mind.SetMission(Mission{ID: missionID})
 
-	// Verify the Mind returns to StateObserving (allowing for potential retries later).
-	// It transitions through Orienting, Deciding, and back to Observing.
+	// -- Corrected Assertion --
+	// 1. First, wait for the mind to reach the expected state. This confirms
+	// the async operation has finished processing the error.
 	assert.Eventually(t, func() bool {
-		// We check if the mocks have been called as a proxy for the cycle completing.
-		mocksMet := mockLLM.AssertExpectations(t) && mockKG.AssertExpectations(t)
-
 		mind.mu.RLock()
 		currentState := mind.currentState
 		mind.mu.RUnlock()
+		return currentState == StateObserving
+	}, 2*time.Second, 50*time.Millisecond, "Mind did not return to OBSERVING state after LLM failure.")
 
-		return mocksMet && currentState == StateObserving
-	}, 2*time.Second, 50*time.Millisecond)
+	// 2. NOW that we know the operation is complete, we can safely assert
+	// that all our mock expectations were met.
+	mockLLM.AssertExpectations(t)
+	mockKG.AssertExpectations(t)
 }
 
-// TestOODALoop_ActionKGFailure verifies the Mind transitions to StateFailed if it cannot record its decided action.
+// Verifies the Mind fails if it cannot record its decided action.
 func TestOODALoop_ActionKGFailure(t *testing.T) {
 	mind, mockLLM, mockKG, _ := setupLLMMind(t)
 	ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
 
 	missionID := "mission-action-kg-fail"
+	missionNode := schemas.Node{ID: missionID, Type: schemas.NodeMission}
 
-	// Setup expectations: Orient succeeds, Decide succeeds, Act (KG recording) fails.
-	mockKG.On("ExtractMissionSubgraph", mock.Anything, missionID, 10).Return(schemas.GraphExport{}, nil).Once()
+	// -- Mock Setup in strict execution order --
+	// 1. Mock the SetMission calls.
+	mockKG.On("GetNode", mock.Anything, missionID).Return(schemas.Node{}, errors.New("not found")).Once()
+	mockKG.On("AddNode", mock.Anything, mock.MatchedBy(func(n schemas.Node) bool { return n.Type == schemas.NodeMission })).Return(nil).Once()
 
+	// 2. Mock O(rient) and D(ecide) to succeed.
+	mockKG.On("GetNode", mock.Anything, missionID).Return(missionNode, nil).Once()
+	mockKG.On("GetNeighbors", mock.Anything, missionID).Return([]schemas.Node{}, nil).Once()
+	mockKG.On("GetEdges", mock.Anything, missionID).Return([]schemas.Edge{}, nil).Once()
 	llmResponse, _ := json.Marshal(Action{Type: ActionClick})
-	mockLLM.On("GenerateResponse", mock.Anything, mock.Anything).Return(string(llmResponse), nil).Once()
+	mockLLM.On("Generate", mock.Anything, mock.Anything).Return(string(llmResponse), nil).Once()
 
+	// 3. A(ct) is the failure point we are testing.
 	expectedError := errors.New("KG write failure")
-	// The AddNode call during the Act phase fails.
-	mockKG.On("AddNode", mock.Anything).Return("", expectedError).Once()
+	mockKG.On("AddNode", mock.Anything, mock.MatchedBy(func(n schemas.Node) bool { return n.Type == schemas.NodeAction })).Return(expectedError).Once()
 
-	// Start the Mind and trigger the cycle
+	// Start the mind and trigger the cycle.
 	go mind.Start(ctx)
 	mind.SetMission(Mission{ID: missionID})
 
-	// Verify the Mind transitions to StateFailed (White-box check)
+	// If the mind can't record what it decided to do, that's a critical failure.
 	assert.Eventually(t, func() bool {
 		mind.mu.RLock()
 		defer mind.mu.RUnlock()

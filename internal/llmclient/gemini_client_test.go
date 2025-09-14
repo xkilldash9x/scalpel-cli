@@ -26,7 +26,7 @@ import (
 
 // setupGeminiClient rigs up a GeminiClient pointed at a mock HTTP server for our testing pleasure.
 // It returns the client, the mock server, the configuration used, and a log observer.
-func setupGeminiClient(t *testing.T, handler http.HandlerFunc) (*GeminiClient, *httptest.Server, config.LLMModelConfig, *observer.ObservedLogs) {
+func setupGeminiClient(t *testing.T, handler http.HandlerFunc) (*GoogleClient, *httptest.Server, config.LLMModelConfig, *observer.ObservedLogs) {
 	t.Helper()
 	// Initialize mock server
 	if handler == nil {
@@ -46,8 +46,8 @@ func setupGeminiClient(t *testing.T, handler http.HandlerFunc) (*GeminiClient, *
 	cfg := getValidLLMConfig()
 	cfg.Endpoint = server.URL
 
-	client, err := NewGeminiClient(cfg, logger)
-	require.NoError(t, err, "NewGeminiClient initialization failed")
+	client, err := NewGoogleClient(cfg, logger)
+	require.NoError(t, err, "NewGoogleClient initialization failed")
 
 	// Ensure tests fail fast on unexpected hangs
 	client.httpClient.Timeout = 5 * time.Second
@@ -67,16 +67,16 @@ func createTestRequest() schemas.GenerationRequest {
 	}
 }
 
-// -- Test Cases: Initialization (NewGeminiClient) --
+// -- Test Cases: Initialization (NewGoogleClient) --
 
 // Verifies successful initialization and default endpoint configuration.
-func TestNewGeminiClient_Success(t *testing.T) {
+func TestNewGoogleClient_Success(t *testing.T) {
 	logger := setupTestLogger(t)
 	cfg := getValidLLMConfig()
 	// Ensure endpoint is empty to test the default assignment logic
 	cfg.Endpoint = ""
 
-	client, err := NewGeminiClient(cfg, logger)
+	client, err := NewGoogleClient(cfg, logger)
 
 	// Verification
 	require.NoError(t, err)
@@ -88,24 +88,24 @@ func TestNewGeminiClient_Success(t *testing.T) {
 	// Verify the default endpoint format
 	expectedEndpoint := fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", cfg.Model)
 	assert.Equal(t, expectedEndpoint, client.endpoint)
+	assert.NotNil(t, client.backoffFactory, "Backoff factory should be initialized")
 }
 
 // Verifies the requirement for an API key.
-func TestNewGeminiClient_Failure_MissingAPIKey(t *testing.T) {
+func TestNewGoogleClient_Failure_MissingAPIKey(t *testing.T) {
 	logger := setupTestLogger(t)
 	cfg := getValidLLMConfig()
 	cfg.APIKey = ""
 
-	client, err := NewGeminiClient(cfg, logger)
+	client, err := NewGoogleClient(cfg, logger)
 
 	// Verification
 	assert.Error(t, err)
 	assert.Nil(t, client)
-	assert.Contains(t, err.Error(), "Gemini API Key is required")
+	assert.Contains(t, err.Error(), "Google/Gemini API Key is required")
 }
 
 // -- Test Cases: Request Payload Generation (buildRequestPayload) --
-// White box testing. We're going straight for the unexported goods to check the payload generation.
 
 // Verifies the structure and content of the generated payload.
 func TestBuildRequestPayload_Standard(t *testing.T) {
@@ -163,10 +163,10 @@ func TestBuildRequestPayload_ForceJSON(t *testing.T) {
 	assert.Equal(t, "application/json", payload.GenerationConfig.ResponseMimeType)
 }
 
-// -- Test Cases: Response Generation (GenerateResponse) - Success Scenarios --
+// -- Test Cases: Response Generation (Generate) - Success Scenarios --
 
 // Verifies a standard successful API call, including request validation, response parsing, and logging.
-func TestGenerateResponse_Success(t *testing.T) {
+func TestGenerate_Success(t *testing.T) {
 	expectedResponseText := "This is the generated content."
 	expectedPromptTokens := 100
 	expectedCompletionTokens := 50
@@ -177,7 +177,7 @@ func TestGenerateResponse_Success(t *testing.T) {
 		assert.Equal(t, "POST", r.Method)
 		assert.Equal(t, "application/json", r.Header.Get("Content-Type"))
 		// Verify Authentication
-		assert.Equal(t, TestAPIKey, r.Header.Get("x-goog-api-key"))
+		assert.Equal(t, "test-api-key", r.Header.Get("x-goog-api-key"))
 
 		// 2. Verify Request Body Structure
 		body, _ := io.ReadAll(r.Body)
@@ -218,7 +218,7 @@ func TestGenerateResponse_Success(t *testing.T) {
 	req := createTestRequest()
 
 	// Execute
-	response, err := client.GenerateResponse(context.Background(), req)
+	response, err := client.Generate(context.Background(), req)
 
 	// Verification
 	assert.NoError(t, err)
@@ -228,16 +228,16 @@ func TestGenerateResponse_Success(t *testing.T) {
 	require.Equal(t, 1, observedLogs.Len(), "Expected one log entry for successful generation")
 	logEntry := observedLogs.All()[0]
 	assert.Equal(t, "LLM generation complete (Gemini)", logEntry.Message)
+	// FIX: Zap logs integers (zap.Int) as int64 in the context map.
 	assert.Equal(t, int64(expectedPromptTokens), logEntry.ContextMap()["prompt_tokens"])
 	assert.Equal(t, int64(expectedCompletionTokens), logEntry.ContextMap()["completion_tokens"])
 	assert.NotNil(t, logEntry.ContextMap()["duration"])
 }
 
-// -- Test Cases: Response Generation (GenerateResponse) - Error Handling & Retries --
-// because networks are flaky
+// -- Test Cases: Response Generation (Generate) - Error Handling & Retries --
 
 // Verifies the exponential backoff mechanism works for transient API errors (5xx).
-func TestGenerateResponse_RetryOnTransientErrors(t *testing.T) {
+func TestGenerate_RetryOnTransientErrors(t *testing.T) {
 	var attemptCounter int32
 	expectedAttempts := 3
 
@@ -266,11 +266,19 @@ func TestGenerateResponse_RetryOnTransientErrors(t *testing.T) {
 	client, _, _, observedLogs := setupGeminiClient(t, handler)
 	req := createTestRequest()
 
+	// FIX: Inject a faster backoff strategy for the test to avoid long wait times.
+	client.backoffFactory = func() backoff.BackOff {
+		b := backoff.NewExponentialBackOff()
+		b.InitialInterval = 10 * time.Millisecond
+		b.MaxElapsedTime = 5 * time.Second
+		return b
+	}
+
 	// Execute
 	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 	defer cancel()
 
-	response, err := client.GenerateResponse(ctx, req)
+	response, err := client.Generate(ctx, req)
 
 	// Verification
 	assert.NoError(t, err)
@@ -283,11 +291,16 @@ func TestGenerateResponse_RetryOnTransientErrors(t *testing.T) {
 }
 
 // Verifies that network level errors are retried and logged as warnings.
-func TestGenerateResponse_RetryOnNetworkError(t *testing.T) {
+func TestGenerate_RetryOnNetworkError(t *testing.T) {
 	// Setup the client first.
 	client, server, _, observedLogs := setupGeminiClient(t, func(w http.ResponseWriter, r *http.Request) {
 		t.Error("Handler reached despite server being closed.")
 	})
+
+	// FIX: Inject a faster backoff strategy.
+	client.backoffFactory = func() backoff.BackOff {
+		return backoff.NewConstantBackOff(10 * time.Millisecond)
+	}
 
 	// Immediately close the server to simulate a network error (connection refused).
 	server.Close()
@@ -296,7 +309,7 @@ func TestGenerateResponse_RetryOnNetworkError(t *testing.T) {
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
 
-	_, err := client.GenerateResponse(ctx, createTestRequest())
+	_, err := client.Generate(ctx, createTestRequest())
 
 	// Verification
 	assert.Error(t, err)
@@ -307,12 +320,12 @@ func TestGenerateResponse_RetryOnNetworkError(t *testing.T) {
 
 	// Verify Warning logs for network errors during retries
 	warnLogs := observedLogs.FilterLevelExact(zap.WarnLevel)
-	assert.Greater(t, warnLogs.Len(), 0, "Expected WARN logs for network errors")
+	assert.Greater(t, warnLogs.Len(), 1, "Expected multiple WARN logs for network errors indicating retries")
 	assert.Contains(t, warnLogs.All()[0].Message, "Network error during LLM request, retrying...")
 }
 
 // Verifies that permanent errors (e.g., 400/403) fail immediately.
-func TestGenerateResponse_NoRetryOnPermanentErrors(t *testing.T) {
+func TestGenerate_NoRetryOnPermanentErrors(t *testing.T) {
 	var attemptCounter int32
 	errorBody := "API Key Invalid"
 
@@ -327,32 +340,33 @@ func TestGenerateResponse_NoRetryOnPermanentErrors(t *testing.T) {
 	req := createTestRequest()
 
 	// Execute
-	response, err := client.GenerateResponse(context.Background(), req)
+	response, err := client.Generate(context.Background(), req)
 
 	// Verification
 	assert.Error(t, err)
 	assert.Empty(t, response)
 	assert.Contains(t, err.Error(), "gemini API error: status 403")
 
-	// Crucially, verify only one attempt was made (backoff.Permanent was used)
+	// Crucially, verify only one attempt was made (backoff.Permanent was used internally)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&attemptCounter), "Permanent errors must not trigger retries")
 
-	// Verify it is wrapped as a permanent error
-	var permanentErr *backoff.PermanentError
-	assert.ErrorAs(t, err, &permanentErr)
+	// FIX: Removed check for backoff.PermanentError wrapper, as backoff.Retry unwraps it.
 
 	// Verify Error Logging
 	errorLogs := observedLogs.FilterLevelExact(zap.ErrorLevel)
 	require.Equal(t, 1, errorLogs.Len())
 	logEntry := errorLogs.All()[0]
 	assert.Equal(t, "Gemini API returned error status", logEntry.Message)
+	// FIX: Zap logs integers as int64.
 	assert.Equal(t, int64(403), logEntry.ContextMap()["status"])
 	assert.Contains(t, logEntry.ContextMap()["response"], errorBody)
 }
 
 // Verifies handling of responses blocked by safety filters (Permanent Error).
-func TestGenerateResponse_Failure_SafetyBlock(t *testing.T) {
+func TestGenerate_Failure_SafetyBlock(t *testing.T) {
+	var attemptCounter int32
 	handler := func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attemptCounter, 1)
 		// Simulate a response where generation finished due to safety reasons (HTTP 200, but FinishReason=SAFETY).
 		responsePayload := GeminiResponsePayload{
 			Candidates: []struct {
@@ -373,19 +387,20 @@ func TestGenerateResponse_Failure_SafetyBlock(t *testing.T) {
 	req := createTestRequest()
 
 	// Execute
-	response, err := client.GenerateResponse(context.Background(), req)
+	response, err := client.Generate(context.Background(), req)
 
 	// Verification
 	assert.Error(t, err)
 	assert.Empty(t, response)
 	assert.Contains(t, err.Error(), "gemini API blocked the request (Reason: SAFETY)")
-	// Verify it is treated as a permanent error
-	var permanentErr *backoff.PermanentError
-	assert.ErrorAs(t, err, &permanentErr)
+
+	// FIX: Verify it is treated as a permanent error by checking the attempt count.
+	assert.Equal(t, int32(1), atomic.LoadInt32(&attemptCounter), "Safety blocks must not trigger retries")
+	// FIX: Removed check for backoff.PermanentError wrapper.
 }
 
 // Verifies handling of empty content for non blocking reasons (Transient Error).
-func TestGenerateResponse_Failure_EmptyContent_NonBlockReason(t *testing.T) {
+func TestGenerate_Failure_EmptyContent_NonBlockReason(t *testing.T) {
 	var attemptCounter int32
 	// Simulate empty content but a non-blocking reason (e.g., OTHER or MAX_TOKENS)
 	responsePayload := GeminiResponsePayload{
@@ -403,10 +418,16 @@ func TestGenerateResponse_Failure_EmptyContent_NonBlockReason(t *testing.T) {
 
 	client, _, _, _ := setupGeminiClient(t, handler)
 
+	// FIX: Inject a fast backoff strategy so retries happen reliably within the test timeout.
+	client.backoffFactory = func() backoff.BackOff {
+		// Constant backoff of 10ms allows for many retries quickly.
+		return backoff.NewConstantBackOff(10 * time.Millisecond)
+	}
+
 	// Execute with a short timeout to limit the retries during the test.
 	ctx, cancel := context.WithTimeout(context.Background(), 500*time.Millisecond)
 	defer cancel()
-	_, err := client.GenerateResponse(ctx, createTestRequest())
+	_, err := client.Generate(ctx, createTestRequest())
 
 	// Verification
 	assert.Error(t, err)
@@ -420,8 +441,10 @@ func TestGenerateResponse_Failure_EmptyContent_NonBlockReason(t *testing.T) {
 }
 
 // Verifies robustness against empty response lists (Permanent Error).
-func TestGenerateResponse_Failure_NoCandidates(t *testing.T) {
+func TestGenerate_Failure_NoCandidates(t *testing.T) {
+	var attemptCounter int32
 	handler := func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&attemptCounter, 1)
 		// Simulate a valid JSON response with an empty candidates array.
 		responsePayload := GeminiResponsePayload{
 			Candidates: []struct {
@@ -437,19 +460,19 @@ func TestGenerateResponse_Failure_NoCandidates(t *testing.T) {
 	req := createTestRequest()
 
 	// Execute
-	response, err := client.GenerateResponse(context.Background(), req)
+	response, err := client.Generate(context.Background(), req)
 
 	// Verification
 	assert.Error(t, err)
 	assert.Empty(t, response)
 	assert.Contains(t, err.Error(), "gemini API returned no candidates")
-	// Verify it is treated as a permanent error
-	var permanentErr *backoff.PermanentError
-	assert.ErrorAs(t, err, &permanentErr)
+	// FIX: Verify it is treated as a permanent error by checking the attempt count.
+	assert.Equal(t, int32(1), atomic.LoadInt32(&attemptCounter), "No candidates response must not trigger retries")
+	// FIX: Removed check for backoff.PermanentError wrapper.
 }
 
 // Verifies handling of corrupted API responses (Permanent Error).
-func TestGenerateResponse_Failure_InvalidJSONResponse(t *testing.T) {
+func TestGenerate_Failure_InvalidJSONResponse(t *testing.T) {
 	var attemptCounter int32
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		atomic.AddInt32(&attemptCounter, 1)
@@ -462,7 +485,7 @@ func TestGenerateResponse_Failure_InvalidJSONResponse(t *testing.T) {
 	req := createTestRequest()
 
 	// Execute
-	response, err := client.GenerateResponse(context.Background(), req)
+	response, err := client.Generate(context.Background(), req)
 
 	// Verification
 	assert.Error(t, err)
@@ -470,12 +493,11 @@ func TestGenerateResponse_Failure_InvalidJSONResponse(t *testing.T) {
 	assert.Contains(t, err.Error(), "failed to decode response payload")
 	// JSON decoding errors should be treated as permanent failures (no retry)
 	assert.Equal(t, int32(1), atomic.LoadInt32(&attemptCounter))
-	var permanentErr *backoff.PermanentError
-	assert.ErrorAs(t, err, &permanentErr)
+	// FIX: Removed check for backoff.PermanentError wrapper.
 }
 
 // Verifies that the operation respects context cancellation during backoff waits.
-func TestGenerateResponse_ContextCancellation(t *testing.T) {
+func TestGenerate_ContextCancellation(t *testing.T) {
 	// Handler that always returns a transient error, forcing continuous retries.
 	handler := func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusTooManyRequests) // Transient error
@@ -484,14 +506,19 @@ func TestGenerateResponse_ContextCancellation(t *testing.T) {
 	client, _, _, _ := setupGeminiClient(t, handler)
 	req := createTestRequest()
 
+	// FIX: Inject a long backoff strategy to ensure cancellation happens during the wait.
+	client.backoffFactory = func() backoff.BackOff {
+		return backoff.NewConstantBackOff(10 * time.Second)
+	}
+
 	// Create a context and cancel it almost immediately
 	ctx, cancel := context.WithCancel(context.Background())
-	// Allow a brief moment for the first request to potentially start before cancelling
-	time.AfterFunc(20*time.Millisecond, cancel)
+	// Allow a brief moment for the first request to start, fail, and enter backoff wait before cancelling.
+	time.AfterFunc(50*time.Millisecond, cancel)
 
 	// Execute
 	startTime := time.Now()
-	response, err := client.GenerateResponse(ctx, req)
+	response, err := client.Generate(ctx, req)
 	duration := time.Since(startTime)
 
 	// Verification

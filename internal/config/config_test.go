@@ -174,7 +174,8 @@ func TestConfigStructureMapping(t *testing.T) {
 	// Network
 	v.Set("network.timeout", "15s")
 	v.Set("network.captureResponseBodies", true)
-	v.Set("network.headers.User-Agent", "Scalpel-Test")
+	// FIX IS HERE: Set the entire map object instead of a nested key.
+	v.Set("network.headers", map[string]string{"User-Agent": "Scalpel-Test"})
 	v.Set("network.postLoadWait", "1s")
 
 	// IAST (Testing both mapstructure and yaml tags where applicable)

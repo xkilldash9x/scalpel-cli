@@ -1,4 +1,3 @@
-// internal/llmclient/google_client.go
 package llmclient
 
 import (
@@ -24,6 +23,8 @@ type GoogleClient struct {
 	httpClient *http.Client
 	logger     *zap.Logger
 	config     config.LLMModelConfig
+	// backoffFactory creates a new BackOff instance for each operation, ensuring thread safety and reset state.
+	backoffFactory func() backoff.BackOff
 }
 
 // Ensures GoogleClient implements the LLMClient interface.
@@ -57,10 +58,10 @@ type GeminiGenerationConfig struct {
 }
 
 type GeminiRequestPayload struct {
-	Contents         []GeminiContent         `json:"contents"`
+	Contents          []GeminiContent          `json:"contents"`
 	SystemInstruction *GeminiSystemInstruction `json:"system_instruction,omitempty"`
-	SafetySettings   []GeminiSafetySetting   `json:"safetySettings,omitempty"`
-	GenerationConfig GeminiGenerationConfig  `json:"generationConfig,omitempty"`
+	SafetySettings    []GeminiSafetySetting    `json:"safetySettings,omitempty"`
+	GenerationConfig  GeminiGenerationConfig   `json:"generationConfig,omitempty"`
 }
 
 type GeminiResponsePayload struct {
@@ -73,6 +74,16 @@ type GeminiResponsePayload struct {
 		CandidatesTokenCount int `json:"candidatesTokenCount"`
 		TotalTokenCount      int `json:"totalTokenCount"`
 	} `json:"usageMetadata"`
+}
+
+// newDefaultBackOffFactory returns a function that creates the standard exponential backoff strategy.
+func newDefaultBackOffFactory() func() backoff.BackOff {
+	return func() backoff.BackOff {
+		b := backoff.NewExponentialBackOff()
+		b.MaxElapsedTime = 2 * time.Minute
+		b.MaxInterval = 30 * time.Second
+		return b
+	}
 }
 
 // NewGoogleClient initializes the client for the Gemini API.
@@ -93,26 +104,13 @@ func NewGoogleClient(cfg config.LLMModelConfig, logger *zap.Logger) (*GoogleClie
 		httpClient: &http.Client{
 			Timeout: cfg.APITimeout,
 		},
-		logger: logger.Named("llm_client.google"),
+		logger:         logger.Named("llm_client.google"),
+		backoffFactory: newDefaultBackOffFactory(),
 	}, nil
 }
 
-// Generate sends a simple prompt to the Gemini API and returns the generated content with retries.
-// This method implements the standard schemas.LLMClient interface.
-func (c *GoogleClient) Generate(ctx context.Context, prompt string) (string, error) {
-	// Adapt the simple string prompt to the required structured request format.
-	generationRequest := schemas.GenerationRequest{
-		SystemPrompt: "You are a helpful and concise assistant.", // A default system prompt
-		UserPrompt:   prompt,
-		Options: schemas.GenerationOptions{
-			Temperature: 0.2, // A default temperature
-		},
-	}
-	return c.generateResponse(ctx, generationRequest)
-}
-
-// generateResponse handles the detailed logic of sending prompts to the Gemini API.
-func (c *GoogleClient) generateResponse(ctx context.Context, req schemas.GenerationRequest) (string, error) {
+// Generate is now the method that sends a structured request to the Gemini API and returns the generated content with retries.
+func (c *GoogleClient) Generate(ctx context.Context, req schemas.GenerationRequest) (string, error) {
 	payload := c.buildRequestPayload(req)
 
 	body, err := json.Marshal(payload)
@@ -120,9 +118,8 @@ func (c *GoogleClient) generateResponse(ctx context.Context, req schemas.Generat
 		return "", fmt.Errorf("failed to marshal request payload: %w", err)
 	}
 
-	b := backoff.NewExponentialBackOff()
-	b.MaxElapsedTime = 2 * time.Minute
-	b.MaxInterval = 30 * time.Second
+	// Get a fresh backoff instance for this operation
+	b := c.backoffFactory()
 
 	var responseContent string
 
@@ -168,6 +165,7 @@ func (c *GoogleClient) generateResponse(ctx context.Context, req schemas.Generat
 			if candidate.FinishReason == "SAFETY" || candidate.FinishReason == "BLOCKLIST" {
 				return backoff.Permanent(fmt.Errorf("gemini API blocked the request (Reason: %s)", candidate.FinishReason))
 			}
+			// Transient error if content is empty for other reasons (e.g., MAX_TOKENS, OTHER)
 			return fmt.Errorf("gemini API returned empty content parts (Reason: %s)", candidate.FinishReason)
 		}
 
@@ -182,7 +180,9 @@ func (c *GoogleClient) generateResponse(ctx context.Context, req schemas.Generat
 		return nil
 	}
 
+	// Apply the backoff strategy with the context.
 	if err = backoff.Retry(operation, backoff.WithContext(b, ctx)); err != nil {
+		// Note: If the operation returned backoff.Permanent(e), backoff.Retry returns e directly (unwrapped).
 		return "", err
 	}
 
@@ -226,10 +226,12 @@ func (c *GoogleClient) handleAPIError(statusCode int, body []byte) error {
 	err := fmt.Errorf("gemini API error: status %d, body: %s", statusCode, string(body))
 
 	switch statusCode {
-	case http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusInternalServerError:
+	// Include common transient HTTP status codes.
+	case http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusInternalServerError, http.StatusBadGateway, http.StatusGatewayTimeout:
 		return err // Transient errors, retry.
 	default:
-		return backoff.Permanent(err) // Permanent errors.
+		// Permanent errors (4xx, etc.).
+		return backoff.Permanent(err)
 	}
 }
 

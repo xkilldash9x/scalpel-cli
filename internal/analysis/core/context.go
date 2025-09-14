@@ -4,6 +4,7 @@ package core
 import (
 	"net/url"
 
+	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
@@ -27,6 +28,7 @@ type GlobalContext struct {
 	Config         *config.Config
 	Logger         *zap.Logger
 	BrowserManager *browser.Manager
+	DBPool         *pgxpool.Pool // Added this field
 	KGClient       KnowledgeGraphClient
 	OASTProvider   OASTProvider // Optional
 	// Add other global services like HTTPClient, LLMClient, etc.

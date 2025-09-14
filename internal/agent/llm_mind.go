@@ -1,8 +1,6 @@
+// File: internal/agent/llm_mind.go
 package agent
-/* WARNING: This file contains a quirk that WILL prevent it from being able to be parsed correctly in a markdown env.
-Specifically, the 'jsonBlockRegex' variable declaration can cause issues.
-To sidestep this, you may need to handle that line separately from the rest of the file. Or not,
-do whatever you think is best, I'm not your dad. **/
+
 import (
     "context"
     "encoding/json"
@@ -18,14 +16,13 @@ import (
 
     "github.com/xkilldash9x/scalpel-cli/api/schemas"
     "github.com/xkilldash9x/scalpel-cli/internal/config"
-    "github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
 )
 
 // LLMMind implements the Mind interface.
 type LLMMind struct {
     cfg                  config.AgentConfig
     logger               *zap.Logger
-    kg                   knowledgegraph.GraphStore
+    kg                   GraphStore
     bus                  *CognitiveBus
     llmClient            schemas.LLMClient
     currentMission       Mission
@@ -44,7 +41,7 @@ func NewLLMMind(
     logger *zap.Logger,
     client schemas.LLMClient,
     cfg config.AgentConfig,
-    kg knowledgegraph.GraphStore,
+    kg GraphStore,
     bus *CognitiveBus,
 ) *LLMMind {
     contextLookbackSteps := 10 // Default lookback
@@ -91,6 +88,7 @@ func (m *LLMMind) Start(ctx context.Context) error {
 // runObserverLoop listens for observations and integrates them into the KG.
 func (m *LLMMind) runObserverLoop(ctx context.Context) {
     m.logger.Info("Observer loop started.")
+    // Subscribe specifically to observations.
     obsChan, unsubscribe := m.bus.Subscribe(MessageTypeObservation)
     defer unsubscribe()
 
@@ -102,27 +100,38 @@ func (m *LLMMind) runObserverLoop(ctx context.Context) {
             return
         case msg, ok := <-obsChan:
             if !ok {
-                m.logger.Info("Observation channel closed, observer loop stopping.")
                 return
             }
 
-            // Process the observation.
+            // Track if processing fails critically.
+            processingFailed := false
             func() {
-                // Acknowledge the message when processing is complete.
                 defer m.bus.Acknowledge(msg)
 
                 m.updateState(StateObserving)
                 if obs, ok := msg.Payload.(Observation); ok {
                     if err := m.processObservation(ctx, obs); err != nil {
                         m.logger.Error("Failed to process observation", zap.Error(err))
+                        // Check specifically for KG recording errors.
+                        if strings.Contains(err.Error(), "failed to record observation in KG") {
+                            processingFailed = true
+                        }
                     }
                 } else {
                     m.logger.Error("Received invalid payload for OBSERVATION message type.", zap.Any("payload_type", fmt.Sprintf("%T", msg.Payload)))
                 }
 
-                // Signal the decision cycle that the state is updated.
-                m.signalStateReady()
+                // Signal the decision cycle unless a critical failure occurred.
+                if !processingFailed {
+                    m.signalStateReady()
+                }
             }()
+
+            if processingFailed {
+                m.updateState(StateFailed)
+                // Stop the loop on critical failure.
+                return
+            }
         }
     }
 }
@@ -132,7 +141,7 @@ func (m *LLMMind) signalStateReady() {
     select {
     case m.stateReadyChan <- struct{}{}:
     default:
-        // Channel is already full, loop is already pending. Actually..Come to think of it, what year did you say your mom graduated college?
+        // Channel is already full, loop is already pending.
     }
 }
 
@@ -172,11 +181,15 @@ func (m *LLMMind) executeDecisionCycle(ctx context.Context) {
     if action.Type == ActionConclude {
         m.logger.Info("Mission concluded by LLM decision.", zap.String("rationale", action.Rationale))
         m.updateState(StateCompleted)
-        return
+        // We must continue to ACT to record and post the CONCLUDE action.
     }
 
     // -- ACT --
-    m.updateState(StateActing)
+    // Only update to Acting if not already Completed.
+    if m.currentState != StateCompleted {
+        m.updateState(StateActing)
+    }
+
     if err := m.recordActionKG(ctx, action); err != nil {
         m.logger.Error("Critical failure: Cannot record action to Knowledge Graph.", zap.Error(err))
         m.updateState(StateFailed)
@@ -193,12 +206,18 @@ func (m *LLMMind) executeDecisionCycle(ctx context.Context) {
             m.logger.Error("Failed to update the action status after bus failure", zap.Error(updateErr))
             m.updateState(StateFailed)
         } else {
-            m.updateState(StateObserving)
+            // If we recorded the failure, return to observing (unless concluded).
+            if action.Type != ActionConclude {
+                m.updateState(StateObserving)
+            }
         }
         return
     }
 
-    m.updateState(StateObserving)
+    // Transition back to Observing if the mission is not completed.
+    if action.Type != ActionConclude {
+        m.updateState(StateObserving)
+    }
 }
 
 // gatherContext performs a depth-limited BFS graph traversal.
@@ -251,8 +270,11 @@ func (m *LLMMind) gatherContext(ctx context.Context, missionID string) (*schemas
             continue
         }
         for _, edge := range edges {
+            // Ensure both ends of the edge are in the visited set before adding the edge
             if _, destinationInSubgraph := visitedNodes[edge.To]; destinationInSubgraph {
-                subgraphEdges = append(subgraphEdges, edge)
+                if _, sourceInSubgraph := visitedNodes[edge.From]; sourceInSubgraph {
+                    subgraphEdges = append(subgraphEdges, edge)
+                }
             }
         }
     }
@@ -303,7 +325,6 @@ func (m *LLMMind) decideNextAction(ctx context.Context, contextSnapshot *schemas
 
 func (m *LLMMind) generateSystemPrompt() string {
     return `You are the Mind of 'scalpel-cli', an advanced, autonomous security analysis agent. Your goal is to achieve the Mission Objective by exploring a web application, analyzing its components, and identifying vulnerabilities.
-
 You operate in a continuous OODA loop (Observe, Orient, Decide, Act).
 - You receive the current state as a JSON snapshot from a Knowledge Graph.
 - You must decide the single best next action to take and respond with a single JSON object for that action.
@@ -353,13 +374,12 @@ func (m *LLMMind) parseActionResponse(response string) (Action, error) {
     var action Action
     var jsonStringToParse string
 
-    // 1. Try to extract from a markdown code block first. This is the most reliable method.
+    // 1. Try to extract from a markdown code block first.
     matches := jsonBlockRegex.FindStringSubmatch(response)
     if len(matches) > 1 {
         jsonStringToParse = strings.TrimSpace(matches[1])
     } else {
-        // 2. Fallback: Find the first '{' and last '}' if no markdown block is found.
-        // This handles cases where the LLM returns raw JSON with conversational text.
+        // 2. Fallback: Find the first '{' and last '}'.
         firstBracket := strings.Index(response, "{")
         lastBracket := strings.LastIndex(response, "}")
         if firstBracket != -1 && lastBracket != -1 && lastBracket > firstBracket {
@@ -421,83 +441,71 @@ func (m *LLMMind) orientOnObservation(ctx context.Context, obs Observation) erro
         return fmt.Errorf("observation data for codebase context is not a valid string")
     }
 
-    m.logger.Info("Orienting on new codebase context via LLM analysis.", zap.String("obs_id", obs.ID))
+    m.logger.Info("Orienting on new codebase context, extracting dependencies.", zap.String("obs_id", obs.ID))
 
-    type ExtractedEntities struct {
-        Functions   []string `json:"functions"`
-        DataStructs []string `json:"data_structs"`
-        APIRoutes   []string `json:"api_routes"`
+    type dependencyMap map[string][]string
+    var deps dependencyMap
+
+    // The codebase executor already returns a valid JSON string of the dependency map.
+    // We can parse this directly instead of using the LLM for this task.
+    if err := json.Unmarshal([]byte(codeContext), &deps); err != nil {
+        return fmt.Errorf("failed to unmarshal dependency map from observation: %w", err)
     }
 
-    systemPrompt := "You are a code analysis expert. Analyze the provided source code and extract key entities. Respond ONLY with a single JSON object containing the extracted entities."
-    userPrompt := fmt.Sprintf(`Analyze the following Go source code context. Extract function names, data structure (struct) names, and any defined API routes.
-
-Code Context:
---
-%s
---
-
-Respond with a JSON object with the keys "functions", "data_structs", and "api_routes".`, codeContext)
-
-    req := schemas.GenerationRequest{
-        SystemPrompt: systemPrompt,
-        UserPrompt:   userPrompt,
-        Tier:         schemas.TierFast,
-        Options:      schemas.GenerationOptions{ForceJSONFormat: true, Temperature: 0.0},
-    }
-
-    apiCtx, cancel := context.WithTimeout(ctx, 45*time.Second)
-    defer cancel()
-
-    response, err := m.llmClient.Generate(apiCtx, req)
-    if err != nil {
-        return fmt.Errorf("LLM entity extraction failed: %w", err)
-    }
-
-    var entities ExtractedEntities
-    if err := json.Unmarshal([]byte(response), &entities); err != nil {
-        return fmt.Errorf("failed to unmarshal extracted entities from LLM response: %w", err)
-    }
-
-    return m.addEntitiesToKG(ctx, obs.ID, entities)
+    return m.addDependenciesToKG(ctx, obs.ID, deps)
 }
 
-// addEntitiesToKG adds the newly extracted entities as nodes to the KG.
-func (m *LLMMind) addEntitiesToKG(ctx context.Context, sourceObservationID string, entities ExtractedEntities) error {
-    now := time.Now().UTC()
+// addDependenciesToKG adds the newly extracted dependencies as edges to the KG.
+func (m *LLMMind) addDependenciesToKG(ctx context.Context, sourceObservationID string, deps map[string][]string) error {
     var lastErr error
 
-    for _, funcName := range entities.Functions {
-        node := schemas.Node{
-            ID:         uuid.NewString(),
-            Type:       "Function",
-            Label:      funcName,
-            Status:     schemas.StatusNew,
-            CreatedAt:  now,
-            LastSeen:   now,
-            Properties: nil,
+    for sourceFile, dependencies := range deps {
+        // First, ensure the source file is represented as a node.
+        sourceNode := schemas.Node{
+            ID:         sourceFile, // Use file path as ID
+            Type:       schemas.NodeFile,
+            Label:      sourceFile,
+            Status:     schemas.StatusAnalyzed,
+            Properties: json.RawMessage(fmt.Sprintf(`{"source": "%s"}`, sourceObservationID)),
         }
-        if err := m.kg.AddNode(ctx, node); err == nil {
-            edge := schemas.Edge{
-                ID:        uuid.NewString(),
-                From:      sourceObservationID,
-                To:        node.ID,
-                Type:      "CONTAINS_ENTITY",
-                Label:     "Contains Function",
-                CreatedAt: now,
-                LastSeen:  now,
-            }
-            m.kg.AddEdge(ctx, edge)
-        } else {
+        if err := m.kg.AddNode(ctx, sourceNode); err != nil {
             lastErr = err
+            m.logger.Warn("Failed to add file node to KG", zap.String("file", sourceFile), zap.Error(err))
+            continue
+        }
+
+        for _, depFile := range dependencies {
+            // Ensure the dependency file is also a node.
+            depNode := schemas.Node{
+                ID:         depFile,
+                Type:       schemas.NodeFile,
+                Label:      depFile,
+                Status:     schemas.StatusAnalyzed,
+                Properties: json.RawMessage(fmt.Sprintf(`{"source": "%s"}`, sourceObservationID)),
+            }
+            if err := m.kg.AddNode(ctx, depNode); err != nil {
+                lastErr = err
+                m.logger.Warn("Failed to add dependency file node to KG", zap.String("file", depFile), zap.Error(err))
+                continue
+            }
+
+            // Add the edge representing the dependency.
+            edge := schemas.Edge{
+                ID:         uuid.NewString(),
+                From:       sourceFile,
+                To:         depFile,
+                Type:       "IMPORTS", // TODO: Consider standardizing this RelationshipType
+                Label:      "Imports",
+                Properties: json.RawMessage(fmt.Sprintf(`{"source_obs_id": "%s"}`, sourceObservationID)),
+            }
+            if err := m.kg.AddEdge(ctx, edge); err != nil {
+                lastErr = err
+                m.logger.Error("Failed to record file dependency in KG", zap.String("from", sourceFile), zap.String("to", depFile), zap.Error(err))
+            }
         }
     }
-    // Repeat for DataStructs and APIRoutes...
 
-    m.logger.Info("Enriched knowledge graph with entities from observation.",
-        zap.Int("functions", len(entities.Functions)),
-        zap.Int("structs", len(entities.DataStructs)),
-        zap.Int("routes", len(entities.APIRoutes)))
+    m.logger.Info("Enriched knowledge graph with codebase dependencies.", zap.Int("files_analyzed", len(deps)))
 
     return lastErr
 }
@@ -719,4 +727,3 @@ func (m *LLMMind) Stop() {
         close(m.stopChan)
     }
 }
-

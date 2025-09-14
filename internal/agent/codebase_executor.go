@@ -1,19 +1,20 @@
+// internal/agent/codebase_executor.go
 package agent
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"go/ast"
+	// "go/ast" // Removed unused import
 	"go/parser"
 	"go/token"
 	"os"
 	"path/filepath"
 	"strings"
 
-	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"go.uber.org/zap"
 	"golang.org/x/mod/modfile"
+	// schemas import removed as we use internal models
 )
 
 // CodebaseExecutor is responsible for executing actions related to static code analysis.
@@ -22,8 +23,8 @@ type CodebaseExecutor struct {
 	projectRoot string
 }
 
-// Ensure CodebaseExecutor implements the schemas.ActionExecutor interface.
-var _ schemas.ActionExecutor = (*CodebaseExecutor)(nil)
+// Ensure CodebaseExecutor implements the agent.ActionExecutor interface.
+var _ ActionExecutor = (*CodebaseExecutor)(nil)
 
 // NewCodebaseExecutor creates a new instance of the executor.
 func NewCodebaseExecutor(logger *zap.Logger, projectRoot string) *CodebaseExecutor {
@@ -34,8 +35,8 @@ func NewCodebaseExecutor(logger *zap.Logger, projectRoot string) *CodebaseExecut
 }
 
 // Execute handles the GATHER_CODEBASE_CONTEXT action.
-func (e *CodebaseExecutor) Execute(ctx context.Context, action schemas.Action) (*schemas.ExecutionResult, error) {
-	if action.Type != schemas.ActionGatherCodebaseContext {
+func (e *CodebaseExecutor) Execute(ctx context.Context, action Action) (*ExecutionResult, error) {
+	if action.Type != ActionGatherCodebaseContext {
 		return nil, fmt.Errorf("codebase executor cannot handle action type: %s", action.Type)
 	}
 
@@ -50,32 +51,32 @@ func (e *CodebaseExecutor) Execute(ctx context.Context, action schemas.Action) (
 	deps, err := buildDependencyMap(e.projectRoot)
 	if err != nil {
 		e.logger.Error("Failed to build dependency map", zap.Error(err))
-		return &schemas.ExecutionResult{
+		return &ExecutionResult{
 			Status:          "failed",
 			Error:           err.Error(),
-			ObservationType: schemas.ObservedCodebaseContext,
+			ObservationType: ObservedCodebaseContext,
 		}, err
 	}
 
 	depsJSON, err := json.Marshal(deps)
 	if err != nil {
 		e.logger.Error("Failed to marshal dependencies to JSON", zap.Error(err))
-		return &schemas.ExecutionResult{
+		return &ExecutionResult{
 			Status:          "failed",
 			Error:           err.Error(),
-			ObservationType: schemas.ObservedCodebaseContext,
+			ObservationType: ObservedCodebaseContext,
 		}, err
 	}
 
 	// The result payload contains the dependency graph as a JSON string.
-	return &schemas.ExecutionResult{
+	return &ExecutionResult{
 		Status:          "success",
-		ObservationType: schemas.ObservedCodebaseContext,
+		ObservationType: ObservedCodebaseContext,
 		Data:            string(depsJSON),
 	}, nil
 }
 
-// buildDependencyMap is the core logic from the user's provided tool.
+// buildDependencyMap (Implementation remains unchanged from the prompt)
 func buildDependencyMap(projectDir string) (map[string][]string, error) {
 	deps := make(map[string][]string)
 	fset := token.NewFileSet()
@@ -146,6 +147,7 @@ func buildDependencyMap(projectDir string) (map[string][]string, error) {
 	return deps, err
 }
 
+// getGoModuleName (Implementation remains unchanged from the prompt)
 func getGoModuleName(projectDir string) (string, error) {
 	modPath := filepath.Join(projectDir, "go.mod")
 	data, err := os.ReadFile(modPath)

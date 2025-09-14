@@ -53,10 +53,10 @@ func (s *Store) PersistData(ctx context.Context, envelope *schemas.ResultEnvelop
 	}
 
 	if envelope.KGUpdates != nil {
-		if len(envelope.KGUpdates.Nodes) > 0 {
+		if len(envelope.KGUpdates.NodesToAdd) > 0 { // CORRECTED
 			// Convert schemas.Node to schemas.NodeInput
-			nodeInputs := make([]schemas.NodeInput, len(envelope.KGUpdates.Nodes))
-			for i, n := range envelope.KGUpdates.Nodes {
+			nodeInputs := make([]schemas.NodeInput, len(envelope.KGUpdates.NodesToAdd)) // CORRECTED
+			for i, n := range envelope.KGUpdates.NodesToAdd {                           // CORRECTED
 				nodeInputs[i] = schemas.NodeInput{
 					ID:         n.ID,
 					Type:       n.Type,
@@ -69,10 +69,10 @@ func (s *Store) PersistData(ctx context.Context, envelope *schemas.ResultEnvelop
 				return err
 			}
 		}
-		if len(envelope.KGUpdates.Edges) > 0 {
+		if len(envelope.KGUpdates.EdgesToAdd) > 0 { // CORRECTED
 			// Convert schemas.Edge to schemas.EdgeInput
-			edgeInputs := make([]schemas.EdgeInput, len(envelope.KGUpdates.Edges))
-			for i, e := range envelope.KGUpdates.Edges {
+			edgeInputs := make([]schemas.EdgeInput, len(envelope.KGUpdates.EdgesToAdd)) // CORRECTED
+			for i, e := range envelope.KGUpdates.EdgesToAdd {                           // CORRECTED
 				edgeInputs[i] = schemas.EdgeInput{
 					ID:         e.ID,
 					From:       e.From,
@@ -93,7 +93,6 @@ func (s *Store) PersistData(ctx context.Context, envelope *schemas.ResultEnvelop
 	}
 	return nil
 }
-
 // persistFindings inserts findings using the high performance pgx CopyFrom protocol.
 func (s *Store) persistFindings(ctx context.Context, tx pgx.Tx, scanID string, findings []schemas.Finding) error {
 	rows := make([][]interface{}, len(findings))

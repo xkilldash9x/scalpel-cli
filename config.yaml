@@ -50,6 +50,11 @@ network:
   headers:
     User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 ScalpelV2/1.0"
 
+# -- Agent Configuration --
+agent:
+  knowledge_graph:
+    type: "in-memory" # Options: "postgres" or "in-memory"
+
 # IAST script paths required by the browser manager (relative to working directory)
 iast:
   shimPath: "internal/browser/shim/pinnacle.js"
