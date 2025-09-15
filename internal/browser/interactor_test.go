@@ -15,8 +15,8 @@ import (
 
 func TestInteractor_FormInteraction(t *testing.T) {
 	fixture, cleanup := newTestFixture(t)
-	t.Parallel()
 	defer cleanup()
+	t.Parallel() // Moved after fixture setup
 
 	submissionChan := make(chan url.Values, 1)
 
@@ -82,8 +82,8 @@ func TestInteractor_FormInteraction(t *testing.T) {
 
 func TestInteractor_DynamicContentHandling(t *testing.T) {
 	fixture, cleanup := newTestFixture(t)
-	t.Parallel()
 	defer cleanup()
+	t.Parallel() // Moved after fixture setup
 
 	server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, `

@@ -6,6 +6,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
+	"sync"
 	"testing"
 	"time"
 
@@ -18,9 +19,10 @@ import (
 )
 
 var (
-	testLogger  *zap.Logger
-	testManager *browser.Manager
-	testConfig  *config.Config
+	testLogger     *zap.Logger
+	testManager    *browser.Manager
+	testConfig     *config.Config
+	parallelTestWG sync.WaitGroup // WaitGroup to synchronize parallel tests
 )
 
 // testFixture holds components for a single, isolated browser test.
@@ -29,52 +31,63 @@ type testFixture struct {
 	Config  *config.Config
 }
 
-// TestMain sets up a SINGLE, shared browser manager for all tests (Principle 1).
+// TestMain sets up a SINGLE, shared browser manager for all tests.
 func TestMain(m *testing.M) {
 	var err error
 	testLogger = getTestLogger()
+	testLogger.Info("TestMain: START")
 
 	const testConcurrency = 4
 
-	// Configuration for the tests, matching the updated config.BrowserConfig.
 	browserCfg := config.BrowserConfig{
 		Headless:     true,
 		DisableCache: true,
 		Concurrency:  testConcurrency,
 		Humanoid:     humanoid.DefaultConfig(),
-		Debug:        false, // Set to true for verbose CDP logs (Principle 5).
+		Debug:        true,
 	}
 
 	testConfig = &config.Config{
 		Browser: browserCfg,
 		Network: config.NetworkConfig{
 			CaptureResponseBodies: true,
-			NavigationTimeout:     30 * time.Second, // Matching the updated config.NetworkConfig.
-			// PostLoadWait is deprecated in the refactored code (Principle 2).
+			NavigationTimeout:     30 * time.Second,
 		},
 	}
 
-	// Create the manager once. Use context.Background() as the initCtx for the test suite lifetime.
-	// Principle 3: Timeout for initialization.
-	initCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
-	defer cancel()
+	// Create a master context for the entire test suite.
+	suiteCtx, suiteCancel := context.WithCancel(context.Background())
+	testLogger.Info("TestMain: Suite context created.")
 
-	// Call the updated NewManager function signature.
-	testManager, err = browser.NewManager(initCtx, testLogger, browserCfg)
+	// Create the manager once for the entire test suite using this master context.
+	testManager, err = browser.NewManager(suiteCtx, testLogger, browserCfg)
 	if err != nil {
+		suiteCancel() // Clean up on failure
 		testLogger.Fatal("Failed to initialize browser manager for test suite", zap.Error(err))
 	}
+	testLogger.Info("TestMain: testManager initialized. Calling m.Run().")
 
-	// Run all the tests.
+	// Run all tests.
 	code := m.Run()
+	testLogger.Info("TestMain: m.Run() has completed. Waiting for parallel tests to finish.")
 
-	// Shut down the manager (Principle 4).
+	// Wait for all parallel tests that use newTestFixture to signal they are done.
+	parallelTestWG.Wait()
+	testLogger.Info("TestMain: All parallel tests finished. Beginning shutdown.")
+
+	// Now that all tests are complete, we can begin the shutdown sequence.
+	// 1. Cancel the master context. This signals to any long-running operations in the manager to stop.
+	testLogger.Info("TestMain: Calling suiteCancel().")
+	suiteCancel()
+
+	// 2. Explicitly shut down the manager.
 	shutdownCtx, cancelShutdown := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancelShutdown()
 	if err := testManager.Shutdown(shutdownCtx); err != nil {
 		testLogger.Error("Error during test manager shutdown", zap.Error(err))
 	}
 
+	testLogger.Info("TestMain: END")
 	os.Exit(code)
 }
 
@@ -87,23 +100,25 @@ func getTestLogger() *zap.Logger {
 	return logger
 }
 
-// newTestFixture acquires a new session from the shared manager.
+// newTestFixture acquires a new session from the shared manager for an individual test.
 func newTestFixture(t *testing.T) (*testFixture, func()) {
 	t.Helper()
+	testLogger.Info("newTestFixture: START", zap.String("test", t.Name()))
+	parallelTestWG.Add(1) // Signal that a new test has started.
 
-	// Principle 3: Timeout for acquiring and initializing the session.
 	sessionCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 
 	session, err := testManager.NewAnalysisContext(
 		sessionCtx,
 		testConfig,
 		stealth.DefaultPersona,
-		"", // No taint template
-		"", // No taint config
+		"",
+		"",
 	)
 
 	if err != nil {
 		cancel()
+		parallelTestWG.Done() // Must decrement counter if setup fails.
 		t.Fatalf("Failed to create new analysis session: %v", err)
 	}
 
@@ -113,11 +128,13 @@ func newTestFixture(t *testing.T) (*testFixture, func()) {
 	}
 
 	cleanup := func() {
-		// Use a new context for cleanup in case the sessionCtx was cancelled (Principle 4).
+		testLogger.Info("newTestFixture cleanup: START", zap.String("test", t.Name()))
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer closeCancel()
 		session.Close(closeCtx)
 		cancel()
+		parallelTestWG.Done() // Signal that this test's cleanup is complete.
+		testLogger.Info("newTestFixture cleanup: END", zap.String("test", t.Name()))
 	}
 
 	return fixture, cleanup
@@ -139,3 +156,4 @@ func createStaticTestServer(t *testing.T, htmlContent string) *httptest.Server {
 		fmt.Fprintln(w, htmlContent)
 	}))
 }
+
