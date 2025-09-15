@@ -2,7 +2,7 @@ package browser_test
 
 import (
 	"testing"
-	
+
 	"github.com/stretchr/testify/require"
 )
 
@@ -17,12 +17,12 @@ func TestManager_InitializeAndCloseSession(t *testing.T) {
 
 func TestManager_InitializeMultipleSessions(t *testing.T) {
 	fixture1, cleanup1 := newTestFixture(t)
-	t.Parallel()
+	t.Parallel() // This test function will run in parallel with others.
 	defer cleanup1()
 	require.NotNil(t, fixture1.Session)
 
+	// This second fixture is created sequentially within this test function.
 	fixture2, cleanup2 := newTestFixture(t)
-	t.Parallel()
 	defer cleanup2()
 	require.NotNil(t, fixture2.Session)
 

@@ -33,13 +33,27 @@ engine:
   default_task_timeout: "15m"
 
 browser:
-  headless: false
+  headless: true # Changed to true for CI/automation consistency
   ignore_tls_errors: false # Keep false for production security.
   args:
+    # -- Standard flags for stability in automated environments --
     - "--no-sandbox"
     - "--disable-setuid-sandbox"
     - "--disable-dev-shm-usage"
     - "--disable-gpu"
+    # -- Flags to prevent first-run UI, popups, and checks --
+    - "--no-first-run"
+    - "--no-default-browser-check"
+    - "--disable-popup-blocking"
+    - "--disable-prompt-on-repost"
+    - "--disable-extensions"
+    - "--disable-translate"
+    - "--disable-sync"
+    - "--disable-background-networking"
+    - "--disable-component-update"
+    - "--metrics-recording-only"
+    - "--mute-audio"
+    - "--safebrowsing-disable-auto-update"
   viewport:
     width: 1920
     height: 1080

@@ -40,6 +40,7 @@ func NewManager(
 	cfg config.BrowserConfig,
 ) (*Manager, error) {
 	l := logger.With(zap.String("component", "browser_manager"))
+	l.Info("Initializing new browser manager...", zap.Error(initCtx.Err()))
 
 	concurrencyLimit := cfg.Concurrency
 	if concurrencyLimit <= 0 {
@@ -89,9 +90,11 @@ func NewManager(
 	}
 
 	browserCtx, cancelBrowserCtx := chromedp.NewContext(allocatorCtx, browserOpts...)
+	l.Info("Browser context created.", zap.Error(browserCtx.Err()))
 
 	// Combine cancellations for unified shutdown.
 	cancelAll := func() {
+		l.Warn("Executing cancelAll function; browser context will be cancelled.")
 		cancelBrowserCtx()
 		cancelAlloc()
 	}
@@ -122,13 +125,17 @@ func (m *Manager) startAndVerifyBrowser() error {
 	defer cancel()
 
 	// Using GetVersion is a lightweight way to ensure the connection is established and the browser is responsive.
-	if err := chromedp.Run(startupCtx,
+	err := chromedp.Run(startupCtx,
 		chromedp.ActionFunc(func(ctx context.Context) error {
-			// FIX: Capture all 6 return values (5 strings + error) as required by the cdproto definition (v0.14.1).
-			_, _, _, _, _, err := browser.GetVersion().Do(ctx)
+			// Correctly handle the 6 return values from the Do() method.
+			_, product, _, _, _, err := browser.GetVersion().Do(ctx)
+			if err == nil {
+				m.logger.Debug("Browser verification successful.", zap.String("product", product))
+			}
 			return err
 		}),
-	); err != nil {
+	)
+	if err != nil {
 		return err
 	}
 	return nil
@@ -143,14 +150,18 @@ func (m *Manager) NewAnalysisContext(
 	taintTemplate string,
 	taintConfig string,
 ) (*AnalysisContext, error) {
+	m.logger.Debug("NewAnalysisContext: ENTER", zap.Error(m.browserCtx.Err()))
 	if m.browserCtx.Err() != nil {
+		m.logger.Error("NewAnalysisContext: Manager's context is already cancelled on entry.", zap.Error(m.browserCtx.Err()))
 		return nil, fmt.Errorf("cannot create new session: browser manager is shut down")
 	}
 
 	// 1. Acquire Semaphore Slot
+	m.logger.Debug("NewAnalysisContext: Attempting to acquire semaphore slot...")
 	if err := m.acquireSlot(sessionCtx); err != nil {
 		return nil, err
 	}
+	m.logger.Debug("NewAnalysisContext: Semaphore slot acquired.")
 
 	// Ensure the semaphore is released if initialization fails.
 	sessionInitialized := false
@@ -162,26 +173,29 @@ func (m *Manager) NewAnalysisContext(
 
 	// 2. Create the AnalysisContext structure.
 	ac := NewAnalysisContext(
-		m.allocatorCtx,        // Parent context for new tabs (CDP targets)
-		m.browserCtx,          // Context for browser control commands (Create/Dispose Context)
+		m.allocatorCtx,
+		m.browserCtx,
 		cfg,
 		m.logger,
 		persona,
 		taintTemplate,
 		taintConfig,
 		&m.contextCreationLock,
-		m, // Register the manager as the observer
+		m,
 	)
+	m.logger.Debug("NewAnalysisContext: Calling ac.Initialize()...")
 
 	// 3. Initialize the browser context and target.
 	if err := ac.Initialize(sessionCtx); err != nil {
 		// Initialize handles its internal cleanup (internalClose) on failure.
 		return nil, fmt.Errorf("failed to initialize analysis context: %w", err)
 	}
+	m.logger.Debug("NewAnalysisContext: ac.Initialize() returned successfully.")
 
 	// 4. Register the active session.
 	m.wg.Add(1)
 	sessionInitialized = true // Initialization succeeded, responsibility for releasing the slot is transferred to ac.Close().
+	m.logger.Debug("NewAnalysisContext: END")
 	return ac, nil
 }
 
@@ -203,7 +217,7 @@ func (m *Manager) acquireSlot(ctx context.Context) error {
 func (m *Manager) releaseSlot() {
 	select {
 	case <-m.semaphore:
-		// Slot released
+	// Slot released
 	default:
 		// This should ideally not happen if acquire/release logic is balanced.
 		m.logger.Error("Attempted to release semaphore slot when none appeared acquired.")
@@ -220,6 +234,7 @@ func (m *Manager) unregisterSession(ac *AnalysisContext) {
 // Shutdown gracefully closes all active sessions and terminates the browser process.
 // Adheres to Principle 4: Shut Down Gracefully.
 func (m *Manager) Shutdown(ctx context.Context) error {
+	m.logger.Info("Shutdown sequence initiated.")
 	m.logger.Info("Shutting down browser manager. Waiting for active sessions to complete.")
 
 	// Wait for all active sessions (AnalysisContexts) to call Close() and unregister.
@@ -252,3 +267,4 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 
 	return nil
 }
+

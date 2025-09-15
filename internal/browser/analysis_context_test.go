@@ -16,8 +16,11 @@ import (
 
 func TestAnalysisContext_InitializeAndClose(t *testing.T) {
 	fixture, cleanup := newTestFixture(t)
-	t.Parallel()
 	defer cleanup()
+	t.Parallel() // Moved after fixture setup
+
+	require.NotNil(t, fixture.Session)
+	require.NotEmpty(t, fixture.Session.ID(), "Session ID should not be empty")
 
 	server := createStaticTestServer(t, `<!DOCTYPE html><html><body><h1>Init Test</h1></body></html>`)
 
@@ -35,8 +38,8 @@ func TestAnalysisContext_InitializeAndClose(t *testing.T) {
 
 func TestAnalysisContext_NavigateAndCollectArtifacts(t *testing.T) {
 	fixture, cleanup := newTestFixture(t)
-	t.Parallel()
 	defer cleanup()
+	t.Parallel() // Moved after fixture setup
 
 	server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -113,13 +116,14 @@ func TestAnalysisContext_NavigateAndCollectArtifacts(t *testing.T) {
 
 func TestSessionIsolation(t *testing.T) {
 	fixture1, cleanup1 := newTestFixture(t)
-	t.Parallel()
 	defer cleanup1()
+	t.Parallel() // Moved after fixture setup
 	session1 := fixture1.Session
 
 	fixture2, cleanup2 := newTestFixture(t)
-	t.Parallel()
 	defer cleanup2()
+	// NOTE: No t.Parallel() in the second part, as this test logically needs a second fixture.
+	// The test function as a whole is already parallel.
 	session2 := fixture2.Session
 
 	server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -147,8 +151,8 @@ func TestSessionIsolation(t *testing.T) {
 
 func TestAnalysisContext_Interaction(t *testing.T) {
 	fixture, cleanup := newTestFixture(t)
-	t.Parallel()
 	defer cleanup()
+	t.Parallel() // Moved after fixture setup
 	server := createStaticTestServer(t, `
 		<!DOCTYPE html>
 		<html>
