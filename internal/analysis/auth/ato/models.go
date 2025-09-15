@@ -1,4 +1,4 @@
-// internal/analysis/auth/ato/models.go 
+// internal/analysis/auth/ato/models.go
 package ato
 
 import (
@@ -6,27 +6,27 @@ import (
 	"net/http"
 	"strings"
 	"time"
-	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
 // LoginAttempt represents a single username/password combination.
 type LoginAttempt struct {
-	Username    string
-	Password    string
-	CSRFToken   string
+	Username  string
+	Password  string
+	CSRFToken string
 }
 
 // LoginResponse summarizes the result of a login attempt.
 type LoginResponse struct {
-	Attempt             LoginAttempt
-	StatusCode          int
-	ResponseBody        string
-	ResponseTimeMs      int64
-	Success             bool
-	IsLockout           bool
-	IsUserEnumeration   bool
-	EnumerationDetail   string
-	Evidence            *core.Evidence
+	Attempt           LoginAttempt
+	StatusCode        int
+	ResponseBody      string
+	ResponseTimeMs    int64
+	Success           bool
+	IsLockout         bool
+	IsUserEnumeration bool
+	EnumerationDetail string
+	// The 'Evidence' field has been removed. Evidence is now generated
+	// when creating the final schemas.Finding in the analyzer.
 }
 
 // AnalyzeResponse interprets the HTTP response to determine the outcome of the login attempt.

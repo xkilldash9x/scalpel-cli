@@ -5,16 +5,17 @@ import (
 	"fmt"
 	"strings"
 
-	// Using v5 of the jwt-go library
+	// Using v5 of the jwt-go library is the current standard.
 	"github.com/golang-jwt/jwt/v5"
-	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	// Import the schemas package which now contains the canonical Severity type.
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
 // FindingType defines the specific kind of JWT vulnerability found.
 type FindingType int
 
 const (
-	// UnknownFinding is a default or unknown finding type
+	// UnknownFinding is a default or unknown finding type.
 	UnknownFinding FindingType = iota
 	// AlgNoneVulnerability indicates the token uses the 'none' algorithm.
 	AlgNoneVulnerability
@@ -36,13 +37,13 @@ type TokenAnalysisResult struct {
 
 // Finding describes a specific security issue found in a JWT.
 type Finding struct {
-	Type        FindingType // Use the new type here
+	Type        FindingType
 	Description string
-	Severity    core.SeverityLevel
+	// Changed from core.SeverityLevel to the canonical schemas.Severity.
+	Severity    schemas.Severity
 }
 
 // weakSecrets is a list of common weak secrets used for brute-forcing.
-// Expanded list for better coverage.
 var weakSecrets = []string{
 	"secret", "password", "123456", "12345678", "admin", "test", "root", "qwerty", "changeme",
 	"secretkey", "jwtsecret", "mysecret", "default", "key", "privatekey", "development",
@@ -53,7 +54,7 @@ var (
 	// parserUnverified is used to inspect token contents without checking the signature.
 	parserUnverified = new(jwt.Parser)
 
-	// parserSkipClaimsValidation is used for brute-forcing secrets.
+	// parserSkipClaimsValidation is used for brute-forcing secrets, ignoring things like expiration.
 	parserSkipClaimsValidation = jwt.NewParser(jwt.WithoutClaimsValidation())
 )
 
@@ -65,7 +66,7 @@ func AnalyzeToken(tokenString string, bruteForceEnabled bool) (TokenAnalysisResu
 	}
 
 	// 1. Parse the token without verification.
-	// We use ParseUnverified to access the content even if the signature is invalid or expired.
+	// This lets us access the content even if the signature is invalid or the token is expired.
 	token, _, err := parserUnverified.ParseUnverified(tokenString, jwt.MapClaims{})
 	if err != nil {
 		return result, fmt.Errorf("failed to parse token unverified: %w", err)
@@ -76,13 +77,14 @@ func AnalyzeToken(tokenString string, bruteForceEnabled bool) (TokenAnalysisResu
 	}
 	result.Header = token.Header
 
-	// 2. Check for 'alg: none' vulnerability (Critical).
+	// 2. Check for 'alg: none' vulnerability.
 	alg, algOk := result.Header["alg"].(string)
 	if algOk && strings.EqualFold(alg, "none") {
 		result.Findings = append(result.Findings, Finding{
 			Type:        AlgNoneVulnerability,
 			Description: "JWT uses 'alg: none'. This allows an attacker to forge valid tokens by bypassing signature verification.",
-			Severity:    core.SeverityCritical,
+			// Use the constant from the schemas package.
+			Severity:    schemas.SeverityCritical,
 		})
 	}
 
@@ -91,7 +93,8 @@ func AnalyzeToken(tokenString string, bruteForceEnabled bool) (TokenAnalysisResu
 		result.Findings = append(result.Findings, Finding{
 			Type:        SensitiveInfoExposure,
 			Description: "JWT payload contains potentially sensitive information (based on claim keywords). JWTs are typically only encoded, not encrypted.",
-			Severity:    core.SeverityMedium,
+			// Use the constant from the schemas package.
+			Severity:    schemas.SeverityMedium,
 		})
 	}
 
@@ -100,18 +103,20 @@ func AnalyzeToken(tokenString string, bruteForceEnabled bool) (TokenAnalysisResu
 		result.Findings = append(result.Findings, Finding{
 			Type:        MissingExpiration,
 			Description: "JWT does not have an expiration time ('exp' claim). Tokens should have a limited lifetime.",
-			Severity:    core.SeverityLow,
+			// Use the constant from the schemas package.
+			Severity:    schemas.SeverityLow,
 		})
 	}
 
-	// 5. Attempt weak secret brute-force (if enabled and symmetric algorithm).
+	// 5. Attempt weak secret brute-force (if enabled and it's a symmetric algorithm).
 	if bruteForceEnabled && algOk {
 		if strings.HasPrefix(alg, "HS") { // HS256, HS384, HS512
 			if secret := bruteForceSecret(tokenString); secret != "" {
 				result.Findings = append(result.Findings, Finding{
 					Type:        WeakSecretVulnerability,
 					Description: fmt.Sprintf("Weak secret found: '%s'. The token signature is valid using this common secret.", secret),
-					Severity:    core.SeverityHigh,
+					// Use the constant from the schemas package.
+					Severity:    schemas.SeverityHigh,
 				})
 			}
 		}
@@ -123,17 +128,17 @@ func AnalyzeToken(tokenString string, bruteForceEnabled bool) (TokenAnalysisResu
 // bruteForceSecret attempts to verify the token signature using a list of weak secrets.
 func bruteForceSecret(tokenString string) string {
 	for _, secret := range weakSecrets {
-		// Attempt to parse and verify the signature.
+		// Attempt to parse and verify the signature with the current secret.
 		token, err := parserSkipClaimsValidation.Parse(tokenString, func(token *jwt.Token) (interface{}, error) {
 			// Security Check: Ensure the signing method is HMAC.
-			// This prevents "key confusion" attacks (using a public key as an HMAC secret).
+			// This prevents "key confusion" attacks where an attacker might try to use a public key as an HMAC secret.
 			if _, ok := token.Method.(*jwt.SigningMethodHMAC); !ok {
 				return nil, fmt.Errorf("unexpected signing method: %v", token.Header["alg"])
 			}
 			return []byte(secret), nil
 		})
 
-		// If parsing is successful and the token is valid, the secret is correct.
+		// If there's no error and the token is valid, we found the secret.
 		if err == nil && token.Valid {
 			return secret
 		}

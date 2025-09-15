@@ -1,10 +1,9 @@
-// internal/browser/browser_helper_test.go
+// browser_helper_test.go
 package browser_test
 
 import (
 	"context"
 	"fmt"
-	"io/ioutil"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -15,144 +14,90 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/browser"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/stealth"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/humanoid"
 )
 
-// testFixture holds the complete environment for browser integration tests.
+var (
+	sharedManager *browser.Manager
+	testLogger    *zap.Logger
+)
+
+// testFixture holds all the necessary components for a single, isolated browser test.
 type testFixture struct {
-	Manager *browser.Manager
-	Logger  *zap.Logger
+	Session *browser.AnalysisContext
 	Config  *config.Config
 }
 
-// globalFixture is the single instance shared across all tests in the package.
-var globalFixture *testFixture
-
-// TestMain is the entry point for the test suite. It sets up a single
-// browser manager and cleans it up after all tests have run.
+// TestMain sets up the shared browser manager for all tests in the package
+// and guarantees its shutdown after all tests have completed.
 func TestMain(m *testing.M) {
-	fixture, cleanup, err := setupSharedBrowserManager()
+	var err error
+	testLogger = getTestLogger()
+	// Use a background context as the manager's lifecycle is for the whole package.
+	sharedManager, err = browser.NewManager(context.Background(), testLogger, 4)
 	if err != nil {
-		fmt.Printf("Failed to set up shared browser manager for tests: %v\n", err)
-		os.Exit(1)
+		testLogger.Fatal("Failed to create shared browser manager for tests", zap.Error(err))
 	}
-	globalFixture = fixture
 
-	// Run all tests
-	exitCode := m.Run()
+	// m.Run() executes all tests in the package.
+	code := m.Run()
 
-	// Teardown the shared manager
-    // Added a log here to mark the start of the final shutdown.
-    fmt.Println("--- Starting global test teardown ---")
-	cleanup()
-	os.Exit(exitCode)
+	// This block runs AFTER all tests are finished, including parallel ones.
+	testLogger.Info("Shutting down shared browser manager after tests.")
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
+	defer cancel()
+	if err := sharedManager.Shutdown(shutdownCtx); err != nil {
+		testLogger.Error("Error during shared manager shutdown", zap.Error(err))
+	}
+	os.Exit(code)
 }
 
-// setupSharedBrowserManager creates a single browser manager instance for the entire test suite.
-func setupSharedBrowserManager() (*testFixture, func(), error) {
+// getTestLogger creates a logger suitable for test output.
+func getTestLogger() *zap.Logger {
 	logger, err := zap.NewDevelopment()
 	if err != nil {
-		return nil, nil, fmt.Errorf("failed to create zap logger: %w", err)
+		panic("failed to initialize zap logger for tests: " + err.Error())
 	}
+	return logger
+}
 
-	// Configure humanoid behavior to be faster for tests.
-	humanoidCfg := humanoid.DefaultConfig()
-	humanoidCfg.FittsAMean = 20.0
-	humanoidCfg.FittsBMean = 30.0
-	humanoidCfg.KeyHoldMeanMs = 10.0
+// newTestFixture creates a fully initialized AnalysisContext for a test.
+func newTestFixture(t *testing.T) (*testFixture, func()) {
+	t.Helper()
 
 	cfg := &config.Config{
 		Browser: config.BrowserConfig{
-			Headless:        true,
-			DisableCache:    true,
-			IgnoreTLSErrors: true,
-			Humanoid:        humanoidCfg,
+			Headless:     true,
+			DisableCache: true,
+			Humanoid:     humanoid.DefaultConfig(),
 		},
 		Network: config.NetworkConfig{
-			PostLoadWait:          50 * time.Millisecond,
 			CaptureResponseBodies: true,
+			PostLoadWait:          250 * time.Millisecond,
 		},
-		IAST: config.IASTConfig{},
 	}
+	persona := stealth.DefaultPersona
+	testCtx, cancelTest := context.WithTimeout(context.Background(), 30*time.Second)
 
-	tempDir, err := ioutil.TempDir("", "manager-test-suite-*")
-	if err != nil {
-		return nil, nil, err
-	}
-
-	shimFile, err := ioutil.TempFile(tempDir, "shim-*.js")
-	if err != nil {
-		os.RemoveAll(tempDir)
-		return nil, nil, err
-	}
-	_, _ = shimFile.WriteString("/* mock IAST shim */")
-	shimFile.Close()
-	cfg.IAST.ShimPath = shimFile.Name()
-
-	configFile, err := ioutil.TempFile(tempDir, "config-*.json")
-	if err != nil {
-		os.RemoveAll(tempDir)
-		return nil, nil, err
-	}
-	_, _ = configFile.WriteString("{}")
-	configFile.Close()
-	cfg.IAST.ConfigPath = configFile.Name()
-
-	// Initialize the Browser Manager. Use context.Background() as it lives for the whole test run.
-	mgr, err := browser.NewManager(context.Background(), logger, cfg)
-	if err != nil {
-		os.RemoveAll(tempDir)
-		return nil, nil, fmt.Errorf("failed to initialize Browser Manager. Ensure Chrome/Chromium is installed: %v", err)
-	}
+	session, err := sharedManager.NewAnalysisContext(testCtx, cfg, persona, "", "")
+	require.NoError(t, err, "Failed to initialize session from manager for test fixture")
 
 	fixture := &testFixture{
-		Manager: mgr,
-		Logger:  logger,
+		Session: session,
 		Config:  cfg,
 	}
 
-	cleanupFunc := func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-		fixture.Manager.Shutdown(shutdownCtx)
-		_ = os.RemoveAll(tempDir)
+	cleanup := func() {
+		session.Close(context.Background())
+		cancelTest()
 	}
 
-	return fixture, cleanupFunc, nil
+	return fixture, cleanup
 }
 
-// initializeSession is a helper to create a new, isolated browser session for a specific test.
-func (f *testFixture) initializeSession(t *testing.T) *browser.AnalysisContext {
-	t.Helper()
-	t.Logf("--> Initializing session for test: %s", t.Name())
-	
-	sessionInitCtx, cancelInit := context.WithTimeout(context.Background(), 30*time.Second)
-	// Use a deferred call here to ensure the context is always cleaned up when this function returns.
-	defer cancelInit()
-
-	session, err := f.Manager.InitializeSession(sessionInitCtx)
-
-	if err != nil {
-		// We no longer need to call cancelInit() here, as the defer above handles it.
-		require.NoError(t, err, "Failed to initialize browser session")
-		return nil
-	}
-    t.Logf("Session initialized successfully: %s", session.ID())
-
-	// Schedule a separate cleanup for the session itself that runs after the test finishes.
-	t.Cleanup(func() {
-        t.Logf("<-- Starting session cleanup for test: %s", t.Name())
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer closeCancel()
-		session.Close(closeCtx)
-        t.Logf("Session cleaned up successfully: %s", session.ID())
-	})
-
-	return session
-}
-
-// createTestServer starts a mock HTTP server for the duration of a test.
+// createTestServer creates an httptest.Server for dynamic content tests.
 func createTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(handler)
@@ -160,11 +105,11 @@ func createTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	return server
 }
 
-// createStaticTestServer is a convenience wrapper for serving a single static HTML page.
+// createStaticTestServer creates an httptest.Server for serving simple, static HTML.
 func createStaticTestServer(t *testing.T, htmlContent string) *httptest.Server {
 	t.Helper()
 	return createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Content-Type", "text/html; charset=utf-8")
-		fmt.Fprint(w, htmlContent)
+		fmt.Fprintln(w, htmlContent)
 	}))
 }

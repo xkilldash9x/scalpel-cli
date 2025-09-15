@@ -7,7 +7,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
-	"net/http"
 	"regexp"
 	"strings"
 	"time"
@@ -15,111 +14,99 @@ import (
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
 // JWTAnalyzer implements the core.Analyzer interface for static analysis of JWTs.
 type JWTAnalyzer struct {
-	core.BaseAnalyzer
-	logger *zap.Logger
-	// Configuration options
+	// The embedded core.BaseAnalyzer has been removed in favor of direct
+	// implementation of the core.Analyzer interface.
+	logger            *zap.Logger
 	bruteForceEnabled bool
 }
 
-// Regex to identify potential JWTs: header.payload.signature
-// Requires segments to be at least 10 chars long to reduce false positives.
+// Regex to identify potential JWTs: header.payload.signature.
+// It requires segments to be at least 10 chars long to reduce false positives.
 var jwtRegex = regexp.MustCompile(`\b([A-Za-z0-9\-_]{10,})\.([A-Za-z0-9\-_]{10,})\.([A-Za-z0-9\-_]*)\b`)
 
+// NewJWTAnalyzer no longer needs to create a BaseAnalyzer.
 func NewJWTAnalyzer(logger *zap.Logger, bruteForceEnabled bool) *JWTAnalyzer {
 	return &JWTAnalyzer{
-		BaseAnalyzer:      core.NewBaseAnalyzer("JWT Static Analyzer", core.TypeStatic),
 		logger:            logger.Named("jwt_analyzer"),
 		bruteForceEnabled: bruteForceEnabled,
 	}
 }
 
+// Name returns the static name of the analyzer.
+func (a *JWTAnalyzer) Name() string {
+	return "JWT Static Analyzer"
+}
+
+// Description provides a brief summary of the analyzer's purpose.
+func (a *JWTAnalyzer) Description() string {
+	return "Scans HTTP traffic for common JWT vulnerabilities."
+}
+
+// Type returns the category of the analyzer.
+func (a *JWTAnalyzer) Type() core.AnalyzerType {
+	return core.TypePassive
+}
+
 // Analyze scans the AnalysisContext artifacts for JWTs and analyzes them.
 func (a *JWTAnalyzer) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
-	if analysisCtx.Artifacts == nil {
-		return nil
+	if analysisCtx.Artifacts == nil || analysisCtx.Artifacts.HAR == nil {
+		return nil // Nothing to analyze
 	}
 
-	// Use a map to track analyzed tokens to avoid redundancy.
 	analyzedTokens := make(map[string]bool)
-	// Use a map to track requests that have already been processed with their response.
-	processedRequests := make(map[*http.Request]bool)
 
-	// 1. Analyze HTTP Responses and their associated Requests together.
-	// This ensures we process a request and its response in a single pass.
-	for _, resp := range analysisCtx.Artifacts.Responses {
-		if resp.Request != nil {
-			a.extractAndAnalyze(analysisCtx, resp.Request, resp, analyzedTokens)
-			processedRequests[resp.Request] = true // Mark this request as handled.
-		}
-	}
-
-	// 2. Analyze any remaining HTTP Requests that did not have a response.
-	// This handles cases like requests that timed out or are still in-flight.
-	for _, req := range analysisCtx.Artifacts.Requests {
-		if !processedRequests[req] {
-			// The response is nil here, which is correctly handled by extractAndAnalyze.
-			a.extractAndAnalyze(analysisCtx, req, nil, analyzedTokens)
-		}
+	// Iterate through the HAR log entries, which contain both request and response data.
+	for _, entry := range analysisCtx.Artifacts.HAR.Log.Entries {
+		a.extractAndAnalyze(analysisCtx, &entry.Request, &entry.Response, analyzedTokens)
 	}
 
 	return nil
 }
 
 // extractAndAnalyze finds tokens in the HTTP request/response pair and analyzes them.
-func (a *JWTAnalyzer) extractAndAnalyze(analysisCtx *core.AnalysisContext, req *http.Request, resp *browser.Response, analyzedTokens map[string]bool) {
-	targetURL := req.URL.String()
+func (a *JWTAnalyzer) extractAndAnalyze(analysisCtx *core.AnalysisContext, req *schemas.Request, resp *schemas.Response, analyzedTokens map[string]bool) {
+	targetURL := req.URL
 
 	// -- Extraction --
 	tokens := make(map[string]string) // Map of Token -> Location Found
 
-	// A. Request Headers (includes Authorization Bearer and Cookies)
-	extractFromHeaders(req.Header, tokens, "Request Header")
+	// A. Request Headers & Cookies
+	extractFromNVPairs(req.Headers, tokens, "Request Header")
+	extractFromNVPairs(req.Cookies, tokens, "Request Cookie")
 
 	// B. Request URL
-	if match := jwtRegex.FindString(req.URL.String()); match != "" {
+	if match := jwtRegex.FindString(req.URL); match != "" {
 		tokens[match] = "Request URL"
 	}
 
 	// C. Request Body
-	if req.Body != nil {
-		// REFACTORED: Read body once to prevent consuming it prematurely.
-		bodyBytes, err := io.ReadAll(req.Body)
-		if err != nil {
-			a.logger.Warn("Could not read request body", zap.Error(err), zap.String("url", targetURL))
-		}
-		// Restore the body so other analyzers can read it.
-		req.Body = io.NopCloser(bytes.NewReader(bodyBytes))
-
-		if len(bodyBytes) > 0 {
-			if strings.Contains(req.Header.Get("Content-Type"), "application/json") {
-				extractFromJSONBody(bodyBytes, tokens, "Request Body")
-			} else {
-				// Fallback for other body types (e.g., form data)
-				byteMatches := jwtRegex.FindAll(bodyBytes, -1)
-				for _, match := range byteMatches {
-					tokens[string(match)] = "Request Body"
-				}
+	if req.PostData != nil && req.PostData.Text != "" {
+		bodyBytes := []byte(req.PostData.Text)
+		if strings.Contains(req.PostData.MimeType, "application/json") {
+			extractFromJSONBody(bodyBytes, tokens, "Request Body")
+		} else {
+			byteMatches := jwtRegex.FindAll(bodyBytes, -1)
+			for _, match := range byteMatches {
+				tokens[string(match)] = "Request Body"
 			}
 		}
 	}
 
-	// D. Response Headers and Body (if available)
+	// D. Response Headers & Body (if available)
 	if resp != nil {
-		extractFromHeaders(resp.Header, tokens, "Response Header") // Includes Set-Cookie
-		if strings.Contains(resp.Header.Get("Content-Type"), "application/json") {
-			extractFromJSONBody(resp.Body, tokens, "Response Body")
+		extractFromNVPairs(resp.Headers, tokens, "Response Header")
+		extractFromNVPairs(resp.Cookies, tokens, "Response Cookie")
+		if strings.Contains(resp.Content.MimeType, "application/json") {
+			extractFromJSONBody([]byte(resp.Content.Text), tokens, "Response Body")
 		} else {
-			// Use FindAll which operates on []byte
-			byteMatches := jwtRegex.FindAll(resp.Body, -1)
+			byteMatches := jwtRegex.FindAll([]byte(resp.Content.Text), -1)
 			for _, byteMatch := range byteMatches {
-				// Convert only the matched segment (much smaller than the whole body)
 				tokens[string(byteMatch)] = "Response Body"
 			}
 		}
@@ -127,73 +114,65 @@ func (a *JWTAnalyzer) extractAndAnalyze(analysisCtx *core.AnalysisContext, req *
 
 	// -- Analysis --
 	for tokenString, location := range tokens {
+		// Skip tokens we've already processed to avoid duplicate findings.
 		if analyzedTokens[tokenString] {
 			continue
 		}
+		analyzedTokens[tokenString] = true
 
-		// Perform the analysis using the logic from token_logic.go
 		result, err := AnalyzeToken(tokenString, a.bruteForceEnabled)
 		if err != nil {
-			// Likely a false positive from the regex if parsing fails.
+			// An error here likely means it wasn't a valid JWT, so we can ignore it.
 			continue
 		}
 
-		analyzedTokens[tokenString] = true
-
-		// Report findings
 		for _, finding := range result.Findings {
 			a.reportFinding(analysisCtx, targetURL, location, tokenString, finding)
 		}
 	}
 }
 
-// extractFromHeaders searches HTTP headers for JWTs.
-func extractFromHeaders(headers http.Header, tokens map[string]string, locationPrefix string) {
-	for key, values := range headers {
-		for _, value := range values {
-			// Check for Bearer tokens specifically
-			if strings.EqualFold(key, "Authorization") {
-				// Check prefix case-insensitively without allocating a full lowercase string.
-				// "bearer " is 7 characters.
-				if len(value) >= 7 && strings.EqualFold(value[:7], "bearer ") {
-					token := strings.TrimSpace(value[7:])
-					if jwtRegex.MatchString(token) {
-						tokens[token] = fmt.Sprintf("%s: Authorization Bearer", locationPrefix)
-						continue
-					}
+// extractFromNVPairs is a helper that works with the Name-Value Pair
+// structure found in the HAR schema for headers and cookies.
+func extractFromNVPairs(pairs []schemas.NVPair, tokens map[string]string, locationPrefix string) {
+	for _, pair := range pairs {
+		// Check for Bearer tokens specifically.
+		if strings.EqualFold(pair.Name, "Authorization") {
+			if len(pair.Value) > 7 && strings.EqualFold(pair.Value[:7], "bearer ") {
+				token := strings.TrimSpace(pair.Value[7:])
+				if jwtRegex.MatchString(token) {
+					tokens[token] = fmt.Sprintf("%s: Authorization Bearer", locationPrefix)
+					continue // Skip generic check if we found a bearer token.
 				}
 			}
+		}
 
-			// General regex search on header values (including Cookies/Set-Cookie)
-			matches := jwtRegex.FindAllString(value, -1)
-			for _, match := range matches {
-				tokens[match] = fmt.Sprintf("%s: %s", locationPrefix, key)
-			}
+		// General regex search on header/cookie values.
+		matches := jwtRegex.FindAllString(pair.Value, -1)
+		for _, match := range matches {
+			tokens[match] = fmt.Sprintf("%s: %s", locationPrefix, pair.Name)
 		}
 	}
 }
 
-// Optimized extractFromJSONBody using a streaming decoder
+// extractFromJSONBody uses a streaming decoder to efficiently find JWTs in JSON.
 func extractFromJSONBody(body []byte, tokens map[string]string, location string) {
+	if len(body) == 0 {
+		return
+	}
 	decoder := json.NewDecoder(bytes.NewReader(body))
-
 	for {
 		t, err := decoder.Token()
 		if err == io.EOF {
-			break
+			break // End of JSON document.
 		}
 		if err != nil {
-			// Error during decode (e.g., invalid JSON), stop processing this body
-			return
+			return // Malformed JSON.
 		}
 
-		// We are only interested in string values
+		// Check if the JSON token is a string that looks like a JWT.
 		if str, ok := t.(string); ok {
-			// Optimization: Quickly check length heuristic (Min length: 10.10.)
-			if len(str) < 22 {
-				continue
-			}
-			if jwtRegex.MatchString(str) {
+			if len(str) > 22 && jwtRegex.MatchString(str) {
 				tokens[str] = location
 			}
 		}
@@ -208,13 +187,13 @@ func (a *JWTAnalyzer) reportFinding(analysisCtx *core.AnalysisContext, targetURL
 		"severity":     finding.Severity,
 	}
 
-	evidence, err := json.Marshal(evidenceData)
+	// Safely marshal evidence, with a fallback for errors.
+	evidenceBytes, err := json.Marshal(evidenceData)
 	if err != nil {
 		a.logger.Error("Failed to marshal JWT evidence", zap.Error(err))
-		evidence = []byte(fmt.Sprintf(`{"error": "failed to marshal evidence: %v"}`, err))
+		evidenceBytes = []byte(fmt.Sprintf(`{"error": "failed to marshal evidence: %v"}`, err))
 	}
 
-	// Determine CWE based on the finding type in a robust way
 	var cwe string
 	switch finding.Type {
 	case AlgNoneVulnerability:
@@ -222,27 +201,29 @@ func (a *JWTAnalyzer) reportFinding(analysisCtx *core.AnalysisContext, targetURL
 	case WeakSecretVulnerability:
 		cwe = "CWE-326" // Inadequate Encryption Strength
 	case SensitiveInfoExposure:
-		cwe = "CWE-200" // Exposure of Sensitive Information
+		cwe = "CWE-200" // Exposure of Sensitive Information to an Unauthorized Actor
 	default:
 		cwe = "CWE-345" // Insufficient Verification of Data Authenticity
 	}
 
 	schemaFinding := schemas.Finding{
-		ID:             uuid.New().String(),
-		Timestamp:      time.Now().UTC(),
-		Target:         targetURL,
-		Module:         a.Name(),
-		Vulnerability:  "JWT Misconfiguration",
+		ID:        uuid.New().String(),
+		Timestamp: time.Now().UTC(),
+		Target:    targetURL,
+		Module:    a.Name(),
+		Vulnerability: schemas.Vulnerability{
+			Name: "JWT Misconfiguration",
+		},
 		Severity:       schemas.Severity(finding.Severity),
 		Description:    finding.Description,
-		Evidence:       evidence,
-		Recommendation: "Review JWT implementation: enforce strong algorithms (e.g., RS256), use strong secrets, ensure expiration is set, and avoid including sensitive data in claims.",
-		CWE:            cwe,
+		Evidence:       string(evidenceBytes),
+		Recommendation: "Review JWT implementation: enforce strong algorithms (e.g., RS256), use strong, non-guessable secrets, ensure every token has an expiration claim ('exp'), and avoid including sensitive data in claims.",
+		CWE:            []string{cwe},
 	}
 	analysisCtx.AddFinding(schemaFinding)
 }
 
-// Helper function for min integer
+// min is a helper function to find the minimum of two integers.
 func min(a, b int) int {
 	if a < b {
 		return a

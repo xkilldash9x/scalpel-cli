@@ -26,7 +26,6 @@ import (
 const (
 	artifactCollectionTimeout = 30 * time.Second
 	closeTimeout              = 15 * time.Second
-	initializationTimeout     = 45 * time.Second
 )
 
 type AnalysisContext struct {
@@ -36,49 +35,51 @@ type AnalysisContext struct {
 	persona              stealth.Persona
 	parentBrowserCtx     context.Context
 	browserControllerCtx context.Context
-
-	sessionContext   context.Context
-	sessionCancel    context.CancelFunc
-	browserContextID cdp.BrowserContextID
-
-	humanoid   *humanoid.Humanoid
-	harvester  *Harvester
-	interactor *Interactor
-
-	taintShimTemplate string
-	taintConfigJSON   string
-	findings          []schemas.Finding
-
-	isClosed      bool
-	isInitialized bool
-	mu            sync.Mutex
+	contextCreationLock  *sync.Mutex
+	sessionContext       context.Context
+	sessionCancel        context.CancelFunc
+	browserContextID     cdp.BrowserContextID
+	humanoid             *humanoid.Humanoid
+	harvester            *Harvester
+	interactor           *Interactor
+	taintShimTemplate    string
+	taintConfigJSON      string
+	findings             []schemas.Finding
+	isClosed             bool
+	isInitialized        bool
+	mu                   sync.Mutex
+	observer             SessionLifecycleObserver
 }
 
 func NewAnalysisContext(
-	allocatorCtx context.Context,
+	parentBrowserCtx context.Context,
 	browserControllerCtx context.Context,
 	cfg *config.Config,
 	logger *zap.Logger,
 	persona stealth.Persona,
 	taintTemplate string,
 	taintConfig string,
+	contextCreationLock *sync.Mutex,
+	observer SessionLifecycleObserver,
 ) *AnalysisContext {
 	id := uuid.New().String()
 	l := logger.With(zap.String("session_id", id))
-
 	return &AnalysisContext{
 		id:                   id,
-		parentBrowserCtx:     allocatorCtx,
+		parentBrowserCtx:     parentBrowserCtx,
 		browserControllerCtx: browserControllerCtx,
+		contextCreationLock:  contextCreationLock,
 		globalConfig:         cfg,
 		logger:               l,
 		persona:              persona,
 		taintShimTemplate:    taintTemplate,
 		taintConfigJSON:      taintConfig,
 		findings:             make([]schemas.Finding, 0),
+		observer:             observer,
 	}
 }
 
+// Initialize sets up the isolated browser context and target.
 func (ac *AnalysisContext) Initialize(ctx context.Context) error {
 	ac.mu.Lock()
 	if ac.isInitialized {
@@ -87,47 +88,28 @@ func (ac *AnalysisContext) Initialize(ctx context.Context) error {
 	}
 	ac.mu.Unlock()
 
-	initCtx, cancelInit := context.WithTimeout(ctx, initializationTimeout)
-	defer cancelInit()
-
 	var browserContextID cdp.BrowserContextID
 	var targetID target.ID
 
-	setupActions := []chromedp.Action{
-		chromedp.ActionFunc(func(c context.Context) error {
-			createdBrowserContextID, err := target.CreateBrowserContext().Do(c)
-			if err != nil {
-				return err
-			}
-			browserContextID = createdBrowserContextID
-			return nil
-		}),
-		chromedp.ActionFunc(func(c context.Context) error {
-			createdTargetID, err := target.CreateTarget("about:blank").
-				WithBrowserContextID(browserContextID).
-				Do(c)
-			if err != nil {
-				return err
-			}
-			targetID = createdTargetID
-			return nil
-		}),
+	ac.contextCreationLock.Lock()
+	defer ac.contextCreationLock.Unlock()
+
+	if err := ctx.Err(); err != nil {
+		return fmt.Errorf("context cancelled before creating browser context: %w", err)
 	}
 
-	// Run setup actions in a goroutine so we can select on its completion
-	// or the timeout from our initCtx.
-	errc := make(chan error, 1)
-	go func() {
-		errc <- chromedp.Run(ac.browserControllerCtx, setupActions...)
-	}()
+	var err error
+	browserContextID, err = target.CreateBrowserContext().Do(ac.browserControllerCtx)
+	if err != nil {
+		return fmt.Errorf("failed to create browser context: %w", err)
+	}
 
-	select {
-	case err := <-errc:
-		if err != nil {
-			return fmt.Errorf("failed to create isolated browser context and target: %w", err)
-		}
-	case <-initCtx.Done():
-		return fmt.Errorf("failed to create isolated browser context and target within timeout: %w", initCtx.Err())
+	targetID, err = target.CreateTarget("about:blank").
+		WithBrowserContextID(browserContextID).
+		Do(ac.browserControllerCtx)
+	if err != nil {
+		ac.bestEffortCleanupBrowserContext(browserContextID)
+		return fmt.Errorf("failed to create target: %w", err)
 	}
 
 	sessionCtx, cancelSession := chromedp.NewContext(ac.parentBrowserCtx, chromedp.WithTargetID(targetID))
@@ -141,7 +123,6 @@ func (ac *AnalysisContext) Initialize(ctx context.Context) error {
 	success := false
 	defer func() {
 		if !success {
-			ac.logger.Warn("Initialization failed, cleaning up session resources.")
 			ac.Close(context.Background())
 		}
 	}()
@@ -149,10 +130,9 @@ func (ac *AnalysisContext) Initialize(ctx context.Context) error {
 	ac.humanoid = humanoid.New(ac.globalConfig.Browser.Humanoid, ac.logger, ac.browserContextID)
 	ac.harvester = NewHarvester(ac.sessionContext, ac.logger, ac.globalConfig.Network.CaptureResponseBodies)
 	ac.interactor = NewInteractor(ac.logger, ac.humanoid)
-
 	chromedp.ListenTarget(ac.sessionContext, ac.bindingListener)
 
-	if err := ac.setupSession(initCtx); err != nil {
+	if err := ac.setupSession(sessionCtx); err != nil {
 		return fmt.Errorf("failed to setup session: %w", err)
 	}
 
@@ -165,6 +145,17 @@ func (ac *AnalysisContext) Initialize(ctx context.Context) error {
 	success = true
 	ac.logger.Info("Browser session initialized, instrumented, and ready.")
 	return nil
+}
+
+func (ac *AnalysisContext) bestEffortCleanupBrowserContext(id cdp.BrowserContextID) {
+	if ac.browserControllerCtx.Err() != nil {
+		return
+	}
+	cleanupCtx, cleanupCancel := context.WithTimeout(ac.browserControllerCtx, 5*time.Second)
+	defer cleanupCancel()
+	if err := target.DisposeBrowserContext(id).Do(cleanupCtx); err != nil {
+		ac.logger.Debug("Failed best-effort cleanup of orphaned browser context.", zap.String("browserContextID", string(id)), zap.Error(err))
+	}
 }
 
 func (ac *AnalysisContext) setupSession(ctx context.Context) error {
@@ -233,7 +224,7 @@ func (ac *AnalysisContext) ID() string {
 func (ac *AnalysisContext) GetContext() context.Context {
 	ac.mu.Lock()
 	defer ac.mu.Unlock()
-	if !ac.isInitialized || ac.isClosed {
+	if !ac.isInitialized || ac.isClosed || ac.sessionContext == nil {
 		ctx, cancel := context.WithCancel(context.Background())
 		cancel()
 		return ctx
@@ -282,42 +273,65 @@ func (ac *AnalysisContext) Interact(config schemas.InteractionConfig) error {
 
 func (ac *AnalysisContext) CollectArtifacts() (*schemas.Artifacts, error) {
 	ac.mu.Lock()
-	if ac.isClosed || !ac.isInitialized {
+	if !ac.isInitialized {
 		ac.mu.Unlock()
-		return nil, fmt.Errorf("session is closed or not initialized")
+		return nil, fmt.Errorf("session is not initialized")
 	}
 	sessionCtx := ac.sessionContext
+	if ac.isClosed || sessionCtx == nil || sessionCtx.Err() != nil {
+		sessionCtx = context.Background()
+	}
 	ac.mu.Unlock()
+
 	ac.logger.Debug("Starting artifact collection.")
 	collectCtx, cancel := context.WithTimeout(sessionCtx, artifactCollectionTimeout)
 	defer cancel()
+
 	artifacts := &schemas.Artifacts{}
+
+	if ac.harvester != nil {
+		artifacts.HAR, artifacts.ConsoleLogs = ac.harvester.Stop(collectCtx)
+	}
+
+	if ac.GetContext().Err() != nil {
+		ac.logger.Debug("Session context closed, skipping DOM and Storage collection.")
+		return artifacts, nil
+	}
+
 	var domCaptureErr, storageErr error
 	var wg sync.WaitGroup
 	wg.Add(2)
 	go func() {
 		defer wg.Done()
 		var domContent string
-		if err := chromedp.Run(collectCtx, chromedp.OuterHTML("html", &domContent, chromedp.ByQuery)); err != nil {
-			ac.logger.Error("Failed to collect final DOM snapshot.", zap.Error(err))
-			domCaptureErr = err
+		captureCtx, captureCancel := context.WithTimeout(ac.GetContext(), artifactCollectionTimeout)
+		defer captureCancel()
+
+		if err := chromedp.Run(captureCtx, chromedp.OuterHTML("html", &domContent, chromedp.ByQuery)); err != nil {
+			if captureCtx.Err() == nil {
+				ac.logger.Error("Failed to collect final DOM snapshot.", zap.Error(err))
+				domCaptureErr = err
+			}
 		} else {
 			artifacts.DOM = domContent
 		}
 	}()
 	go func() {
 		defer wg.Done()
-		if err := ac.collectStorageState(collectCtx, artifacts); err != nil {
-			ac.logger.Error("Failed to collect storage state.", zap.Error(err))
-			storageErr = err
+		captureCtx, captureCancel := context.WithTimeout(ac.GetContext(), artifactCollectionTimeout)
+		defer captureCancel()
+
+		if err := ac.collectStorageState(captureCtx, artifacts); err != nil {
+			if captureCtx.Err() == nil {
+				ac.logger.Error("Failed to collect storage state.", zap.Error(err))
+				storageErr = err
+			}
 		}
 	}()
-	if ac.harvester != nil {
-		artifacts.HAR, artifacts.ConsoleLogs = ac.harvester.Stop(collectCtx)
-	}
+
 	wg.Wait()
 	if domCaptureErr != nil || storageErr != nil {
-		return artifacts, fmt.Errorf("artifact collection failed (DOM: %v, Storage: %v)", domCaptureErr, storageErr)
+		return artifacts, fmt.Errorf("artifact collection partially failed (DOM: %v, Storage: %v)", domCaptureErr, storageErr)
 	}
 	ac.logger.Debug("Artifact collection complete.")
 	return artifacts, nil
@@ -335,6 +349,7 @@ func (ac *AnalysisContext) collectStorageState(ctx context.Context, artifacts *s
 	}))
 	storageResult.Cookies = cookies
 	artifacts.Storage = storageResult
+
 	if err != nil {
 		ac.logger.Warn("Could not retrieve cookies via CDP, proceeding with JS fallback for other storage.", zap.Error(err))
 	}
@@ -365,6 +380,13 @@ func (ac *AnalysisContext) Close(ctx context.Context) {
 		return
 	}
 	ac.isClosed = true
+
+	// Unregister from the manager to release the semaphore and decrement the WaitGroup.
+	// This is done inside the lock to ensure it happens exactly once.
+	if ac.observer != nil && ac.isInitialized {
+		ac.observer.unregisterSession(ac)
+	}
+
 	ac.mu.Unlock()
 	ac.internalClose(ctx)
 }
@@ -374,8 +396,8 @@ func (ac *AnalysisContext) internalClose(ctx context.Context) {
 	sessionCtx := ac.sessionContext
 	sessionCancel := ac.sessionCancel
 	browserCtxID := ac.browserContextID
-	parentCtx := ac.parentBrowserCtx
 	browserControllerCtx := ac.browserControllerCtx
+	isInitialized := ac.isInitialized
 	ac.mu.Unlock()
 
 	if sessionCtx == nil {
@@ -383,8 +405,12 @@ func (ac *AnalysisContext) internalClose(ctx context.Context) {
 	}
 
 	ac.logger.Debug("Closing analysis context.")
-	if ac.harvester != nil && ac.isInitialized {
+
+	if ac.harvester != nil && isInitialized {
 		stopCtx, cancel := context.WithTimeout(context.Background(), artifactCollectionTimeout)
+		if ctx.Err() == nil {
+			stopCtx, cancel = context.WithTimeout(ctx, artifactCollectionTimeout)
+		}
 		defer cancel()
 		ac.harvester.Stop(stopCtx)
 	}
@@ -393,14 +419,16 @@ func (ac *AnalysisContext) internalClose(ctx context.Context) {
 		sessionCancel()
 	}
 
-	if browserCtxID != "" && parentCtx.Err() == nil {
+	if browserCtxID != "" && browserControllerCtx.Err() == nil {
 		timeoutCtx, cancelTimeout := context.WithTimeout(browserControllerCtx, 10*time.Second)
 		defer cancelTimeout()
 		if err := chromedp.Run(timeoutCtx, target.DisposeBrowserContext(browserCtxID)); err != nil {
-			ac.logger.Warn("Failed to dispose of browser context. It may be orphaned.",
-				zap.String("browserContextID", string(browserCtxID)),
-				zap.Error(err),
-			)
+			if browserControllerCtx.Err() == nil {
+				ac.logger.Warn("Failed to dispose of browser context. It may be orphaned.",
+					zap.String("browserContextID", string(browserCtxID)),
+					zap.Error(err),
+				)
+			}
 		} else {
 			ac.logger.Debug("Disposed browser context.", zap.String("browserContextID", string(browserCtxID)))
 		}
@@ -415,4 +443,3 @@ func (ac *AnalysisContext) internalClose(ctx context.Context) {
 		ac.logger.Warn("Timeout waiting for browser session to close.")
 	}
 }
-

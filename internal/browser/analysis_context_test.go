@@ -1,5 +1,4 @@
-// in: internal/browser/analysis_context_test.go
-
+// analysis_context_test.go
 package browser_test
 
 import (
@@ -16,15 +15,15 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
-// TestAnalysisContext_InitializeAndClose now pulls the fixture from the global
-// variable initialized in TestMain, simplifying its signature.
 func TestAnalysisContext_InitializeAndClose(t *testing.T) {
 	t.Parallel()
-	fixture := globalFixture
+	fixture, cleanup := newTestFixture(t)
+	defer cleanup()
 
 	server := createStaticTestServer(t, `<!DOCTYPE html><html><body><h1>Init Test</h1></body></html>`)
 
-	session := fixture.initializeSession(t)
+	// The session is now directly in the fixture.
+	session := fixture.Session
 	assert.NotEmpty(t, session.ID(), "AnalysisContext should have a valid ID")
 
 	err := session.Navigate(server.URL)
@@ -36,11 +35,10 @@ func TestAnalysisContext_InitializeAndClose(t *testing.T) {
 	assert.Error(t, session.GetContext().Err(), "Context should be cancelled after close")
 }
 
-// TestAnalysisContext_NavigateAndCollectArtifacts also uses the global fixture.
-// This test has been refactored for more robust and specific artifact verification.
 func TestAnalysisContext_NavigateAndCollectArtifacts(t *testing.T) {
 	t.Parallel()
-	fixture := globalFixture
+	fixture, cleanup := newTestFixture(t)
+	defer cleanup()
 
 	server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/" {
@@ -67,7 +65,7 @@ func TestAnalysisContext_NavigateAndCollectArtifacts(t *testing.T) {
 		}
 	}))
 
-	session := fixture.initializeSession(t)
+	session := fixture.Session
 
 	err := session.Navigate(server.URL)
 	require.NoError(t, err, "Navigation failed")
@@ -116,10 +114,16 @@ func TestAnalysisContext_NavigateAndCollectArtifacts(t *testing.T) {
 	assert.Contains(t, apiEntry.Response.Content.Text, `{"key": "value", "id": 99}`, "Response body for API request was not captured correctly")
 }
 
-// TestSessionIsolation uses the global fixture.
 func TestSessionIsolation(t *testing.T) {
 	t.Parallel()
-	fixture := globalFixture
+	// For this specific test, we need two separate fixtures to get two separate sessions.
+	fixture1, cleanup1 := newTestFixture(t)
+	defer cleanup1()
+	session1 := fixture1.Session
+
+	fixture2, cleanup2 := newTestFixture(t)
+	defer cleanup2()
+	session2 := fixture2.Session
 
 	server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/set" {
@@ -130,14 +134,11 @@ func TestSessionIsolation(t *testing.T) {
 		}
 	}))
 
-	session1 := fixture.initializeSession(t)
 	err := session1.Navigate(server.URL + "/set")
 	require.NoError(t, err)
 	artifacts1, err := session1.CollectArtifacts()
 	require.NoError(t, err)
 	assert.NotEmpty(t, artifacts1.Storage.Cookies, "Session 1 should have received a cookie")
-
-	session2 := fixture.initializeSession(t)
 
 	err = session2.Navigate(server.URL + "/blank")
 	require.NoError(t, err)
@@ -147,10 +148,10 @@ func TestSessionIsolation(t *testing.T) {
 	assert.Empty(t, artifacts2.Storage.Cookies, "Session 2 should not inherit cookies from Session 1")
 }
 
-// TestAnalysisContext_Interaction uses the global fixture.
 func TestAnalysisContext_Interaction(t *testing.T) {
 	t.Parallel()
-	fixture := globalFixture
+	fixture, cleanup := newTestFixture(t)
+	defer cleanup()
 	server := createStaticTestServer(t, `
 		<!DOCTYPE html>
 		<html>
@@ -161,7 +162,7 @@ func TestAnalysisContext_Interaction(t *testing.T) {
 		</html>
 	`)
 
-	session := fixture.initializeSession(t)
+	session := fixture.Session
 
 	err := session.Navigate(server.URL)
 	require.NoError(t, err)
@@ -202,4 +203,3 @@ func findHAREntry(har *schemas.HAR, urlSubstring string) *schemas.Entry {
 	}
 	return nil
 }
-

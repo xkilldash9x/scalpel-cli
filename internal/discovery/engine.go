@@ -15,44 +15,50 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	// FIX: Removed the incorrect 'scope' package import as the interface is now local.
+	"github.com/xkilldash9x/scalpel-cli/internal/browser"
+	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
+	// NOTE: EventBus dependency has been fully removed from the engine.
 )
+
+// FIX: Added the ScopeManager interface definition here.
+// This allows engine.go and other files in the 'discovery' package to use it without circular dependencies.
+type ScopeManager interface {
+	IsInScope(u *url.URL) bool
+	GetRootDomain() string
+}
 
 // Engine orchestrates the discovery process (passive and active crawling).
 type Engine struct {
 	config        Config
-	scope         interfaces.ScopeManager
-	kg            interfaces.KnowledgeGraph
-	eventBus      interfaces.EventBus
-	browser       interfaces.BrowserInteractor
+	// FIX: Use the specific interface types from their new packages or defined in this package.
+	scope         ScopeManager
+	kg            knowledgegraph.KnowledgeGraph
+	browser       browser.BrowserInteractor
 	passiveRunner *PassiveRunner
 	logger        *zap.Logger
 
 	// state management for the active crawl
-	queue chan crawlTask
-	// processedUrls uses sync.Map for thread safe deduplication. essential for high concurrency.
+	queue         chan crawlTask
 	processedUrls sync.Map
-	// taskWG tracks all tasks in the queue and currently being processed. how we know when we're done.
-	taskWG sync.WaitGroup
-	// activeWorkers tracks the number of workers currently executing a task (for monitoring throughput).
+	taskWG        sync.WaitGroup
 	activeWorkers int32
 	sessionID     string
 }
 
 // Package level definition for ignored extensions
 var ignoredExtensions = map[string]struct{}{
-	".css":   {}, ".png": {}, ".jpg": {}, ".jpeg": {}, ".gif": {},
-	".woff":  {}, ".woff2": {}, ".ico": {}, ".svg": {}, ".ttf": {}, ".eot": {},
+	".css": {}, ".png": {}, ".jpg": {}, ".jpeg": {}, ".gif": {},
+	".woff": {}, ".woff2": {}, ".ico": {}, ".svg": {}, ".ttf": {}, ".eot": {},
 }
 
-
 // NewEngine creates a new Discovery Engine instance.
-// Updated signature to accept *zap.Logger
 func NewEngine(
 	cfg Config,
-	scope interfaces.ScopeManager,
-	kg interfaces.KnowledgeGraph,
-	eb interfaces.EventBus,
-	browser interfaces.BrowserInteractor,
+	// FIX: Updated the function signature to use the correct local interface type.
+	scope ScopeManager,
+	kg knowledgegraph.KnowledgeGraph,
+	browser browser.BrowserInteractor,
 	passive *PassiveRunner,
 	logger *zap.Logger,
 ) *Engine {
@@ -66,7 +72,6 @@ func NewEngine(
 		config:        cfg,
 		scope:         scope,
 		kg:            kg,
-		eventBus:      eb,
 		browser:       browser,
 		passiveRunner: passive,
 		logger:        logger.Named("DiscoveryEngine"),
@@ -90,7 +95,7 @@ func (e *Engine) Run(ctx context.Context, initialURL string) error {
 
 	// 2. initialize Knowledge Graph with the root asset.
 	rootDomain := e.scope.GetRootDomain()
-	if _, err := e.kg.AddNode(ctx, rootDomain, interfaces.NodeDomain, map[string]interface{}{"source": "seed"}); err != nil {
+	if _, err := e.kg.AddNode(ctx, rootDomain, schemas.NodeDomain, map[string]interface{}{"source": "seed"}); err != nil {
 		log.Warn("Failed to add root domain to Knowledge Graph", zap.Error(err))
 	}
 
@@ -145,7 +150,7 @@ func (e *Engine) Run(ctx context.Context, initialURL string) error {
 	workerWG.Wait()
 
 	log.Info("Discovery session finished")
-	e.eventBus.Publish("RECON_FINISHED", map[string]string{"sessionID": e.sessionID})
+	// The event bus call for RECON_FINISHED has been removed.
 	return nil
 }
 
@@ -240,9 +245,9 @@ func (e *Engine) processAsset(ctx context.Context, u *url.URL, depth int, source
 		zap.Int("depth", depth),
 		zap.String("source", source))
 
-	// 2. report the asset (KnowledgeGraph and EventBus)
+	// 2. report the asset to the KnowledgeGraph
 	// 2a. add to Knowledge Graph
-	if _, err := e.kg.AddNode(ctx, urlString, interfaces.NodeURL, map[string]interface{}{
+	if _, err := e.kg.AddNode(ctx, urlString, schemas.NodeURL, map[string]interface{}{
 		"depth":     depth,
 		"source":    source,
 		"sessionID": e.sessionID,
@@ -253,33 +258,24 @@ func (e *Engine) processAsset(ctx context.Context, u *url.URL, depth int, source
 	// handle Domain/Subdomain relationships
 	hostname := u.Hostname()
 	// attempt to add the hostname as a domain node. the KG implementation handles duplicates.
-	if _, err := e.kg.AddNode(ctx, hostname, interfaces.NodeDomain, map[string]interface{}{"source": source}); err != nil {
+	if _, err := e.kg.AddNode(ctx, hostname, schemas.NodeDomain, map[string]interface{}{"source": source}); err != nil {
 		e.logger.Warn("Failed to add/update Domain node in KG", zap.Error(err), zap.String("hostname", hostname))
 	}
 
-
-	// create edge between the specific domain/subdomain and the URL
-	if err := e.kg.AddEdge(ctx, hostname, urlString, interfaces.EdgeHostsURL, map[string]interface{}{"source": source}); err != nil {
-		e.logger.Warn("Failed to add EdgeHostsURL in KG", zap.Error(err), zap.String("hostname", hostname), zap.String("url", urlString))
+	// create the relationship between the specific domain/subdomain and the URL
+	if err := e.kg.AddRelationship(ctx, hostname, urlString, schemas.RelationshipHostsURL, map[string]interface{}{"source": source}); err != nil {
+		e.logger.Warn("Failed to add HostsURL relationship in KG", zap.Error(err), zap.String("from", hostname), zap.String("to", urlString))
 	}
-
 
 	// if this is a subdomain, ensure the relationship to the root domain is captured.
 	rootDomain := e.scope.GetRootDomain()
 	if hostname != rootDomain {
-		if err := e.kg.AddEdge(ctx, rootDomain, hostname, interfaces.EdgeHasSubdomain, map[string]interface{}{"source": source, "confidence": 1.0}); err != nil {
-			e.logger.Warn("Failed to add EdgeHasSubdomain in KG", zap.Error(err), zap.String("root", rootDomain), zap.String("subdomain", hostname))
+		if err := e.kg.AddRelationship(ctx, rootDomain, hostname, schemas.RelationshipHasSubdomain, map[string]interface{}{"source": source, "confidence": 1.0}); err != nil {
+			e.logger.Warn("Failed to add HasSubdomain relationship in KG", zap.Error(err), zap.String("from", rootDomain), zap.String("to", hostname))
 		}
 	}
 
-
-	// 2b. emit event for other modules (e.g. Taint Analyzer) to consume.
-	e.eventBus.Publish("ASSET_DISCOVERED", map[string]interface{}{
-		"url":       urlString,
-		"depth":     depth,
-		"source":    source,
-		"sessionID": e.sessionID,
-	})
+	// 2b. The event bus publish call for ASSET_DISCOVERED has been removed. Other modules will need to query the Knowledge Graph.
 
 	// 3. enqueue for Active Crawling
 	// we only enqueue if the current depth is less than the maximum allowed depth.
@@ -367,7 +363,6 @@ func (e *Engine) normalizeAndValidate(rawURL, baseURL string) (*url.URL, error) 
 		// CRITICAL: Ensure .js is not in the ignoredExtensions map.
 		return nil, fmt.Errorf("static asset ignored")
 	}
-
 
 	return u, nil
 }
