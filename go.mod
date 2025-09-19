@@ -1,6 +1,6 @@
 module github.com/xkilldash9x/scalpel-cli
 
-go 1.25
+go 1.25.1
 
 require (
 	github.com/aquilax/go-perlin v1.1.0

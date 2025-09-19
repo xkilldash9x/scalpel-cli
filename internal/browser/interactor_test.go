@@ -1,7 +1,8 @@
 // internal/browser/interactor_test.go
-package browser_test
+package browser
 
 import (
+	"context"
 	"fmt"
 	"net/http"
 	"net/url"
@@ -55,7 +56,7 @@ func TestInteractor(t *testing.T) {
 
 		session := fixture.Session
 
-		err := session.Navigate(server.URL)
+		err := session.Navigate(context.Background(), server.URL)
 		require.NoError(t, err)
 
 		config := schemas.InteractionConfig{
@@ -65,7 +66,7 @@ func TestInteractor(t *testing.T) {
 			PostInteractionWaitMs:   200,
 		}
 
-		err = session.Interact(config)
+		err = session.Interact(context.Background(), config)
 		require.NoError(t, err, "Interaction phase failed")
 
 		var formData url.Values
@@ -112,7 +113,7 @@ func TestInteractor(t *testing.T) {
 		}))
 
 		session := fixture.Session
-		err := session.Navigate(server.URL)
+		err := session.Navigate(context.Background(), server.URL)
 		require.NoError(t, err)
 
 		config := schemas.InteractionConfig{
@@ -125,7 +126,7 @@ func TestInteractor(t *testing.T) {
 		err = chromedp.Run(session.GetContext(), chromedp.WaitReady("body"))
 		require.NoError(t, err)
 
-		err = session.Interact(config)
+		err = session.Interact(context.Background(), config)
 		require.NoError(t, err)
 
 		err = chromedp.Run(session.GetContext(), chromedp.WaitReady(`body[data-status="ready"]`))
