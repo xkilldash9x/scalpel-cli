@@ -9,18 +9,21 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	// Removed unused import: "net/http/httptest"
 )
 
-const interactorTestTimeout = 15 * time.Second
+// This constant is specific to the manager tests to avoid conflicts.
+const managerTestTimeout = 15 * time.Second
 
 func TestManager(t *testing.T) {
 	t.Run("InitializeAndCloseSession", func(t *testing.T) {
 		t.Parallel()
 		fixture := newTestFixture(t)
 
+		// A session should be created successfully by the fixture.
 		require.NotNil(t, fixture.Session)
 		require.NotEmpty(t, fixture.Session.ID(), "Session ID should not be empty")
+
+		// The fixture's cleanup function will handle closing the session.
 	})
 
 	t.Run("InitializeMultipleSessions", func(t *testing.T) {
@@ -31,11 +34,13 @@ func TestManager(t *testing.T) {
 		fixture2 := newTestFixture(t)
 		require.NotNil(t, fixture2.Session)
 
+		// Each browser context should be isolated, resulting in unique session IDs.
 		require.NotEqual(t, fixture1.Session.ID(), fixture2.Session.ID(), "Each session should have a unique ID")
 	})
 
 	t.Run("NavigateAndExtract", func(t *testing.T) {
 		t.Parallel()
+		fixture := newTestFixture(t)
 		// This is a more comprehensive integration test that validates the manager's
 		// ability to handle a complete, self contained task.
 		server := createStaticTestServer(t, `
@@ -52,11 +57,11 @@ func TestManager(t *testing.T) {
 		defer server.Close()
 
 		// Use a timed context to make the test robust.
-		ctx, cancel := context.WithTimeout(context.Background(), interactorTestTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), managerTestTimeout)
 		defer cancel()
 
-		// Execute the manager's utility function.
-		extractedHrefs, err := brTestManager.NavigateAndExtract(ctx, server.URL)
+		// Execute the manager's utility function, now using the sandboxed manager from the fixture.
+		extractedHrefs, err := fixture.Manager.NavigateAndExtract(ctx, server.URL)
 		require.NoError(t, err)
 
 		// The extracted hrefs might be relative. We need to resolve them against
@@ -84,3 +89,4 @@ func TestManager(t *testing.T) {
 		assert.ElementsMatch(t, expectedHrefs, absHrefs, "Extracted links do not match expected links")
 	})
 }
+

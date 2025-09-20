@@ -3,6 +3,7 @@ package browser
 
 import (
 	"context"
+	"time"
 )
 
 // SessionLifecycleObserver defines an interface for components that need to be
@@ -11,24 +12,50 @@ type SessionLifecycleObserver interface {
 	unregisterSession(ac *AnalysisContext)
 }
 
+// valueOnlyContext wraps a parent context to create a "detached" context.
+// It inherits all values (like CDP target information) from its parent,
+// but it explicitly ignores the parent's deadline and cancellation signal.
+//
+// This is an essential tool for operations that must attempt to run to completion
+// even if the originating context is canceled. Common use cases include:
+//   - Finalizer/cleanup tasks (e.g., removing a temporary attribute from a DOM element).
+//   - Asynchronous data fetching that should not be aborted by a user-facing timeout
+//     (e.g., fetching a response body after a navigation context has timed out).
+//
+// A timeout should almost always be applied to a valueOnlyContext to prevent it
+// from running indefinitely.
+type valueOnlyContext struct {
+	context.Context
+}
 
-// CombineContext creates a new context derived from sessionCtx (inheriting its values,
-// including the chromedp context) but ensures it is cancelled if opCtx is cancelled.
-// This is crucial for allowing callers to control timeouts/cancellation (via opCtx) while still
-// providing chromedp with the necessary session information (via sessionCtx).
-func CombineContext(sessionCtx context.Context, opCtx context.Context) (context.Context, context.CancelFunc) {
-	// Create a new context derived from the session context.
+// Deadline always returns false, effectively removing any deadline from the parent.
+func (valueOnlyContext) Deadline() (deadline time.Time, ok bool) { return }
+
+// Done always returns nil, making the context un-cancellable from its parent.
+func (valueOnlyContext) Done() <-chan struct{} { return nil }
+
+// Err always returns nil.
+func (valueOnlyContext) Err() error { return nil }
+
+// CombineContext creates a new context that is a child of sessionCtx.
+// It is designed to be canceled when *either* its parent (sessionCtx) is canceled
+// *or* the provided operational context (opCtx) is canceled.
+//
+// This is useful for creating contexts for specific operations (like a navigation)
+// that should respect both the overall session lifecycle and the specific
+// timeout or cancellation signal of the operation itself.
+func CombineContext(sessionCtx, opCtx context.Context) (context.Context, context.CancelFunc) {
 	combinedCtx, cancel := context.WithCancel(sessionCtx)
 
-	// Monitor the operation context in a goroutine.
-	// This ensures that if the operation context is cancelled, the combined context is also cancelled.
+	// This goroutine links the operational context's lifecycle to the new combined context.
 	go func() {
 		select {
 		case <-opCtx.Done():
-			// Operation context is done (cancelled or timed out). Cancel the combined context.
+			// If the operation's context is canceled, cancel our new context.
 			cancel()
 		case <-combinedCtx.Done():
-			// Combined context is done (session closed or operation completed).
+			// The combined context was already canceled (likely from the session closing),
+			// so we can just exit.
 		}
 	}()
 

@@ -2,6 +2,7 @@ package engine
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"net/url"
 	"sync"
@@ -90,29 +91,48 @@ func (e *TaskEngine) Start(ctx context.Context, taskChan <-chan schemas.Task) {
 // Stop gracefully shuts down the engine by waiting for all workers to finish.
 func (e *TaskEngine) Stop() {
 	e.logger.Info("Stopping task engine... waiting for workers to finish.")
-	// The channel is closed by the orchestrator; the engine just waits.
+	// We wait for workers to exit, which they will do if the context is cancelled or the channel is closed.
 	e.wg.Wait()
 	e.logger.Info("Task engine stopped gracefully.")
 }
 
 // runWorker is the main loop for a single worker goroutine.
-// It now receives the task channel as an argument.
+// It utilizes a select statement to handle both incoming tasks and context cancellation.
 func (e *TaskEngine) runWorker(ctx context.Context, workerID int, taskChan <-chan schemas.Task) {
 	defer e.wg.Done()
 	logger := e.logger.With(zap.Int("worker_id", workerID))
 	logger.Info("Worker goroutine started")
 
-	// This loop will process tasks until the orchestrator closes taskChan.
-	for task := range taskChan {
-		e.process(ctx, task, logger)
+	// ARCHITECTURAL UPDATE: Replaced for-range with for-select to respect context cancellation.
+	for {
+		select {
+		case <-ctx.Done():
+			// Context was cancelled (e.g., global shutdown signal).
+			// We stop waiting for new tasks immediately.
+			logger.Info("Context cancelled, worker shutting down immediately.", zap.Error(ctx.Err()))
+			return
+		case task, ok := <-taskChan:
+			if !ok {
+				// Channel closed and drained by the producer.
+				logger.Info("Task queue closed and drained, worker shutting down gracefully.")
+				return
+			}
+			// Received a new task, process it.
+			e.process(ctx, task, logger)
+		}
 	}
-
-	logger.Info("Task queue closed and drained, worker shutting down.")
 }
 
 // process handles the execution of a single task.
 func (e *TaskEngine) process(ctx context.Context, task schemas.Task, logger *zap.Logger) {
 	logger.Info("Processing task", zap.String("task_id", task.TaskID), zap.String("task_type", string(task.Type)))
+
+	// ARCHITECTURAL UPDATE: Added pre-check for context cancellation.
+	// Check context before starting heavy work.
+	if ctx.Err() != nil {
+		logger.Warn("Context cancelled before task processing started", zap.Error(ctx.Err()))
+		return
+	}
 
 	targetURL, err := url.Parse(task.TargetURL)
 	if err != nil {
@@ -133,11 +153,21 @@ func (e *TaskEngine) process(ctx context.Context, task schemas.Task, logger *zap
 	if taskTimeout <= 0 {
 		taskTimeout = 15 * time.Minute // Sensible default if config is invalid.
 	}
+
+	// Create a derived context for the specific task execution, respecting the parent context.
 	taskCtx, cancel := context.WithTimeout(ctx, taskTimeout)
 	defer cancel()
 
 	if err := e.worker.ProcessTask(taskCtx, analysisCtx); err != nil {
-		logger.Error("Task processing failed", zap.Error(err))
+		// ARCHITECTURAL UPDATE: Improved error classification for better observability.
+		// Distinguish between expected cancellation/timeout and actual errors.
+		if errors.Is(err, context.DeadlineExceeded) {
+			logger.Warn("Task processing timed out", zap.Duration("timeout", taskTimeout), zap.Error(err))
+		} else if errors.Is(err, context.Canceled) {
+			logger.Warn("Task processing was cancelled", zap.Error(err))
+		} else {
+			logger.Error("Task processing failed with unexpected error", zap.Error(err))
+		}
 		return
 	}
 
@@ -152,7 +182,9 @@ func (e *TaskEngine) process(ctx context.Context, task schemas.Task, logger *zap
 			KGUpdates: analysisCtx.KGUpdates,
 		}
 
-		persistCtx, persistCancel := context.WithTimeout(ctx, 30*time.Second)
+		//  Use a background context for persistence with a specific timeout.
+		// This ensures we attempt to save results even if the parent scan context (ctx) is cancelled during shutdown.
+		persistCtx, persistCancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer persistCancel()
 
 		if err := e.storeService.PersistData(persistCtx, resultEnvelope); err != nil {

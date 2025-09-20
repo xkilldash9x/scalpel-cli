@@ -1,4 +1,6 @@
-package protopollution
+// Package analyze implements the active analysis logic for detecting client-side
+// prototype pollution vulnerabilities.
+package analyze
 
 import (
 	"context"
@@ -101,10 +103,17 @@ func (a *Analyzer) Analyze(ctx context.Context, taskID, targetURL string) ([]sch
 	}
 
 	// 5. Wait for asynchronous events to be captured by our shim.
+	// Use time.NewTimer instead of time.After to properly handle context cancellation and avoid resource leaks.
+	timer := time.NewTimer(a.config.WaitDuration)
 	select {
-	case <-time.After(a.config.WaitDuration):
+	case <-timer.C:
 		aCtx.logger.Info("Monitoring period finished.")
 	case <-ctx.Done():
+		// Ensure the timer is stopped if the context is cancelled.
+		if !timer.Stop() {
+			// If Stop() returns false, the timer already fired, so we must drain the channel.
+			<-timer.C
+		}
 		aCtx.logger.Info("Analysis context cancelled during monitoring.")
 		err = ctx.Err() // Capture the cancellation error to return it.
 	}

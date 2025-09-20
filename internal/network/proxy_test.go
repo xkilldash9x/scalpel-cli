@@ -12,14 +12,14 @@ import (
 	"net/url"
 	"strings"
 	"testing"
-	"time"
 
 	"github.com/elazarl/goproxy"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	// FIX: Changed the import path to the correct location.
+	// FIX: Removed the 'certs' alias to resolve the "undefined: security" error.
+	// The package will now be referenced by its name, 'security'.
 	"github.com/xkilldash9x/scalpel-cli/internal/security"
 )
 
@@ -28,6 +28,7 @@ import (
 // setupTestCA initializes a dummy Certificate Authority and returns the CA struct and PEM-encoded bytes.
 func setupTestCA(t *testing.T) (*security.CA, []byte, []byte) {
 	t.Helper()
+	// Using the correct package identifier 'security' now.
 	ca, err := security.NewCA()
 	require.NoError(t, err, "Failed to create test CA")
 
@@ -45,7 +46,8 @@ func setupTestProxy(t *testing.T, caCert, caKey []byte) (*InterceptionProxy, str
 	t.Helper()
 	logger := zap.NewNop()
 	clientCfg := NewDefaultClientConfig()
-	clientCfg.IgnoreTLSErrors = true // Important for tests using httptest.NewTLSServer
+	// Important for tests using httptest.NewTLSServer
+	clientCfg.IgnoreTLSErrors = true
 
 	proxy, err := NewInterceptionProxy(caCert, caKey, clientCfg, logger)
 	require.NoError(t, err, "Failed to create interception proxy")
@@ -65,7 +67,8 @@ func createTestClient(t *testing.T, proxyURLStr string, ca *security.CA) *http.C
 	require.NoError(t, err)
 
 	tlsConfig := &tls.Config{
-		InsecureSkipVerify: true, // Needed for httptest.NewTLSServer's self-signed cert
+		// Needed for httptest.NewTLSServer's self-signed cert
+		InsecureSkipVerify: true,
 	}
 
 	if ca != nil {
@@ -92,7 +95,8 @@ func TestProxy_HTTP_Forwarding(t *testing.T) {
 	}))
 	defer targetServer.Close()
 
-	_, proxyURL, cleanup := setupTestProxy(t, nil, nil) // No MITM
+	// No MITM
+	_, proxyURL, cleanup := setupTestProxy(t, nil, nil)
 	defer cleanup()
 
 	client := createTestClient(t, proxyURL, nil)
@@ -117,10 +121,12 @@ func TestProxy_HTTPS_TunnelingMode(t *testing.T) {
 	}))
 	defer targetServer.Close()
 
-	_, proxyURL, cleanup := setupTestProxy(t, nil, nil) // No MITM
+	// No MITM
+	_, proxyURL, cleanup := setupTestProxy(t, nil, nil)
 	defer cleanup()
 
-	client := createTestClient(t, proxyURL, nil) // Client does not trust proxy CA
+	// Client does not trust proxy CA
+	client := createTestClient(t, proxyURL, nil)
 
 	resp, err := client.Get(targetServer.URL)
 	require.NoError(t, err)
@@ -154,7 +160,8 @@ func TestProxy_HTTPS_MITMMode(t *testing.T) {
 		return r
 	})
 
-	client := createTestClient(t, proxyURL, ca) // Client trusts the proxy's CA
+	// Client trusts the proxy's CA
+	client := createTestClient(t, proxyURL, ca)
 
 	resp, err := client.Get(targetServer.URL)
 	require.NoError(t, err)

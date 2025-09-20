@@ -12,13 +12,25 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/api/schemas" // FIX: Import the canonical schemas
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
 // TestApplyStealthEvasions verifies that browser properties are correctly spoofed.
 func TestApplyStealthEvasions(t *testing.T) {
+	// Create a new sandboxed browser instance for this test.
+	// We start with a parent context for the entire test's duration.
+	testCtx, testCancel := context.WithCancel(context.Background())
+	defer testCancel()
+
+	// Create an allocator, which manages the browser process.
+	allocatorCtx, allocatorCancel := chromedp.NewExecAllocator(testCtx, chromedp.DefaultExecAllocatorOptions[:]...)
+	defer allocatorCancel()
+
+	// Now create a browser context (a tab) from the allocator.
+	ctx, cancel := chromedp.NewContext(allocatorCtx)
+	defer cancel()
+
 	// 1. Define a specific, non-default persona for the test.
-	// FIX: Use the Persona struct from the 'schemas' package.
 	testPersona := schemas.Persona{
 		UserAgent: "Mozilla/5.0 (Scalpel Test Environment) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.0.0 Safari/537.36",
 		Platform:  "TestOS",
@@ -47,15 +59,11 @@ func TestApplyStealthEvasions(t *testing.T) {
 	}))
 	defer server.Close()
 
-	// 3. Setup a new browser context.
-	ctx, cancel := chromedp.NewContext(context.Background())
-	defer cancel()
-
-	// 4. Apply the stealth evasions.
+	// 3. Apply the stealth evasions (this is what we are testing).
 	err := Apply(testPersona, zap.NewNop()).Do(ctx)
 	require.NoError(t, err, "Applying stealth evasions should not fail")
 
-	// 5. Navigate to the page and evaluate the results.
+	// 4. Navigate to the page and evaluate the results.
 	var fingerprint map[string]interface{}
 	err = chromedp.Run(ctx,
 		chromedp.Navigate(server.URL),
@@ -66,7 +74,7 @@ func TestApplyStealthEvasions(t *testing.T) {
 	require.NoError(t, err, "Chromedp run failed")
 	require.NotNil(t, fingerprint, "Fingerprint object should be populated by the page script")
 
-	// 6. Assert that the properties were successfully spoofed.
+	// 5. Assert that the properties were successfully spoofed.
 	assert.Equal(t, testPersona.UserAgent, fingerprint["userAgent"], "UserAgent was not spoofed correctly")
 	assert.Equal(t, testPersona.Platform, fingerprint["platform"], "Platform was not spoofed correctly")
 	assert.False(t, fingerprint["webdriver"].(bool), "navigator.webdriver should be false")
