@@ -44,21 +44,22 @@ func TestManager(t *testing.T) {
 		// This is a more comprehensive integration test that validates the manager's
 		// ability to handle a complete, self contained task.
 		server := createStaticTestServer(t, `
-				<html>
-					<body>
-						<a href="/page1">Link 1</a>
-						<a href="http://sub.example.com/page2">Link 2</a>
-						<a href="#fragment">Fragment Link</a>
-						<a href="/page1">Duplicate Link</a>
-						<a>Link without href</a>
-					</body>
-				</html>
-			`)
+                    <html>
+                        <body>
+                            <a href="/page1">Link 1</a>
+                            <a href="http://sub.example.com/page2">Link 2</a>
+                            <a href="#fragment">Fragment Link</a>
+                            <a href="/page1">Duplicate Link</a>
+                            <a>Link without href</a>
+                        </body>
+                    </html>
+                `)
 		defer server.Close()
 
 		// Use a timed context to make the test robust.
 		ctx, cancel := context.WithTimeout(context.Background(), managerTestTimeout)
-		defer cancel()
+		// FIX: Use t.Cleanup instead of defer cancel() in parallel tests.
+		t.Cleanup(cancel)
 
 		// Execute the manager's utility function, now using the sandboxed manager from the fixture.
 		extractedHrefs, err := fixture.Manager.NavigateAndExtract(ctx, server.URL)
@@ -89,4 +90,3 @@ func TestManager(t *testing.T) {
 		assert.ElementsMatch(t, expectedHrefs, absHrefs, "Extracted links do not match expected links")
 	})
 }
-

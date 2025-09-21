@@ -13,6 +13,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
 const testTimeout = 25 * time.Second
@@ -25,7 +26,8 @@ func TestAnalysisContext(t *testing.T) {
 		session := fixture.Session
 
 		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-		defer cancel()
+		// FIX: Use t.Cleanup instead of defer cancel() in parallel tests.
+		t.Cleanup(cancel)
 
 		require.NoError(t, session.Navigate(ctx, server.URL))
 		require.NoError(t, session.Close(ctx))
@@ -50,7 +52,8 @@ func TestAnalysisContext(t *testing.T) {
 		session := fixture.Session
 
 		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-		defer cancel()
+		// FIX: Use t.Cleanup instead of defer cancel() in parallel tests.
+		t.Cleanup(cancel)
 
 		require.NoError(t, session.Navigate(ctx, server.URL), "Navigation failed")
 		artifacts, err := session.CollectArtifacts()
@@ -73,7 +76,8 @@ func TestAnalysisContext(t *testing.T) {
 		}))
 
 		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-		defer cancel()
+		// FIX: Use t.Cleanup instead of defer cancel() in parallel tests.
+		t.Cleanup(cancel)
 
 		// First session, sets a cookie.
 		fixture1 := newTestFixture(t)
@@ -96,7 +100,8 @@ func TestAnalysisContext(t *testing.T) {
 		session := fixture.Session
 
 		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-		defer cancel()
+		// FIX: Use t.Cleanup instead of defer cancel() in parallel tests.
+		t.Cleanup(cancel)
 
 		require.NoError(t, session.Navigate(ctx, server.URL))
 		config := schemas.InteractionConfig{MaxDepth: 1, MaxInteractionsPerDepth: 1}
@@ -113,7 +118,8 @@ func TestAnalysisContext(t *testing.T) {
 		session := fixture.Session
 
 		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-		defer cancel()
+		// FIX: Use t.Cleanup instead of defer cancel() in parallel tests.
+		t.Cleanup(cancel)
 
 		callbackChan := make(chan string, 1)
 		myFunc := func(s string) { callbackChan <- s }
@@ -133,28 +139,32 @@ func TestAnalysisContext(t *testing.T) {
 
 	t.Run("NavigateTimeout", func(t *testing.T) {
 		t.Parallel()
-		fixture := newTestFixture(t)
-		cfg := *fixture.Config
-		cfg.Network.NavigationTimeout = 100 * time.Millisecond
+
+		// FIX: Use newTestFixture with a configurator to set the short timeout.
+		// This ensures the test respects the global semaphore and cleanup logic,
+		// and eliminates the rogue Manager creation that caused instability.
+		fixture := newTestFixture(t, func(cfg *config.Config) {
+			cfg.Network.NavigationTimeout = 100 * time.Millisecond
+		})
+
 		server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			time.Sleep(500 * time.Millisecond) // This sleep is longer than the timeout.
+			fmt.Fprintln(w, "<html><body>Slow response</body></html>")
 		}))
 
-		fixtureCtx, fixtureCancel := context.WithCancel(context.Background())
-		defer fixtureCancel()
-		manager, err := NewManager(fixtureCtx, getTestLogger(), &cfg)
-		require.NoError(t, err)
-
-		session, err := manager.NewAnalysisContext(fixtureCtx, &cfg, schemas.DefaultPersona, "", "")
-		require.NoError(t, err)
+		// The previous manual lifecycle management (fixtureCtx, NewManager) is removed.
+		session := fixture.Session
 
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer cancel()
+		// FIX: Use t.Cleanup instead of defer cancel().
+		t.Cleanup(cancel)
 
 		// Navigation should fail with a timeout error.
-		err = session.Navigate(ctx, server.URL)
+		err := session.Navigate(ctx, server.URL)
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "context deadline exceeded")
+		// We specifically check that the error chain includes the deadline exceeded error.
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+		assert.Contains(t, err.Error(), "timed out after 100ms")
 	})
 }
 

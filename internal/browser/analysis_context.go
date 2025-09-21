@@ -62,8 +62,7 @@ func NewAnalysisContext(
 	}
 	ac.harvester = NewHarvester(ctx, sessionLogger, cfg.Network.CaptureResponseBodies)
 	if cfg.Browser.Humanoid.Enabled {
-		// Revert to the original, correct logic for finding the browser context ID.
-		// The simplified 'NewFromContext' was an incorrect assumption.
+		// Logic for finding the browser context ID required for humanoid features.
 		var browserContextID cdp.BrowserContextID
 		if target := chromedp.FromContext(ctx).Target; target != nil {
 			targetID := target.TargetID
@@ -72,7 +71,10 @@ func NewAnalysisContext(
 			defer targetsCancel()
 
 			if infos, err := chromedp.Targets(targetsCtx); err != nil {
-				ac.logger.Warn("Failed to retrieve browser targets to initialize humanoid.", zap.Error(err))
+				// Log only if the session context is still active.
+				if ctx.Err() == nil {
+					ac.logger.Warn("Failed to retrieve browser targets to initialize humanoid.", zap.Error(err))
+				}
 			} else {
 				for _, info := range infos {
 					if info.TargetID == targetID {
@@ -89,7 +91,10 @@ func NewAnalysisContext(
 	}
 	ac.interactor = NewInteractor(sessionLogger, ac.humanoid, stabilizeFn)
 	if err := ac.harvester.Start(); err != nil {
-		ac.logger.Error("Failed to start harvester", zap.Error(err))
+		// Log only if the session context is still active.
+		if ctx.Err() == nil {
+			ac.logger.Error("Failed to start harvester", zap.Error(err))
+		}
 	}
 	return ac
 }
@@ -274,39 +279,49 @@ func (ac *AnalysisContext) WaitForAsync(milliseconds int) error {
 	return chromedp.Run(ac.ctx, chromedp.Sleep(time.Duration(milliseconds)*time.Millisecond))
 }
 
+// ExposeFunction exposes a Go function to the browser's JavaScript environment.
+// The binding remains active until the provided ctx is canceled or the session is closed.
 func (ac *AnalysisContext) ExposeFunction(ctx context.Context, name string, function interface{}) error {
-	bindCtx, bindCancel := context.WithCancel(ac.ctx)
+	// REFACTORED: Fixed context lifecycle management for persistent bindings.
+	// The previous implementation incorrectly used 'defer' to launch cleanup immediately.
 
+	// Create a context that is cancelled if either the session (ac.ctx) or the caller (ctx) is done.
+	bindCtx, bindCancel := CombineContext(ac.ctx, ctx)
+
+	// Set up a goroutine to manage the cleanup when the context is done.
 	go func() {
-		select {
-		case <-ctx.Done():
-			bindCancel()
-		case <-bindCtx.Done():
-		}
-	}()
-	defer func() {
-		// Launch cleanup in a separate goroutine with a detached context
-		// to ensure it runs even if the primary context is canceled.
+		// Wait until the binding context is done.
+		<-bindCtx.Done()
+
+		// Now that the binding is no longer needed, perform cleanup.
+		// We launch this in a separate goroutine as cleanupBinding is synchronous and uses a detached context.
 		go ac.cleanupBinding(name)
 	}()
 
-	if err := chromedp.Run(bindCtx, runtime.AddBinding(name)); err != nil {
+	// Use a short timeout for the setup action itself, derived from bindCtx.
+	setupCtx, setupCancel := context.WithTimeout(bindCtx, 5*time.Second)
+	defer setupCancel()
+
+	if err := chromedp.Run(setupCtx, runtime.AddBinding(name)); err != nil {
+		bindCancel() // Ensure cancellation if setup fails.
 		return fmt.Errorf("failed to add runtime binding for %s: %w", name, err)
 	}
 
-	// Listen for the binding being called from the browser.
+	// Listen for the binding being called from the browser. (Using long-lived bindCtx)
 	eventChan := make(chan *runtime.EventBindingCalled, 16)
 	chromedp.ListenTarget(bindCtx, func(ev interface{}) {
 		if e, ok := ev.(*runtime.EventBindingCalled); ok && e.Name == name {
 			select {
 			case eventChan <- e:
 			case <-bindCtx.Done():
+			// Stop sending if context is done.
 			default:
 				ac.logger.Warn("Exposed function event channel full.", zap.String("name", name))
 			}
 		}
 	})
 
+	// Start the event handler goroutine. (Using long-lived bindCtx)
 	go ac.bindingEventHandler(bindCtx, eventChan, function)
 
 	return nil
@@ -332,13 +347,13 @@ func (ac *AnalysisContext) bindingEventHandler(ctx context.Context, events <-cha
 func (ac *AnalysisContext) cleanupBinding(name string) {
 	// This cleanup task must run even if the parent context is canceled.
 	// We create a new "detached" context by wrapping the session context
-	// in a valueOnlyContext and adding a timeout for the cleanup operation.
+	// in a valueOnlyContext (inherits CDP target info) and adding a timeout.
 	cleanupCtx, cancel := context.WithTimeout(valueOnlyContext{ac.ctx}, 2*time.Second)
 	defer cancel()
 
 	if err := chromedp.Run(cleanupCtx, runtime.RemoveBinding(name)); err != nil {
-		// Only log if the cleanup context itself didn't time out.
-		if cleanupCtx.Err() == nil {
+		// Only log if the cleanup context itself didn't time out and the session context is still somewhat active.
+		if cleanupCtx.Err() == nil && ac.ctx.Err() == nil {
 			ac.logger.Debug("Failed to remove runtime binding.", zap.String("name", name), zap.Error(err))
 		}
 	}
@@ -351,19 +366,17 @@ func (ac *AnalysisContext) handleBindingCall(payload string, fnVal reflect.Value
 		}
 	}()
 
+	// The payload from CDP runtime.EventBindingCalled is expected to be a JSON string
+	// representing an array of the arguments passed in JavaScript.
+
 	var rawArgs []json.RawMessage
 	if err := json.Unmarshal([]byte(payload), &rawArgs); err != nil {
-		ac.logger.Error("Failed to unmarshal binding payload", zap.Error(err), zap.String("payload", payload))
+		ac.logger.Error("Failed to unmarshal binding payload as JSON array", zap.Error(err), zap.String("payload", payload))
 		return
 	}
-	if len(rawArgs) != 1 {
-		ac.logger.Error("Binding payload should have a single element (a JSON array string)", zap.Int("got", len(rawArgs)))
-		return
-	}
-	if err := json.Unmarshal(rawArgs[0], &rawArgs); err != nil {
-		ac.logger.Error("Failed to unmarshal inner arguments array", zap.Error(err), zap.String("payload", string(rawArgs[0])))
-		return
-	}
+
+	// The original implementation had a flawed double-unmarshal logic (checking len(rawArgs) != 1 and unmarshalling rawArgs[0]) which is removed.
+
 	if len(rawArgs) != numArgs {
 		ac.logger.Error("Binding argument count mismatch", zap.Int("expected", numArgs), zap.Int("got", len(rawArgs)))
 		return
@@ -396,4 +409,3 @@ func (ac *AnalysisContext) ExecuteScript(ctx context.Context, script string) err
 	defer execCancel()
 	return chromedp.Run(execCtx, chromedp.Evaluate(script, nil))
 }
-

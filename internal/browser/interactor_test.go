@@ -44,24 +44,25 @@ func TestInteractor(t *testing.T) {
 				return
 			}
 			fmt.Fprintln(w, `
-				<html><body>
-					<form action="/submit" method="POST">
-						<input type="text" name="username" id="userField">
-						<input type="password" name="password">
-						<select name="color">
-							<option value="">Select...</option>
-							<option value="red">Red</option>
-							<option value="blue">Blue</option>
-						</select>
-						<button type="submit" id="submitBtn">Submit</button>
-					</form>
-				</body></html>
-			`)
+                    <html><body>
+                        <form action="/submit" method="POST">
+                            <input type="text" name="username" id="userField">
+                            <input type="password" name="password">
+                            <select name="color">
+                                <option value="">Select...</option>
+                                <option value="red">Red</option>
+                                <option value="blue">Blue</option>
+                            </select>
+                            <button type="submit" id="submitBtn">Submit</button>
+                        </form>
+                    </body></html>
+                `)
 		}))
 		defer server.Close()
 
 		ctx, cancel := context.WithTimeout(context.Background(), interactorTestTimeout)
-		defer cancel()
+		// FIX: Use t.Cleanup instead of defer cancel() in parallel tests.
+		t.Cleanup(cancel)
 
 		err := session.Navigate(ctx, server.URL)
 		require.NoError(t, err)
@@ -98,30 +99,31 @@ func TestInteractor(t *testing.T) {
 
 		server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			fmt.Fprintln(w, `
-				<html><body>
-					<div id="status">Initial</div>
-					<button id="revealBtn" onclick="reveal()">Reveal</button>
-					<div id="dynamicContent" style="display:none;">
-						<button id="dynamicBtn" onclick="updateStatus()">Interact</button>
-					</div>
-					<script>
-						function reveal() {
-							setTimeout(() => {
-								document.getElementById('dynamicContent').style.display = 'block';
-								document.getElementById('status').innerText = 'Revealed';
-							}, 150);
-						}
-						function updateStatus() {
-							document.getElementById('status').innerText = 'Dynamic Success';
-						}
-					</script>
-				</body></html>
-			`)
+                    <html><body>
+                        <div id="status">Initial</div>
+                        <button id="revealBtn" onclick="reveal()">Reveal</button>
+                        <div id="dynamicContent" style="display:none;">
+                            <button id="dynamicBtn" onclick="updateStatus()">Interact</button>
+                        </div>
+                        <script>
+                            function reveal() {
+                                setTimeout(() => {
+                                    document.getElementById('dynamicContent').style.display = 'block';
+                                    document.getElementById('status').innerText = 'Revealed';
+                                }, 150);
+                            }
+                            function updateStatus() {
+                                document.getElementById('status').innerText = 'Dynamic Success';
+                            }
+                        </script>
+                    </body></html>
+                `)
 		}))
 		defer server.Close()
 
 		ctx, cancel := context.WithTimeout(context.Background(), interactorTestTimeout)
-		defer cancel()
+		// FIX: Use t.Cleanup instead of defer cancel() in parallel tests.
+		t.Cleanup(cancel)
 
 		err := session.Navigate(ctx, server.URL)
 		require.NoError(t, err)
@@ -147,4 +149,3 @@ func TestInteractor(t *testing.T) {
 		}, 10*time.Second, 100*time.Millisecond, "Interactor failed to interact with dynamic content")
 	})
 }
-

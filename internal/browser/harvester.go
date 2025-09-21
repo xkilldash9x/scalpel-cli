@@ -181,7 +181,12 @@ func (h *Harvester) handleRequestWillBeSent(e *network.EventRequestWillBeSent) {
 			prevState.Response = e.RedirectResponse
 			prevState.IsComplete = true
 			prevState.EndTS = e.Timestamp
-			close(prevState.ResponseReady)
+			// Ensure the channel is closed so any potential body fetch doesn't hang.
+			select {
+			case <-prevState.ResponseReady:
+			default:
+				close(prevState.ResponseReady)
+			}
 		}
 	}
 
@@ -388,7 +393,8 @@ func (h *Harvester) generateHAR() *schemas.HAR {
 	defer h.lock.RUnlock()
 
 	entries := make([]schemas.Entry, 0, len(h.requests))
-	for _, state := range h.requests {
+	// Iterate using requestID for logging in conversion helpers.
+	for requestID, state := range h.requests {
 		if !state.IsComplete || state.Request == nil || state.StartTS == nil {
 			continue
 		}
@@ -406,7 +412,7 @@ func (h *Harvester) generateHAR() *schemas.HAR {
 		entry := schemas.Entry{
 			StartedDateTime: startTime,
 			Time:            duration,
-			Request:         h.convertRequest(state.Request),
+			Request:         h.convertRequest(state.Request, requestID),
 			Response:        h.convertResponse(state.Response, state.Body),
 		}
 		entries = append(entries, entry)
@@ -427,30 +433,42 @@ func (h *Harvester) generateHAR() *schemas.HAR {
 
 // -- Conversion Helpers --
 
-func (h *Harvester) convertRequest(req *network.Request) schemas.Request {
+// convertRequest converts a CDP network.Request to a HAR Request format.
+func (h *Harvester) convertRequest(req *network.Request, requestID network.RequestID) schemas.Request {
 	headers := convertHeaders(req.Headers)
 	queryString := convertQueryString(req.URL)
 
 	var postData *schemas.PostData
 	bodySize := int64(-1)
 
-	// FINAL FIX: The `network.Request` struct does not have a `PostData` field.
-	// The post body must be constructed from the `PostDataEntries` slice.
-	// This logic now correctly reads from the available fields.
+	// REFACTORED: The post body must be constructed from the `PostDataEntries` slice.
+	// According to CDP specification, the bytes field is Base64 encoded.
 	if req.HasPostData && req.PostDataEntries != nil && len(req.PostDataEntries) > 0 {
-		var postDataTextBuilder strings.Builder
+		var postDataBuffer []byte
+
 		for _, entry := range req.PostDataEntries {
 			if entry.Bytes != "" {
-				postDataTextBuilder.WriteString(entry.Bytes)
+				// Decode the Base64 encoded bytes.
+				decodedBytes, err := base64.StdEncoding.DecodeString(entry.Bytes)
+				if err != nil {
+					// If decoding fails, log the error and use the raw string as a fallback.
+					h.logger.Warn("Failed to decode base64 PostDataEntry.Bytes",
+						zap.Error(err),
+						zap.String("request_id", string(requestID)),
+					)
+					postDataBuffer = append(postDataBuffer, []byte(entry.Bytes)...)
+				} else {
+					postDataBuffer = append(postDataBuffer, decodedBytes...)
+				}
 			}
 		}
-		postDataText := postDataTextBuilder.String()
 
-		if postDataText != "" {
-			bodySize = int64(len(postDataText))
+		if len(postDataBuffer) > 0 {
+			bodySize = int64(len(postDataBuffer))
 			postData = &schemas.PostData{
 				MimeType: getHeader(req.Headers, "Content-Type"),
-				Text:     postDataText,
+				Text:     string(postDataBuffer),
+				// Encoding field is omitted as we provide the decoded text.
 			}
 		}
 	}
@@ -573,4 +591,3 @@ func isTextMime(mimeType string) bool {
 		strings.Contains(mime, "xml") ||
 		strings.Contains(mime, "x-www-form-urlencoded")
 }
-

@@ -20,38 +20,29 @@ import (
 )
 
 const (
-	// How long to wait for the initial browser connection to be established.
-	verificationTimeout = 30 * time.Second
-	// How long to wait for a new session (tab) to initialize.
-	sessionInitTimeout = 30 * time.Second
-	// The grace period for a single session to close during a full shutdown.
+	verificationTimeout    = 30 * time.Second
+	sessionInitTimeout     = 30 * time.Second
 	shutdownSessionTimeout = 10 * time.Second
-	// The grace period for a temporary session to clean up after a utility function runs.
-	cleanupTimeout = 5 * time.Second
 )
 
-// Manager is in charge of the browser's lifecycle,
-// spinning up new isolated sessions, and making sure everything shuts down cleanly.
+// Manager is in charge of the browser's lifecycle. It holds contexts for the
+// allocator (the browser process) and the browser connection itself.
 type Manager struct {
-	logger *zap.Logger
-	cfg    *config.Config
-
-	// This context represents the lifecycle of the browser executable itself.
-	// It serves as the root of the context tree for all browser operations.
-	// When its cancel function is called, the entire browser process is terminated.
+	logger          *zap.Logger
+	cfg             *config.Config
 	allocatorCtx    context.Context
 	allocatorCancel context.CancelFunc
-
-	// Keeps track of all the active sessions.
-	sessions map[string]*AnalysisContext
-	mu       sync.Mutex
+	browserCtx      context.Context
+	browserCancel   context.CancelFunc
+	sessions        map[string]*AnalysisContext
+	mu              sync.Mutex
 }
 
-// -- Interface Compliance --
 var _ schemas.BrowserManager = (*Manager)(nil)
 var _ SessionLifecycleObserver = (*Manager)(nil)
 
 // NewManager fires up the browser manager and the underlying browser process.
+// It establishes a single, long lived connection to the browser.
 func NewManager(ctx context.Context, logger *zap.Logger, cfg *config.Config) (*Manager, error) {
 	m := &Manager{
 		logger:   logger.Named("browser_manager"),
@@ -60,28 +51,31 @@ func NewManager(ctx context.Context, logger *zap.Logger, cfg *config.Config) (*M
 	}
 
 	opts := m.generateAllocatorOptions()
-
-	// This establishes the root of our context tree for the browser process.
-	// The lifecycle of the browser executable is tied to this allocatorCtx.
+	// The allocator context's lifecycle is tied to the parent context. Canceling it
+	// will terminate the browser process.
 	m.allocatorCtx, m.allocatorCancel = chromedp.NewExecAllocator(ctx, opts...)
 
-	// "Warm up" the browser connection using a temporary context to ensure it's ready.
-	verifyCtx, verifyCancel := chromedp.NewContext(m.allocatorCtx, chromedp.WithLogf(m.logger.Sugar().Debugf))
-	defer verifyCancel()
+	// From the allocator, we create a single browser context that represents the
+	// connection to the browser instance. New tabs will be created from this context.
+	m.browserCtx, m.browserCancel = chromedp.NewContext(m.allocatorCtx, chromedp.WithLogf(m.logger.Sugar().Debugf))
 
-	runCtx, runCancel := context.WithTimeout(verifyCtx, verificationTimeout)
+	// We'll "warm up" the browser connection to ensure it's ready.
+	// A timed context is derived from our main browser context for this check.
+	runCtx, runCancel := context.WithTimeout(m.browserCtx, verificationTimeout)
 	defer runCancel()
 
-	// Just run a no-op to confirm the connection is live.
-	err := chromedp.Run(runCtx, chromedp.ActionFunc(func(ctx context.Context) error {
+	err := chromedp.Run(runCtx, chromedp.ActionFunc(func(c context.Context) error {
 		m.logger.Info("Browser manager initialized and connection verified.",
 			zap.Bool("headless", cfg.Browser.Headless),
 			zap.Bool("proxy_enabled", cfg.Network.Proxy.Enabled),
+			// Log if the stabilized test/debug configuration is active.
+			zap.Bool("is_test_config", cfg.Browser.Debug),
 		)
 		return nil
 	}))
 
 	if err != nil {
+		m.browserCancel()   // Clean up the browser context.
 		m.allocatorCancel() // If we can't connect, kill the browser process.
 		return nil, fmt.Errorf("failed to verify connection to browser instance: %w", err)
 	}
@@ -89,9 +83,10 @@ func NewManager(ctx context.Context, logger *zap.Logger, cfg *config.Config) (*M
 	return m, nil
 }
 
-// NewAnalysisContext creates a new, fully isolated browser session for analysis tasks.
+// NewAnalysisContext creates a new, isolated browser tab (session).
+// It no longer accepts a `sessionCtx` because the lifecycle is managed explicitly.
 func (m *Manager) NewAnalysisContext(
-	sessionCtx context.Context,
+	ctx context.Context,
 	cfgInterface interface{},
 	persona schemas.Persona,
 	taintTemplate string,
@@ -102,7 +97,7 @@ func (m *Manager) NewAnalysisContext(
 		return nil, fmt.Errorf("invalid configuration object type provided: %T", cfgInterface)
 	}
 
-	ac, err := m.createBrowserSession(sessionCtx, appConfig, persona)
+	ac, err := m.createBrowserSession(appConfig, persona)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create browser session: %w", err)
 	}
@@ -114,8 +109,10 @@ func (m *Manager) NewAnalysisContext(
 	if taintTemplate != "" && taintConfig != "" {
 		if err := ac.InitializeTaint(taintTemplate, taintConfig); err != nil {
 			m.logger.Error("Failed to initialize taint instrumentation", zap.Error(err))
-			// If taint setup fails, the session is invalid. Clean it up immediately.
-			ac.Close(context.Background())
+			// Use a detached, timed context for the close operation on failure to ensure cleanup.
+			closeCtx, closeCancel := context.WithTimeout(context.Background(), shutdownSessionTimeout)
+			defer closeCancel()
+			ac.Close(closeCtx)
 			return nil, fmt.Errorf("failed to initialize taint instrumentation: %w", err)
 		}
 	}
@@ -126,7 +123,6 @@ func (m *Manager) NewAnalysisContext(
 // Shutdown gracefully terminates all active sessions and the main browser process.
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.logger.Info("Shutting down browser manager...")
-
 	m.mu.Lock()
 	sessionsToClose := make([]*AnalysisContext, 0, len(m.sessions))
 	for _, session := range m.sessions {
@@ -152,6 +148,10 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	}
 	wg.Wait()
 
+	// Shut down contexts in the correct order: browser connection, then process.
+	if m.browserCancel != nil {
+		m.browserCancel()
+	}
 	if m.allocatorCancel != nil {
 		m.allocatorCancel()
 	}
@@ -160,33 +160,42 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	return nil
 }
 
-// NavigateAndExtract is a high level utility for visiting a URL, waiting for it to
-// load, and extracting all discoverable links.
-func (m *Manager) NavigateAndExtract(ctx context.Context, url string) ([]string, error) {
-	m.logger.Debug("NavigateAndExtract called", zap.String("url", url))
+// NavigateAndExtract creates a temporary session to perform a task.
+func (m *Manager) NavigateAndExtract(ctx context.Context, targetURL string) ([]string, error) {
+	m.logger.Debug("NavigateAndExtract called", zap.String("url", targetURL))
 
 	session, err := m.NewAnalysisContext(ctx, m.cfg, schemas.DefaultPersona, "", "")
 	if err != nil {
 		return nil, fmt.Errorf("failed to create session for NavigateAndExtract: %w", err)
 	}
-	// This defer ensures the temporary session is cleaned up, even if the parent
-	// context is cancelled. A new "detached" context (from context.Background)
-	// with a timeout guarantees a graceful shutdown attempt.
-	defer func() {
-		cleanupCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
-		defer cancel()
-		session.Close(cleanupCtx)
-	}()
+
+	// Make sure the temporary session is closed.
+	// REFACTORED: Use a detached, timed context for closing to ensure graceful shutdown
+	// even if the parent context (ctx) is already cancelled.
+	closeCtx, closeCancel := context.WithTimeout(context.Background(), shutdownSessionTimeout)
+	defer closeCancel()
+	defer session.Close(closeCtx)
+
+	// REFACTORED: Use the CombineContext utility for robust context management.
+	// This ensures the operation respects both the session lifecycle and the incoming request's deadline (ctx),
+	// replacing the previous manual goroutine implementation.
+	operationCtx, operationCancel := CombineContext(session.GetContext(), ctx)
+	defer operationCancel()
 
 	var attributes []map[string]string
-
 	tasks := chromedp.Tasks{
-		chromedp.Navigate(url),
+		chromedp.Navigate(targetURL),
 		chromedp.WaitVisible("body", chromedp.ByQuery),
 		chromedp.AttributesAll("a[href]", &attributes, chromedp.ByQueryAll),
 	}
 
-	if err := chromedp.Run(session.GetContext(), tasks); err != nil {
+	// All actions for this task run under our new, cancellable operation context.
+	if err := chromedp.Run(operationCtx, tasks); err != nil {
+		// If the error was caused by the incoming context being cancelled,
+		// it's good practice to return that original error.
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("failed to run navigation and extraction tasks: %w", err)
 	}
 
@@ -201,102 +210,99 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, url string) ([]string,
 	return hrefs, nil
 }
 
-// unregisterSession is a callback for an AnalysisContext to announce its closure.
-// This satisfies the SessionLifecycleObserver interface.
 func (m *Manager) unregisterSession(ac *AnalysisContext) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
-	if _, exists := m.sessions[ac.ID()]; exists {
-		delete(m.sessions, ac.ID())
-		m.logger.Debug("Unregistered session", zap.String("session_id", ac.ID()))
-	}
+	delete(m.sessions, ac.ID())
+	m.logger.Debug("Unregistered session", zap.String("session_id", ac.ID()))
 }
 
-// -- Private Helpers --
+// createBrowserSession now follows the modern, simplified pattern.
+func (m *Manager) createBrowserSession(appConfig *config.Config, persona schemas.Persona) (*AnalysisContext, error) {
+	// 1. Create a new context (a "tab") from the main browser context.
+	// This context directly controls the lifecycle of the tab.
+	tabCtx, tabCancel := chromedp.NewContext(m.browserCtx)
 
-// createBrowserSession handles creating a new incognito context, applying stealth
-// settings, and wrapping it in our AnalysisContext struct.
-func (m *Manager) createBrowserSession(sessionCtx context.Context, appConfig *config.Config, persona schemas.Persona) (*AnalysisContext, error) {
-	// Create a new incognito browser context (a "tab") from the root allocator.
-	// This establishes a parent-child relationship in the context tree.
-	ctx, cancel := chromedp.NewContext(m.allocatorCtx, chromedp.WithLogf(m.logger.Sugar().Debugf))
-
-	// Link the lifecycle of this new context to the parent operation's context.
-	// When the parent (sessionCtx) is done, the browser tab closes automatically.
-	// This is the core of the "cancellation cascade".
-	go func() {
-		select {
-		case <-sessionCtx.Done():
-			cancel()
-		case <-ctx.Done():
-		}
-	}()
-
-	initCtx, initCancel := context.WithTimeout(ctx, sessionInitTimeout)
+	// 2. Perform initialization within a timed context derived from the tab context.
+	initCtx, initCancel := context.WithTimeout(tabCtx, sessionInitTimeout)
 	defer initCancel()
 
 	if persona.UserAgent == "" {
 		persona = schemas.DefaultPersona
 	}
-	applyStealthAction := stealth.Apply(persona, m.logger)
 
 	tasks := chromedp.Tasks{
 		chromedp.Navigate("about:blank"),
-		applyStealthAction,
+		stealth.Apply(persona, m.logger),
 	}
 
 	if err := chromedp.Run(initCtx, tasks); err != nil {
-		// If the context was cancelled during init, this error is expected.
-		// Otherwise, it's a legitimate problem.
-		if initCtx.Err() == nil {
-			m.logger.Warn("Failed to apply all stealth evasions during session init", zap.Error(err))
-		}
+		tabCancel() // If init fails, we must explicitly cancel the tab context.
+		return nil, fmt.Errorf("failed to initialize browser session: %w", err)
 	}
 
 	sessionID := uuid.New().String()
-	ac := NewAnalysisContext(ctx, cancel, m.logger, appConfig, persona, m, sessionID)
-
+	// 3. The AnalysisContext is now simpler: it just receives the tab's context and cancel func.
+	ac := NewAnalysisContext(tabCtx, tabCancel, m.logger, appConfig, persona, m, sessionID)
 	return ac, nil
 }
 
 // generateAllocatorOptions assembles the command line arguments for launching Chrome
 // to ensure stability and evade detection.
 func (m *Manager) generateAllocatorOptions() []chromedp.ExecAllocatorOption {
-	defaultOpts := chromedp.DefaultExecAllocatorOptions[:]
-	opts := make([]chromedp.ExecAllocatorOption, len(defaultOpts), len(defaultOpts)+20)
-	copy(opts, defaultOpts)
-
 	browserCfg := m.cfg.Browser
 	proxyCfg := m.cfg.Network.Proxy
 
-	if browserCfg.Headless {
-		opts = append(opts, chromedp.Flag("headless", "new"))
-	}
+	// Start with a clean slate of options. Building the options explicitly is robust.
+	opts := []chromedp.ExecAllocatorOption{
+		// Since the test runner executes from within the package directory,
+		// the relative path is now correct.
+		chromedp.ExecPath("./run-chrome.sh"),
 
-	opts = append(opts,
+		// 1. Core stealth and automation overrides.
 		chromedp.Flag("enable-automation", false),
 		chromedp.Flag("disable-blink-features", "AutomationControlled"),
-		chromedp.Flag("disable-background-networking", true),
-		chromedp.Flag("disable-sync", true),
-		chromedp.Flag("metrics-recording-only", true),
-		chromedp.Flag("disable-default-apps", true),
-		chromedp.Flag("no-first-run", true),
-		chromedp.Flag("disable-hang-monitor", true),
-		chromedp.Flag("disable-prompt-on-repost", true),
-		chromedp.Flag("disable-extensions", true),
-		chromedp.Flag("disable-dev-shm-usage", true),
-		chromedp.Flag("disable-gpu", browserCfg.Headless),
-	)
 
+		// Set a default user agent.
+		chromedp.UserAgent(schemas.DefaultPersona.UserAgent),
+	}
+
+	// 2. Apply configuration-specific flags.
+	if browserCfg.Headless {
+		// Use the "new" headless mode for better stealth and consistency (Modern practice).
+		opts = append(opts, chromedp.Flag("headless", "new"))
+	}
 	if browserCfg.IgnoreTLSErrors {
 		opts = append(opts, chromedp.Flag("ignore-certificate-errors", true))
 	}
 
+	// 3. Apply stability and environment-specific flags.
+	opts = append(opts,
+		// Stability flags beneficial in all environments, especially containers.
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("disable-gpu", browserCfg.Headless), // Disable GPU in headless mode.
+	)
+
+	// Environment differentiation (Debug/Test vs. Production).
+	if browserCfg.Debug {
+		// In test/debug environments (often containerized CI), NoSandbox is crucial for stability.
+		opts = append(opts, chromedp.NoSandbox)
+	} else {
+		// In production, ensure key operational flags for a clean run are present.
+		opts = append(opts,
+			chromedp.Flag("disable-background-networking", true),
+			chromedp.Flag("disable-sync", true),
+			chromedp.Flag("no-first-run", true),
+			chromedp.Flag("no-default-browser-check", true),
+		)
+	}
+
+	// 4. Apply Proxy settings.
 	if proxyCfg.Enabled && proxyCfg.Address != "" {
 		proxyURL := "http://" + proxyCfg.Address
 		if _, err := url.Parse(proxyURL); err == nil {
 			opts = append(opts, chromedp.ProxyServer(proxyURL))
+			// When using a proxy (especially for interception), ignoring cert errors is often necessary.
 			opts = append(opts, chromedp.Flag("ignore-certificate-errors", true))
 		} else {
 			m.logger.Error("Invalid proxy address, proxy will not be used", zap.String("address", proxyCfg.Address))
@@ -305,3 +311,4 @@ func (m *Manager) generateAllocatorOptions() []chromedp.ExecAllocatorOption {
 
 	return opts
 }
+
