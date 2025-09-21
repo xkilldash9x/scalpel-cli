@@ -608,7 +608,7 @@ type SessionContext interface {
 	// InjectScriptPersistently adds a script that will be executed on all new documents in the session.
 	InjectScriptPersistently(ctx context.Context, script string) error
 	// ExecuteScript runs a snippet of JavaScript in the current document.
-	ExecuteScript(ctx context.Context, script string) error
+	ExecuteScript(ctx context.Context, script string, res interface{}) error
 	// Interact triggers the automated recursive interaction logic.
 	Interact(ctx context.Context, config InteractionConfig) error
 	// Close gracefully terminates the browser session.

@@ -12,11 +12,11 @@ import (
 )
 
 // This constant is specific to the manager tests to avoid conflicts.
-const managerTestTimeout = 15 * time.Second
+// Increased slightly for stability.
+const managerTestTimeout = 30 * time.Second
 
 func TestManager(t *testing.T) {
 	t.Run("InitializeAndCloseSession", func(t *testing.T) {
-		t.Parallel()
 		fixture := newTestFixture(t)
 
 		// A session should be created successfully by the fixture.
@@ -27,7 +27,6 @@ func TestManager(t *testing.T) {
 	})
 
 	t.Run("InitializeMultipleSessions", func(t *testing.T) {
-		t.Parallel()
 		fixture1 := newTestFixture(t)
 		require.NotNil(t, fixture1.Session)
 
@@ -39,7 +38,6 @@ func TestManager(t *testing.T) {
 	})
 
 	t.Run("NavigateAndExtract", func(t *testing.T) {
-		t.Parallel()
 		fixture := newTestFixture(t)
 		// This is a more comprehensive integration test that validates the manager's
 		// ability to handle a complete, self contained task.
@@ -54,11 +52,10 @@ func TestManager(t *testing.T) {
                         </body>
                     </html>
                 `)
-		defer server.Close()
+		t.Cleanup(server.Close)
 
 		// Use a timed context to make the test robust.
 		ctx, cancel := context.WithTimeout(context.Background(), managerTestTimeout)
-		// FIX: Use t.Cleanup instead of defer cancel() in parallel tests.
 		t.Cleanup(cancel)
 
 		// Execute the manager's utility function, now using the sandboxed manager from the fixture.

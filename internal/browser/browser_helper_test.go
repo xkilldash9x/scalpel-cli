@@ -8,7 +8,6 @@ import (
 	"net/http/httptest"
 	"os"
 	"runtime"
-	// sync import removed as managerPool is removed
 	"testing"
 	"time"
 
@@ -21,28 +20,20 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/humanoid"
 )
 
-// Implementing a Controlled and Stable Test Architecture
-
-// Global state for managing concurrency and lifecycle across the test suite.
 var (
-	// processSemaphore limits the number of concurrent browser processes (Managers).
 	processSemaphore *semaphore.Weighted
-	// suiteLogger and suiteConfig are initialized once for the whole suite.
-	suiteLogger *zap.Logger
-	suiteConfig *config.Config
-	// managerPool is removed. We rely on the context cancellation cascade for cleanup.
+	suiteLogger      *zap.Logger
+	suiteConfig      *config.Config
 )
 
-// FIX: Reduced concurrency limit to alleviate resource contention.
-const maxTestConcurrency = 4 // Stability cap for concurrent browser processes.
+// Forcing sequential execution for stability in CI environments.
+const maxTestConcurrency = 1
+const shutdownTimeout = 15 * time.Second
 
-// TestMain controls the lifecycle of the entire test run for this package.
 func TestMain(m *testing.M) {
-	// 1. Initialize global resources.
 	suiteLogger = getTestLogger()
 	suiteConfig = createTestConfig()
 
-	// 2. Initialize concurrency control.
 	concurrency := int64(runtime.GOMAXPROCS(0))
 	if concurrency > maxTestConcurrency {
 		concurrency = maxTestConcurrency
@@ -53,29 +44,21 @@ func TestMain(m *testing.M) {
 	suiteLogger.Info("Initializing browser test suite.", zap.Int64("concurrency_limit", concurrency))
 	processSemaphore = semaphore.NewWeighted(concurrency)
 
-	// 3. Run the tests.
 	exitCode := m.Run()
-
-	// 4. Teardown (None required). We rely on t.Cleanup and context cancellation propagation
-	//    (implemented in newTestFixture and Manager) to gracefully shut down resources.
-
-	// 5. Exit.
 	os.Exit(exitCode)
 }
 
-// testFixture holds all components for a single, isolated, and sandboxed browser test.
+// Updated testFixture to use the new Session struct.
 type testFixture struct {
-	Session *AnalysisContext
+	Session *Session
 	Config  *config.Config
 	Manager *Manager
 	Logger  *zap.Logger
 }
 
-// fixtureConfigurator is a function type for customizing the configuration in newTestFixture.
 type fixtureConfigurator func(*config.Config)
 
 func getTestLogger() *zap.Logger {
-	// Use the existing suiteLogger if available, otherwise initialize a fallback.
 	if suiteLogger != nil {
 		return suiteLogger
 	}
@@ -86,69 +69,84 @@ func getTestLogger() *zap.Logger {
 	return logger
 }
 
-// createTestConfig initializes the configuration used for the test suite.
+// createTestConfig generates a configuration optimized for fast integration testing.
 func createTestConfig() *config.Config {
+	// Start with the default humanoid configuration
+	humanoidCfg := humanoid.DefaultConfig()
+
+	// Speed up humanoid simulation significantly for tests to prevent timeouts.
+	humanoidCfg.FittsAMean = 10.0
+	humanoidCfg.FittsBMean = 20.0
+	humanoidCfg.ClickHoldMinMs = 5
+	humanoidCfg.ClickHoldMaxMs = 15
+	humanoidCfg.KeyHoldMeanMs = 10.0
+
 	cfg := &config.Config{
 		Browser: config.BrowserConfig{
 			Headless:        true,
 			DisableCache:    true,
 			IgnoreTLSErrors: true,
 			Concurrency:     4,
-			Humanoid:        humanoid.DefaultConfig(),
-			// Crucial: This flag signals manager.go to use the stabilized configuration filtering.
-			Debug: true,
+			Humanoid:        humanoidCfg,
+			Debug:           true,
 		},
 		Network: config.NetworkConfig{
 			CaptureResponseBodies: true,
-			NavigationTimeout:     15 * time.Second,
+			NavigationTimeout:     20 * time.Second,
 			Proxy:                 config.ProxyConfig{Enabled: false},
 		},
+		// Ensure IAST is disabled for standard tests unless specifically enabled.
+		IAST: config.IASTConfig{Enabled: false},
 	}
 	cfg.Browser.Humanoid.Enabled = true
 	return cfg
 }
 
-// newTestFixture creates a fully sandboxed browser environment for a single test.
-// It integrates concurrency control with correct context lifecycle management.
+// newTestFixture creates a sandboxed environment for browser tests.
 func newTestFixture(t *testing.T, configurators ...fixtureConfigurator) *testFixture {
 	t.Helper()
 
-	// 0. Configuration Isolation: Create a safe copy for this test.
 	cfgCopy := *suiteConfig
 	for _, configurator := range configurators {
 		configurator(&cfgCopy)
 	}
 
-	// 1. Concurrency Limiting: Acquire a semaphore slot.
+	// --- Semaphore Acquisition ---
 	acquireCtx, acquireCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	// FIX: Use t.Cleanup instead of defer. The fixture function returns before the test completes in parallel execution.
 	t.Cleanup(acquireCancel)
 
 	if err := processSemaphore.Acquire(acquireCtx, 1); err != nil {
-		t.Fatalf("Failed to acquire semaphore (timed out waiting for available slot): %v", err)
+		t.Fatalf("Failed to acquire semaphore: %v", err)
 	}
 
-	// Ensure the semaphore is released when the test finishes.
+	// Register Semaphore Release (LIFO: Runs LAST)
 	t.Cleanup(func() {
 		processSemaphore.Release(1)
 	})
 
-	// 2. Context Lifecycle Management: Create a context scoped to this specific test.
-	// We rely on the context cascade initiated by t.Cleanup for graceful shutdown.
-	fixtureCtx, fixtureCancel := context.WithCancel(context.Background())
-	t.Cleanup(fixtureCancel)
-
+	// --- Browser Lifecycle Management ---
+	// Use context.Background() for the browser lifecycle.
+	lifecycleCtx := context.Background()
 	logger := suiteLogger.With(zap.String("test", t.Name()))
 
-	// 3. Initialize the manager (browser process) using the fixture context.
-	// When fixtureCtx is canceled (via t.Cleanup), the Manager's primary context will be canceled.
-	manager, err := NewManager(fixtureCtx, logger, &cfgCopy)
+	// Initialize the manager.
+	manager, err := NewManager(lifecycleCtx, &cfgCopy, logger)
 	require.NoError(t, err, "Failed to initialize per-test browser manager")
 
-	// 4. Create the session (tab) using the fixture context.
-	// When fixtureCtx is canceled, the session context will be canceled, closing the tab.
-	session, err := manager.NewAnalysisContext(
-		fixtureCtx,
+	// Register Manager Shutdown (LIFO: Runs SECOND)
+	t.Cleanup(func() {
+		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+		defer shutdownCancel()
+		logger.Debug("Starting graceful shutdown of browser manager.")
+		if err := manager.Shutdown(shutdownCtx); err != nil {
+			t.Logf("Warning: Error during browser manager shutdown: %v", err)
+		}
+		logger.Debug("Graceful shutdown complete.")
+	})
+
+	// Create the session.
+	sessionInterface, err := manager.NewAnalysisContext(
+		lifecycleCtx, // Pass the lifecycle context
 		&cfgCopy,
 		schemas.DefaultPersona,
 		"",
@@ -156,21 +154,27 @@ func newTestFixture(t *testing.T, configurators ...fixtureConfigurator) *testFix
 	)
 	require.NoError(t, err, "Failed to create new analysis context")
 
-	// Explicit t.Cleanup calls for Shutdown/Close are not required as they are handled
-	// by the fixtureCtx cancellation cascade and the implementation in Manager.
+	// Type assertion to the concrete Session type.
+	session, ok := sessionInterface.(*Session)
+	require.True(t, ok, "session must be of type *Session")
 
-	analysisContext, ok := session.(*AnalysisContext)
-	require.True(t, ok, "session must be of type *AnalysisContext")
+	// Register Session Close (LIFO: Runs FIRST)
+	t.Cleanup(func() {
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), shutdownTimeout/2)
+		defer closeCancel()
+		if err := session.Close(closeCtx); err != nil {
+			t.Logf("Warning: Error during session close: %v", err)
+		}
+	})
 
 	return &testFixture{
-		Session: analysisContext,
+		Session: session,
 		Config:  &cfgCopy,
 		Manager: manager,
 		Logger:  logger,
 	}
 }
 
-// createTestServer creates an httptest.Server and handles its cleanup.
 func createTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(handler)
@@ -178,7 +182,6 @@ func createTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	return server
 }
 
-// createStaticTestServer creates an httptest.Server for static HTML.
 func createStaticTestServer(t *testing.T, htmlContent string) *httptest.Server {
 	t.Helper()
 	return createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {

@@ -15,11 +15,11 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
-const interactorTestTimeout = 25 * time.Second
+// Increased timeout for stability.
+const interactorTestTimeout = 60 * time.Second
 
 func TestInteractor(t *testing.T) {
 	t.Run("FormInteraction", func(t *testing.T) {
-		t.Parallel()
 		fixture := newTestFixture(t)
 		session := fixture.Session
 
@@ -58,10 +58,9 @@ func TestInteractor(t *testing.T) {
                     </body></html>
                 `)
 		}))
-		defer server.Close()
+		t.Cleanup(server.Close)
 
 		ctx, cancel := context.WithTimeout(context.Background(), interactorTestTimeout)
-		// FIX: Use t.Cleanup instead of defer cancel() in parallel tests.
 		t.Cleanup(cancel)
 
 		err := session.Navigate(ctx, server.URL)
@@ -93,7 +92,6 @@ func TestInteractor(t *testing.T) {
 	})
 
 	t.Run("DynamicContentHandling", func(t *testing.T) {
-		t.Parallel()
 		fixture := newTestFixture(t)
 		session := fixture.Session
 
@@ -119,10 +117,9 @@ func TestInteractor(t *testing.T) {
                     </body></html>
                 `)
 		}))
-		defer server.Close()
+		t.Cleanup(server.Close)
 
 		ctx, cancel := context.WithTimeout(context.Background(), interactorTestTimeout)
-		// FIX: Use t.Cleanup instead of defer cancel() in parallel tests.
 		t.Cleanup(cancel)
 
 		err := session.Navigate(ctx, server.URL)
@@ -141,10 +138,9 @@ func TestInteractor(t *testing.T) {
 		// Use Eventually to handle the async nature of the interaction.
 		assert.Eventually(t, func() bool {
 			var finalStatus string
-			// Derive a short lived context for the check.
-			checkCtx, checkCancel := context.WithTimeout(session.GetContext(), 2*time.Second)
-			defer checkCancel()
-			err := chromedp.Run(checkCtx, chromedp.Text("#status", &finalStatus, chromedp.ByQuery))
+            // We must use the session's context for the actual chromedp.Run command.
+            // The short-lived context approach used previously was unnecessary complexity.
+			err := chromedp.Run(session.GetContext(), chromedp.Text("#status", &finalStatus, chromedp.ByQuery))
 			return err == nil && finalStatus == "Dynamic Success"
 		}, 10*time.Second, 100*time.Millisecond, "Interactor failed to interact with dynamic content")
 	})

@@ -27,8 +27,12 @@ func (h *Humanoid) MoveTo(selector string, field *PotentialField) chromedp.Actio
 
 			// 1a. Ensure the target is visible (Scrolling).
 			if err := h.intelligentScroll(selector).Do(ctx); err != nil {
+                // FIX: If the context was cancelled during scroll, we must return immediately.
+                if ctx.Err() != nil {
+                    return ctx.Err()
+                }
 				h.logger.Debug("Humanoid: Scrolling encountered issues (non-critical)", zap.Error(err), zap.String("selector", selector))
-				// Continue even if scrolling fails (e.g., context cancelled during scroll).
+				// Continue even if scrolling fails for other reasons (e.g., JS execution error)
 			}
 
 			// 1b. Cognitive pause (Visual search and planning after scroll).
@@ -81,7 +85,7 @@ func (h *Humanoid) MoveToVector(target Vector2D, field *PotentialField) chromedp
 
 			// Simulate the movement. This function call is blocking.
 			var err error
-			
+
 			// Cast our internal MouseButton type to the required input.MouseButton type.
 			finalVelocity, err = h.simulateTrajectory(ctx, start, target, field, input.MouseButton(buttonState))
 
@@ -95,6 +99,11 @@ func (h *Humanoid) MoveToVector(target Vector2D, field *PotentialField) chromedp
 		}),
 		// Corrective movement action
 		chromedp.ActionFunc(func(ctx context.Context) error {
+            // Check context before starting correction
+            if ctx.Err() != nil {
+                return ctx.Err()
+            }
+
 			h.mu.Lock()
 			finalPos := h.currentPos
 			buttonState := h.currentButtonState
