@@ -26,7 +26,6 @@ var (
 	suiteConfig      *config.Config
 )
 
-// Forcing sequential execution for stability in CI environments.
 const maxTestConcurrency = 1
 const shutdownTimeout = 15 * time.Second
 
@@ -48,12 +47,12 @@ func TestMain(m *testing.M) {
 	os.Exit(exitCode)
 }
 
-// Updated testFixture to use the new Session struct.
 type testFixture struct {
-	Session *Session
-	Config  *config.Config
-	Manager *Manager
-	Logger  *zap.Logger
+	Session      *Session
+	Config       *config.Config
+	Manager      *Manager
+	Logger       *zap.Logger
+	FindingsChan chan schemas.Finding
 }
 
 type fixtureConfigurator func(*config.Config)
@@ -69,12 +68,8 @@ func getTestLogger() *zap.Logger {
 	return logger
 }
 
-// createTestConfig generates a configuration optimized for fast integration testing.
 func createTestConfig() *config.Config {
-	// Start with the default humanoid configuration
 	humanoidCfg := humanoid.DefaultConfig()
-
-	// Speed up humanoid simulation significantly for tests to prevent timeouts.
 	humanoidCfg.FittsAMean = 10.0
 	humanoidCfg.FittsBMean = 20.0
 	humanoidCfg.ClickHoldMinMs = 5
@@ -95,14 +90,12 @@ func createTestConfig() *config.Config {
 			NavigationTimeout:     20 * time.Second,
 			Proxy:                 config.ProxyConfig{Enabled: false},
 		},
-		// Ensure IAST is disabled for standard tests unless specifically enabled.
 		IAST: config.IASTConfig{Enabled: false},
 	}
 	cfg.Browser.Humanoid.Enabled = true
 	return cfg
 }
 
-// newTestFixture creates a sandboxed environment for browser tests.
 func newTestFixture(t *testing.T, configurators ...fixtureConfigurator) *testFixture {
 	t.Helper()
 
@@ -111,54 +104,44 @@ func newTestFixture(t *testing.T, configurators ...fixtureConfigurator) *testFix
 		configurator(&cfgCopy)
 	}
 
-	// --- Semaphore Acquisition ---
 	acquireCtx, acquireCancel := context.WithTimeout(context.Background(), 60*time.Second)
 	t.Cleanup(acquireCancel)
 
 	if err := processSemaphore.Acquire(acquireCtx, 1); err != nil {
 		t.Fatalf("Failed to acquire semaphore: %v", err)
 	}
+	t.Cleanup(func() { processSemaphore.Release(1) })
 
-	// Register Semaphore Release (LIFO: Runs LAST)
-	t.Cleanup(func() {
-		processSemaphore.Release(1)
-	})
-
-	// --- Browser Lifecycle Management ---
-	// Use context.Background() for the browser lifecycle.
 	lifecycleCtx := context.Background()
 	logger := suiteLogger.With(zap.String("test", t.Name()))
 
-	// Initialize the manager.
 	manager, err := NewManager(lifecycleCtx, &cfgCopy, logger)
 	require.NoError(t, err, "Failed to initialize per-test browser manager")
 
-	// Register Manager Shutdown (LIFO: Runs SECOND)
 	t.Cleanup(func() {
 		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
 		defer shutdownCancel()
-		logger.Debug("Starting graceful shutdown of browser manager.")
 		if err := manager.Shutdown(shutdownCtx); err != nil {
 			t.Logf("Warning: Error during browser manager shutdown: %v", err)
 		}
-		logger.Debug("Graceful shutdown complete.")
 	})
 
-	// Create the session.
+	findingsChan := make(chan schemas.Finding, 50)
+	t.Cleanup(func() { close(findingsChan) })
+
 	sessionInterface, err := manager.NewAnalysisContext(
-		lifecycleCtx, // Pass the lifecycle context
+		lifecycleCtx,
 		&cfgCopy,
 		schemas.DefaultPersona,
 		"",
 		"",
+		findingsChan,
 	)
 	require.NoError(t, err, "Failed to create new analysis context")
 
-	// Type assertion to the concrete Session type.
 	session, ok := sessionInterface.(*Session)
 	require.True(t, ok, "session must be of type *Session")
 
-	// Register Session Close (LIFO: Runs FIRST)
 	t.Cleanup(func() {
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), shutdownTimeout/2)
 		defer closeCancel()
@@ -168,10 +151,11 @@ func newTestFixture(t *testing.T, configurators ...fixtureConfigurator) *testFix
 	})
 
 	return &testFixture{
-		Session: session,
-		Config:  &cfgCopy,
-		Manager: manager,
-		Logger:  logger,
+		Session:      session,
+		Config:       &cfgCopy,
+		Manager:      manager,
+		Logger:       logger,
+		FindingsChan: findingsChan,
 	}
 }
 

@@ -16,24 +16,24 @@ import (
 type TaskType string
 
 const (
-	TaskAgentMission      TaskType = "AGENT_MISSION"
+	TaskAgentMission          TaskType = "AGENT_MISSION"
 	TaskAnalyzeWebPageTaint   TaskType = "ANALYZE_WEB_PAGE_TAINT"
 	TaskAnalyzeWebPageProtoPP TaskType = "ANALYZE_WEB_PAGE_PROTOPP"
-	TaskTestRaceCondition   TaskType = "TEST_RACE_CONDITION"
-	TaskTestAuthATO       TaskType = "TEST_AUTH_ATO"
-	TaskTestAuthIDOR      TaskType = "TEST_AUTH_IDOR"
-	TaskAnalyzeHeaders    TaskType = "ANALYZE_HEADERS"
-	TaskAnalyzeJWT        TaskType = "ANALYZE_JWT"
+	TaskTestRaceCondition     TaskType = "TEST_RACE_CONDITION"
+	TaskTestAuthATO           TaskType = "TEST_AUTH_ATO"
+	TaskTestAuthIDOR          TaskType = "TEST_AUTH_IDOR"
+	TaskAnalyzeHeaders        TaskType = "ANALYZE_HEADERS"
+	TaskAnalyzeJWT            TaskType = "ANALYZE_JWT"
 )
 
 // Task represents a unit of work to be executed by the engine.
 // This is central to how the system decouples discovery from execution.
 type Task struct {
-	TaskID      string      `json:"task_id"`
-	ScanID      string      `json:"scan_id"`
-	Type        TaskType    `json:"type"`
-	TargetURL   string      `json:"target_url"`
-	Parameters  interface{} `json:"parameters"` // Holds task specific configuration.
+	TaskID     string      `json:"task_id"`
+	ScanID     string      `json:"scan_id"`
+	Type       TaskType    `json:"type"`
+	TargetURL  string      `json:"target_url"`
+	Parameters interface{} `json:"parameters"` // Holds task specific configuration.
 }
 
 // -- Task Parameter Definitions --
@@ -64,10 +64,10 @@ type AgentMissionParams struct {
 type Severity string
 
 const (
-	SeverityCritical    Severity = "CRITICAL"
-	SeverityHigh      Severity = "HIGH"
-	SeverityMedium    Severity = "MEDIUM"
-	SeverityLow       Severity = "LOW"
+	SeverityCritical      Severity = "CRITICAL"
+	SeverityHigh          Severity = "HIGH"
+	SeverityMedium        Severity = "MEDIUM"
+	SeverityLow           Severity = "LOW"
 	SeverityInformational Severity = "INFORMATIONAL"
 )
 
@@ -79,18 +79,18 @@ type Vulnerability struct {
 
 // Finding represents a specific instance of a vulnerability discovered during a scan.
 type Finding struct {
-	ID            string          `json:"id"`
-	ScanID          string          `json:"scan_id"`
-	TaskID          string          `json:"task_id"`
-	Timestamp       time.Time       `json:"timestamp"`
-	Target          string          `json:"target"`
-	Module          string          `json:"module"`
-	Vulnerability   Vulnerability   `json:"vulnerability"`
-	Severity        Severity        `json:"severity"`
-	Description     string          `json:"description"`
-	Evidence        string 			`json:"evidence"`
-	Recommendation  string          `json:"recommendation"`
-	CWE         []string        `json:"cwe,omitempty"`
+	ID             string        `json:"id"`
+	ScanID         string        `json:"scan_id"`
+	TaskID         string        `json:"task_id"`
+	Timestamp      time.Time     `json:"timestamp"`
+	Target         string        `json:"target"`
+	Module         string        `json:"module"`
+	Vulnerability  Vulnerability `json:"vulnerability"`
+	Severity       Severity      `json:"severity"`
+	Description    string        `json:"description"`
+	Evidence       string        `json:"evidence"`
+	Recommendation string        `json:"recommendation"`
+	CWE            []string      `json:"cwe,omitempty"`
 }
 
 // -- IAST (Interactive Application Security Testing) Schemas --
@@ -99,14 +99,14 @@ type Finding struct {
 type ProbeType string
 
 const (
-	ProbeTypeXSS          ProbeType = "XSS"
-	ProbeTypeSSTI         ProbeType = "SSTI" // Server-Side Template Injection
-	ProbeTypeSQLi         ProbeType = "SQLI" // SQL Injection
-	ProbeTypeCmdInjection     ProbeType = "CMD_INJECTION"
-	ProbeTypeOAST         ProbeType = "OAST" // Out-of-Band Application Security Testing
-	ProbeTypeDOMClobbering    ProbeType = "DOM_CLOBBERING"
+	ProbeTypeXSS                ProbeType = "XSS"
+	ProbeTypeSSTI               ProbeType = "SSTI" // Server-Side Template Injection
+	ProbeTypeSQLi               ProbeType = "SQLI" // SQL Injection
+	ProbeTypeCmdInjection       ProbeType = "CMD_INJECTION"
+	ProbeTypeOAST               ProbeType = "OAST" // Out-of-Band Application Security Testing
+	ProbeTypeDOMClobbering      ProbeType = "DOM_CLOBBERING"
 	ProbeTypePrototypePollution ProbeType = "PROTOTYPE_POLLUTION"
-	ProbeTypeGeneric      ProbeType = "GENERIC" // For generic data flow tracking.
+	ProbeTypeGeneric            ProbeType = "GENERIC" // For generic data flow tracking.
 )
 
 // TaintSource identifies where the tainted data originated.
@@ -114,7 +114,7 @@ type TaintSource string
 
 const (
 	// Client side persistent storage
-	SourceCookie       TaintSource = "COOKIE"
+	SourceCookie         TaintSource = "COOKIE"
 	SourceLocalStorage   TaintSource = "LOCAL_STORAGE"
 	SourceSessionStorage TaintSource = "SESSION_STORAGE"
 
@@ -136,32 +136,32 @@ type TaintSink string
 
 const (
 	// -- Execution Sinks --
-	SinkEval            TaintSink = "EVAL"
+	SinkEval                TaintSink = "EVAL"
 	SinkFunctionConstructor TaintSink = "FUNCTION_CONSTRUCTOR"
-	SinkSetTimeout        TaintSink = "SET_TIMEOUT"          // When a string is passed.
-	SinkSetInterval       TaintSink = "SET_INTERVAL"         // When a string is passed.
-	SinkEventHandler      TaintSink = "EVENT_HANDLER"        // e.g., element.onload, setAttribute('onclick', ...)
+	SinkSetTimeout          TaintSink = "SET_TIMEOUT"          // When a string is passed.
+	SinkSetInterval         TaintSink = "SET_INTERVAL"         // When a string is passed.
+	SinkEventHandler        TaintSink = "EVENT_HANDLER"        // e.g., element.onload, setAttribute('onclick', ...)
 
 	// -- DOM Manipulation Sinks (XSS) --
-	SinkInnerHTML         TaintSink = "INNER_HTML"
-	SinkOuterHTML         TaintSink = "OUTER_HTML"
+	SinkInnerHTML          TaintSink = "INNER_HTML"
+	SinkOuterHTML          TaintSink = "OUTER_HTML"
 	SinkInsertAdjacentHTML TaintSink = "INSERT_ADJACENT_HTML"
-	SinkDocumentWrite     TaintSink = "DOCUMENT_WRITE"
+	SinkDocumentWrite      TaintSink = "DOCUMENT_WRITE"
 
 	// -- Resource & Navigation Sinks --
-	SinkScriptSrc     TaintSink = "SCRIPT_SRC"
-	SinkIframeSrc     TaintSink = "IFRAME_SRC"
-	SinkIframeSrcDoc TaintSink = "IFRAME_SRCDOC"
-	SinkWorkerSrc     TaintSink = "WORKER_SRC"
-	SinkEmbedSrc      TaintSink = "EMBED_SRC"
-	SinkObjectData    TaintSink = "OBJECT_DATA"
-	SinkBaseHref      TaintSink = "BASE_HREF"  // Can lead to script gadget hijacking
-	SinkNavigation    TaintSink = "NAVIGATION" // e.g., location.href, window.open with javascript: URIs
+	SinkScriptSrc      TaintSink = "SCRIPT_SRC"
+	SinkIframeSrc      TaintSink = "IFRAME_SRC"
+	SinkIframeSrcDoc   TaintSink = "IFRAME_SRCDOC"
+	SinkWorkerSrc      TaintSink = "WORKER_SRC"
+	SinkEmbedSrc       TaintSink = "EMBED_SRC"
+	SinkObjectData     TaintSink = "OBJECT_DATA"
+	SinkBaseHref       TaintSink = "BASE_HREF"  // Can lead to script gadget hijacking
+	SinkNavigation     TaintSink = "NAVIGATION" // e.g., location.href, window.open with javascript: URIs
 
 	// -- Network/Exfiltration Sinks --
-	SinkFetch           TaintSink = "FETCH_BODY"
-	SinkFetchURL        TaintSink = "FETCH_URL"
-	SinkXMLHTTPRequest      TaintSink = "XHR_BODY"
+	SinkFetch             TaintSink = "FETCH_BODY"
+	SinkFetchURL          TaintSink = "FETCH_URL"
+	SinkXMLHTTPRequest    TaintSink = "XHR_BODY"
 	SinkXMLHTTPRequestURL TaintSink = "XHR_URL"
 	SinkWebSocketSend     TaintSink = "WEBSOCKET_SEND"
 	SinkSendBeacon        TaintSink = "SEND_BEACON"
@@ -171,13 +171,13 @@ const (
 	SinkWorkerPostMessage TaintSink = "WORKER_POST_MESSAGE"
 
 	// -- Style & CSS Sinks --
-	SinkStyleCSS      TaintSink = "STYLE_CSS"      // e.g., element.style.cssText, can be used for data exfil/UI redressing
+	SinkStyleCSS        TaintSink = "STYLE_CSS"      // e.g., element.style.cssText, can be used for data exfil/UI redressing
 	SinkStyleInsertRule TaintSink = "STYLE_INSERT_RULE" // Can inject malicious CSS rules.
 
 	// -- Special Confirmation Sinks (High Confidence) --
-	SinkExecution             TaintSink = "EXECUTION_PROOF"
-	SinkOASTInteraction       TaintSink = "OAST_INTERACTION"
-	SinkPrototypePollution    TaintSink = "PROTOTYPE_POLLUTION_CONFIRMED"
+	SinkExecution               TaintSink = "EXECUTION_PROOF"
+	SinkOASTInteraction         TaintSink = "OAST_INTERACTION"
+	SinkPrototypePollution      TaintSink = "PROTOTYPE_POLLUTION_CONFIRMED"
 )
 
 // ObservationType defines the category of an observation made by an agent.
@@ -234,31 +234,31 @@ type NodeStatus string
 const (
 	StatusNew        NodeStatus = "NEW"
 	StatusProcessing NodeStatus = "PROCESSING"
-	StatusAnalyzed     NodeStatus = "ANALYZED"
+	StatusAnalyzed   NodeStatus = "ANALYZED"
 	StatusError      NodeStatus = "ERROR"
 )
 
 // Node represents a single entity in the Knowledge Graph.
 type Node struct {
-	ID           string          `json:"id"`
-	Type         NodeType        `json:"type"`
-	Label        string          `json:"label"`
-	Status       NodeStatus      `json:"status"`
-	Properties   json.RawMessage `json:"properties"`
-	CreatedAt    time.Time       `json:"created_at"`
-	LastSeen     time.Time       `json:"last_seen"`
+	ID         string          `json:"id"`
+	Type       NodeType        `json:"type"`
+	Label      string          `json:"label"`
+	Status     NodeStatus      `json:"status"`
+	Properties json.RawMessage `json:"properties"`
+	CreatedAt  time.Time       `json:"created_at"`
+	LastSeen   time.Time       `json:"last_seen"`
 }
 
 // Edge represents a directed, labeled relationship between two nodes.
 type Edge struct {
-	ID           string           `json:"id"`
-	From         string           `json:"from"` // Source Node ID
-	To           string           `json:"to"`   // Target Node ID
-	Type         RelationshipType `json:"type"`
-	Label        string           `json:"label"`
-	Properties   json.RawMessage  `json:"properties"`
-	CreatedAt    time.Time        `json:"created_at"`
-	LastSeen     time.Time        `json:"last_seen"`
+	ID         string           `json:"id"`
+	From       string           `json:"from"` // Source Node ID
+	To         string           `json:"to"`   // Target Node ID
+	Type       RelationshipType `json:"type"`
+	Label      string           `json:"label"`
+	Properties json.RawMessage  `json:"properties"`
+	CreatedAt  time.Time        `json:"created_at"`
+	LastSeen   time.Time        `json:"last_seen"`
 }
 
 // Subgraph represents a localized view of the Knowledge Graph, used for context passing.
@@ -271,21 +271,21 @@ type Subgraph struct {
 
 // NodeInput is a helper struct for bulk inserting or updating nodes.
 type NodeInput struct {
-	ID           string          `json:"id"`
-	Type         NodeType        `json:"type"`
-	Label        string          `json:"label"`
-	Status       NodeStatus      `json:"status"`
-	Properties   json.RawMessage `json:"properties"`
+	ID         string          `json:"id"`
+	Type       NodeType        `json:"type"`
+	Label      string          `json:"label"`
+	Status     NodeStatus      `json:"status"`
+	Properties json.RawMessage `json:"properties"`
 }
 
 // EdgeInput is a helper struct for bulk inserting or updating edges.
 type EdgeInput struct {
-	ID           string           `json:"id"`
-	From         string           `json:"from"` // Source Node ID
-	To           string           `json:"to"`   // Target Node ID
-	Type         RelationshipType `json:"type"`
-	Label        string           `json:"label"`
-	Properties   json.RawMessage  `json:"properties"`
+	ID         string           `json:"id"`
+	From       string           `json:"from"` // Source Node ID
+	To         string           `json:"to"`   // Target Node ID
+	Type       RelationshipType `json:"type"`
+	Label      string           `json:"label"`
+	Properties json.RawMessage  `json:"properties"`
 }
 
 // -- Communication & Result Schemas --
@@ -310,12 +310,12 @@ type ResultEnvelope struct {
 
 // ClientHints defines the User-Agent Client Hints data.
 type ClientHints struct {
-	Platform      string                         `json:"platform"`
+	Platform        string                         `json:"platform"`
 	PlatformVersion string                         `json:"platformVersion"`
-	Architecture  string                         `json:"architecture"`
-	Bitness       string                         `json:"bitness"`
-	Mobile        bool                           `json:"mobile"`
-	Brands        []*emulation.UserAgentBrandVersion `json:"brands"`
+	Architecture    string                         `json:"architecture"`
+	Bitness         string                         `json:"bitness"`
+	Mobile          bool                           `json:"mobile"`
+	Brands          []*emulation.UserAgentBrandVersion `json:"brands"`
 }
 
 // Persona encapsulates all properties for a consistent browser fingerprint.
@@ -341,15 +341,15 @@ type Persona struct {
 
 // DefaultPersona provides a fallback persona if none is specified.
 var DefaultPersona = Persona{
-	UserAgent:     "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
-	Platform:      "Win32",
-	Languages:     []string{"en-US", "en"},
+	UserAgent:   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
+	Platform:    "Win32",
+	Languages:   []string{"en-US", "en"},
 	Width:       1920,
 	Height:      1080,
-	AvailWidth:    1920,
-	AvailHeight:   1040,
-	ColorDepth:    24,
-	PixelDepth:    24,
+	AvailWidth:  1920,
+	AvailHeight: 1040,
+	ColorDepth:  24,
+	PixelDepth:  24,
 	Mobile:      false,
 	Timezone:    "America/Los_Angeles",
 	Locale:      "en-US",
@@ -357,10 +357,10 @@ var DefaultPersona = Persona{
 
 // InteractionConfig defines parameters for the automated page interactor.
 type InteractionConfig struct {
-	MaxDepth            int               `json:"max_depth"`
+	MaxDepth              int               `json:"max_depth"`
 	MaxInteractionsPerDepth int               `json:"max_interactions_per_depth"`
-	InteractionDelayMs      int               `json:"interaction_delay_ms"`
-	PostInteractionWaitMs   int               `json:"post_interaction_wait_ms"`
+	InteractionDelayMs    int               `json:"interaction_delay_ms"`
+	PostInteractionWaitMs int               `json:"post_interaction_wait_ms"`
 	CustomInputData       map[string]string `json:"custom_input_data,omitempty"`
 }
 
@@ -369,15 +369,15 @@ type ConsoleLog struct {
 	Type      string    `json:"type"`
 	Timestamp time.Time `json:"timestamp"`
 	Text      string    `json:"text"`
-	Source      string    `json:"source,omitempty"`
+	Source    string    `json:"source,omitempty"`
 	URL       string    `json:"url,omitempty"`
 	Line      int64     `json:"line,omitempty"`
 }
 
 // StorageState captures the state of browser storage at a point in time.
 type StorageState struct {
-	Cookies      []*network.Cookie `json:"cookies"`
-	LocalStorage    map[string]string `json:"local_storage"`
+	Cookies        []*network.Cookie `json:"cookies"`
+	LocalStorage   map[string]string `json:"local_storage"`
 	SessionStorage map[string]string `json:"session_storage"`
 }
 
@@ -427,35 +427,35 @@ type PageTimings struct {
 }
 
 type Entry struct {
-	Pageref       string    `json:"pageref"`
+	Pageref         string    `json:"pageref"`
 	StartedDateTime time.Time `json:"startedDateTime"`
-	Time          float64   `json:"time"`
-	Request       Request   `json:"request"`
-	Response      Response  `json:"response"`
-	Cache         struct{}  `json:"cache"`
-	Timings       Timings   `json:"timings"`
+	Time            float64   `json:"time"`
+	Request         Request   `json:"request"`
+	Response        Response  `json:"response"`
+	Cache           struct{}  `json:"cache"`
+	Timings         Timings   `json:"timings"`
 }
 
 type Request struct {
-	Method      string     `json:"method"`
-	URL         string     `json:"url"`
-	HTTPVersion string     `json:"httpVersion"`
-	Cookies     []Cookie   `json:"cookies"`
-	Headers     []NVPair   `json:"headers"`
-	QueryString []NVPair   `json:"queryString"`
-	PostData    *PostData  `json:"postData,omitempty"`
-	HeadersSize int64      `json:"headersSize"`
-	BodySize    int64      `json:"bodySize"`
+	Method      string    `json:"method"`
+	URL         string    `json:"url"`
+	HTTPVersion string    `json:"httpVersion"`
+	Cookies     []Cookie  `json:"cookies"`
+	Headers     []NVPair  `json:"headers"`
+	QueryString []NVPair  `json:"queryString"`
+	PostData    *PostData `json:"postData,omitempty"`
+	HeadersSize int64     `json:"headersSize"`
+	BodySize    int64     `json:"bodySize"`
 }
 
 type Response struct {
 	Status      int      `json:"status"`
-	StatusText  string     `json:"statusText"`
-	HTTPVersion string     `json:"httpVersion"`
+	StatusText  string   `json:"statusText"`
+	HTTPVersion string   `json:"httpVersion"`
 	Cookies     []Cookie `json:"cookies"`
 	Headers     []NVPair `json:"headers"`
 	Content     Content  `json:"content"`
-	RedirectURL string     `json:"redirectURL"`
+	RedirectURL string   `json:"redirectURL"`
 	HeadersSize int64    `json:"headersSize"`
 	BodySize    int64    `json:"bodySize"`
 }
@@ -476,13 +476,13 @@ type NVPair struct {
 }
 
 type Cookie struct {
-	Name    string    `json:"name"`
-	Value   string    `json:"value"`
-	Path    string    `json:"path"`
-	Domain    string    `json:"domain"`
-	Expires   time.Time `json:"expires"`
-	HTTPOnly  bool    `json:"httpOnly"`
-	Secure    bool    `json:"secure"`
+	Name     string    `json:"name"`
+	Value    string    `json:"value"`
+	Path     string    `json:"path"`
+	Domain   string    `json:"domain"`
+	Expires  time.Time `json:"expires"`
+	HTTPOnly bool      `json:"httpOnly"`
+	Secure   bool      `json:"secure"`
 }
 
 type PostData struct {
@@ -518,21 +518,21 @@ func NewHAR() *HAR {
 type ModelTier string
 
 const (
-	TierFast   ModelTier = "fast"   // Optimized for speed and cost.
+	TierFast     ModelTier = "fast"   // Optimized for speed and cost.
 	TierPowerful ModelTier = "powerful" // Optimized for reasoning and accuracy.
 )
 
 type GenerationOptions struct {
-	Temperature   float32 `json:"temperature"`
-	ForceJSONFormat bool  `json:"force_json_format"`
-	TopP          float32
-	TopK          int
+	Temperature     float32 `json:"temperature"`
+	ForceJSONFormat bool    `json:"force_json_format"`
+	TopP            float32
+	TopK            int
 }
 
 type GenerationRequest struct {
 	SystemPrompt string          `json:"system_prompt"`
 	UserPrompt   string          `json:"user_prompt"`
-	Tier         ModelTier         `json:"tier"`
+	Tier         ModelTier       `json:"tier"`
 	Options      GenerationOptions `json:"options"`
 }
 
@@ -579,6 +579,7 @@ type BrowserManager interface {
 		persona Persona,
 		taintTemplate string,
 		taintConfig string,
+		findingsChan chan<- Finding,
 	) (SessionContext, error)
 	Shutdown(ctx context.Context) error
 }
@@ -631,9 +632,10 @@ type OASTProvider interface {
 
 // OASTInteraction represents a detected interaction on the OAST server.
 type OASTInteraction struct {
-	Canary        string
-	Protocol      string
-	SourceIP      string
+	Canary          string
+	Protocol        string
+	SourceIP        string
 	InteractionTime time.Time
 	RawRequest      string
 }
+

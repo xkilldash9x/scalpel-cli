@@ -82,7 +82,7 @@ func TestSession(t *testing.T) {
 			}
 		}
 		assert.True(t, foundCookie, "SessionID HttpOnly cookie not found or attributes incorrect")
-        assert.Equal(t, "localValue", artifacts.Storage.LocalStorage["localKey"])
+		assert.Equal(t, "localValue", artifacts.Storage.LocalStorage["localKey"])
 
 		assertLogPresent(t, artifacts.ConsoleLogs, "log", "Hello from JS")
 		require.NotNil(t, findHAREntry(artifacts.HAR, server.URL), "HAR entry not found")
@@ -130,23 +130,23 @@ func TestSession(t *testing.T) {
 
 		require.NoError(t, session.Navigate(ctx, server.URL))
 
-        // Test Type
-        require.NoError(t, session.Type("#inputField", "typed_value"))
-        var typedValue string
-        require.NoError(t, chromedp.Run(session.GetContext(), chromedp.Value("#inputField", &typedValue)))
-        // Humanoid typing appends, it does not replace by default.
+		// Test Type
+		require.NoError(t, session.Type("#inputField", "typed_value"))
+		var typedValue string
+		require.NoError(t, chromedp.Run(session.GetContext(), chromedp.Value("#inputField", &typedValue)))
+		// Humanoid typing appends, it does not replace by default.
 		assert.Contains(t, typedValue, "typed_value")
 
 		// Test Click
 		require.NoError(t, session.Click("#target"))
 
-        // Verify click result
+		// Verify click result
 		artifacts, _ := session.CollectArtifacts(ctx)
 		assert.Contains(t, artifacts.DOM, ">Clicked<")
 
-        var clickedValue string
-        require.NoError(t, chromedp.Run(session.GetContext(), chromedp.Value("#inputField", &clickedValue)))
-        assert.Equal(t, "clicked_value", clickedValue)
+		var clickedValue string
+		require.NoError(t, chromedp.Run(session.GetContext(), chromedp.Value("#inputField", &clickedValue)))
+		assert.Equal(t, "clicked_value", clickedValue)
 	})
 
 	// Note: The full 'Interact' (crawler) test is in interactor_test.go
@@ -170,7 +170,7 @@ func TestSession(t *testing.T) {
 		// ExposeFunction requires a context. We use the main test context here.
 		require.NoError(t, session.ExposeFunction(ctx, "myGoFunction", myFunc))
 		require.NoError(t, session.Navigate(ctx, server.URL))
-		// FIX: Added nil as the third argument to satisfy the updated method signature.
+
 		require.NoError(t, session.ExecuteScript(ctx, `window.myGoFunction("hello", 123)`, nil))
 
 		// Check that the exposed Go function was called.
@@ -182,7 +182,7 @@ func TestSession(t *testing.T) {
 		}
 	})
 
-    t.Run("ExposeFunctionIntegration_MapSignature", func(t *testing.T) {
+	t.Run("ExposeFunctionIntegration_MapSignature", func(t *testing.T) {
 		fixture := newTestFixture(t)
 		server := createStaticTestServer(t, `<html><body>Test</body></html>`)
 		session := fixture.Session
@@ -194,7 +194,7 @@ func TestSession(t *testing.T) {
 
 		// Test using a map signature, common for the IAST shim.
 		myFunc := func(data map[string]interface{}) {
-            val, _ := data["key"].(string)
+			val, _ := data["key"].(string)
 			callbackChan <- val
 		}
 
@@ -257,3 +257,5 @@ func findHAREntry(har *schemas.HAR, urlSubstring string) *schemas.Entry {
 	}
 	return nil
 }
+
+
