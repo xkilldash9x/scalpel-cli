@@ -135,8 +135,8 @@ func (m *MockSessionContext) InjectScriptPersistently(ctx context.Context, scrip
 	return args.Error(0)
 }
 
-func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string) error {
-	args := m.Called(ctx, script)
+func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string, res interface{}) error {
+	args := m.Called(ctx, script, res)
 	return args.Error(0)
 }
 
@@ -149,3 +149,22 @@ func (m *MockSessionContext) Close(ctx context.Context) error {
 	args := m.Called(ctx)
 	return args.Error(0)
 }
+
+func (m *MockSessionContext) AddFinding(finding schemas.Finding) error {
+	args := m.Called(finding)
+	return args.Error(0)
+}
+
+func (m *MockSessionContext) CollectArtifacts() (*schemas.Artifacts, error) {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*schemas.Artifacts), args.Error(1)
+}
+
+func (m *MockSessionContext) ID() string {
+	args := m.Called()
+	return args.String(0)
+}
+

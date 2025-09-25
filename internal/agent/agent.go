@@ -14,6 +14,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/humanoid"
 	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
 	"github.com/xkilldash9x/scalpel-cli/internal/llmclient"
 )
@@ -30,6 +31,7 @@ type Agent struct {
 	resultChan chan MissionResult
 	isFinished bool
 	mu         sync.Mutex
+	humanoid   *humanoid.Humanoid
 }
 
 // NewGraphStoreFromConfig acts as a factory to create the appropriate GraphStore.
@@ -77,7 +79,6 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext) (*
 	}
 
 	// 3. Initialize LLM Client and Router
-	// The function is NewClient and it expects the entire AgentConfig.
 	llmRouter, err := llmclient.NewClient(globalCtx.Config.Agent, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create LLM router for agent: %w", err)
@@ -88,8 +89,12 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext) (*
 
 	// 5. Initialize Executors
 	projectRoot, _ := os.Getwd()
-	// The registry is created, and the session provider will be set later during the mission's runtime.
 	executors := NewExecutorRegistry(logger, projectRoot)
+
+	// Create a new humanoid instance
+	// NOTE: We pass an empty browser context ID for now. This will need to be updated
+	// when the agent's browser session is created.
+	h := humanoid.New(humanoid.DefaultConfig(), logger.Named("humanoid"), "")
 
 	agent := &Agent{
 		mission:    mission,
@@ -99,6 +104,7 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext) (*
 		bus:        bus,
 		executors:  executors,
 		resultChan: make(chan MissionResult, 1),
+		humanoid:   h,
 	}
 	return agent, nil
 }
@@ -109,17 +115,17 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 	missionCtx, cancelMission := context.WithCancel(ctx)
 	defer cancelMission()
 
-	// 1. Create a dedicated browser session.
-	// FIX: The call to NewAnalysisContext now uses the updated BrowserManager interface.
-	// It passes the config as an interface{} and the Persona from the schemas package.
-	session, err := a.globalCtx.BrowserManager.NewAnalysisContext(missionCtx, a.globalCtx.Config, schemas.DefaultPersona, "", "")
+	// 1. Create a findings channel for this mission
+	findingsChan := make(chan schemas.Finding, 100)
+	go a.processFindings(missionCtx, findingsChan)
+
+	// 2. Create a dedicated browser session.
+	session, err := a.globalCtx.BrowserManager.NewAnalysisContext(missionCtx, a.globalCtx.Config, schemas.DefaultPersona, "", "", findingsChan)
 	if err != nil {
 		return nil, fmt.Errorf("failed to get browser session for agent: %w", err)
 	}
 	defer session.Close(context.Background())
 
-	// FIX: The session variable is now of type schemas.SessionContext, which matches what the executor expects.
-	// The type assertion is no longer needed.
 	sessionCtx := session
 
 	// Inject the live session provider into the executor registry.
@@ -127,26 +133,25 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 		return sessionCtx
 	})
 
-	// 2. Start the Mind's cognitive loop.
+	// 3. Start the Mind's cognitive loop.
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
 		if err := a.mind.Start(missionCtx); err != nil {
-			// Do not log a cancellation error, as it is expected on shutdown.
 			if missionCtx.Err() == nil {
 				a.logger.Error("Mind process failed", zap.Error(err))
 			}
 		}
 	}()
 
-	// 3. Start the main action/observation loop.
+	// 4. Start the main action/observation loop.
 	a.wg.Add(1)
 	go a.actionLoop(missionCtx)
 
-	// 4. Prime the Mind with the mission objective.
+	// 5. Prime the Mind with the mission objective.
 	a.mind.SetMission(a.mission)
 
-	// 5. Wait for the mission to complete or be cancelled.
+	// 6. Wait for the mission to complete or be cancelled.
 	select {
 	case result := <-a.resultChan:
 		a.logger.Info("Mission finished. Returning results.")
@@ -157,10 +162,22 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 	}
 }
 
+func (a *Agent) processFindings(ctx context.Context, findingsChan <-chan schemas.Finding) {
+	for {
+		select {
+		case finding := <-findingsChan:
+			// In a real scenario, you'd save the finding to the database
+			// or send it to a results service.
+			a.logger.Info("Received new finding", zap.Any("finding", finding))
+		case <-ctx.Done():
+			return
+		}
+	}
+}
+
 // actionLoop listens for actions, executes them, and posts back observations.
 func (a *Agent) actionLoop(ctx context.Context) {
 	defer a.wg.Done()
-	// Subscribe specifically to actions.
 	actionChan, unsubscribe := a.bus.Subscribe(MessageTypeAction)
 	defer unsubscribe()
 
@@ -194,12 +211,10 @@ func (a *Agent) actionLoop(ctx context.Context) {
 
 				execResult, err := a.executors.Execute(ctx, action)
 				if err != nil {
-					// Pre-execution failure (e.g., no session, invalid parameters)
-					a.logger.Error("Executor pre-check failed", zap.String("action_type", string(action.Type)), zap.Error(err))
+					a.logger.Error("Executor failed", zap.String("action_type", string(action.Type)), zap.Error(err))
 					execResult = &ExecutionResult{Status: "failed", Error: err.Error(), ObservationType: ObservedSystemState}
 				}
 
-				// Create the observation.
 				obs := Observation{
 					ID:             uuid.New().String(),
 					MissionID:      action.MissionID,
@@ -244,3 +259,4 @@ func (a *Agent) finish(result MissionResult) {
 	a.bus.Shutdown()
 	a.resultChan <- result
 }
+
