@@ -66,14 +66,19 @@ func TestNewDialerConfig_Defaults(t *testing.T) {
 	assert.Equal(t, expectedCurves, config.TLSConfig.CurvePreferences, "Should prefer modern curves (X25519 first)")
 
 	// Verify Cipher Suites (Strong AEAD required)
+	// Updated to match the standardized list in dialer.go.
 	expectedCiphers := []uint16{
+		// TLS 1.3 suites
 		tls.TLS_AES_256_GCM_SHA384,
 		tls.TLS_CHACHA20_POLY1305_SHA256,
 		tls.TLS_AES_128_GCM_SHA256,
+		// TLS 1.2 suites
 		tls.TLS_ECDHE_ECDSA_WITH_AES_256_GCM_SHA384,
 		tls.TLS_ECDHE_RSA_WITH_AES_256_GCM_SHA384,
 		tls.TLS_ECDHE_ECDSA_WITH_CHACHA20_POLY1305,
 		tls.TLS_ECDHE_RSA_WITH_CHACHA20_POLY1305,
+		tls.TLS_ECDHE_ECDSA_WITH_AES_128_GCM_SHA256,
+		tls.TLS_ECDHE_RSA_WITH_AES_128_GCM_SHA256,
 	}
 	assert.Equal(t, expectedCiphers, config.TLSConfig.CipherSuites, "Should only include strong, forward secret ciphers")
 }
@@ -286,7 +291,8 @@ func TestDialContext_TLS_InvalidCert(t *testing.T) {
 	assert.Error(t, err)
 	assert.Nil(t, conn)
 	assert.Contains(t, err.Error(), "tls handshake failed")
-	assert.Contains(t, err.Error(), "certificate signed by unknown authority")
+	// Use regex to match common validation errors across different Go versions/platforms.
+	assert.Regexp(t, "(certificate signed by unknown authority|unable to verify the first certificate)", err.Error())
 }
 
 // Verifies that certificate validation can be successfully skipped.
