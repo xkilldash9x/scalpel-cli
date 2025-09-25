@@ -1,4 +1,4 @@
-// internal/humanoid/humanoid.go --
+// internal/humanoid/humanoid.go
 package humanoid
 
 import (
@@ -7,20 +7,14 @@ import (
 	"math/rand"
 
 	"github.com/aquilax/go-perlin"
-	"github.com/chromedp/cdproto/cdp"
+	// "github.com/chromedp/cdproto/cdp" // Removed
 	"go.uber.org/zap"
 )
 
 // maxVelocity defines the maximum physiological mouse velocity (pixels per second).
 const maxVelocity = 6000.0
 
-// MouseButton represents the state of a mouse button, mirroring the CDP protocol strings.
-type MouseButton string
-
-const (
-	MouseButtonNone MouseButton = "none"
-	MouseButtonLeft MouseButton = "left"
-)
+// NOTE: MouseButton type and constants are now defined in types.go.
 
 // Humanoid manages the state and execution of human-like interactions.
 type Humanoid struct {
@@ -29,16 +23,17 @@ type Humanoid struct {
 	// Dynamic configuration (current state, affected by fatigue)
 	dynamicConfig Config
 
-	// Browser context and logging
-	browserContextID cdp.BrowserContextID
+	// Browser context, logging, and execution
+	// browserContextID cdp.BrowserContextID // Removed
 	logger            *zap.Logger
+	executor          Executor // Facilitates interaction via the Executor interface.
 
 	// Internal state synchronization
 	mu sync.Mutex
 
 	// Current cursor position and state
 	currentPos          Vector2D
-	currentButtonState  MouseButton // Tracks the currently pressed mouse button
+	currentButtonState  MouseButton // Uses agnostic type from types.go
 
 	// Fatigue modeling
 	fatigueLevel float64 // Ranges from 0.0 (rested) to 1.0 (exhausted)
@@ -54,8 +49,10 @@ type Humanoid struct {
 	noiseY  *perlin.Perlin
 }
 
-// New creates a new Humanoid instance with the given configuration.
-func New(config Config, logger *zap.Logger, browserContextID cdp.BrowserContextID) *Humanoid {
+// New creates a new Humanoid instance with the given configuration and executor.
+// The executor is required for all browser interactions.
+// We remove the dependency on cdp.BrowserContextID.
+func New(config Config, logger *zap.Logger, executor Executor) *Humanoid {
 	// 1. Initialize RNG
 	var seed int64
 	var rng *rand.Rand
@@ -79,11 +76,11 @@ func New(config Config, logger *zap.Logger, browserContextID cdp.BrowserContextI
 	h := &Humanoid{
 		baseConfig:          config,
 		dynamicConfig:       config, // Start with the base config
-		browserContextID:    browserContextID,
 		logger:              logger,
+		executor:            executor, // Initialize the executor
 		rng:                 rng,
 		lastActionTime:      time.Now(),
-		currentButtonState:  MouseButtonNone,
+		currentButtonState:  ButtonNone, // Use constant from types.go
 		noiseX:              perlin.NewPerlin(alpha, beta, n, seed),
 		noiseY:              perlin.NewPerlin(alpha, beta, n, seed+1), // Offset seed for Y noise
 	}

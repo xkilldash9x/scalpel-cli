@@ -3,52 +3,43 @@ package humanoid
 
 import (
 	"context"
+	"encoding/json"
 	"time"
 
-	"github.com/chromedp/cdproto/cdp"
-	"github.com/chromedp/cdproto/dom"
-	"github.com/chromedp/cdproto/input"
-	"github.com/chromedp/cdproto/page"
-	"github.com/chromedp/cdproto/runtime"
-	"github.com/chromedp/chromedp"
+
 )
 
 // Controller defines the high-level interface for human-like interactions.
+
 type Controller interface {
 	MoveTo(ctx context.Context, selector string, field *PotentialField) error
-	Click(ctx context.Context) error
-	ClickOn(ctx context.Context, selector string, field *PotentialField) error
-	DoubleClick(ctx context.Context) error
-	Drag(ctx context.Context, start, end Vector2D, field *PotentialField) error
-	Scroll(ctx context.Context, deltaX, deltaY float64) error
-	Type(ctx context.Context, text string) error
+	// IntelligentClick includes movement and clicking behavior.
+	IntelligentClick(ctx context.Context, selector string, field *PotentialField) error
+	// DragAndDrop performs a drag operation between two selectors.
+	DragAndDrop(ctx context.Context, startSelector, endSelector string) error
+	Type(ctx context.Context, selector string, text string) error
+	CognitivePause(ctx context.Context, meanMs, stdDevMs float64) error
 }
 
-// Executor defines the interface for interacting with the browser via CDP.
-// This interface facilitates dependency injection and mocking for tests.
+// Executor defines the interface for interacting with the browser automation layer (e.g., CDP, Playwright).
+// This interface is designed to be agnostic of the underlying technology.
 type Executor interface {
-	// DispatchMouseEvent sends a mouse event.
-	DispatchMouseEvent(ctx context.Context, p *input.DispatchMouseEventParams) error
-
-	// DispatchKeyEvent sends a keyboard event.
-	DispatchKeyEvent(ctx context.Context, p *input.DispatchKeyEventParams) error
-
 	// Sleep pauses execution, respecting context cancellation.
 	Sleep(ctx context.Context, d time.Duration) error
 
-	// ExecuteAction executes a generic chromedp.Action (useful for JS execution via runtime.Evaluate).
-	ExecuteAction(ctx context.Context, a chromedp.Action) error
+	// DispatchMouseEvent sends a mouse event using agnostic data structures.
+	DispatchMouseEvent(ctx context.Context, data MouseEventData) error
 
-	// GetLayoutMetrics retrieves the current viewport metrics.
-	// The signature matches the return values of the page.GetLayoutMetrics CDP command.
-	GetLayoutMetrics(ctx context.Context) (*page.LayoutViewport, *page.VisualViewport, *dom.Rect, error)
+	// SendKeys sends the specified keys to the currently active element.
+	// The humanoid logic ensures the target element is focused (via clicking) before calling this.
+	SendKeys(ctx context.Context, keys string) error
 
-	// GetBoxModel retrieves the box model for a node ID.
-	GetBoxModel(ctx context.Context, nodeID cdp.NodeID) (*dom.BoxModel, error)
+	// GetElementGeometry finds the first element matching the selector and returns its geometry.
+	// The implementation (the adapter) is responsible for waiting until the element is visible and interactable.
+	GetElementGeometry(ctx context.Context, selector string) (*ElementGeometry, error)
 
-	// CallFunctionOn executes JavaScript on a specific object.
-	CallFunctionOn(ctx context.Context, params *runtime.CallFunctionOnParams) (*runtime.RemoteObject, *runtime.ExceptionDetails, error)
-
-	// QueryNodes finds nodes matching a CSS selector.
-	QueryNodes(ctx context.Context, selector string) ([]*cdp.Node, error)
+	// ExecuteScript runs the provided JavaScript function/script with arguments and returns the result.
+	// The implementation is responsible for executing the script and waiting for completion (including promises).
+	// The result is returned as a raw JSON message representing the value returned by the script.
+	ExecuteScript(ctx context.Context, script string, args []interface{}) (json.RawMessage, error)
 }

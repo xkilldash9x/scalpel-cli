@@ -1,4 +1,3 @@
-// internal/humanoid/movement.go --
 package humanoid
 
 import (
@@ -6,143 +5,125 @@ import (
 	"fmt"
 	"math"
 
-	// Required for BoxModel (necessary low-level access)
-	"github.com/chromedp/cdproto/dom"
-	// Required for input.MouseButton type for simulateTrajectory
-	"github.com/chromedp/cdproto/input"
-	"github.com/chromedp/chromedp"
+	// "github.com/chromedp/cdproto/dom"   // Removed
+	// "github.com/chromedp/cdproto/input" // Removed
 	"go.uber.org/zap"
 )
 
-// MoveTo simulates human like movement from the current position to the target selector.
-func (h *Humanoid) MoveTo(selector string, field *PotentialField) chromedp.Action {
+// MoveTo simulates human-like movement from the current position to a target element.
+// It executes immediately using the provided context.
+func (h *Humanoid) MoveTo(ctx context.Context, selector string, field *PotentialField) error {
 	var target Vector2D
 
-	// The entire operation is a sequence of tasks (chromedp.Tasks).
-	return chromedp.Tasks{
-		// 1. Preparation Phase: Scroll, locate, and plan.
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			// Moving is a high intensity action.
-			h.updateFatigue(1.0)
+	// 1. Preparation Phase: Scroll, locate, and plan.
+	h.updateFatigue(1.0) // Moving is a high-intensity action.
 
-			// 1a. Ensure the target is visible (Scrolling).
-			if err := h.intelligentScroll(selector).Do(ctx); err != nil {
-                // FIX: If the context was cancelled during scroll, we must return immediately.
-                if ctx.Err() != nil {
-                    return ctx.Err()
-                }
-				h.logger.Debug("Humanoid: Scrolling encountered issues (non-critical)", zap.Error(err), zap.String("selector", selector))
-				// Continue even if scrolling fails for other reasons (e.g., JS execution error)
-			}
-
-			// 1b. Cognitive pause (Visual search and planning after scroll).
-			if err := h.CognitivePause(150, 50).Do(ctx); err != nil {
-				return err
-			}
-
-			// 1c. Locate the target element geometry.
-			box, err := h.getElementBoxBySelector(ctx, selector)
-			if err != nil {
-				return fmt.Errorf("humanoid: failed to locate target element after scroll: %w", err)
-			}
-
-			center, valid := boxToCenter(box)
-			if !valid {
-				return fmt.Errorf("humanoid: element '%s' has invalid geometry", selector)
-			}
-
-			// 1d. Calculate the target point and store it for the next step.
-			// Initial target calculation assumes zero initial velocity bias.
-			target = h.calculateTargetPoint(box, center, Vector2D{X: 0, Y: 0})
-			return nil
-		}),
-
-		// 2. Execution Phase: Perform the movement.
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			// MoveToVector handles the main trajectory and correction.
-			return h.MoveToVector(target, field).Do(ctx)
-		}),
+	// 1a. Ensure the target is visible by scrolling it into view.
+	if err := h.intelligentScroll(ctx, selector); err != nil {
+		if ctx.Err() != nil { // If context was cancelled, return immediately.
+			return ctx.Err()
+		}
+		// Log other scroll errors but attempt to continue.
+		h.logger.Debug("Humanoid: Scrolling encountered non-critical issues", zap.Error(err), zap.String("selector", selector))
 	}
+
+	// 1b. Cognitive pause for visual search and planning.
+	if err := h.CognitivePause(ctx, 150, 50); err != nil {
+		return err
+	}
+
+	// 1c. Locate the target element geometry.
+	// REFACTORED: Now uses the agnostic ElementGeometry type.
+	geo, err := h.getElementBoxBySelector(ctx, selector)
+	if err != nil {
+		return fmt.Errorf("humanoid: failed to locate target element '%s': %w", selector, err)
+	}
+
+	center, valid := boxToCenter(geo) // Assumes boxToCenter is updated for ElementGeometry
+	if !valid {
+		return fmt.Errorf("humanoid: element '%s' has invalid geometry", selector)
+	}
+
+	// 1d. Calculate a realistic target point within the element.
+	target = h.calculateTargetPoint(geo, center, Vector2D{X: 0, Y: 0})
+
+	// 2. Execution Phase: Perform the physical mouse movement.
+	return h.MoveToVector(ctx, target, field)
 }
 
-// MoveToVector simulates human like movement from the current position to the target vector.
-func (h *Humanoid) MoveToVector(target Vector2D, field *PotentialField) chromedp.Action {
-	// We need to capture the final velocity from the main movement to inform the correction.
+// MoveToVector simulates human-like movement to a specific coordinate, with corrective actions.
+// It executes immediately.
+func (h *Humanoid) MoveToVector(ctx context.Context, target Vector2D, field *PotentialField) error {
 	var finalVelocity Vector2D
 
-	return chromedp.Tasks{
-		// Main movement action
-		chromedp.ActionFunc(func(ctx context.Context) error {
-			h.mu.Lock()
-			start := h.currentPos
-			// Crucial: Read the current button state (e.g., for dragging).
-			buttonState := h.currentButtonState
-			h.mu.Unlock()
+	// --- Main movement ---
+	h.mu.Lock()
+	start := h.currentPos
+	buttonState := h.currentButtonState // Read current button state for dragging.
+	h.mu.Unlock()
 
-			if field == nil {
-				field = NewPotentialField()
-			}
-
-			// Simulate the movement. This function call is blocking.
-			var err error
-
-			// Cast our internal MouseButton type to the required input.MouseButton type.
-			finalVelocity, err = h.simulateTrajectory(ctx, start, target, field, input.MouseButton(buttonState))
-
-			if err == nil {
-				h.mu.Lock()
-				h.lastMovementDistance = start.Dist(target)
-				h.mu.Unlock()
-			}
-
-			return err
-		}),
-		// Corrective movement action
-		chromedp.ActionFunc(func(ctx context.Context) error {
-            // Check context before starting correction
-            if ctx.Err() != nil {
-                return ctx.Err()
-            }
-
-			h.mu.Lock()
-			finalPos := h.currentPos
-			buttonState := h.currentButtonState
-			h.mu.Unlock()
-
-			// Use a virtual box around the target coordinate for the recalculation context.
-			box, _ := h.getElementBoxByVector(ctx, target)
-
-			// Recalculate the target point, considering the momentum (finalVelocity) from the previous step.
-			finalTarget := h.calculateTargetPoint(box, target, finalVelocity)
-
-			// A small correction movement if the deviation is significant.
-			distanceToFinalTarget := finalTarget.Dist(finalPos)
-			if distanceToFinalTarget > 1.5 { // Threshold for correction (pixels).
-				correctionField := NewPotentialField()
-				// Cast our internal MouseButton type to the required input.MouseButton type.
-				_, err := h.simulateTrajectory(ctx, finalPos, finalTarget, correctionField, input.MouseButton(buttonState))
-
-				if err == nil {
-					h.mu.Lock()
-					h.lastMovementDistance += distanceToFinalTarget
-					h.mu.Unlock()
-				}
-				return err
-			}
-			return nil
-		}),
+	if field == nil {
+		field = NewPotentialField()
 	}
+
+	// Simulate the main trajectory.
+	var err error
+	// REFACTORED: No longer need to cast buttonState. It's passed directly.
+	finalVelocity, err = h.simulateTrajectory(ctx, start, target, field, buttonState)
+	if err != nil {
+		return err
+	}
+
+	h.mu.Lock()
+	h.lastMovementDistance = start.Dist(target)
+	h.mu.Unlock()
+
+	// --- Corrective movement ---
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	h.mu.Lock()
+	finalPos := h.currentPos
+	buttonState = h.currentButtonState // Re-read button state just in case.
+	h.mu.Unlock()
+
+	// Create a virtual geometry box around the target coordinate for recalculation.
+	// REFACTORED: Now uses the agnostic ElementGeometry type.
+	geo, _ := h.getElementBoxByVector(ctx, target)
+
+	// Recalculate the target point, considering the momentum from the main movement.
+	finalTarget := h.calculateTargetPoint(geo, target, finalVelocity)
+
+	// Perform a small correction if we landed too far from the ideal final target.
+	distanceToFinalTarget := finalTarget.Dist(finalPos)
+	if distanceToFinalTarget > 1.5 { // Correction threshold in pixels.
+		correctionField := NewPotentialField()
+
+		// REFACTORED: No longer need to cast buttonState here either.
+		_, err := h.simulateTrajectory(ctx, finalPos, finalTarget, correctionField, buttonState)
+
+		if err == nil {
+			h.mu.Lock()
+			h.lastMovementDistance += distanceToFinalTarget
+			h.mu.Unlock()
+		}
+		return err
+	}
+	return nil
 }
 
-// calculateTargetPoint determines a realistic click point within an element.
-func (h *Humanoid) calculateTargetPoint(box *dom.BoxModel, center Vector2D, finalVelocity Vector2D) Vector2D {
-	if box == nil || box.Width == 0 || box.Height == 0 {
+// calculateTargetPoint determines a realistic click point within an element's geometry.
+// It considers the element's size, a Gaussian distribution, and movement momentum.
+// REFACTORED: Signature now uses the agnostic ElementGeometry type.
+func (h *Humanoid) calculateTargetPoint(geo *ElementGeometry, center Vector2D, finalVelocity Vector2D) Vector2D {
+	if geo == nil || geo.Width == 0 || geo.Height == 0 {
 		return center
 	}
 
-	width, height := float64(box.Width), float64(box.Height)
+	width, height := float64(geo.Width), float64(geo.Height)
 
-	// Define the effective target area (e.g., 90% of the element size).
+	// Define the effective target area (e.g., 90% of the element's dimensions).
 	effectiveWidth := width * 0.9
 	effectiveHeight := height * 0.9
 
@@ -150,19 +131,15 @@ func (h *Humanoid) calculateTargetPoint(box *dom.BoxModel, center Vector2D, fina
 	rng := h.rng
 	h.mu.Unlock()
 
-	// 1. Gaussian distribution around the center.
-	stdDevX := effectiveWidth / 6.0 // 99.7% of clicks fall within the effective area.
+	// 1. Base Offset: Gaussian distribution around the center.
+	stdDevX := effectiveWidth / 6.0
 	stdDevY := effectiveHeight / 6.0
-
 	offsetX := rng.NormFloat64() * stdDevX
 	offsetY := rng.NormFloat64() * stdDevY
 
-	// 2. Velocity bias (Momentum).
+	// 2. Velocity Bias: Add a bias in the direction of mouse travel (momentum).
 	velocityMag := finalVelocity.Mag()
-	// Normalize velocity (max realistic velocity ~4000 px/s).
-	normalizedVelocity := math.Min(1.0, velocityMag/4000.0)
-
-	// Max bias amount (e.g., up to 10% of the element size).
+	normalizedVelocity := math.Min(1.0, velocityMag/4000.0) // Normalize against a max realistic velocity.
 	maxBiasX := width * 0.1
 	maxBiasY := height * 0.1
 
@@ -175,7 +152,7 @@ func (h *Humanoid) calculateTargetPoint(box *dom.BoxModel, center Vector2D, fina
 	finalX := center.X + offsetX
 	finalY := center.Y + offsetY
 
-	// Clamp to the element's bounding box edges (with 1px margin).
+	// Clamp the final coordinates to be within the element's bounding box.
 	minX := center.X - width/2.0 + 1.0
 	maxX := center.X + width/2.0 - 1.0
 	minY := center.Y - height/2.0 + 1.0

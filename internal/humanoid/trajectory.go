@@ -5,13 +5,11 @@ import (
 	"math"
 	"time"
 
-	// CRITICAL: Low-level input access is fundamentally required for high-fidelity simulation.
-	"github.com/chromedp/cdproto/input"
-	"github.com/chromedp/chromedp" // Required for chromedp.Sleep
+	// "github.com/chromedp/cdproto/input" // Removed final dependency
 	"go.uber.org/zap"
 )
 
-// computeEaseInOutCubic provides a smooth acceleration and deceleration profile.
+// computeEaseInOutCubic provides a smooth acceleration and deceleration profile for movement.
 func computeEaseInOutCubic(t float64) float64 {
 	if t < 0.5 {
 		return 4 * t * t * t
@@ -19,7 +17,8 @@ func computeEaseInOutCubic(t float64) float64 {
 	return 1 - math.Pow(-2*t+2, 3)/2
 }
 
-// calculateFittsLaw determines movement duration based on Fitts's Law.
+// calculateFittsLaw determines a realistic movement duration based on Fitts's Law,
+// which models the time required to move to a target area.
 func (h *Humanoid) calculateFittsLaw(distance float64) time.Duration {
 	const W = 30.0 // Assumed default target width (W) in pixels.
 
@@ -41,7 +40,8 @@ func (h *Humanoid) calculateFittsLaw(distance float64) time.Duration {
 	return time.Duration(mt) * time.Millisecond
 }
 
-// generateIdealPath creates a human like trajectory (Bezier curve) deformed by the potential field.
+// generateIdealPath creates a human-like trajectory (a Bezier curve) that is
+// deformed by forces from a potential field.
 func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField, numSteps int) []Vector2D {
 	p0, p3 := start, end
 	mainVec := end.Sub(start)
@@ -53,7 +53,7 @@ func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField,
 
 	mainDir := mainVec.Normalize()
 
-	// Sample forces at 1/3rd and 2/3rds along the path.
+	// Sample forces at 1/3rd and 2/3rds along the path to create control points.
 	samplePoint1 := start.Add(mainDir.Mul(dist / 3.0))
 	force1 := field.CalculateNetForce(samplePoint1)
 	samplePoint2 := start.Add(mainDir.Mul(dist * 2.0 / 3.0))
@@ -79,14 +79,10 @@ func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField,
 	return path
 }
 
-// simulateTrajectory moves the mouse along a generated path, dispatching events.
-// This function requires immediate execution and precise timing, utilizing the low-level cdproto/input API.
-func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, field *PotentialField, buttonState input.MouseButton) (Vector2D, error) {
+// simulateTrajectory moves the mouse along a generated path, dispatching events via the executor.
+// REFACTORED: Signature now uses the agnostic MouseButton type.
+func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, field *PotentialField, buttonState MouseButton) (Vector2D, error) {
 	dist := start.Dist(end)
-	h.mu.Lock()
-	h.lastMovementDistance = dist
-	h.mu.Unlock()
-
 	duration := h.calculateFittsLaw(dist)
 	numSteps := int(duration.Seconds() * 100)
 	if numSteps < 2 {
@@ -99,33 +95,39 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 
 	idealPath := h.generateIdealPath(start, end, field, numSteps)
 
+	// REFACTORED: Pre-calculate the bitfield for the held button.
+	buttonsBitfield := h.calculateButtonsBitfield(buttonState)
+
 	var velocity Vector2D
 	startTime := time.Now()
 	lastPos := start
 	lastTime := startTime
 
 	for i := 0; i < len(idealPath); i++ {
+		if ctx.Err() != nil {
+			return velocity, ctx.Err()
+		}
+
+		// Apply easing to time to simulate acceleration/deceleration.
 		t := float64(i) / float64(len(idealPath)-1)
 		easedT := computeEaseInOutCubic(t)
-
+		
 		pathIndex := int(easedT * float64(len(idealPath)-1))
 		if pathIndex >= len(idealPath) {
 			pathIndex = len(idealPath) - 1
 		}
 		currentPos := idealPath[pathIndex]
 
-		// Calculate the target time for this step.
+		// Calculate target time for this step and sleep if we're ahead.
 		currentTime := startTime.Add(time.Duration(easedT * float64(duration)))
-
-		// Use context-aware sleep to adhere to Fitts's law timing.
 		sleepDur := time.Until(currentTime)
 		if sleepDur > 0 {
-			if err := chromedp.Sleep(sleepDur).Do(ctx); err != nil {
+			if err := h.executor.Sleep(ctx, sleepDur); err != nil {
 				return velocity, err
 			}
 		}
 
-		// Update velocity based on actual time elapsed.
+		// Update velocity and timing information.
 		now := time.Now()
 		dt := now.Sub(lastTime).Seconds()
 		if dt > 1e-6 {
@@ -134,64 +136,49 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 		lastPos = currentPos
 		lastTime = now
 
-		// -- Noise Combination (Relies on real-time elapsed) --
+		// Apply Perlin and Gaussian noise to the cursor position.
 		h.mu.Lock()
 		perlinMagnitude := h.dynamicConfig.PerlinAmplitude
 		rng := h.rng
 		h.mu.Unlock()
-
+		
 		perlinFrequency := 0.8
 		timeElapsed := now.Sub(startTime).Seconds()
 		perlinDrift := Vector2D{
 			X: h.noiseX.Noise1D(timeElapsed*perlinFrequency) * perlinMagnitude,
 			Y: h.noiseY.Noise1D(timeElapsed*perlinFrequency) * perlinMagnitude,
 		}
-
 		driftAppliedPos := currentPos.Add(perlinDrift)
 		finalPerturbedPoint := h.applyGaussianNoise(driftAppliedPos)
 
-		// Dispatch the mouse movement event.
-		dispatchMouse := input.DispatchMouseEvent(input.MouseMoved, finalPerturbedPoint.X, finalPerturbedPoint.Y)
-
-		// FIXED: Use the string literal "none" for comparison as requested.
-		if buttonState != "none" {
-			dispatchMouse = dispatchMouse.WithButton(buttonState)
-			var buttons int64
-			
-			// FIXED: Use string literals ("left", "right", "middle") for comparison.
-			switch buttonState {
-			case "left":
-				buttons = 1
-			case "right":
-				buttons = 2
-			case "middle":
-				buttons = 4
-			}
-			if buttons > 0 {
-				dispatchMouse = dispatchMouse.WithButtons(buttons)
-			}
+		// REFACTORED: Create the agnostic MouseEventData struct.
+		eventData := MouseEventData{
+			Type:   MouseMove,
+			X:      finalPerturbedPoint.X,
+			Y:      finalPerturbedPoint.Y,
+			Button: ButtonNone, // For MouseMove, 'Button' is typically None.
 		}
 
-		// Execute the low-level command immediately.
-		if err := dispatchMouse.Do(ctx); err != nil {
-			h.logger.Warn("Humanoid: Failed to dispatch mouse move event during simulation", zap.Error(err))
+		// If a button is held down (e.g., for dragging), set the Buttons bitfield.
+		if buttonsBitfield > 0 {
+			eventData.Buttons = buttonsBitfield
+		}
+
+		// Dispatch the event via the executor.
+		if err := h.executor.DispatchMouseEvent(ctx, eventData); err != nil {
+			if ctx.Err() == nil {
+				h.logger.Warn("Humanoid: Failed to dispatch mouse move event", zap.Error(err))
+			}
 			return velocity, err
 		}
 
-		// Update the internal position tracker.
+		// Update internal state and apply a tiny delay to simulate the browser's event loop.
 		h.mu.Lock()
 		h.currentPos = finalPerturbedPoint
 		h.mu.Unlock()
 
-		// Simulate browser rendering/event loop delay.
-		// Ensure Intn argument is positive
-		randPart := 0
-		if 4 > 0 {
-			randPart = rng.Intn(4)
-		}
-		sleepDuration := time.Duration(2+randPart) * time.Millisecond
-
-		if err := chromedp.Sleep(sleepDuration).Do(ctx); err != nil {
+		randPart := rng.Intn(4)
+		if err := h.executor.Sleep(ctx, time.Duration(2+randPart)*time.Millisecond); err != nil {
 			return velocity, err
 		}
 	}
