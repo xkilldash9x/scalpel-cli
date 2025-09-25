@@ -1,4 +1,4 @@
-package certs
+package security
 
 import (
 	"crypto/rand"
@@ -69,3 +69,4 @@ func TestNewCA(t *testing.T) {
 	assert.NoError(t, err, "Verification of a certificate signed by the CA should succeed")
 	assert.Len(t, chains, 1, "Should find exactly one valid certificate chain")
 }
+

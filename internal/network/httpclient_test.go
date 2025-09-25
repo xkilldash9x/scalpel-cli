@@ -16,6 +16,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"golang.org/x/net/http2"
 )
 
 // -- Test Cases: Configuration and Defaults (ClientConfig) --
@@ -36,7 +37,8 @@ func TestNewDefaultClientConfig_Optimizations(t *testing.T) {
 
 // TestConfigureTLS_Defaults verifies the strong security defaults of the TLS configuration helper.
 func TestConfigureTLS_Defaults(t *testing.T) {
-	tlsConfig := configureTLS(nil)
+	config := NewDefaultClientConfig()
+	tlsConfig := configureTLS(config)
 
 	require.NotNil(t, tlsConfig, "TLS config should never be nil")
 	assert.Equal(t, uint16(tls.VersionTLS12), tlsConfig.MinVersion)
@@ -145,7 +147,6 @@ func TestNewClient_RedirectPolicy(t *testing.T) {
 	defer server.Close()
 	client := NewClient(nil)
 
-	// FIX: Use the standard http.Get, not our custom one, to test redirect policy.
 	resp, err := client.Get(server.URL)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -166,7 +167,6 @@ func TestClient_TimeoutBehavior(t *testing.T) {
 	client := NewClient(config)
 
 	startTime := time.Now()
-	// FIX: Use the standard http.Get to test client-level timeout.
 	resp, err := client.Get(server.URL)
 	duration := time.Since(startTime)
 
@@ -182,19 +182,20 @@ func TestClient_HTTPS_Integration(t *testing.T) {
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, "Hello, client")
 	}))
-	server.TLS = &tls.Config{}
+	// This is the key change: we must explicitly enable HTTP/2 on the test server.
+	http2.ConfigureServer(server.Config, &http2.Server{})
 	server.StartTLS()
 	defer server.Close()
 
 	caCertPool := x509.NewCertPool()
-	caCertPool.AddCert(server.TLS.Certificates[0].Leaf)
+	// The httptest server uses a self signed certificate. We need to get it and trust it.
+	caCertPool.AddCert(server.Certificate())
 
 	config := NewDefaultClientConfig()
 	config.TLSConfig = &tls.Config{RootCAs: caCertPool}
 	config.ForceHTTP2 = true
 	client := NewClient(config)
 
-	// FIX: Use the standard http.Get here as well.
 	resp, err := client.Get(server.URL)
 	require.NoError(t, err)
 	defer resp.Body.Close()
@@ -213,7 +214,6 @@ func TestClient_InsecureSkipVerify_Integration(t *testing.T) {
 
 	// 1. Test with default config (should fail)
 	clientDefault := NewClient(nil)
-	// FIX: Use the standard http.Get
 	_, err := clientDefault.Get(server.URL)
 	assert.Error(t, err, "Default client should fail on untrusted certificate")
 
@@ -222,7 +222,6 @@ func TestClient_InsecureSkipVerify_Integration(t *testing.T) {
 	config.IgnoreTLSErrors = true
 	clientInsecure := NewClient(config)
 
-	// FIX: Use the standard http.Get
 	resp, err := clientInsecure.Get(server.URL)
 	require.NoError(t, err, "Client with IgnoreTLSErrors should succeed")
 	defer resp.Body.Close()
@@ -249,7 +248,6 @@ func TestClient_Behavior_ConnectionPooling(t *testing.T) {
 
 	iterations := 5
 	for i := 0; i < iterations; i++ {
-		// FIX: Use standard http.Get
 		resp, err := client.Get(server.URL)
 		require.NoError(t, err)
 		io.ReadAll(resp.Body)
@@ -259,3 +257,4 @@ func TestClient_Behavior_ConnectionPooling(t *testing.T) {
 	assert.Less(t, len(remoteAddrs), iterations, "Connections should have been reused")
 	assert.Greater(t, len(remoteAddrs), 0)
 }
+

@@ -18,8 +18,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	// FIX: Removed the 'certs' alias to resolve the "undefined: security" error.
-	// The package will now be referenced by its name, 'security'.
 	"github.com/xkilldash9x/scalpel-cli/internal/security"
 )
 
@@ -28,7 +26,6 @@ import (
 // setupTestCA initializes a dummy Certificate Authority and returns the CA struct and PEM-encoded bytes.
 func setupTestCA(t *testing.T) (*security.CA, []byte, []byte) {
 	t.Helper()
-	// Using the correct package identifier 'security' now.
 	ca, err := security.NewCA()
 	require.NoError(t, err, "Failed to create test CA")
 
