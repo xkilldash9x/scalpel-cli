@@ -27,14 +27,17 @@ type MockBrowserManager struct {
 	mock.Mock
 }
 
+// FIX: Updated the function signature to include the new `findingsChan` parameter.
 func (m *MockBrowserManager) NewAnalysisContext(
 	sessionCtx context.Context,
 	cfg interface{},
 	persona schemas.Persona,
 	taintTemplate string,
 	taintConfig string,
+	findingsChan chan<- schemas.Finding,
 ) (schemas.SessionContext, error) {
-	args := m.Called(sessionCtx, cfg, persona, taintTemplate, taintConfig)
+	// FIX: Added the new channel to the list of arguments passed to the mock framework.
+	args := m.Called(sessionCtx, cfg, persona, taintTemplate, taintConfig, findingsChan)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
@@ -47,10 +50,18 @@ func (m *MockBrowserManager) Shutdown(ctx context.Context) error {
 }
 
 // MockSessionContext mocks the schemas.SessionContext interface.
+// NOTE: This mock has been made complete by implementing all methods from the interface.
 type MockSessionContext struct {
 	mock.Mock
 	callbackFunc func(payload PollutionProofEvent)
 	mu           sync.Mutex
+}
+
+// --- Start of schemas.SessionContext interface implementation ---
+
+func (m *MockSessionContext) ID() string {
+	args := m.Called()
+	return args.String(0)
 }
 
 func (m *MockSessionContext) ExposeFunction(ctx context.Context, name string, function interface{}) error {
@@ -63,6 +74,75 @@ func (m *MockSessionContext) ExposeFunction(ctx context.Context, name string, fu
 	return args.Error(0)
 }
 
+func (m *MockSessionContext) InjectScriptPersistently(ctx context.Context, script string) error {
+	args := m.Called(ctx, script)
+	return args.Error(0)
+}
+
+func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string, res interface{}) error {
+	args := m.Called(ctx, script, res)
+	return args.Error(0)
+}
+
+func (m *MockSessionContext) Navigate(ctx context.Context, url string) error {
+	args := m.Called(ctx, url)
+	return args.Error(0)
+}
+
+func (m *MockSessionContext) Interact(ctx context.Context, config schemas.InteractionConfig) error {
+	args := m.Called(ctx, config)
+	return args.Error(0)
+}
+
+func (m *MockSessionContext) Close(ctx context.Context) error {
+	args := m.Called(ctx)
+	return args.Error(0)
+}
+
+func (m *MockSessionContext) Click(selector string) error {
+	return m.Called(selector).Error(0)
+}
+
+func (m *MockSessionContext) Type(selector string, text string) error {
+	return m.Called(selector, text).Error(0)
+}
+
+func (m *MockSessionContext) Submit(selector string) error {
+	return m.Called(selector).Error(0)
+}
+
+func (m *MockSessionContext) ScrollPage(direction string) error {
+	return m.Called(direction).Error(0)
+}
+
+func (m *MockSessionContext) WaitForAsync(milliseconds int) error {
+	return m.Called(milliseconds).Error(0)
+}
+
+func (m *MockSessionContext) GetContext() context.Context {
+	args := m.Called()
+	if ctx, ok := args.Get(0).(context.Context); ok {
+		return ctx
+	}
+	return context.Background()
+}
+
+func (m *MockSessionContext) CollectArtifacts() (*schemas.Artifacts, error) {
+	args := m.Called()
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*schemas.Artifacts), args.Error(1)
+}
+
+func (m *MockSessionContext) AddFinding(finding schemas.Finding) error {
+	args := m.Called(finding)
+	return args.Error(0)
+}
+
+// --- End of interface implementation ---
+
+// SimulateCallback is a test helper to invoke the registered callback function.
 func (m *MockSessionContext) SimulateCallback(t *testing.T, functionName string, event PollutionProofEvent) {
 	t.Helper()
 	m.mu.Lock()
@@ -71,48 +151,6 @@ func (m *MockSessionContext) SimulateCallback(t *testing.T, functionName string,
 	require.NotNil(t, cb, "Callback function was not set via ExposeFunction")
 	// Simulate the asynchronous nature of the browser callback.
 	go cb(event)
-}
-func (m *MockSessionContext) InjectScriptPersistently(ctx context.Context, script string) error {
-	args := m.Called(ctx, script)
-	return args.Error(0)
-}
-func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string) error {
-	args := m.Called(ctx, script)
-	return args.Error(0)
-}
-func (m *MockSessionContext) Navigate(ctx context.Context, url string) error {
-	args := m.Called(ctx, url)
-	return args.Error(0)
-}
-func (m *MockSessionContext) Interact(ctx context.Context, config schemas.InteractionConfig) error {
-	args := m.Called(ctx, config)
-	return args.Error(0)
-}
-func (m *MockSessionContext) Close(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
-}
-func (m *MockSessionContext) Click(selector string) error {
-	return m.Called(selector).Error(0)
-}
-func (m *MockSessionContext) Type(selector string, text string) error {
-	return m.Called(selector, text).Error(0)
-}
-func (m *MockSessionContext) Submit(selector string) error {
-	return m.Called(selector).Error(0)
-}
-func (m *MockSessionContext) ScrollPage(direction string) error {
-	return m.Called(direction).Error(0)
-}
-func (m *MockSessionContext) WaitForAsync(milliseconds int) error {
-	return m.Called(milliseconds).Error(0)
-}
-func (m *MockSessionContext) GetContext() context.Context {
-	args := m.Called()
-	if ctx, ok := args.Get(0).(context.Context); ok {
-		return ctx
-	}
-	return context.Background()
 }
 func generateCanary() string {
 	return uuid.NewString()[:8]
@@ -153,7 +191,8 @@ func TestAnalyze_FindingFound(t *testing.T) {
 	var capturedCanary string
 
 	// --- Mocks ---
-	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "").Return(mockSession, nil).Once()
+	// FIX: Added mock.Anything to match the new findings channel argument.
+	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", mock.Anything).Return(mockSession, nil).Once()
 
 	// CRITICAL: Updated the type signature to reflect the new package name 'analyze'.
 	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.AnythingOfType("func(analyze.PollutionProofEvent)")).Return(nil).Once()
@@ -223,7 +262,8 @@ func TestAnalyze_NoFinding(t *testing.T) {
 	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 	ctx := context.Background()
 
-	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "").Return(mockSession, nil)
+	// FIX: Added mock.Anything for the new channel parameter.
+	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", mock.Anything).Return(mockSession, nil)
 	// Updated the type signature.
 	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.AnythingOfType("func(analyze.PollutionProofEvent)")).Return(nil)
 	mockSession.On("InjectScriptPersistently", ctx, mock.AnythingOfType("string")).Return(nil)
@@ -246,7 +286,8 @@ func TestAnalyze_BrowserError(t *testing.T) {
 	ctx := context.Background()
 	expectedErr := errors.New("failed to launch browser")
 
-	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "").Return(nil, expectedErr)
+	// FIX: Added mock.Anything for the new channel parameter.
+	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", mock.Anything).Return(nil, expectedErr)
 
 	findings, err := analyzer.Analyze(ctx, "task-fail", "http://example.com")
 
@@ -271,7 +312,8 @@ func TestAnalyze_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	// Use mock.Anything for context arguments as the context object might be wrapped or cancelled.
-	mockBrowserManager.On("NewAnalysisContext", mock.Anything, mock.Anything, schemas.Persona{}, "", "").Return(mockSession, nil)
+	// FIX: Added mock.Anything for the new channel parameter.
+	mockBrowserManager.On("NewAnalysisContext", mock.Anything, mock.Anything, schemas.Persona{}, "", "", mock.Anything).Return(mockSession, nil)
 	// Updated the type signature.
 	mockSession.On("ExposeFunction", mock.Anything, jsCallbackName, mock.AnythingOfType("func(analyze.PollutionProofEvent)")).Return(nil)
 	mockSession.On("InjectScriptPersistently", mock.Anything, mock.AnythingOfType("string")).Return(nil)
@@ -310,7 +352,8 @@ func TestAnalyze_InstrumentationError(t *testing.T) {
 	ctx := context.Background()
 	expectedErr := errors.New("browser disconnected")
 
-	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "").Return(mockSession, nil)
+	// FIX: Added mock.Anything for the new channel parameter.
+	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", mock.Anything).Return(mockSession, nil)
 	// Fail during ExposeFunction
 	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.Anything).Return(expectedErr)
 	mockSession.On("Close", ctx).Return(nil) // Ensure Close is still called due to defer
@@ -334,7 +377,8 @@ func TestAnalyze_MismatchedCanary(t *testing.T) {
 	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 	ctx := context.Background()
 
-	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "").Return(mockSession, nil)
+	// FIX: Added mock.Anything for the new channel parameter.
+	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", mock.Anything).Return(mockSession, nil)
 	// Updated the type signature.
 	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.AnythingOfType("func(analyze.PollutionProofEvent)")).Return(nil)
 	mockSession.On("InjectScriptPersistently", ctx, mock.AnythingOfType("string")).Return(nil)
