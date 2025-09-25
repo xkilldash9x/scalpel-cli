@@ -18,23 +18,23 @@ func TestBuildTaintShim(t *testing.T) {
 
 	// -- a simple, valid template for our tests --
 	mockTemplate := `
-		(function() {
-			"use strict";
-			const config = /*{{SCALPEL_SINKS_CONFIG}}*/;
-			console.log("Shim loaded with", config.length, "rules.");
-		})();
-	`
+			(function() {
+				"use strict";
+				const config = /*{{SCALPEL_SINKS_CONFIG}}*/;
+				console.log("Shim loaded with", config.length, "rules.");
+			})();
+		`
 
 	t.Run("should inject valid JSON config into template", func(t *testing.T) {
 		t.Parallel()
 		configJSON := `[{"sink":"document.write","params":[0]}]`
 		expectedScript := `
-		(function() {
-			"use strict";
-			const config = [{"sink":"document.write","params":[0]}];
-			console.log("Shim loaded with", config.length, "rules.");
-		})();
-	`
+			(function() {
+				"use strict";
+				const config = [{"sink":"document.write","params":[0]}];
+				console.log("Shim loaded with", config.length, "rules.");
+			})();
+		`
 
 		script, err := BuildTaintShim(mockTemplate, configJSON)
 		require.NoError(t, err, "Should not return an error with valid inputs")
@@ -45,12 +45,12 @@ func TestBuildTaintShim(t *testing.T) {
 		t.Parallel()
 		configJSON := ""
 		expectedScript := `
-		(function() {
-			"use strict";
-			const config = [];
-			console.log("Shim loaded with", config.length, "rules.");
-		})();
-	`
+			(function() {
+				"use strict";
+				const config = [];
+				console.log("Shim loaded with", config.length, "rules.");
+			})();
+		`
 
 		script, err := BuildTaintShim(mockTemplate, configJSON)
 		require.NoError(t, err, "Should not return an error for an empty config string")
@@ -61,12 +61,12 @@ func TestBuildTaintShim(t *testing.T) {
 		t.Parallel()
 		configJSON := "[]"
 		expectedScript := `
-		(function() {
-			"use strict";
-			const config = [];
-			console.log("Shim loaded with", config.length, "rules.");
-		})();
-	`
+			(function() {
+				"use strict";
+				const config = [];
+				console.log("Shim loaded with", config.length, "rules.");
+			})();
+		`
 
 		script, err := BuildTaintShim(mockTemplate, configJSON)
 		require.NoError(t, err, "Should not return an error for an empty JSON array")

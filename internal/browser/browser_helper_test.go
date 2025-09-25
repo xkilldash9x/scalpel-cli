@@ -7,13 +7,12 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"os"
-	"runtime"
+	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
-	"golang.org/x/sync/semaphore"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
@@ -21,29 +20,64 @@ import (
 )
 
 var (
-	processSemaphore *semaphore.Weighted
 	suiteLogger      *zap.Logger
 	suiteConfig      *config.Config
+	// Initialize the Manager once for the whole suite for efficiency.
+	suiteManager     *Manager
+	suiteManagerOnce sync.Once
+	suiteManagerErr  error
 )
 
-const maxTestConcurrency = 1
-const shutdownTimeout = 15 * time.Second
+const shutdownTimeout = 30 * time.Second
+const initTimeout = 5 * time.Minute // Timeout for initialization (includes browser installation).
 
+// TestMain controls the lifecycle of the test suite, initializing the Manager globally.
 func TestMain(m *testing.M) {
 	suiteLogger = getTestLogger()
 	suiteConfig = createTestConfig()
 
-	concurrency := int64(runtime.GOMAXPROCS(0))
-	if concurrency > maxTestConcurrency {
-		concurrency = maxTestConcurrency
-	}
-	if concurrency < 1 {
-		concurrency = 1
-	}
-	suiteLogger.Info("Initializing browser test suite.", zap.Int64("concurrency_limit", concurrency))
-	processSemaphore = semaphore.NewWeighted(concurrency)
+	// Initialize the suite manager (Playwright driver + Browser instance).
+	ctx, cancel := context.WithTimeout(context.Background(), initTimeout)
+	defer cancel()
 
+	// Use sync.Once to ensure initialization happens only once.
+	suiteManagerOnce.Do(func() {
+		suiteLogger.Info("Initializing global browser test suite manager...")
+		// NewManager handles installation and launch internally via deferred initialization.
+		suiteManager, suiteManagerErr = NewManager(ctx, suiteConfig, suiteLogger)
+		if suiteManagerErr != nil {
+			suiteLogger.Error("Failed to create global browser manager.", zap.Error(suiteManagerErr))
+			// We don't exit here yet, allowing tests to potentially run if they handle the error.
+			return
+		}
+
+		// Force initialization now to catch errors early.
+		if err := suiteManager.initialize(ctx); err != nil {
+			suiteManagerErr = err
+			suiteLogger.Error("Failed to initialize global browser manager.", zap.Error(suiteManagerErr))
+			return
+		}
+		suiteLogger.Info("Global browser manager initialized.")
+	})
+
+	if suiteManagerErr != nil {
+		// If initialization failed, we must exit as browser tests cannot run.
+		os.Exit(1)
+	}
+
+	// Run the tests.
 	exitCode := m.Run()
+
+	// Shutdown the suite manager after all tests complete.
+	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
+	defer shutdownCancel()
+	if suiteManager != nil {
+		suiteLogger.Info("Shutting down global browser manager...")
+		if err := suiteManager.Shutdown(shutdownCtx); err != nil {
+			suiteLogger.Error("Error during global browser manager shutdown.", zap.Error(err))
+		}
+	}
+
 	os.Exit(exitCode)
 }
 
@@ -61,6 +95,7 @@ func getTestLogger() *zap.Logger {
 	if suiteLogger != nil {
 		return suiteLogger
 	}
+	// Use a development config for detailed logs during testing.
 	logger, err := zap.NewDevelopment()
 	if err != nil {
 		panic("failed to initialize zap logger for tests: " + err.Error())
@@ -69,26 +104,26 @@ func getTestLogger() *zap.Logger {
 }
 
 func createTestConfig() *config.Config {
+	// Configuration optimized for testing.
 	humanoidCfg := humanoid.DefaultConfig()
-	humanoidCfg.FittsAMean = 10.0
-	humanoidCfg.FittsBMean = 20.0
+	// Speed up humanoid actions for faster tests.
 	humanoidCfg.ClickHoldMinMs = 5
 	humanoidCfg.ClickHoldMaxMs = 15
 	humanoidCfg.KeyHoldMeanMs = 10.0
 
 	cfg := &config.Config{
 		Browser: config.BrowserConfig{
-			Headless:        true,
+			Headless:        true, // Always headless in tests.
 			DisableCache:    true,
 			IgnoreTLSErrors: true,
-			Concurrency:     4,
 			Humanoid:        humanoidCfg,
 			Debug:           true,
 		},
 		Network: config.NetworkConfig{
 			CaptureResponseBodies: true,
-			NavigationTimeout:     20 * time.Second,
+			NavigationTimeout:     45 * time.Second, // Reasonable default for tests.
 			Proxy:                 config.ProxyConfig{Enabled: false},
+			IgnoreTLSErrors:       true,
 		},
 		IAST: config.IASTConfig{Enabled: false},
 	}
@@ -96,57 +131,50 @@ func createTestConfig() *config.Config {
 	return cfg
 }
 
+// newTestFixture creates a new session from the global manager.
 func newTestFixture(t *testing.T, configurators ...fixtureConfigurator) *testFixture {
 	t.Helper()
+
+	if suiteManager == nil || suiteManagerErr != nil {
+		t.Fatalf("Global suite manager is not available. Initialization error: %v", suiteManagerErr)
+	}
 
 	cfgCopy := *suiteConfig
 	for _, configurator := range configurators {
 		configurator(&cfgCopy)
 	}
 
-	acquireCtx, acquireCancel := context.WithTimeout(context.Background(), 60*time.Second)
-	t.Cleanup(acquireCancel)
-
-	if err := processSemaphore.Acquire(acquireCtx, 1); err != nil {
-		t.Fatalf("Failed to acquire semaphore: %v", err)
-	}
-	t.Cleanup(func() { processSemaphore.Release(1) })
-
-	lifecycleCtx := context.Background()
 	logger := suiteLogger.With(zap.String("test", t.Name()))
-
-	manager, err := NewManager(lifecycleCtx, &cfgCopy, logger)
-	require.NoError(t, err, "Failed to initialize per-test browser manager")
-
-	t.Cleanup(func() {
-		shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), shutdownTimeout)
-		defer shutdownCancel()
-		if err := manager.Shutdown(shutdownCtx); err != nil {
-			t.Logf("Warning: Error during browser manager shutdown: %v", err)
-		}
-	})
+	manager := suiteManager
 
 	findingsChan := make(chan schemas.Finding, 50)
 	t.Cleanup(func() { close(findingsChan) })
 
+	// Create a new session (BrowserContext) for the test.
+	// The context controls the test's execution lifecycle.
+	testCtx, testCancel := context.WithCancel(context.Background())
+	t.Cleanup(testCancel)
+
 	sessionInterface, err := manager.NewAnalysisContext(
-		lifecycleCtx,
+		testCtx,
 		&cfgCopy,
 		schemas.DefaultPersona,
 		"",
 		"",
 		findingsChan,
 	)
-	require.NoError(t, err, "Failed to create new analysis context")
+	require.NoError(t, err, "Failed to create new analysis context (session)")
 
 	session, ok := sessionInterface.(*Session)
 	require.True(t, ok, "session must be of type *Session")
 
+	// Ensure the session is closed when the test finishes.
 	t.Cleanup(func() {
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), shutdownTimeout/2)
+		// Use a background context with timeout for cleanup.
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), shutdownTimeout/3)
 		defer closeCancel()
 		if err := session.Close(closeCtx); err != nil {
-			t.Logf("Warning: Error during session close: %v", err)
+			t.Logf("Warning: Error during session close in cleanup: %v", err)
 		}
 	})
 
@@ -159,6 +187,7 @@ func newTestFixture(t *testing.T, configurators ...fixtureConfigurator) *testFix
 	}
 }
 
+// Helper functions for creating test servers.
 func createTestServer(t *testing.T, handler http.Handler) *httptest.Server {
 	t.Helper()
 	server := httptest.NewServer(handler)

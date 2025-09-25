@@ -5,129 +5,143 @@ import (
 	"context"
 	"encoding/base64"
 	"fmt"
+	"net/http"
 	"net/url"
 	"strings"
 	"sync"
 	"time"
 
-	"github.com/chromedp/cdproto/cdp"
-	"github.com/chromedp/cdproto/log"
-	"github.com/chromedp/cdproto/network"
-	"github.com/chromedp/cdproto/page"
-	"github.com/chromedp/chromedp"
+	"github.com/playwright-community/playwright-go"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
 const networkIdleCheckFrequency = 250 * time.Millisecond
+const bodyFetchTimeout = 15 * time.Second
 
 // requestState holds the information for a single network request throughout its lifecycle.
 type requestState struct {
-	request      *network.EventRequestWillBeSent
-	responses    []*network.EventResponseReceived // Handles redirects
-	body         []byte
-	err          error
-	finished     bool
-	isDataURL    bool
-	wallTime     time.Time
-	monotonicTime cdp.MonotonicTime
+	request   playwright.Request
+	response  playwright.Response
+	body      []byte
+	err       error
+	finished  bool
+	isDataURL bool
+	startTime time.Time
 }
 
-// Harvester listens to browser network events and console logs to build a HAR file.
+// Harvester listens to browser network events and console logs to build a HAR file and monitor activity.
 type Harvester struct {
-	ctx           context.Context
-	cancel        context.CancelFunc
+	ctx           context.Context // Session lifecycle context.
 	logger        *zap.Logger
 	captureBodies bool
+	page          playwright.Page // Store page to manage listeners.
 
 	mu            sync.RWMutex
-	requests      map[network.RequestID]*requestState
+	requests      map[playwright.Request]*requestState // Keyed by Request object pointer.
 	consoleLogs   []schemas.ConsoleLog
-	pageID        string
 	pageTitle     string
-	startTime     time.Time
-	onLoadTime    float64
-	onContentLoad float64
-	activeReqs    int64 // Counter for active requests for idle calculation
+	pageStartTime time.Time
+	pageTimings   schemas.PageTimings
 
-	wg sync.WaitGroup // To wait for all body-fetching goroutines
+	activeReqs int64 // Counter for active requests, including body fetching time.
+
+	stopOnce sync.Once
+
+	// Event handlers are stored to be able to remove them in Stop().
+	requestHandler          func(playwright.Request)
+	responseHandler         func(playwright.Response)
+	requestFinishedHandler  func(playwright.Request)
+	requestFailedHandler    func(playwright.Request)
+	consoleMessageHandler   func(playwright.ConsoleMessage)
+	pageLoadHandler         func(playwright.Page)
+	domContentLoadedHandler func(playwright.Page)
 }
 
 // NewHarvester creates a new network harvester instance.
 func NewHarvester(ctx context.Context, logger *zap.Logger, captureBodies bool) *Harvester {
-	hCtx, hCancel := context.WithCancel(ctx)
-	return &Harvester{
-		ctx:           hCtx,
-		cancel:        hCancel,
+	h := &Harvester{
+		ctx:           ctx,
 		logger:        logger.Named("harvester"),
 		captureBodies: captureBodies,
-		requests:      make(map[network.RequestID]*requestState),
+		requests:      make(map[playwright.Request]*requestState),
 		consoleLogs:   make([]schemas.ConsoleLog, 0),
-		startTime:     time.Now(),
+		pageStartTime: time.Now(),
 	}
+	// Assign handlers to struct fields so they can be referenced in Stop().
+	h.requestHandler = h.handleRequest
+	h.responseHandler = h.handleResponse
+	h.requestFinishedHandler = h.handleRequestFinished
+	h.requestFailedHandler = h.handleRequestFailed
+	h.consoleMessageHandler = h.handleConsoleMessage
+	h.pageLoadHandler = h.handlePageLoad
+	h.domContentLoadedHandler = h.handleDOMContentLoaded
+	return h
 }
 
-// Start begins listening to network and console events from the browser context.
-func (h *Harvester) Start(ctx context.Context) error {
-	// This context is the session context, which is what we need to listen on
-	h.listen(ctx)
-	return nil
-}
+// Start begins listening to network and console events from the Playwright Page.
+func (h *Harvester) Start(page playwright.Page) {
+	h.logger.Debug("Starting harvester event listeners.")
+	h.page = page // Store page to remove listeners later.
 
-// Stop halts the event listeners and returns the collected artifacts (HAR and console logs).
-func (h *Harvester) Stop(ctx context.Context) (*schemas.HAR, []schemas.ConsoleLog) {
-	h.cancel()  // Signal the listener goroutine to stop
-	h.wg.Wait() // Wait for any outstanding body-fetching goroutines to complete
+	// -- Network Events --
+	page.On("request", h.requestHandler)
+	page.On("response", h.responseHandler)
+	page.On("requestfinished", h.requestFinishedHandler)
+	page.On("requestfailed", h.requestFailedHandler)
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	// -- Console Events --
+	page.On("console", h.consoleMessageHandler)
 
-	har := h.generateHAR()
-	logs := h.consoleLogs
-	h.consoleLogs = make([]schemas.ConsoleLog, 0) // Clear logs for safety
+	// -- Page Lifecycle Events --
+	page.On("load", h.pageLoadHandler)
+	page.On("domcontentloaded", h.domContentLoadedHandler)
 
-	return har, logs
-}
-
-// listen sets up the CDP event listeners.
-func (h *Harvester) listen(ctx context.Context) {
-	chromedp.ListenTarget(ctx, func(ev interface{}) {
-		// Use a select to ensure we don't process events after the harvester is stopped
-		select {
-		case <-h.ctx.Done():
-			return
-		default:
-		}
-
-		switch ev := ev.(type) {
-		// -- Network Events --
-		case *network.EventRequestWillBeSent:
-			h.handleRequestWillBeSent(ev)
-		case *network.EventResponseReceived:
-			h.handleResponseReceived(ev)
-		case *network.EventLoadingFinished:
-			h.handleLoadingFinished(ev)
-		case *network.EventLoadingFailed:
-			h.handleLoadingFailed(ev)
-		// -- Page Lifecycle Events --
-		case *page.EventLifecycleEvent:
-			h.handlePageLifecycleEvent(ev)
-		// -- Console Events --
-		case *log.EventEntryAdded:
-			h.handleConsoleLog(ev)
+	// Capture the accurate start time upon the first main frame navigation.
+	page.Once("framenavigated", func(frame playwright.Frame) {
+		if frame == page.MainFrame() {
+			h.mu.Lock()
+			h.pageStartTime = time.Now()
+			h.mu.Unlock()
 		}
 	})
 }
 
+// Stop halts the event listeners.
+func (h *Harvester) Stop() {
+	h.stopOnce.Do(func() {
+		h.logger.Debug("Stopping harvester event listeners.")
+		if h.page != nil && !h.page.IsClosed() {
+			h.page.Off("request", h.requestHandler)
+			h.page.Off("response", h.responseHandler)
+			h.page.Off("requestfinished", h.requestFinishedHandler)
+			h.page.Off("requestfailed", h.requestFailedHandler)
+			h.page.Off("console", h.consoleMessageHandler)
+			h.page.Off("load", h.pageLoadHandler)
+			h.page.Off("domcontentloaded", h.domContentLoadedHandler)
+		}
+	})
+}
+
+// GetConsoleLogs returns the collected console logs.
+func (h *Harvester) GetConsoleLogs() []schemas.ConsoleLog {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+	logs := make([]schemas.ConsoleLog, len(h.consoleLogs))
+	copy(logs, h.consoleLogs)
+	return logs
+}
+
 // WaitNetworkIdle blocks until the network has been quiet for a specified duration.
+// Robust implementation tracking last activity time.
 func (h *Harvester) WaitNetworkIdle(ctx context.Context, quietPeriod time.Duration) error {
-	h.logger.Debug("Waiting for network to become idle.")
-	timer := time.NewTimer(quietPeriod)
-	defer timer.Stop()
+	h.logger.Debug("Waiting for network to become idle.", zap.Duration("quiet_period", quietPeriod))
 
 	ticker := time.NewTicker(networkIdleCheckFrequency)
 	defer ticker.Stop()
+
+	lastActiveTime := time.Now()
 
 	for {
 		select {
@@ -135,314 +149,391 @@ func (h *Harvester) WaitNetworkIdle(ctx context.Context, quietPeriod time.Durati
 			return ctx.Err()
 		case <-h.ctx.Done():
 			return h.ctx.Err()
-		case <-ticker.C:
+		case now := <-ticker.C:
 			h.mu.RLock()
 			active := h.activeReqs
 			h.mu.RUnlock()
 
 			if active == 0 {
-				// Reset the timer only if it's not already running
-				if !timer.Stop() {
-					// Drain the channel if Stop() returns false
-					select {
-					case <-timer.C:
-					default:
-					}
+				// If network is idle, check how long it has been idle.
+				if now.Sub(lastActiveTime) >= quietPeriod {
+					h.logger.Debug("Network is idle.")
+					return nil
 				}
-				timer.Reset(quietPeriod)
+			} else {
+				// Network is active (requests pending or bodies fetching), reset the last active time.
+				lastActiveTime = now
 			}
-		case <-timer.C:
-			// Timer fired, meaning network was idle for the quiet period
-			h.logger.Debug("Network is idle.")
-			return nil
 		}
 	}
 }
 
 // -- Event Handlers --
 
-func (h *Harvester) handleRequestWillBeSent(ev *network.EventRequestWillBeSent) {
+func (h *Harvester) handleRequest(req playwright.Request) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
 	h.activeReqs++
 
-	if _, exists := h.requests[ev.RequestID]; !exists {
-		h.requests[ev.RequestID] = &requestState{
-			isDataURL: strings.HasPrefix(ev.Request.URL, "data:"),
-		}
-	}
-	h.requests[ev.RequestID].request = ev
-	h.requests[ev.RequestID].wallTime = ev.WallTime.Time()
-	
-	// FIX: Dereference the pointer after a nil check.
-	if ev.Timestamp != nil {
-		h.requests[ev.RequestID].monotonicTime = *ev.Timestamp
-	}
-
-	// Capture the initial page ID if not set
-	if h.pageID == "" && ev.Type == network.ResourceTypeDocument {
-		h.pageID = ev.FrameID.String()
+	h.requests[req] = &requestState{
+		request:   req,
+		isDataURL: strings.HasPrefix(req.URL(), "data:"),
+		startTime: time.Now(),
 	}
 }
 
-func (h *Harvester) handleResponseReceived(ev *network.EventResponseReceived) {
+func (h *Harvester) handleResponse(resp playwright.Response) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if req, ok := h.requests[ev.RequestID]; ok {
-		req.responses = append(req.responses, ev)
-		// Try to fetch the body now if configured
-		if h.captureBodies && ev.HasExtraInfo {
-			h.fetchBody(ev.RequestID)
-		}
+	req := resp.Request()
+	if reqState, ok := h.requests[req]; ok {
+		reqState.response = resp
 	}
 }
 
-func (h *Harvester) handleLoadingFinished(ev *network.EventLoadingFinished) {
+// handleRequestFinished processes the request completion, including fetching the body synchronously.
+func (h *Harvester) handleRequestFinished(req playwright.Request) {
+	h.processRequestCompletion(req, nil)
+}
+
+// handleRequestFailed processes request failures.
+func (h *Harvester) handleRequestFailed(req playwright.Request) {
+	failure, err := req.Failure()
+	if err != nil {
+		h.processRequestCompletion(req, fmt.Errorf("could not get request failure reason: %w", err))
+		return
+	}
+	var failureErr error
+	if failure != nil {
+		failureErr = fmt.Errorf("request failed: %s", failure.Error())
+	} else {
+		failureErr = fmt.Errorf("request failed (unknown reason)")
+	}
+	h.processRequestCompletion(req, failureErr)
+}
+
+// processRequestCompletion handles the logic for both finished and failed requests.
+// Crucially, it fetches the body synchronously before decrementing activeReqs.
+func (h *Harvester) processRequestCompletion(req playwright.Request, failureErr error) {
+	h.mu.RLock()
+	reqState, ok := h.requests[req]
+	shouldFetchBody := h.captureBodies && ok && !reqState.isDataURL && reqState.response != nil
+	h.mu.RUnlock()
+
+	var body []byte
+	var fetchErr error
+
+	if shouldFetchBody {
+		// Fetch the body content synchronously.
+		body, fetchErr = reqState.response.Body()
+		if fetchErr != nil {
+			// Log the error if it's not due to the context being cancelled (session shutdown).
+			if h.ctx.Err() == nil {
+				h.logger.Debug("Failed to fetch response body.", zap.String("url", req.URL()), zap.Error(fetchErr))
+			}
+		}
+	}
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if req, ok := h.requests[ev.RequestID]; ok {
-		req.finished = true
-		// Try fetching body again, in case extra info wasn't available before
-		if h.captureBodies && len(req.responses) > 0 && req.body == nil && !req.isDataURL {
-			h.fetchBody(ev.RequestID)
+	// Update state after fetching body.
+	if reqState, ok := h.requests[req]; ok {
+		reqState.finished = true
+		reqState.body = body
+		// Prioritize failure error over body fetch error.
+		if failureErr != nil {
+			reqState.err = failureErr
+		} else if fetchErr != nil {
+			reqState.err = fetchErr
 		}
 	}
+
+	// Decrement activeReqs only after all processing (including body fetch) is done.
 	h.activeReqs--
 }
 
-func (h *Harvester) handleLoadingFailed(ev *network.EventLoadingFailed) {
+func (h *Harvester) handleConsoleMessage(msg playwright.ConsoleMessage) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	if req, ok := h.requests[ev.RequestID]; ok {
-		req.finished = true
-		req.err = fmt.Errorf("request failed: %s", ev.ErrorText)
-	}
-	h.activeReqs--
-}
-
-func (h *Harvester) handlePageLifecycleEvent(ev *page.EventLifecycleEvent) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	if h.pageID == "" {
-		h.pageID = ev.FrameID.String()
-	}
-
-	delta := ev.Timestamp.Time().Sub(h.startTime).Seconds() * 1000
-
-	switch ev.Name {
-	case "load":
-		h.onLoadTime = delta
-	case "DOMContentLoaded":
-		h.onContentLoad = delta
-	case "init":
-		h.startTime = ev.Timestamp.Time()
-	}
-}
-
-func (h *Harvester) handleConsoleLog(ev *log.EventEntryAdded) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
+	location := msg.Location()
 	h.consoleLogs = append(h.consoleLogs, schemas.ConsoleLog{
-		Type:      string(ev.Entry.Level),
-		Timestamp: ev.Entry.Timestamp.Time(),
-		Text:      ev.Entry.Text,
-		Source:    string(ev.Entry.Source),
-		URL:       ev.Entry.URL,
-		Line:      ev.Entry.LineNumber,
+		Type:      msg.Type(),
+		Timestamp: time.Now(), // Approximate timestamp.
+		Text:      msg.Text(),
+		Source:    "console-api",
+		URL:       location.URL,
+		Line:      int64(location.LineNumber),
 	})
 }
 
-// -- Body Fetching Logic --
+func (h *Harvester) handlePageLoad(page playwright.Page) {
+	if page.MainFrame() != page.MainFrame() {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pageTitle, _ = page.Title()
+	h.pageTimings.OnLoad = float64(time.Since(h.pageStartTime).Milliseconds())
+}
 
-func (h *Harvester) fetchBody(reqID network.RequestID) {
-	h.wg.Add(1)
-	go func() {
-		defer h.wg.Done()
-
-		var body []byte
-		// FIX: Corrected the chromedp.Run call to avoid the multiple-value error.
-		err := chromedp.Run(h.ctx,
-			chromedp.ActionFunc(func(c context.Context) error {
-				var err error
-				body, err = network.GetResponseBody(reqID).Do(c)
-				return err
-			}),
-		)
-
-		h.mu.Lock()
-		defer h.mu.Unlock()
-		if req, ok := h.requests[reqID]; ok {
-			if err != nil {
-				// Don't log context canceled errors as they are expected on shutdown.
-				if h.ctx.Err() == nil {
-					h.logger.Debug("Failed to fetch response body.", zap.String("reqID", string(reqID)), zap.Error(err))
-				}
-				req.err = err
-			} else {
-				req.body = body
-			}
-		}
-	}()
+func (h *Harvester) handleDOMContentLoaded(page playwright.Page) {
+	if page.MainFrame() != page.MainFrame() {
+		return
+	}
+	h.mu.Lock()
+	defer h.mu.Unlock()
+	h.pageTimings.OnContentLoad = float64(time.Since(h.pageStartTime).Milliseconds())
 }
 
 // -- HAR Generation --
 
-func (h *Harvester) generateHAR() *schemas.HAR {
+// GenerateHAR constructs the HAR structure from the collected network events.
+func (h *Harvester) GenerateHAR() *schemas.HAR {
+	h.mu.RLock()
+	defer h.mu.RUnlock()
+
 	har := schemas.NewHAR()
+	pageID := "page_1"
 
 	har.Log.Pages = append(har.Log.Pages, schemas.Page{
-		StartedDateTime: h.startTime,
-		ID:              h.pageID,
+		StartedDateTime: h.pageStartTime,
+		ID:              pageID,
 		Title:           h.pageTitle,
-		PageTimings: schemas.PageTimings{
-			OnContentLoad: h.onContentLoad,
-			OnLoad:        h.onLoadTime,
-		},
+		PageTimings:     h.pageTimings,
 	})
 
 	for _, reqState := range h.requests {
-		if reqState.request == nil || len(reqState.responses) == 0 {
-			continue // Skip incomplete entries
+		// Skip incomplete entries (not finished, or finished without response and without error).
+		if !reqState.finished || (reqState.response == nil && reqState.err == nil) {
+			continue
 		}
-		finalResp := reqState.responses[len(reqState.responses)-1]
-		
-		totalTime := finalResp.Timestamp.Time().Sub(reqState.monotonicTime.Time()).Seconds() * 1000
+
+		// Playwright timings are crucial.
+		timing, _ := reqState.request.Timing()
+
+		// Calculate duration. If ResponseEnd is missing (e.g., failure), use time since start approximation.
+		totalTime := float64(-1)
+		if timing.ResponseEnd > 0 && timing.RequestStart > 0 {
+			totalTime = timing.ResponseEnd - timing.RequestStart
+		} else {
+			totalTime = time.Since(reqState.startTime).Seconds() * 1000
+		}
 
 		entry := schemas.Entry{
-			Pageref:         h.pageID,
-			StartedDateTime: reqState.wallTime,
+			Pageref:         pageID,
+			StartedDateTime: reqState.startTime, // Use the recorded start time.
 			Time:            totalTime,
 			Request:         h.buildHARRequest(reqState.request),
-			Response:        h.buildHARResponse(finalResp, reqState.body),
+			Response:        h.buildHARResponse(reqState.response, reqState.body, reqState.err),
 			Cache:           struct{}{},
-			// FIX: Access the Timing field via the nested Response struct.
-			Timings:         convertCDPTimings(finalResp.Response.Timing),
+			Timings:         convertPWTImings(timing),
 		}
 		har.Log.Entries = append(har.Log.Entries, entry)
 	}
 	return har
 }
 
-func (h *Harvester) buildHARRequest(req *network.EventRequestWillBeSent) schemas.Request {
-	u, _ := url.Parse(req.Request.URL)
-	qs := make([]schemas.NVPair, 0)
-	for k, v := range u.Query() {
-		for _, val := range v {
-			qs = append(qs, schemas.NVPair{Name: k, Value: val})
-		}
-	}
+func (h *Harvester) buildHARRequest(req playwright.Request) schemas.Request {
+	headers, _ := req.Headers()
+	headersSize := calculateHeaderSize(headers)
+
+	postData, _ := req.PostData()
+	bodySize := int64(len(postData))
 
 	harReq := schemas.Request{
-		Method:      req.Request.Method,
-		URL:         req.Request.URL,
-		HTTPVersion: "HTTP/1.1", // Often a guess
-		// FIX: Use helper to get header value and handle type assertion.
-		Cookies:     convertCDPCookies(getHeader(req.Request.Headers, "Cookie")),
-		Headers:     convertCDPHeaders(req.Request.Headers),
-		QueryString: qs,
-		HeadersSize: calculateHeaderSize(req.Request.Headers),
-		BodySize:    int64(len(req.Request.PostData)),
+		Method:      req.Method(),
+		URL:         req.URL(),
+		HTTPVersion: "HTTP/1.1", // Approximation
+		Cookies:     extractCookiesFromHeaders(headers),
+		Headers:     convertPWHeaders(headers),
+		QueryString: extractQueryString(req.URL()),
+		HeadersSize: headersSize,
+		BodySize:    bodySize,
 	}
 
-	if req.Request.PostData != "" {
+	if bodySize > 0 {
+		contentType, _ := req.HeaderValue("content-type")
 		harReq.PostData = &schemas.PostData{
-			// FIX: Use helper to get header value.
-			MimeType: getHeader(req.Request.Headers, "Content-Type"),
-			Text:     req.Request.PostData,
+			MimeType: contentType,
+			Text:     postData,
 		}
 	}
 
 	return harReq
 }
 
-func (h *Harvester) buildHARResponse(resp *network.EventResponseReceived, body []byte) schemas.Response {
-	content := schemas.Content{
-		Size:     int64(len(body)),
-		MimeType: resp.Response.MimeType,
+func (h *Harvester) buildHARResponse(resp playwright.Response, body []byte, reqErr error) schemas.Response {
+	if resp == nil {
+		// Handle failed requests where no response object exists.
+		return schemas.Response{
+			Status:      0,
+			StatusText:  "Failed",
+			HTTPVersion: "unknown",
+			Content: schemas.Content{
+				Size:     0,
+				MimeType: "text/plain",
+				Text:     fmt.Sprintf("Request failed: %v", reqErr),
+			},
+			HeadersSize: -1,
+			BodySize:    -1,
+		}
 	}
 
-	if isTextMime(resp.Response.MimeType) {
+	headers, _ := resp.Headers()
+	headersSize := calculateHeaderSize(headers)
+
+	contentType, _ := resp.HeaderValue("content-type")
+	if contentType == "" {
+		contentType = "application/octet-stream"
+	}
+
+	content := schemas.Content{
+		Size:     int64(len(body)),
+		MimeType: contentType,
+	}
+
+	if isTextMime(contentType) {
 		content.Text = string(body)
 	} else if len(body) > 0 {
 		content.Encoding = "base64"
 		content.Text = base64.StdEncoding.EncodeToString(body)
 	}
 
+	bodySize := int64(len(body)) // Approximation of transferred size.
+
+	// Determine protocol.
+	protocol := "HTTP/1.1"
+	sd, err := resp.SecurityDetails()
+	if err == nil && sd != nil && sd.Protocol != "" {
+		protocol = sd.Protocol
+	}
+
+	redirectURL, _ := resp.HeaderValue("location")
 	return schemas.Response{
-		Status:      int(resp.Response.Status),
-		StatusText:  resp.Response.StatusText,
-		HTTPVersion: resp.Response.Protocol,
-		// FIX: Use helper to get header value.
-		Cookies:     convertCDPCookies(getHeader(resp.Response.Headers, "Set-Cookie")),
-		Headers:     convertCDPHeaders(resp.Response.Headers),
+		Status:      resp.Status(),
+		StatusText:  resp.StatusText(),
+		HTTPVersion: protocol,
+		Cookies:     extractCookiesFromHeaders(headers), // Handles Set-Cookie
+		Headers:     headers,
 		Content:     content,
-		// FIX: Use helper to get header value.
-		RedirectURL: getHeader(resp.Response.Headers, "Location"),
-		HeadersSize: calculateHeaderSize(resp.Response.Headers),
-		// FIX: Cast float64 to int64.
-		BodySize:    int64(resp.Response.EncodedDataLength),
+		RedirectURL: redirectURL,
+		HeadersSize: headersSize,
+		BodySize:    bodySize,
 	}
 }
 
 // -- Helpers --
 
-// getHeader performs a case-insensitive search for a header and returns its string value.
-func getHeader(headers network.Headers, key string) string {
-	for h, v := range headers {
-		if strings.EqualFold(h, key) {
-			if s, ok := v.(string); ok {
-				return s
-			}
-		}
-	}
-	return ""
-}
-
-// convertCDPTimings converts network.ResourceTiming to HAR Timings format.
-func convertCDPTimings(t *network.ResourceTiming) schemas.Timings {
-	if t == nil {
-		return schemas.Timings{}
-	}
-	// Helper to convert CDP timing (milliseconds) to HAR timing, handling negative values.
-	toHARTime := func(v float64) float64 {
-		if v < 0 {
+// convertPWTImings converts Playwright RequestTiming to HAR Timings format.
+// Playwright timings are relative durations in milliseconds.
+func convertPWTImings(t playwright.RequestTiming) schemas.Timings {
+	duration := func(start, end float64) float64 {
+		if start <= 0 || end <= 0 || start > end {
 			return -1
 		}
-		return v
+		return end - start
 	}
 
-	// Calculate HAR timings based on the CDP structure.
-	dns := toHARTime(t.DNSEnd - t.DNSStart)
-	connect := toHARTime(t.ConnectEnd - t.ConnectStart)
-	ssl := toHARTime(t.SslEnd - t.SslStart)
-	send := toHARTime(t.SendEnd - t.SendStart)
+	dnsTime := duration(t.DomainLookupStart, t.DomainLookupEnd)
+	connectTime := duration(t.ConnectStart, t.ConnectEnd)
+	// SSL time is the duration of the secure connection handshake, part of the total connect time.
+	sslTime := duration(t.SecureConnectionStart, t.ConnectEnd)
 
-	// Blocked time approximation.
-	blocked := t.RequestTime*1000 - t.ProxyEnd
-	if blocked < 0 {
-		blocked = 0
-	}
-
-	// Wait time (Time To First Byte - TTFB).
-	wait := toHARTime(t.ReceiveHeadersEnd - t.SendEnd)
-	// Receive time is complex to calculate perfectly without the total duration event, defaulting to 0.
-	receive := float64(0)
+	// Send: Time taken to issue the request.
+	sendTime := duration(t.RequestStart, t.RequestEnd)
+	// Wait (TTFB): Time waiting for the response.
+	waitTime := duration(t.RequestEnd, t.ResponseStart)
+	// Receive: Time taken to download the response body.
+	receiveTime := duration(t.ResponseStart, t.ResponseEnd)
 
 	return schemas.Timings{
-		Blocked: blocked,
-		DNS:     dns,
-		Connect: connect,
-		Send:    send,
-		Wait:    wait,
-		Receive: receive,
-		SSL:     ssl,
+		Blocked: -1, // Not accurately available in Playwright RequestTiming structure.
+		DNS:     dnsTime,
+		Connect: connectTime,
+		Send:    sendTime,
+		Wait:    waitTime,
+		Receive: receiveTime,
+		SSL:     sslTime,
 	}
+}
+
+func convertPWHeaders(headers map[string]string) []schemas.NVPair {
+	pairs := make([]schemas.NVPair, 0, len(headers))
+	for k, v := range headers {
+		pairs = append(pairs, schemas.NVPair{Name: k, Value: v})
+	}
+	return pairs
+}
+
+func calculateHeaderSize(headers map[string]string) int64 {
+	var size int64
+	for k, v := range headers {
+		size += int64(len(k) + len(v) + 4) // Key + Value + ": " + "\r\n"
+	}
+	return size
+}
+
+func extractQueryString(urlString string) []schemas.NVPair {
+	u, err := url.Parse(urlString)
+	if err != nil {
+		return []schemas.NVPair{}
+	}
+	qs := u.Query()
+	pairs := make([]schemas.NVPair, 0, len(qs))
+	for k, values := range qs {
+		for _, v := range values {
+			pairs = append(pairs, schemas.NVPair{Name: k, Value: v})
+		}
+	}
+	return pairs
+}
+
+// extractCookiesFromHeaders robustly parses cookies from "Cookie" or "Set-Cookie" headers.
+func extractCookiesFromHeaders(headers map[string]string) []schemas.Cookie {
+	// Playwright combines multiple 'set-cookie' headers into a single string separated by newlines.
+	if setCookieHeader, ok := headers["set-cookie"]; ok {
+		header := http.Header{}
+		for _, line := range strings.Split(setCookieHeader, "\n") {
+			header.Add("Set-Cookie", line)
+		}
+		resp := http.Response{Header: header}
+		return convertHttpCookiesToSchema(resp.Cookies())
+	}
+
+	// Check for "Cookie" header (Requests).
+	if cookieHeader, ok := headers["cookie"]; ok {
+		header := http.Header{}
+		header.Add("Cookie", cookieHeader)
+		req := http.Request{Header: header}
+		return convertHttpCookiesToSchema(req.Cookies())
+	}
+
+	return []schemas.Cookie{}
+}
+
+func convertHttpCookiesToSchema(cookies []*http.Cookie) []schemas.Cookie {
+	schemaCookies := make([]schemas.Cookie, len(cookies))
+	for i, c := range cookies {
+		expires := float64(-1)
+		if !c.Expires.IsZero() {
+			// Unix time (seconds) for HAR compatibility.
+			expires = float64(c.Expires.Unix())
+		}
+		schemaCookies[i] = schemas.Cookie{
+			Name:     c.Name,
+			Value:    c.Value,
+			Path:     c.Path,
+			Domain:   c.Domain,
+			Expires:  expires,
+			HTTPOnly: c.HttpOnly,
+			Secure:   c.Secure,
+		}
+	}
+	return schemaCookies
 }
 
 func isTextMime(mimeType string) bool {
@@ -451,41 +542,4 @@ func isTextMime(mimeType string) bool {
 		strings.Contains(lowerMime, "javascript") ||
 		strings.Contains(lowerMime, "json") ||
 		strings.Contains(lowerMime, "xml")
-}
-
-func calculateHeaderSize(headers network.Headers) int64 {
-	var size int64
-	for k, v := range headers {
-		if val, ok := v.(string); ok {
-			// Add size of key, value, plus separators like ": " and "\r\n"
-			size += int64(len(k) + len(val) + 4)
-		}
-	}
-	return size
-}
-
-func convertCDPHeaders(headers network.Headers) []schemas.NVPair {
-	pairs := make([]schemas.NVPair, 0, len(headers))
-	for k, v := range headers {
-		if val, ok := v.(string); ok {
-			pairs = append(pairs, schemas.NVPair{Name: k, Value: val})
-		}
-	}
-	return pairs
-}
-
-func convertCDPCookies(cookieHeader string) []schemas.Cookie {
-	// A simple parser; a more robust one might be needed for complex cases.
-	if cookieHeader == "" {
-		return []schemas.Cookie{}
-	}
-	parts := strings.Split(cookieHeader, ";")
-	cookies := make([]schemas.Cookie, len(parts))
-	for i, part := range parts {
-		kv := strings.SplitN(strings.TrimSpace(part), "=", 2)
-		if len(kv) == 2 {
-			cookies[i] = schemas.Cookie{Name: kv[0], Value: kv[1]}
-		}
-	}
-	return cookies
 }
