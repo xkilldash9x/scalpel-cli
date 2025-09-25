@@ -21,8 +21,8 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/humanoid"
 )
 
 // loginResult represents the semantic outcome of a single login attempt.
@@ -81,6 +81,12 @@ var csrfFieldHeuristics = []string{
 	`input[type=hidden][name*=nonce]`,
 }
 
+// HumanoidProvider defines an interface for duck-typing the SessionContext
+// to check if it provides access to the Humanoid controller.
+type HumanoidProvider interface {
+	GetHumanoid() *humanoid.Humanoid
+}
+
 // ATOAnalyzer actively and concurrently tests login mechanisms for vulnerabilities.
 type ATOAnalyzer struct {
 	*core.BaseAnalyzer
@@ -110,7 +116,7 @@ func NewATOAnalyzer(cfg *config.Config, logger *zap.Logger) (*ATOAnalyzer, error
 	}, nil
 }
 
-// loadCredentialSet loads credentials from an external file or falls back to a default list.
+// loads credentials from an external file or falls back to a default list.
 func loadCredentialSet(filePath string, logger *zap.Logger) ([]schemas.Credential, error) {
 	if filePath == "" {
 		logger.Warn("No credential file specified in config, using internal default list for ATO analysis.")
@@ -128,7 +134,7 @@ func loadCredentialSet(filePath string, logger *zap.Logger) ([]schemas.Credentia
 }
 
 // Analyze is the main entry point for the ATO analysis, using a concurrent worker pool.
-func (a *ATOAnalyzer) Analyze(ctx context.Context, analysisCtx *browser.AnalysisContext) error {
+func (a *ATOAnalyzer) Analyze(ctx context.Context, analysisCtx schemas.SessionContext) error {
 	if !a.cfg.Enabled {
 		a.Logger.Info("ATO analysis is disabled by configuration.")
 		return nil
@@ -174,7 +180,7 @@ func (a *ATOAnalyzer) Analyze(ctx context.Context, analysisCtx *browser.Analysis
 	return nil
 }
 
-// discoverLoginEndpoints parses HAR artifacts to find unique login requests.
+// parses HAR artifacts to find unique login requests.
 func (a *ATOAnalyzer) discoverLoginEndpoints(artifacts *schemas.Artifacts) map[string]*loginAttempt {
 	loginAttempts := make(map[string]*loginAttempt)
 	for _, entry := range artifacts.HAR.Log.Entries {
@@ -190,7 +196,7 @@ func (a *ATOAnalyzer) discoverLoginEndpoints(artifacts *schemas.Artifacts) map[s
 }
 
 // worker is a concurrent routine that pulls login attempts from the jobs channel and tests them.
-func (a *ATOAnalyzer) worker(ctx context.Context, wg *sync.WaitGroup, analysisCtx *browser.AnalysisContext, jobs <-chan *loginAttempt, results chan<- schemas.Finding) {
+func (a *ATOAnalyzer) worker(ctx context.Context, wg *sync.WaitGroup, analysisCtx schemas.SessionContext, jobs <-chan *loginAttempt, results chan<- schemas.Finding) {
 	defer wg.Done()
 	for attempt := range jobs {
 		findings := a.testEndpoint(ctx, analysisCtx, attempt)
@@ -267,9 +273,20 @@ func (a *ATOAnalyzer) identifyLoginRequest(req schemas.Request) (*loginAttempt, 
 }
 
 // testEndpoint executes the credential stuffing and enumeration attack against a single endpoint.
-func (a *ATOAnalyzer) testEndpoint(ctx context.Context, analysisCtx *browser.AnalysisContext, attempt *loginAttempt) []schemas.Finding {
+func (a *ATOAnalyzer) testEndpoint(ctx context.Context, analysisCtx schemas.SessionContext, attempt *loginAttempt) []schemas.Finding {
 	var findings []schemas.Finding
 	userEnumerationDetected := false
+
+	// --- Humanoid Integration: Retrieve Controller ---
+	var h *humanoid.Humanoid
+	if provider, ok := analysisCtx.(HumanoidProvider); ok {
+		h = provider.GetHumanoid()
+	}
+
+	if h == nil {
+		a.Logger.Debug("Humanoid controller not available in SessionContext, using legacy pauses.")
+	}
+	// ---------------------------------------------------
 
 	a.Logger.Debug("Establishing baseline failure response", zap.String("url", attempt.URL))
 	baseline, err := a.establishBaseline(ctx, analysisCtx, attempt)
@@ -283,7 +300,16 @@ func (a *ATOAnalyzer) testEndpoint(ctx context.Context, analysisCtx *browser.Ana
 			a.Logger.Warn("ATO analysis cancelled during testing.", zap.Error(ctx.Err()))
 			return findings
 		}
-		a.humanoidPause(ctx)
+
+		if err := a.executePause(ctx, analysisCtx, h); err != nil {
+			// Check if the error was due to context cancellation (either operation ctx or browser ctx).
+			if ctx.Err() != nil || (analysisCtx.GetContext() != nil && analysisCtx.GetContext().Err() != nil) {
+				a.Logger.Warn("ATO analysis cancelled during pause.", zap.Error(err))
+				return findings
+			}
+			// Log other potential errors during the pause execution, but continue.
+			a.Logger.Warn("Error during execution pause, proceeding.", zap.Error(err))
+		}
 
 		token, err := a.getFreshCSRFToken(ctx, analysisCtx, attempt.URL)
 		if err != nil {
@@ -317,7 +343,7 @@ func (a *ATOAnalyzer) testEndpoint(ctx context.Context, analysisCtx *browser.Ana
 }
 
 // establishBaseline sends a request with random credentials to establish a baseline of a failed login.
-func (a *ATOAnalyzer) establishBaseline(ctx context.Context, analysisCtx *browser.AnalysisContext, attempt *loginAttempt) (*baselineFailure, error) {
+func (a *ATOAnalyzer) establishBaseline(ctx context.Context, analysisCtx schemas.SessionContext, attempt *loginAttempt) (*baselineFailure, error) {
 	randomCreds := schemas.Credential{
 		Username: uuid.NewString(),
 		Password: uuid.NewString(),
@@ -341,12 +367,31 @@ func (a *ATOAnalyzer) establishBaseline(ctx context.Context, analysisCtx *browse
 }
 
 // getFreshCSRFToken navigates to the login page and attempts to scrape a CSRF token value.
-func (a *ATOAnalyzer) getFreshCSRFToken(ctx context.Context, analysisCtx *browser.AnalysisContext, pageURL string) (*csrfToken, error) {
+func (a *ATOAnalyzer) getFreshCSRFToken(ctx context.Context, analysisCtx schemas.SessionContext, pageURL string) (*csrfToken, error) {
 	var tokenName, tokenValue string
 	var nodes []*cdp.Node
 
-	tasks := chromedp.Tasks{
-		chromedp.Navigate(pageURL),
+	// --- Humanoid Integration: Retrieve Controller ---
+	var h *humanoid.Humanoid
+	if provider, ok := analysisCtx.(HumanoidProvider); ok {
+		h = provider.GetHumanoid()
+	}
+	// ---------------------------------------------------
+
+	tasks := chromedp.Tasks{}
+
+	// Pre-navigation pause (Cognitive planning)
+	if h != nil {
+		tasks = append(tasks, h.CognitivePause(300, 100))
+	}
+
+	tasks = append(tasks, chromedp.Navigate(pageURL))
+	// Wait for the page to be ready before proceeding.
+	tasks = append(tasks, chromedp.WaitReady("body"))
+
+	// Post-navigation pause (Visual scanning of the page)
+	if h != nil {
+		tasks = append(tasks, h.CognitivePause(500, 200))
 	}
 
 	for _, selector := range csrfFieldHeuristics {
@@ -359,6 +404,16 @@ func (a *ATOAnalyzer) getFreshCSRFToken(ctx context.Context, analysisCtx *browse
 			if err != nil || len(nodes) == 0 {
 				return nil // Continue to next selector
 			}
+
+			// Brief hesitation during scraping
+			if h != nil {
+				// 'c' is the browser context provided by chromedp.Run.
+				if err := h.Hesitate(50 * time.Millisecond).Do(c); err != nil {
+					// Log error but don't fail the whole process if hesitation fails.
+					a.Logger.Debug("Humanoid hesitation failed during CSRF scraping", zap.Error(err))
+				}
+			}
+
 			var attrs map[string]string
 			if err := chromedp.Attributes(selector, &attrs, chromedp.FromNode(nodes[0])).Do(c); err != nil {
 				return err
@@ -375,7 +430,7 @@ func (a *ATOAnalyzer) getFreshCSRFToken(ctx context.Context, analysisCtx *browse
 	}
 
 	if err := chromedp.Run(analysisCtx.GetContext(), tasks); err != nil {
-		return nil, fmt.Errorf("could not navigate to page to get CSRF token: %w", err)
+		return nil, fmt.Errorf("could not navigate to page or scrape CSRF token: %w", err)
 	}
 
 	if tokenName != "" {
@@ -394,7 +449,7 @@ type fetchResponse struct {
 }
 
 // executeLoginAttempt safely replays a modified login request using the browser's fetch API.
-func (a *ATOAnalyzer) executeLoginAttempt(ctx context.Context, analysisCtx *browser.AnalysisContext, attempt *loginAttempt, creds schemas.Credential, token *csrfToken) (*fetchResponse, error) {
+func (a *ATOAnalyzer) executeLoginAttempt(ctx context.Context, analysisCtx schemas.SessionContext, attempt *loginAttempt, creds schemas.Credential, token *csrfToken) (*fetchResponse, error) {
 	bodyParams := make(map[string]interface{})
 	for k, v := range attempt.BodyParams {
 		bodyParams[k] = v
@@ -514,16 +569,75 @@ func (a *ATOAnalyzer) analyzeLoginResponse(res *fetchResponse, baseline *baselin
 	return loginUnknown
 }
 
-// humanoidPause introduces a variable delay to simulate human interaction.
-func (a *ATOAnalyzer) humanoidPause(ctx context.Context) {
-	if a.cfg.MinRequestDelayMs <= 0 {
+// executePause handles the pacing between requests using Humanoid if available, or falling back to legacy sleep.
+func (a *ATOAnalyzer) executePause(ctx context.Context, analysisCtx schemas.SessionContext, h *humanoid.Humanoid) error {
+	minDelayMs := a.cfg.MinRequestDelayMs
+	jitterMs := a.cfg.RequestDelayJitterMs
+
+	if minDelayMs <= 0 && jitterMs <= 0 {
+		return nil
+	}
+
+	if h != nil {
+		// Use Humanoid's CognitivePause for realistic behavior (idling, micro-movements, fatigue awareness).
+		// Calculate Mean and StdDev based on Min + Jitter configuration.
+		// Mean = MinDelay + Jitter/2; StdDev = Jitter/2 (approx)
+
+		mean := float64(minDelayMs)
+		stdDev := 0.0
+
+		if jitterMs > 0 {
+			mean += float64(jitterMs) / 2.0
+			stdDev = float64(jitterMs) / 2.0
+		}
+
+		// If the configuration results in a very small delay, we still apply a reasonable cognitive pause if Humanoid is enabled.
+		if mean < 50.0 {
+			mean = 500.0 // Default to 500ms if config is tiny.
+			if stdDev < 100.0 {
+				stdDev = 100.0
+			}
+		}
+
+		// Execute the action using the session's browser context, required for Humanoid actions.
+		browserCtx := analysisCtx.GetContext()
+		if browserCtx == nil {
+			// Handle gracefully if browser context is somehow unavailable.
+			a.Logger.Error("Browser context is nil, falling back to legacy pause.")
+			a.legacyPause(ctx)
+			return nil
+		}
+
+		// Execute the action. Errors (including context cancellation of browserCtx) will be returned.
+		return chromedp.Run(browserCtx, h.CognitivePause(mean, stdDev))
+
+	} else {
+		// Fallback: Use the legacy randomized sleep using the operation context.
+		a.legacyPause(ctx)
+		return nil
+	}
+}
+
+// legacyPause introduces a variable delay. This is used as a fallback when the Humanoid module is unavailable.
+func (a *ATOAnalyzer) legacyPause(ctx context.Context) {
+	// Check if any delay is configured.
+	if a.cfg.MinRequestDelayMs <= 0 && a.cfg.RequestDelayJitterMs <= 0 {
 		return
 	}
+
+	baseDelayMs := a.cfg.MinRequestDelayMs
+	// Ensure a base delay if MinDelayMs is zero but JitterMs is positive.
+	if baseDelayMs <= 0 {
+		baseDelayMs = 1
+	}
+
 	jitter := 0
+	// Ensure the argument to Intn is positive.
 	if a.cfg.RequestDelayJitterMs > 0 {
 		jitter = a.rng.Intn(a.cfg.RequestDelayJitterMs)
 	}
-	delay := time.Duration(a.cfg.MinRequestDelayMs+jitter) * time.Millisecond
+
+	delay := time.Duration(baseDelayMs+jitter) * time.Millisecond
 	select {
 	case <-time.After(delay):
 	case <-ctx.Done():

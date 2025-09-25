@@ -592,7 +592,6 @@ type BrowserInteractor interface {
 // SessionContext defines the interface for interacting with a specific browser session (tab).
 // This is used by more advanced analyzers and agents that need fine-grained control.
 type SessionContext interface {
-	// CORRECTION: Added ID() method to the interface to satisfy the architectural contract.
 	// ID returns the unique identifier for the session.
 	ID() string
 	Navigate(ctx context.Context, url string) error
@@ -614,6 +613,11 @@ type SessionContext interface {
 	Interact(ctx context.Context, config InteractionConfig) error
 	// Close gracefully terminates the browser session.
 	Close(ctx context.Context) error
+
+	// FIX: Added CollectArtifacts to gather data like HAR logs and DOM state from the session.
+	CollectArtifacts() (*Artifacts, error)
+	// FIX: Added AddFinding to allow analyzers to report findings directly through the session.
+	AddFinding(finding Finding) error
 }
 
 // HTTPClient defines the interface for making simple HTTP GET requests.
@@ -638,4 +642,3 @@ type OASTInteraction struct {
 	InteractionTime time.Time
 	RawRequest      string
 }
-

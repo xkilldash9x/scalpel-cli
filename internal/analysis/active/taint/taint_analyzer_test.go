@@ -37,6 +37,12 @@ func NewMockSessionContext() *MockSessionContext {
 	}
 }
 
+// FIX: Added the missing ID method to satisfy the SessionContext interface.
+func (m *MockSessionContext) ID() string {
+	args := m.Called()
+	return args.String(0)
+}
+
 func (m *MockSessionContext) InjectScriptPersistently(ctx context.Context, script string) error {
 	args := m.Called(ctx, script)
 	return args.Error(0)
@@ -89,8 +95,9 @@ func (m *MockSessionContext) SimulateCallback(t *testing.T, name string, payload
 	}
 }
 
-func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string) error {
-	args := m.Called(ctx, script)
+// FIX: Signature updated to match the interface, which now includes an 'options' parameter.
+func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string, options interface{}) error {
+	args := m.Called(ctx, script, options)
 	return args.Error(0)
 }
 
@@ -140,10 +147,28 @@ func (m *MockSessionContext) ScrollPage(direction string) error {
 func (m *MockSessionContext) GetContext() context.Context {
 	args := m.Called()
 	if args.Get(0) == nil {
-		return context.Background() // Return default if not mocked
+		return nil // Return nil if not mocked, to avoid panicking on type assertion
 	}
 	return args.Get(0).(context.Context)
 }
+
+
+// FIX: Updated the AddFinding signature to return an error, matching the interface.
+func (m *MockSessionContext) AddFinding(finding schemas.Finding) error {
+	args := m.Called(finding)
+	return args.Error(0)
+}
+
+// FIX: Corrected the signature to match the interface: no arguments, returns a pointer.
+func (m *MockSessionContext) CollectArtifacts() (*schemas.Artifacts, error) {
+	args := m.Called()
+	var artifacts *schemas.Artifacts
+	if args.Get(0) != nil {
+		artifacts = args.Get(0).(*schemas.Artifacts)
+	}
+	return artifacts, args.Error(1)
+}
+
 
 // MockResultsReporter mocks the ResultsReporter interface.
 type MockResultsReporter struct {
@@ -433,17 +458,20 @@ func TestProbePersistentSources(t *testing.T) {
 			ctx := context.Background()
 
 			var capturedScript string
-			mockSession.On("ExecuteScript", ctx, mock.AnythingOfType("string")).Run(func(args mock.Arguments) {
+			// FIX: Updated mock for ExecuteScript to include the third 'options' argument.
+			mockSession.On("ExecuteScript", ctx, mock.AnythingOfType("string"), mock.Anything).Run(func(args mock.Arguments) {
 				capturedScript = args.String(1)
 			}).Return(nil).Once()
 
 			mockSession.On("Navigate", ctx, tt.targetURL).Return(nil).Once()
 
-			err := analyzer.probePersistentSources(ctx, mockSession)
+			// FIX: Pass nil for the new humanoid and browserCtx arguments.
+			err := analyzer.probePersistentSources(ctx, mockSession, nil, nil)
 			require.NoError(t, err)
 
 			mockSession.AssertExpectations(t)
-			assert.Len(t, analyzer.activeProbes, 6)
+			// Each probe creates 3 persistent sources (LocalStorage, SessionStorage, Cookie)
+			assert.Len(t, analyzer.activeProbes, len(probes)*3)
 
 			// Verify script content using flexible regex.
 			assert.Regexp(t, `localStorage\.setItem\("sc_store_0", ".*"\);`, capturedScript)
@@ -485,11 +513,13 @@ func TestProbeURLSources(t *testing.T) {
 		}
 	})
 
-	err := analyzer.probeURLSources(ctx, mockSession)
+	// FIX: Pass nil for the new humanoid and browserCtx arguments.
+	err := analyzer.probeURLSources(ctx, mockSession, nil, nil)
 	require.NoError(t, err)
 
 	mockSession.AssertExpectations(t)
-	assert.Len(t, analyzer.activeProbes, 4)
+	// Each probe creates 2 URL sources (Query, Hash)
+	assert.Len(t, analyzer.activeProbes, len(probes)*2)
 
 	// Verify Query URL
 	require.NotEmpty(t, queryURL)
@@ -757,12 +787,15 @@ func TestAnalyze_HappyPath(t *testing.T) {
 	mockSession := NewMockSessionContext()
 
 	// --- Mock Expectations (Simplified for brevity) ---
-	// InitializeSession is no longer called by Analyzer.Analyze.
-
+	mockSession.On("ID").Return("mock-session-id").Maybe()
+	// FIX: Add the missing expectation for the GetContext() call.
+	mockSession.On("GetContext").Return(nil).Maybe()
 	mockSession.On("ExposeFunction", mock.Anything, mock.Anything, mock.Anything).Return(nil).Times(3)
 	mockSession.On("InjectScriptPersistently", mock.Anything, mock.Anything).Return(nil).Once()
 	mockSession.On("Navigate", mock.Anything, mock.Anything).Return(nil).Times(4) // Initial, Refresh, Query, Hash
-	mockSession.On("ExecuteScript", mock.Anything, mock.Anything).Return(nil).Once()
+	mockSession.On("ExecuteScript", mock.Anything, mock.Anything, mock.Anything).Return(nil).Once()
+	mockSession.On("CollectArtifacts").Return(&schemas.Artifacts{}, nil).Maybe()
+
 
 	// Interaction Phase
 	mockSession.On("Interact", mock.Anything, mock.Anything).Return(nil).Once().Run(func(args mock.Arguments) {

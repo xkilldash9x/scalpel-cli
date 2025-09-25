@@ -13,10 +13,12 @@ import (
 	"text/template"
 	"time"
 
+	"github.com/chromedp/chromedp" // Added import for executing Humanoid actions
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/humanoid" // Added import
 )
 
 //go:embed taint_shim.js
@@ -26,6 +28,18 @@ const taintShimFilename = "taint_shim.js"
 
 // Canary format: SCALPEL_{Prefix}_{Type}_{UUID_Short}
 var canaryRegex = regexp.MustCompile(`SCALPEL_[A-Z]+_[A-Z_]+_[a-f0-9]{8}`)
+
+// HumanoidProvider defines an interface for duck-typing the SessionContext
+// to check if it provides access to the Humanoid controller.
+type HumanoidProvider interface {
+	GetHumanoid() *humanoid.Humanoid
+}
+
+// BrowserContextProvider defines an interface to retrieve the underlying browser context.
+// This is necessary for executing chromedp actions like Humanoid pauses.
+type BrowserContextProvider interface {
+	GetContext() context.Context
+}
 
 // Analyzer is the central nervous system of the IAST operation. It orchestrates probe
 // injection, event collection, and vulnerability correlation.
@@ -117,6 +131,23 @@ func (a *Analyzer) Analyze(ctx context.Context, session SessionContext) error {
 
 	a.backgroundCtx, a.backgroundCancel = context.WithCancel(context.Background())
 
+	// -- Humanoid Integration: Retrieve Controller and Context --
+	var h *humanoid.Humanoid
+	if provider, ok := session.(HumanoidProvider); ok {
+		h = provider.GetHumanoid()
+	}
+
+	var browserCtx context.Context
+	if provider, ok := session.(BrowserContextProvider); ok {
+		browserCtx = provider.GetContext()
+	}
+
+	if h != nil && browserCtx == nil {
+		a.logger.Warn("Humanoid controller is available, but BrowserContext is not. Humanoid features will be disabled.")
+		h = nil // Disable humanoid if we can't execute its actions.
+	}
+	// -----------------------------------------------------------
+
 	if err := a.instrument(analysisCtx, session); err != nil {
 		return fmt.Errorf("failed to instrument browser: %w", err)
 	}
@@ -125,8 +156,12 @@ func (a *Analyzer) Analyze(ctx context.Context, session SessionContext) error {
 	a.startBackgroundWorkers()
 
 	// Execute the attack vectors and user interactions.
-	if err := a.executeProbes(analysisCtx, session); err != nil {
-		a.logger.Error("Error encountered during probing phase", zap.Error(err))
+	// MODIFICATION: Pass Humanoid controller and browser context down.
+	if err := a.executeProbes(analysisCtx, session, h, browserCtx); err != nil {
+		// Only log as error if the failure wasn't simply due to the analysis context timeout/cancellation.
+		if analysisCtx.Err() == nil {
+			a.logger.Error("Error encountered during probing phase", zap.Error(err))
+		}
 	}
 
 	a.logger.Debug("Probing finished. Waiting for asynchronous events.", zap.Duration("grace_period", a.config.FinalizationGracePeriod))
@@ -279,23 +314,92 @@ func (a *Analyzer) handleShimError(event ShimErrorEvent) {
 	)
 }
 
+// executePause attempts to execute a Humanoid cognitive pause using the provided browser context.
+// If Humanoid is nil or the browser context is nil, it skips the pause silently.
+// MODIFICATION: New helper function.
+func (a *Analyzer) executePause(ctx context.Context, browserCtx context.Context, h *humanoid.Humanoid, meanMs, stdDevMs float64) error {
+	// Check if the operation context (ctx) is done.
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	if h == nil || browserCtx == nil {
+		return nil
+	}
+
+	// Check if the browser context (browserCtx) is done.
+	if browserCtx.Err() != nil {
+		// Return the browser context error, as it indicates the session is closed.
+		return browserCtx.Err()
+	}
+
+	// Execute the action using the session's browser context.
+	// Errors (including context cancellation) will be returned.
+	if err := chromedp.Run(browserCtx, h.CognitivePause(meanMs, stdDevMs)); err != nil {
+		a.logger.Debug("Error during Humanoid pause execution.", zap.Error(err))
+		return err
+	}
+	return nil
+}
+
 // executeProbes orchestrates the various probing strategies against the target.
-func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext) error {
+// MODIFICATION: Updated signature to accept Humanoid and BrowserContext. Integrated pauses.
+func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h *humanoid.Humanoid, browserCtx context.Context) error {
+
+	// MODIFICATION: Pause before initial navigation (Planning/Typing URL)
+	if err := a.executePause(ctx, browserCtx, h, 500, 200); err != nil {
+		return err // Return if context cancelled during pause
+	}
+
 	if err := session.Navigate(ctx, a.config.Target.String()); err != nil {
 		a.logger.Warn("Initial navigation failed, attempting to continue probes.", zap.Error(err))
 	}
 
-	if err := a.probePersistentSources(ctx, session); err != nil {
-		a.logger.Error("Error during persistent source probing", zap.Error(err))
+	// MODIFICATION: Pause after initial navigation (Visual Scanning/Processing)
+	if err := a.executePause(ctx, browserCtx, h, 800, 300); err != nil {
+		return err
 	}
 
-	if err := a.probeURLSources(ctx, session); err != nil {
-		a.logger.Error("Error during URL source probing", zap.Error(err))
+	// MODIFICATION: Pass Humanoid and context down.
+	if err := a.probePersistentSources(ctx, session, h, browserCtx); err != nil {
+		// Check if the context was cancelled before logging the error.
+		if ctx.Err() == nil {
+			a.logger.Error("Error during persistent source probing", zap.Error(err))
+		}
+	}
+
+	// MODIFICATION: Pause between probing phases (Cognitive Shift)
+	if err := a.executePause(ctx, browserCtx, h, 400, 150); err != nil {
+		return err
+	}
+
+	// MODIFICATION: Pass Humanoid and context down.
+	if err := a.probeURLSources(ctx, session, h, browserCtx); err != nil {
+		// Check if the context was cancelled before logging the error.
+		if ctx.Err() == nil {
+			a.logger.Error("Error during URL source probing", zap.Error(err))
+		}
 	}
 
 	a.logger.Info("Starting interactive probing phase.")
+
+	// MODIFICATION: Pause before starting interaction phase (Planning Interaction Strategy)
+	if err := a.executePause(ctx, browserCtx, h, 600, 250); err != nil {
+		return err
+	}
+
+	// The Interact method itself likely uses Humanoid if the session implementation supports it.
 	if err := session.Interact(ctx, a.config.Interaction); err != nil {
-		a.logger.Warn("Interactive probing phase encountered errors", zap.Error(err))
+		// Check if the context was cancelled before logging the error.
+		if ctx.Err() == nil {
+			a.logger.Warn("Interactive probing phase encountered errors", zap.Error(err))
+		}
+	}
+
+	// MODIFICATION: Pause after interaction phase concludes (Observing Results)
+	if err := a.executePause(ctx, browserCtx, h, 1000, 400); err != nil {
+		// We don't return error here as probing is done, we just log if the final pause failed.
+		a.logger.Debug("Final post-interaction pause interrupted.", zap.Error(err))
 	}
 
 	return nil
@@ -325,7 +429,8 @@ func (a *Analyzer) preparePayload(probeDef ProbeDefinition, canary string) strin
 }
 
 // probePersistentSources injects probes into Cookies, LocalStorage, and SessionStorage.
-func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionContext) error {
+// MODIFICATION: Updated signature to accept Humanoid and BrowserContext. Integrated pauses.
+func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionContext, h *humanoid.Humanoid, browserCtx context.Context) error {
 	a.logger.Debug("Starting persistent source probing (Storage/Cookies).")
 	storageKeyPrefix := "sc_store_"
 	cookieNamePrefix := "sc_cookie_"
@@ -412,20 +517,38 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 		return nil
 	}
 
-	if err := session.ExecuteScript(ctx, injectionScript); err != nil {
+	// MODIFICATION: Pause before executing the injection script (Cognitive effort for injection)
+	if err := a.executePause(ctx, browserCtx, h, 300, 100); err != nil {
+		return err
+	}
+
+	// FIX: The ExecuteScript function now requires a third 'options' argument. Pass nil.
+	if err := session.ExecuteScript(ctx, injectionScript, nil); err != nil {
 		a.logger.Warn("Failed to inject persistent probes via JavaScript", zap.Error(err))
 	}
 
 	a.logger.Debug("Persistent probes injected. Refreshing page.")
+
+	// MODIFICATION: Pause before refreshing the page (Allowing time for injection to settle)
+	if err := a.executePause(ctx, browserCtx, h, 200, 80); err != nil {
+		return err
+	}
+
 	if err := session.Navigate(ctx, a.config.Target.String()); err != nil {
 		a.logger.Warn("Navigation (refresh) failed after persistent probe injection", zap.Error(err))
+		// We don't return the error immediately, allowing the post-navigation pause to occur if possible.
+	}
+
+	// MODIFICATION: Pause after refresh (Visual scanning of refreshed page)
+	if err := a.executePause(ctx, browserCtx, h, 700, 300); err != nil {
 		return err
 	}
 	return nil
 }
 
-// probeURLSources injects probes into URL query parameters and the hash fragment.
-func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext) error {
+//  injects probes into URL query parameters and the hash fragment.
+// MODIFICATION: Updated signature to accept Humanoid and BrowserContext. Integrated pauses.
+func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, h *humanoid.Humanoid, browserCtx context.Context) error {
 	baseURL := *a.config.Target
 	paramPrefix := "sc_test_"
 
@@ -455,8 +578,19 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext) 
 	if probesInjected > 0 {
 		targetURL.RawQuery = q.Encode()
 		a.logger.Debug("Navigating with combined URL parameter probes", zap.Int("probe_count", probesInjected))
+
+		// MODIFICATION: Pause before navigating with query params (Planning/URL manipulation)
+		if err := a.executePause(ctx, browserCtx, h, 400, 150); err != nil {
+			return err
+		}
+
 		if err := session.Navigate(ctx, targetURL.String()); err != nil {
 			a.logger.Warn("Navigation failed during combined URL probing", zap.Error(err))
+		}
+
+		// MODIFICATION: Pause after navigation (Visual scanning)
+		if err := a.executePause(ctx, browserCtx, h, 700, 300); err != nil {
+			return err
 		}
 	}
 
@@ -486,8 +620,19 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext) 
 	if probesInjected > 0 {
 		targetURL.Fragment = strings.Join(hashFragments, "&")
 		a.logger.Debug("Navigating with combined Hash fragment probes", zap.Int("probe_count", probesInjected))
+
+		// MODIFICATION: Pause before navigating with hash fragments (Cognitive shift)
+		if err := a.executePause(ctx, browserCtx, h, 400, 150); err != nil {
+			return err
+		}
+
 		if err := session.Navigate(ctx, targetURL.String()); err != nil {
 			a.logger.Warn("Navigation failed during combined Hash probing", zap.Error(err))
+		}
+
+		// MODIFICATION: Pause after navigation (Visual scanning)
+		if err := a.executePause(ctx, browserCtx, h, 700, 300); err != nil {
+			return err
 		}
 	}
 	return nil
@@ -583,6 +728,13 @@ func (a *Analyzer) pollOASTInteractions() {
 func (a *Analyzer) fetchAndEnqueueOAST() {
 	a.probesMutex.RLock()
 	var relevantCanaries []string
+
+	// MODIFICATION: Check if oastProvider is nil before accessing it.
+	if a.oastProvider == nil {
+		a.probesMutex.RUnlock()
+		return
+	}
+
 	oastServerURL := a.oastProvider.GetServerURL()
 	for canary, probe := range a.activeProbes {
 		if probe.Type == schemas.ProbeTypeOAST || strings.Contains(probe.Value, oastServerURL) {
@@ -621,7 +773,7 @@ func (a *Analyzer) fetchAndEnqueueOAST() {
 	}
 }
 
-// processEvent is the main dispatcher for incoming events. It routes events
+//  main dispatcher for incoming events. It routes events
 // to the appropriate handler based on their type.
 func (a *Analyzer) processEvent(event Event) {
 	switch e := event.(type) {
@@ -636,7 +788,7 @@ func (a *Analyzer) processEvent(event Event) {
 	}
 }
 
-// processOASTInteraction handles confirmed out of band callbacks and reports a finding.
+//  handles confirmed out of band callbacks and reports a finding.
 func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
 	a.probesMutex.RLock()
 	probe, ok := a.activeProbes[interaction.Canary]
