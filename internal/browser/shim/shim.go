@@ -6,8 +6,6 @@ import (
 	"strings"
 )
 
-// Removed all C++ code. This file is now dedicated to preparing the Go-based browser shim.
-
 const (
 	// ConfigPlaceholder is the string replaced in the JS template with the actual JSON configuration.
 	ConfigPlaceholder = "/*{{SCALPEL_SINKS_CONFIG}}*/"

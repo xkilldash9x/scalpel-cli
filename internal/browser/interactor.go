@@ -3,6 +3,8 @@ package browser
 
 import (
 	"context"
+	"encoding/json"
+	"errors"
 	"fmt"
 	"hash"
 	"hash/fnv"
@@ -13,9 +15,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/chromedp/cdproto/cdp"
-	"github.com/chromedp/cdproto/dom"
-	"github.com/chromedp/chromedp"
+	"github.com/playwright-community/playwright-go"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
@@ -27,52 +27,73 @@ import (
 // StabilizationFunc is a function type that waits for the application state to stabilize.
 type StabilizationFunc func(ctx context.Context) error
 
-// Interactor is responsible for intelligently interacting with web pages.
+// Interactor is responsible for intelligently interacting with web pages using Playwright.
 type Interactor struct {
 	logger      *zap.Logger
-	humanoid    *humanoid.Humanoid
+	page        playwright.Page  // The page being interacted with.
+	humanoidCfg *humanoid.Config // Configuration for human-like behavior.
 	stabilizeFn StabilizationFunc
 	rng         *rand.Rand
 }
 
-// interactiveElement bundles a node with its unique fingerprint.
+// interactiveElement represents a discovered element suitable for interaction.
 type interactiveElement struct {
-	Node        *cdp.Node
+	// We store the unique selector generated during discovery for robust targeting.
+	Selector    string
 	Fingerprint string
 	Description string
 	IsInput     bool
+	// Data needed for input generation if it's an input element.
+	InputData ElementData
 }
 
-// NewInteractor creates a new interactor instance.
-func NewInteractor(logger *zap.Logger, h *humanoid.Humanoid, stabilizeFn StabilizationFunc) *Interactor {
+// ElementData holds essential information about a DOM node, extracted via JS evaluation.
+type ElementData struct {
+	NodeName   string            `json:"nodeName"`
+	Attributes map[string]string `json:"attributes"`
+	TextContent string           `json:"textContent"`
+	// For SELECT elements.
+	SelectOptions []SelectOptionData `json:"selectOptions"`
+}
+
+type SelectOptionData struct {
+	Value    string `json:"value"`
+	Disabled bool   `json:"disabled"`
+}
+
+// NewInteractor creates a new interactor instance. Page must be set later via SetPage().
+func NewInteractor(logger *zap.Logger, hCfg *humanoid.Config, stabilizeFn StabilizationFunc) *Interactor {
 	source := rand.NewSource(time.Now().UnixNano())
-	// Fallback stabilization function if none provided.
 	if stabilizeFn == nil {
 		stabilizeFn = func(ctx context.Context) error { return nil }
 	}
 	return &Interactor{
 		logger:      logger.Named("interactor"),
-		humanoid:    h,
+		humanoidCfg: hCfg,
 		stabilizeFn: stabilizeFn,
 		rng:         rand.New(source),
 	}
+}
+
+// SetPage sets the Playwright page for the interactor.
+func (i *Interactor) SetPage(page playwright.Page) {
+	i.page = page
 }
 
 // -- Orchestration Logic --
 
 // RecursiveInteract is the main entry point for the interaction logic.
 func (i *Interactor) RecursiveInteract(ctx context.Context, config schemas.InteractionConfig) error {
-	// Ensure the context has a deadline for safety.
-	if _, ok := ctx.Deadline(); !ok {
-		i.logger.Warn("RecursiveInteract called without a timeout context.")
+	if i.page == nil || i.page.IsClosed() {
+		return fmt.Errorf("interactor page is not set or closed")
 	}
 
 	interactedElements := make(map[string]bool)
 	i.logger.Info("Starting recursive interaction.", zap.Int("max_depth", config.MaxDepth))
 
-	// Initial cognitive pause (simulating the user orienting themselves on the page).
-	if i.humanoid != nil {
-		if err := i.humanoid.CognitivePause(800, 300).Do(ctx); err != nil {
+	// Initial cognitive pause.
+	if i.humanoidCfg != nil {
+		if err := i.cognitivePause(ctx, 800, 300); err != nil {
 			return err
 		}
 	}
@@ -86,7 +107,6 @@ func (i *Interactor) interactDepth(
 	depth int,
 	interactedElements map[string]bool,
 ) error {
-	// Check for cancellation or depth limit.
 	if err := ctx.Err(); err != nil {
 		return err
 	}
@@ -96,25 +116,31 @@ func (i *Interactor) interactDepth(
 
 	log := i.logger.With(zap.Int("depth", depth))
 
-	// 1. Discover new elements on the page.
+	// 1. Discover new elements.
 	newElements, err := i.discoverElements(ctx, interactedElements)
 	if err != nil {
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
+		// Handle target closed error (e.g., navigation happened during discovery).
+		if errors.Is(err, playwright.ErrTargetClosed) {
+			log.Debug("Page closed during element discovery.")
+			return nil
+		}
 		log.Warn("Failed to query for interactive elements.", zap.Error(err))
-		return nil // Continue gracefully if discovery fails but context is valid.
+		return nil
 	}
 	if len(newElements) == 0 {
+		log.Debug("No new elements found at this depth.")
 		return nil
 	}
 
-	// 2. Shuffle elements for randomized interaction.
+	// 2. Shuffle elements.
 	i.rng.Shuffle(len(newElements), func(j, k int) {
 		newElements[j], newElements[k] = newElements[k], newElements[j]
 	})
 
-	// 3. Interact with elements up to the configured limit.
+	// 3. Interact with elements.
 	interactions := 0
 	for _, element := range newElements {
 		if err := ctx.Err(); err != nil {
@@ -124,21 +150,27 @@ func (i *Interactor) interactDepth(
 			break
 		}
 
-		// Small pause before considering the next element.
-		if i.humanoid != nil {
-			if err := i.humanoid.CognitivePause(150, 70).Do(ctx); err != nil {
+		// Pause before considering the next element.
+		if i.humanoidCfg != nil {
+			if err := i.cognitivePause(ctx, 150, 70); err != nil {
 				return err
 			}
 		}
 
-		// Execute the interaction with a specific timeout.
+		// Execute the interaction with a specific timeout derived from the main context.
 		actionCtx, cancelAction := context.WithTimeout(ctx, 30*time.Second)
 		success, err := i.executeInteraction(actionCtx, element, log)
 		cancelAction()
 
 		interactedElements[element.Fingerprint] = true
+
 		if err != nil {
-			// Only log the error if it wasn't due to the context being canceled.
+			// Handle navigation/page close during interaction.
+			if errors.Is(err, playwright.ErrTargetClosed) || strings.Contains(err.Error(), "Execution context was destroyed") {
+				log.Debug("Target closed or navigation occurred during interaction.")
+				interactions++
+				break // Stop this depth and proceed to stabilization/recursion.
+			}
 			if actionCtx.Err() == nil {
 				log.Debug("Interaction failed.", zap.String("desc", element.Description), zap.Error(err))
 			}
@@ -147,30 +179,27 @@ func (i *Interactor) interactDepth(
 
 		if success {
 			interactions++
-			// Pause after successful interaction.
 			delay := time.Duration(config.InteractionDelayMs) * time.Millisecond
-			if delay > 0 && i.humanoid != nil {
-				if err := i.humanoid.Hesitate(delay).Do(ctx); err != nil {
+			if delay > 0 && i.humanoidCfg != nil {
+				if err := i.hesitate(ctx, delay); err != nil {
 					return err
 				}
 			}
 		}
 	}
 
-	// 4. If interactions occurred, stabilize and recurse.
+	// 4. Stabilize and recurse.
 	if interactions > 0 {
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		// Wait for the application state to stabilize.
 		if err := i.stabilizeFn(ctx); err != nil && ctx.Err() == nil {
-			log.Warn("Stabilization failed after interaction (non-critical).", zap.Error(err))
+			log.Debug("Stabilization finished (potentially interrupted).", zap.Error(err))
 		}
 
-		// Post-interaction wait (e.g., waiting for async content to load).
 		waitDuration := time.Duration(config.PostInteractionWaitMs) * time.Millisecond
-		if waitDuration > 0 && i.humanoid != nil {
-			if err := i.humanoid.Hesitate(waitDuration).Do(ctx); err != nil {
+		if waitDuration > 0 && i.humanoidCfg != nil {
+			if err := i.hesitate(ctx, waitDuration); err != nil {
 				return err
 			}
 		}
@@ -179,48 +208,173 @@ func (i *Interactor) interactDepth(
 	return nil
 }
 
-// -- Element Discovery Logic --
+// -- Element Discovery Logic (Optimized) --
+
+const interactiveSelectors = "a[href], button, [onclick], [role=button], [role=link], input, textarea, select, summary, details, [tabindex='0'], [contenteditable=true]"
+
+// discoveryScript performs discovery, visibility checks, data extraction, and temporary tagging in a single JS evaluation.
+const discoveryScript = `
+	(selectors) => {
+	    const elementsData = [];
+	    const candidates = document.querySelectorAll(selectors);
+		const maxTextLength = 64;
+
+		// Helper to check visibility (approximating Playwright's checks).
+		const isVisible = (el) => {
+			const style = window.getComputedStyle(el);
+			if (style.visibility === 'hidden' || style.display === 'none' || style.opacity === '0') return false;
+
+			const rect = el.getBoundingClientRect();
+			// Element must have some size.
+			if (rect.width === 0 || rect.height === 0) return false;
+
+			return true;
+		};
+
+		// Helper to check if element is disabled (simplified check).
+		const isDisabled = (el) => {
+			return el.disabled || el.getAttribute('aria-disabled') === 'true';
+		};
+
+	    candidates.forEach((el, index) => {
+			// 1. Filter: Visibility and Disabled status.
+			if (!isVisible(el) || isDisabled(el)) return;
+
+	        // 2. Data Extraction
+	        const attributes = {};
+	        for (const attr of el.attributes) {
+	            attributes[attr.name] = attr.value;
+	        }
+
+			let textContent = (el.textContent || "").trim();
+			if (textContent.length > maxTextLength) {
+				textContent = textContent.substring(0, maxTextLength);
+			}
+
+			// 3. Handle SELECT options
+			const selectOptions = [];
+			if (el.tagName === 'SELECT') {
+				for (const option of el.options) {
+					selectOptions.push({
+						value: option.value,
+						disabled: option.disabled
+					});
+				}
+			}
+
+			// 4. Generate unique tag ID for robust targeting.
+			const tagId = 'scalpel-id-' + index + '-' + Date.now() + Math.random().toString(36).substring(2, 15);
+
+	        elementsData.push({
+				tagId: tagId,
+	            data: {
+					nodeName: el.tagName,
+					attributes: attributes,
+					textContent: textContent,
+					selectOptions: selectOptions
+				}
+	        });
+
+			// 5. Tag the element immediately.
+			el.setAttribute('data-scalpel-discovery-id', tagId);
+	    });
+
+	    return elementsData;
+	}
+	`
+
+type discoveryResult struct {
+	TagId string      `json:"tagId"`
+	Data  ElementData `json:"data"`
+}
 
 func (i *Interactor) discoverElements(ctx context.Context, interacted map[string]bool) ([]interactiveElement, error) {
-	// Comprehensive selector for interactive elements.
-	selectors := "a[href], button, [onclick], [role=button], [role=link], input, textarea, select, summary, details, [tabindex='0']"
-	var nodes []*cdp.Node
+	if i.page == nil || i.page.IsClosed() {
+		return nil, fmt.Errorf("page not available for discovery")
+	}
 
-	// Use a timeout for the discovery query.
+	// Use a specific timeout for the discovery query.
 	queryCtx, cancelQuery := context.WithTimeout(ctx, 30*time.Second)
 	defer cancelQuery()
 
-	// Query for all visible nodes matching the selectors.
-	err := chromedp.Run(queryCtx,
-		chromedp.Nodes(selectors, &nodes, chromedp.ByQueryAll, chromedp.NodeVisible),
-	)
+	var results []discoveryResult
+
+	// Execute the optimized script.
+	// We must use the context (queryCtx) with the Evaluate call for proper timeout handling.
+	rawResult, err := i.page.Evaluate(queryCtx, discoveryScript, interactiveSelectors)
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("failed to execute discovery script: %w", err)
 	}
 
-	return i.filterAndFingerprint(nodes, interacted), nil
+	// Clean up the temporary attributes immediately after discovery.
+	// We do this asynchronously so it doesn't block the interaction flow.
+	defer i.cleanupDiscoveryAttributes()
+
+	// Marshal and Unmarshal to convert interface{} (from JS) to the struct slice.
+	data, err := json.Marshal(rawResult)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal discovery results: %w", err)
+	}
+	if err := json.Unmarshal(data, &results); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal discovery results: %w", err)
+	}
+
+	return i.filterAndFingerprint(results, interacted), nil
 }
 
-func (i *Interactor) filterAndFingerprint(nodes []*cdp.Node, interacted map[string]bool) []interactiveElement {
-	newElements := make([]interactiveElement, 0, len(nodes))
-	for _, node := range nodes {
-		attrs := attributeMap(node)
-		// Skip disabled or readonly elements.
-		if isDisabled(node, attrs) {
-			continue
+// cleanupDiscoveryAttributes removes the temporary attributes added during discovery.
+func (i *Interactor) cleanupDiscoveryAttributes() {
+	if i.page == nil || i.page.IsClosed() {
+		return
+	}
+
+	script := `() => {
+			document.querySelectorAll('[data-scalpel-discovery-id]').forEach(el => {
+				el.removeAttribute('data-scalpel-discovery-id');
+			});
+		}`
+	// Use a short timeout for the cleanup task, running in the background.
+	cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	// Execute cleanup non-blockingly.
+	go func() {
+		_, err := i.page.Evaluate(cleanupCtx, script)
+		if err != nil && cleanupCtx.Err() == nil && !errors.Is(err, playwright.ErrTargetClosed) {
+			i.logger.Debug("Failed to clean up discovery attributes.", zap.Error(err))
 		}
-		// Generate a unique fingerprint for the element.
-		fingerprint, description := generateNodeFingerprint(node, attrs)
+	}()
+}
+
+func (i *Interactor) filterAndFingerprint(results []discoveryResult, interacted map[string]bool) []interactiveElement {
+	newElements := make([]interactiveElement, 0, len(results))
+	for _, result := range results {
+		data := result.Data
+		attrs := data.Attributes
+
+		// Skip readonly inputs (visibility/disabled checks happened in JS).
+		isInput := isInputElement(data)
+		if isInput {
+			if _, readonly := attrs["readonly"]; readonly {
+				continue
+			}
+		}
+
+		// Generate fingerprint.
+		fingerprint, description := generateNodeFingerprint(data, attrs)
 		if fingerprint == "" {
 			continue
 		}
-		// Only include elements that haven't been interacted with yet.
+
+		// Check if already interacted.
 		if !interacted[fingerprint] {
 			newElements = append(newElements, interactiveElement{
-				Node:        node,
+				// The selector uses the unique tag ID assigned during discovery.
+				Selector:    fmt.Sprintf(`[data-scalpel-discovery-id="%s"]`, result.TagId),
 				Fingerprint: fingerprint,
 				Description: description,
-				IsInput:     isInputElement(node),
+				IsInput:     isInput,
+				InputData:   data,
 			})
 		}
 	}
@@ -229,107 +383,115 @@ func (i *Interactor) filterAndFingerprint(nodes []*cdp.Node, interacted map[stri
 
 // -- Action Execution Logic --
 
-// executeInteraction performs the interaction using a temporary attribute for robust targeting.
 func (i *Interactor) executeInteraction(ctx context.Context, element interactiveElement, log *zap.Logger) (bool, error) {
-	if i.humanoid == nil {
-		return false, fmt.Errorf("humanoid controller is not available")
+	if i.page == nil || i.page.IsClosed() {
+		return false, fmt.Errorf("page not available for interaction")
 	}
 
-	// 1. Tag the element with a temporary unique ID for precise targeting.
-	tempID := fmt.Sprintf("scalpel-interaction-%d-%d", time.Now().UnixNano(), i.rng.Int63())
-	attributeName := "data-scalpel-id"
-	selector := fmt.Sprintf(`[%s="%s"]`, attributeName, tempID)
+	// The selector targets the element using the temporary attribute set during discovery.
+	var err error
 
-	// Ensure the temporary attribute is removed after the interaction.
-	defer i.cleanupInteractionAttribute(ctx, selector, attributeName, log)
-
-	err := chromedp.Run(ctx,
-		// Use the low-level DOM command to set the attribute by NodeID.
-		dom.SetAttributeValue(element.Node.NodeID, attributeName, tempID),
-	)
-	if err != nil {
-		return false, fmt.Errorf("failed to tag element for interaction: %w", err)
-	}
-
-	// 2. Determine and execute the appropriate action.
-	var interactionAction chromedp.Action
 	if element.IsInput {
-		if strings.ToUpper(element.Node.NodeName) == "SELECT" {
-			interactionAction = i.handleSelectInteraction(selector, element.Node)
+		if strings.ToUpper(element.InputData.NodeName) == "SELECT" {
+			err = i.handleSelectInteraction(ctx, element.Selector, element.InputData)
 		} else {
-			// Generate realistic payload based on input type/name.
-			payload := i.generateInputPayload(element.Node)
-			interactionAction = i.humanoid.Type(selector, payload)
+			payload := i.generateInputPayload(element.InputData)
+			err = i.executeType(ctx, element.Selector, payload)
 		}
 	} else {
-		// Standard click action for non-input elements.
-		interactionAction = i.humanoid.IntelligentClick(selector, nil)
+		err = i.executeClick(ctx, element.Selector)
 	}
 
-	if interactionAction == nil {
-		return false, nil // No suitable action found (e.g., empty select).
+	if err != nil {
+		// Check if the error is because the element disappeared (common in SPAs) or is no longer visible/interactive.
+		// Playwright throws specific errors for these cases due to its auto-waiting.
+		if strings.Contains(err.Error(), "element not found") || strings.Contains(err.Error(), "not visible") || strings.Contains(err.Error(), "not enabled") {
+			log.Debug("Element disappeared or became non-interactive before action.", zap.String("selector", element.Selector))
+			return false, nil // Not successful, but also not a critical error.
+		}
+		return false, fmt.Errorf("interaction failed: %w", err)
 	}
 
-	// 3. Execute the humanoid action.
-	if err = chromedp.Run(ctx, interactionAction); err != nil {
-		return false, fmt.Errorf("humanoid action failed: %w", err)
-	}
 	return true, nil
 }
 
-// cleanupInteractionAttribute removes the temporary attribute using JS execution.
-func (i *Interactor) cleanupInteractionAttribute(parentCtx context.Context, selector, attributeName string, log *zap.Logger) {
-	// Use valueOnlyContext to ensure cleanup attempts to run even if the parent context was canceled.
-	detachedCtx := valueOnlyContext{parentCtx}
-	// Apply a short timeout for the cleanup task.
-	taskCtx, cancelTask := context.WithTimeout(detachedCtx, 2*time.Second)
-	defer cancelTask()
-
-	// Use JS execution for cleanup as the element might have been removed from the DOM.
-	jsCleanup := fmt.Sprintf(`document.querySelector('%s')?.removeAttribute('%s')`, selector, attributeName)
-	err := chromedp.Run(taskCtx, chromedp.Evaluate(jsCleanup, nil))
-
-	// Only log an error if the cleanup itself didn't time out.
-	if err != nil && taskCtx.Err() == nil {
-		log.Debug("Failed to execute cleanup JS for interaction attribute", zap.Error(err))
+func (i *Interactor) executeClick(ctx context.Context, selector string) error {
+	options := playwright.PageClickOptions{
+		Timeout: playwright.Float(10000), // 10s timeout for the action.
 	}
-}
 
-func (i *Interactor) handleSelectInteraction(selector string, node *cdp.Node) chromedp.Action {
-	var options []string
-	// Find available options within the select element.
-	for _, child := range node.Children {
-		if strings.ToUpper(child.NodeName) == "OPTION" {
-			childAttrs := attributeMap(child)
-			if value, ok := childAttrs["value"]; ok && value != "" {
-				if _, disabled := childAttrs["disabled"]; !disabled {
-					options = append(options, value)
-				}
-			}
+	if i.humanoidCfg != nil {
+		minMs := int(i.humanoidCfg.ClickHoldMinMs)
+		maxMs := int(i.humanoidCfg.ClickHoldMaxMs)
+		if maxMs > minMs {
+			delay := float64(minMs + i.rng.Intn(maxMs-minMs))
+			options.Delay = playwright.Float(delay)
 		}
 	}
-	if len(options) == 0 {
-		return nil
+
+	return i.page.Click(ctx, selector, options)
+}
+
+func (i *Interactor) executeType(ctx context.Context, selector string, text string) error {
+	// Use Type for humanoid behavior (key-by-key delay), otherwise use Fill.
+	if i.humanoidCfg != nil && i.humanoidCfg.KeyHoldMeanMs > 0 {
+		// Clear the field first using Fill for reliability.
+		if err := i.page.Fill(ctx, selector, "", playwright.PageFillOptions{Timeout: playwright.Float(5000)}); err != nil {
+			return fmt.Errorf("failed to clear input field before typing: %w", err)
+		}
+
+		// Use Type with a delay.
+		delay := float64(i.humanoidCfg.KeyHoldMeanMs * (1.0 + i.rng.Float64()*0.5)) // Add variance
+		typeOptions := playwright.PageTypeOptions{
+			Timeout: playwright.Float(10000),
+			Delay:   playwright.Float(delay),
+		}
+		return i.page.Type(ctx, selector, text, typeOptions)
 	}
+
+	// Standard Fill.
+	return i.page.Fill(ctx, selector, text, playwright.PageFillOptions{Timeout: playwright.Float(10000)})
+}
+
+func (i *Interactor) handleSelectInteraction(ctx context.Context, selector string, data ElementData) error {
+	var options []string
+	// Find available, non-empty options.
+	for _, opt := range data.SelectOptions {
+		if !opt.Disabled && opt.Value != "" {
+			options = append(options, opt.Value)
+		}
+	}
+
+	if len(options) == 0 {
+		return nil // Empty or fully disabled select.
+	}
+
 	// Randomly select one option.
 	selectedValue := options[i.rng.Intn(len(options))]
-	// Use chromedp.SetValue to change the selected option.
-	// Includes a click first if humanoid is enabled to simulate opening the dropdown.
-	tasks := chromedp.Tasks{}
-	if i.humanoid != nil {
-		tasks = append(tasks, i.humanoid.IntelligentClick(selector, nil))
+
+	if i.humanoidCfg != nil {
+		// Optionally click first to simulate opening the dropdown.
+		if err := i.executeClick(ctx, selector); err != nil {
+			i.logger.Debug("Humanoid click before select failed (non-critical).", zap.Error(err))
+		}
+		i.hesitate(ctx, 100*time.Millisecond)
 	}
-	tasks = append(tasks, chromedp.SetValue(selector, selectedValue, chromedp.ByQuery))
-	return tasks
+
+	// Use Playwright's SelectOption.
+	_, err := i.page.SelectOption(ctx, selector, playwright.SelectOptionValues{
+		Values: playwright.StringSlice(selectedValue),
+	}, playwright.PageSelectOptionOptions{
+		Timeout: playwright.Float(5000),
+	})
+	return err
 }
 
 // generateInputPayload creates realistic dummy data based on the input element's context.
-func (i *Interactor) generateInputPayload(node *cdp.Node) string {
-	attrs := attributeMap(node)
+func (i *Interactor) generateInputPayload(data ElementData) string {
+	attrs := data.Attributes
 	inputType := strings.ToLower(attrs["type"])
 	contextString := strings.ToLower(attrs["name"] + " " + attrs["id"] + " " + attrs["placeholder"])
 
-	// Prioritize common field types.
 	if inputType == "email" || strings.Contains(contextString, "email") {
 		return "test.user@example.com"
 	}
@@ -345,23 +507,36 @@ func (i *Interactor) generateInputPayload(node *cdp.Node) string {
 	if strings.Contains(contextString, "name") || strings.Contains(contextString, "user") {
 		return "Test User"
 	}
-	// Default fallback payload.
 	return "scalpel test input"
+}
+
+// -- Humanoid Helpers --
+
+func (i *Interactor) cognitivePause(ctx context.Context, baseMs, varianceMs int) error {
+	duration := time.Duration(baseMs+i.rng.Intn(varianceMs)) * time.Millisecond
+	return i.hesitate(ctx, duration)
+}
+
+func (i *Interactor) hesitate(ctx context.Context, duration time.Duration) error {
+	select {
+	case <-time.After(duration):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // -- Fingerprinting & Helpers --
 
-// Use a pool of hashers to reduce allocation overhead.
 var hasherPool = sync.Pool{
 	New: func() interface{} { return fnv.New64a() },
 }
 
-const maxTextLength = 64
-
-// generateNodeFingerprint creates a unique, stable identifier for a DOM node.
-func generateNodeFingerprint(node *cdp.Node, attrs map[string]string) (string, string) {
+// generateNodeFingerprint creates a unique, stable identifier for a DOM node based on extracted data.
+func generateNodeFingerprint(data ElementData, attrs map[string]string) (string, string) {
 	var sb strings.Builder
-	sb.WriteString(strings.ToLower(node.NodeName))
+	tagNameLower := strings.ToLower(data.NodeName)
+	sb.WriteString(tagNameLower)
 
 	// Include ID and Classes for specificity.
 	if id, ok := attrs["id"]; ok && id != "" {
@@ -369,11 +544,11 @@ func generateNodeFingerprint(node *cdp.Node, attrs map[string]string) (string, s
 	}
 	if cls, ok := attrs["class"]; ok && cls != "" {
 		classes := strings.Fields(cls)
-		sort.Strings(classes) // Ensure consistent order.
+		sort.Strings(classes)
 		sb.WriteString("." + strings.Join(classes, "."))
 	}
 
-	// Include relevant attributes that define the element's behavior or appearance.
+	// Include relevant attributes.
 	attributesToInclude := []string{"name", "href", "type", "role", "aria-label", "placeholder", "title", "action"}
 	sort.Strings(attributesToInclude)
 	for _, attr := range attributesToInclude {
@@ -382,18 +557,16 @@ func generateNodeFingerprint(node *cdp.Node, attrs map[string]string) (string, s
 		}
 	}
 
-	// Include truncated text content for elements like buttons or links.
-	if text := getNodeText(node); text != "" {
-		sb.WriteString(fmt.Sprintf(`[text="%s"]`, text))
+	// Include truncated text content.
+	if data.TextContent != "" {
+		sb.WriteString(fmt.Sprintf(`[text="%s"]`, data.TextContent))
 	}
 
 	description := sb.String()
-	// If the description is just the tag name, it's too generic.
-	if strings.ToLower(node.NodeName) == description {
+	if tagNameLower == description {
 		return "", ""
 	}
 
-	// Hash the description to create the fingerprint.
 	hasher := hasherPool.Get().(hash.Hash64)
 	defer func() {
 		hasher.Reset()
@@ -404,79 +577,23 @@ func generateNodeFingerprint(node *cdp.Node, attrs map[string]string) (string, s
 	return strconv.FormatUint(hasher.Sum64(), 16), description
 }
 
-// getNodeText extracts visible text content from a node and its children.
-func getNodeText(node *cdp.Node) string {
-	var sb strings.Builder
-	var findText func(*cdp.Node)
-	findText = func(n *cdp.Node) {
-		if n.NodeType == cdp.NodeTypeText {
-			sb.WriteString(n.NodeValue)
-		}
-		// Stop traversing if we exceed the max length.
-		if sb.Len() < maxTextLength {
-			for _, child := range n.Children {
-				findText(child)
-			}
-		}
-	}
-	findText(node)
-
-	text := strings.TrimSpace(sb.String())
-	if len(text) > maxTextLength {
-		return text[:maxTextLength]
-	}
-	return text
-}
-
-func isDisabled(node *cdp.Node, attrs map[string]string) bool {
-	_, disabled := attrs["disabled"]
-	// Check aria-disabled as well.
-	ariaDisabled := attrs["aria-disabled"] == "true"
-	return disabled || ariaDisabled
-}
-
-func isInputElement(node *cdp.Node) bool {
-	name := strings.ToUpper(node.NodeName)
-	attrs := attributeMap(node)
+func isInputElement(data ElementData) bool {
+	name := strings.ToUpper(data.NodeName)
+	attrs := data.Attributes
 
 	if name == "INPUT" {
-		// Exclude hidden inputs and buttons disguised as inputs.
 		inputType := strings.ToLower(attrs["type"])
 		switch inputType {
 		case "hidden", "submit", "button", "reset", "image":
 			return false
 		default:
-			// Check for readonly on inputs.
-			if _, readonly := attrs["readonly"]; readonly {
-				return false
-			}
 			return true
 		}
 	}
 
 	if name == "TEXTAREA" || name == "SELECT" {
-		// Check for readonly on textareas/selects.
-		if _, readonly := attrs["readonly"]; readonly {
-			return false
-		}
 		return true
 	}
 
-	// Check for contenteditable elements.
 	return attrs["contenteditable"] == "true"
-}
-
-// attributeMap converts the flat attribute array from CDP into a map.
-func attributeMap(node *cdp.Node) map[string]string {
-	attrs := make(map[string]string)
-	if node == nil {
-		return attrs
-	}
-	// Attributes are stored as a flat slice [key1, value1, key2, value2, ...].
-	for i := 0; i < len(node.Attributes); i += 2 {
-		if i+1 < len(node.Attributes) {
-			attrs[node.Attributes[i]] = node.Attributes[i+1]
-		}
-	}
-	return attrs
 }

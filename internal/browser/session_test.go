@@ -9,7 +9,6 @@ import (
 	"testing"
 	"time"
 
-	"github.com/chromedp/chromedp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -17,107 +16,147 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
-const testTimeout = 45 * time.Second
+const sessionTestTimeout = 60 * time.Second
 
-// Renamed TestAnalysisContext to TestSession
 func TestSession(t *testing.T) {
+	// Ensure the global manager is ready.
+	if suiteManagerErr != nil {
+		t.Fatalf("Skipping Session tests due to initialization failure: %v", suiteManagerErr)
+	}
+
 	t.Run("InitializeAndClose", func(t *testing.T) {
 		fixture := newTestFixture(t)
 		server := createStaticTestServer(t, `<html><body>Init Test</body></html>`)
 		session := fixture.Session
 
-		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), sessionTestTimeout)
 		t.Cleanup(cancel)
 
 		require.NoError(t, session.Navigate(ctx, server.URL))
 
-		// Closing is handled by the fixture cleanup, but calling it explicitly here is fine too.
-		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// Explicitly close the session.
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer closeCancel()
 		require.NoError(t, session.Close(closeCtx))
 
-		// Verifies that the session context is properly canceled upon closing.
-		select {
-		case <-session.GetContext().Done():
-			// Expected outcome.
-		case <-time.After(5 * time.Second):
-			t.Error("Session context did not close as expected")
-		}
+		// Verifies context cancellation.
 		assert.ErrorIs(t, session.GetContext().Err(), context.Canceled)
+
+		// Verify Playwright resources are closed.
+		assert.True(t, session.page.IsClosed(), "Page should be closed")
 	})
 
 	t.Run("NavigateAndCollectArtifacts", func(t *testing.T) {
 		fixture := newTestFixture(t)
 		server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			http.SetCookie(w, &http.Cookie{Name: "SessionID", Value: "12345", HttpOnly: true})
-			fmt.Fprint(w, `<html><body>Target Page
+			// Set multiple cookies to test Harvester's handling of Set-Cookie headers.
+			http.SetCookie(w, &http.Cookie{Name: "SessionID", Value: "12345", HttpOnly: true, Path: "/"})
+			http.SetCookie(w, &http.Cookie{Name: "Analytics", Value: "Enabled", Path: "/"})
+
+			fmt.Fprint(w, `<html><body><h1>Target Page</h1>
                 <script>
                     localStorage.setItem("localKey", "localValue");
+					sessionStorage.setItem("sessionKey", "sessionValue");
                     console.log("Hello from JS");
+					fetch('/data.json'); // Trigger network request
                 </script>
             </body></html>`)
 		}))
+
+		// Add handler for the fetch request.
+		mux := http.NewServeMux()
+		mux.HandleFunc("/data.json", func(w http.ResponseWriter, r *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			fmt.Fprint(w, `{"status": "ok"}`)
+		})
+		// Use the original handler for the main page.
+		mux.HandleFunc("/", server.Config.Handler.ServeHTTP)
+		server.Config.Handler = mux
+
 		session := fixture.Session
 
-		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), sessionTestTimeout)
 		t.Cleanup(cancel)
 
 		require.NoError(t, session.Navigate(ctx, server.URL), "Navigation failed")
 
-		// CollectArtifacts now requires a context.
 		artifacts, err := session.CollectArtifacts(ctx)
 		require.NoError(t, err)
 		require.NotNil(t, artifacts)
 
-		// Assertions to validate the collected artifacts.
-		assert.Contains(t, artifacts.DOM, "Target Page")
-		assert.True(t, len(artifacts.Storage.Cookies) > 0, "Should have captured cookies")
+		// Assertions
+		assert.Contains(t, artifacts.DOM, "<h1>Target Page</h1>")
 
-		// Check if the cookie attributes are captured correctly.
+		// Storage Assertions
+		assert.Equal(t, "localValue", artifacts.Storage.LocalStorage["localKey"])
+		assert.Equal(t, "sessionValue", artifacts.Storage.SessionStorage["sessionKey"])
+
+		// Cookie Assertions (collected via BrowserContext.Cookies())
+		require.True(t, len(artifacts.Storage.Cookies) >= 2, "Should have captured cookies")
 		foundCookie := false
 		for _, cookie := range artifacts.Storage.Cookies {
-			if cookie.Name == "SessionID" && cookie.HTTPOnly {
+			if cookie.Name == "SessionID" {
+				assert.True(t, cookie.HTTPOnly, "SessionID should be HttpOnly")
+				assert.Equal(t, "12345", cookie.Value)
 				foundCookie = true
 				break
 			}
 		}
-		assert.True(t, foundCookie, "SessionID HttpOnly cookie not found or attributes incorrect")
-		assert.Equal(t, "localValue", artifacts.Storage.LocalStorage["localKey"])
+		assert.True(t, foundCookie, "SessionID cookie not found")
 
+		// Console Log Assertions
 		assertLogPresent(t, artifacts.ConsoleLogs, "log", "Hello from JS")
-		require.NotNil(t, findHAREntry(artifacts.HAR, server.URL), "HAR entry not found")
+
+		// HAR Assertions
+		mainEntry := findHAREntry(artifacts.HAR, server.URL)
+		require.NotNil(t, mainEntry, "Main HAR entry not found")
+
+		// Check that the Harvester correctly parsed cookies from the response headers.
+		foundHarCookie := false
+		for _, cookie := range mainEntry.Response.Cookies {
+			if cookie.Name == "Analytics" {
+				foundHarCookie = true
+				break
+			}
+		}
+		assert.True(t, foundHarCookie, "Analytics cookie missing from HAR response")
+
+		jsonEntry := findHAREntry(artifacts.HAR, "/data.json")
+		require.NotNil(t, jsonEntry, "JSON fetch HAR entry not found")
 	})
 
 	t.Run("SessionIsolation", func(t *testing.T) {
+		// Test that cookies do not bleed between sessions (BrowserContexts).
 		server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/set" {
-				http.SetCookie(w, &http.Cookie{Name: "IsolatedCookie", Value: "SessionSpecific"})
+				http.SetCookie(w, &http.Cookie{Name: "IsolatedCookie", Value: "SessionSpecific", Path: "/"})
 				fmt.Fprintln(w, "Cookie Set")
 			} else {
 				fmt.Fprintln(w, "Blank Page")
 			}
 		}))
 
-		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), sessionTestTimeout)
 		t.Cleanup(cancel)
 
-		// First session, sets a cookie.
+		// Session 1: Sets the cookie.
 		fixture1 := newTestFixture(t)
 		require.NoError(t, fixture1.Session.Navigate(ctx, server.URL+"/set"))
 		artifacts1, _ := fixture1.Session.CollectArtifacts(ctx)
 		assert.NotEmpty(t, artifacts1.Storage.Cookies, "Session 1 should have cookies")
 
-		// Second session, should be completely isolated.
+		// Session 2: Should start clean.
 		fixture2 := newTestFixture(t)
 		require.NoError(t, fixture2.Session.Navigate(ctx, server.URL+"/blank"))
 		artifacts2, _ := fixture2.Session.CollectArtifacts(ctx)
+
+		// Verify isolation.
 		assert.Empty(t, artifacts2.Storage.Cookies, "Session 2 should not have cookies from session 1")
 	})
 
-	t.Run("Interaction_BasicClickAndType", func(t *testing.T) {
+	t.Run("Interaction_ClickAndType_Humanoid", func(t *testing.T) {
+		// Humanoid is enabled by default in the test config.
 		fixture := newTestFixture(t)
-		// Check internal state (humanoid should be initialized if enabled in config).
-		require.NotNil(t, fixture.Session.humanoid, "Humanoid should be initialized")
 
 		server := createStaticTestServer(t, `
             <input id="inputField" type="text" value="initial">
@@ -125,127 +164,105 @@ func TestSession(t *testing.T) {
         `)
 		session := fixture.Session
 
-		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), sessionTestTimeout)
 		t.Cleanup(cancel)
 
 		require.NoError(t, session.Navigate(ctx, server.URL))
 
-		// Test Type
+		// Test Type (Session.Type handles clearing the field first when humanoid is enabled)
 		require.NoError(t, session.Type("#inputField", "typed_value"))
+
 		var typedValue string
-		require.NoError(t, chromedp.Run(session.GetContext(), chromedp.Value("#inputField", &typedValue)))
-		// Humanoid typing appends, it does not replace by default.
-		assert.Contains(t, typedValue, "typed_value")
+		require.NoError(t, session.ExecuteScript(ctx, `document.getElementById('inputField').value`, &typedValue))
+		assert.Equal(t, "typed_value", typedValue, "Humanoid typing should replace the value")
 
 		// Test Click
 		require.NoError(t, session.Click("#target"))
 
 		// Verify click result
-		artifacts, _ := session.CollectArtifacts(ctx)
-		assert.Contains(t, artifacts.DOM, ">Clicked<")
-
 		var clickedValue string
-		require.NoError(t, chromedp.Run(session.GetContext(), chromedp.Value("#inputField", &clickedValue)))
-		assert.Equal(t, "clicked_value", clickedValue)
-	})
-
-	// Note: The full 'Interact' (crawler) test is in interactor_test.go
-
-	t.Run("ExposeFunctionIntegration_ManualBinding", func(t *testing.T) {
-		fixture := newTestFixture(t)
-		server := createStaticTestServer(t, `<html><body>Test</body></html>`)
-		session := fixture.Session
-
-		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
-		t.Cleanup(cancel)
-
-		callbackChan := make(chan string, 1)
-
-		// The function signature must match the arguments passed from JS.
-		// JS calls: window.myGoFunction("hello", 123) -> Go func: func(s string, i int)
-		myFunc := func(s string, i int) {
-			callbackChan <- fmt.Sprintf("%s_%d", s, i)
-		}
-
-		// ExposeFunction requires a context. We use the main test context here.
-		require.NoError(t, session.ExposeFunction(ctx, "myGoFunction", myFunc))
-		require.NoError(t, session.Navigate(ctx, server.URL))
-
-		require.NoError(t, session.ExecuteScript(ctx, `window.myGoFunction("hello", 123)`, nil))
-
-		// Check that the exposed Go function was called.
-		select {
-		case res := <-callbackChan:
-			assert.Equal(t, "hello_123", res)
-		case <-time.After(10 * time.Second):
-			t.Fatal("Timed out waiting for exposed function")
-		}
+		// Use Eventually to allow time for the JS onclick handler to execute.
+		assert.Eventually(t, func() bool {
+			err := session.ExecuteScript(ctx, `document.getElementById('inputField').value`, &clickedValue)
+			return err == nil && clickedValue == "clicked_value"
+		}, 5*time.Second, 100*time.Millisecond)
 	})
 
 	t.Run("ExposeFunctionIntegration_MapSignature", func(t *testing.T) {
+		// This tests the robust function exposure mechanism, crucial for IAST.
 		fixture := newTestFixture(t)
 		server := createStaticTestServer(t, `<html><body>Test</body></html>`)
 		session := fixture.Session
 
-		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+		ctx, cancel := context.WithTimeout(context.Background(), sessionTestTimeout)
 		t.Cleanup(cancel)
 
-		callbackChan := make(chan string, 1)
+		callbackChan := make(chan map[string]interface{}, 1)
 
-		// Test using a map signature, common for the IAST shim.
+		// Function signature matching the IAST shim handler.
 		myFunc := func(data map[string]interface{}) {
-			val, _ := data["key"].(string)
-			callbackChan <- val
+			callbackChan <- data
 		}
 
 		require.NoError(t, session.ExposeFunction(ctx, "myMapFunc", myFunc))
 		require.NoError(t, session.Navigate(ctx, server.URL))
-		require.NoError(t, session.ExecuteScript(ctx, `window.myMapFunc({"key": "map_value"})`, nil))
 
+		// Call the exposed function from JS with a complex object.
+		require.NoError(t, session.ExecuteScript(ctx, `window.myMapFunc({"key": "map_value", "nested": {"id": 123}})`, nil))
+
+		// Check that the Go function was called and data marshaled correctly via the JSON intermediary.
 		select {
 		case res := <-callbackChan:
-			assert.Equal(t, "map_value", res)
+			assert.Equal(t, "map_value", res["key"])
+			nested, ok := res["nested"].(map[string]interface{})
+			require.True(t, ok, "Nested object should be a map")
+			// Numbers are typically unmarshaled as float64 from JSON intermediary.
+			assert.Equal(t, float64(123), nested["id"])
 		case <-time.After(10 * time.Second):
 			t.Fatal("Timed out waiting for exposed function (map signature)")
 		}
 	})
 
 	t.Run("NavigateTimeout", func(t *testing.T) {
-		// Configure a short timeout for this specific test.
+		// Configure a very short timeout for this specific test.
+		timeoutDuration := 500 * time.Millisecond
 		fixture := newTestFixture(t, func(cfg *config.Config) {
-			cfg.Network.NavigationTimeout = 200 * time.Millisecond
+			cfg.Network.NavigationTimeout = timeoutDuration
 		})
 
+		// Server that intentionally delays the response.
 		server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			time.Sleep(1 * time.Second) // Longer than the timeout.
+			time.Sleep(2 * time.Second) // Longer than the timeout.
 			fmt.Fprintln(w, "<html><body>Slow response</body></html>")
 		}))
 
 		session := fixture.Session
 
-		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+		// Use a longer context for the test execution itself.
+		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		t.Cleanup(cancel)
 
 		// Navigation should fail with a timeout error.
 		err := session.Navigate(ctx, server.URL)
 		require.Error(t, err)
-		assert.ErrorIs(t, err, context.DeadlineExceeded)
-		assert.Contains(t, err.Error(), "timed out after 200ms")
+		// Playwright provides specific timeout errors.
+		assert.True(t, strings.Contains(err.Error(), "navigation timed out") || strings.Contains(err.Error(), "Timeout"), "Error should be a timeout error")
 	})
 }
 
-// assertLogPresent is a helper to check for a specific console log message.
+// Helper functions (remain the same as they are generic)
+
 func assertLogPresent(t *testing.T, logs []schemas.ConsoleLog, level, substring string) {
 	t.Helper()
 	for _, log := range logs {
-		if log.Type == level && strings.Contains(log.Text, substring) {
+		// Playwright console types are often lowercase (e.g., "log", "error", "warning").
+		if strings.EqualFold(log.Type, level) && strings.Contains(log.Text, substring) {
 			return
 		}
 	}
-	t.Errorf("Expected console log not found: Type=%s, Substring='%s'", level, substring)
+	t.Errorf("Expected console log not found: Type=%s, Substring='%s'. Found %d logs.", level, substring, len(logs))
 }
 
-// findHAREntry is a helper to find a specific entry in the HAR log.
 func findHAREntry(har *schemas.HAR, urlSubstring string) *schemas.Entry {
 	if har == nil {
 		return nil
@@ -257,5 +274,3 @@ func findHAREntry(har *schemas.HAR, urlSubstring string) *schemas.Entry {
 	}
 	return nil
 }
-
-

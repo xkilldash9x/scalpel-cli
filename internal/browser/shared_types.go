@@ -6,28 +6,15 @@ import (
 	"time"
 )
 
-// valueOnlyContext wraps a parent context to create a "detached" context.
-// It inherits all values (like CDP target information) from its parent,
-// but it explicitly ignores the parent's deadline and cancellation signal.
-type valueOnlyContext struct {
-	context.Context
-}
-
-// Deadline always returns false, removing any deadline from the parent.
-func (valueOnlyContext) Deadline() (deadline time.Time, ok bool) { return }
-
-// Done always returns nil, making the context un-cancellable from its parent.
-func (valueOnlyContext) Done() <-chan struct{} { return nil }
-
-// Err always returns nil.
-func (valueOnlyContext) Err() error { return nil }
-
 // CombineContext creates a new context that is a child of parentCtx.
 // It is canceled when *either* parentCtx or secondaryCtx is canceled.
+// This is crucial for ensuring that operations respect both the long-running session lifecycle
+// and the specific request/task deadline.
 func CombineContext(parentCtx, secondaryCtx context.Context) (context.Context, context.CancelFunc) {
+	// Start with the parent context (e.g., session context).
 	combinedCtx, cancel := context.WithCancel(parentCtx)
 
-	// Link the secondary context's lifecycle to the new combined context.
+	// Link the secondary context's lifecycle (e.g., request context) to the new combined context.
 	go func() {
 		select {
 		case <-secondaryCtx.Done():
@@ -40,3 +27,12 @@ func CombineContext(parentCtx, secondaryCtx context.Context) (context.Context, c
 
 	return combinedCtx, cancel
 }
+
+// valueOnlyContext is retained for potential cleanup tasks that should run detached from the main context cancellation.
+type valueOnlyContext struct {
+	context.Context
+}
+
+func (valueOnlyContext) Deadline() (deadline time.Time, ok bool) { return }
+func (valueOnlyContext) Done() <-chan struct{}                   { return nil }
+func (valueOnlyContext) Err() error                              { return nil }
