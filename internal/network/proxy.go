@@ -11,7 +11,6 @@ import (
 	"io"
 	"net/http"
 	"sync"
-	"sync/atomic"
 	"time"
 
 	"github.com/elazarl/goproxy"
@@ -19,10 +18,12 @@ import (
 )
 
 var (
-	// Global lock for protecting goproxy global state modification.
-	mitmConfigMutex sync.Mutex
-	// Ensures configureMITM is only called once.
-	mitmInitialized uint32
+	// Ensures configureMITM initialization logic runs exactly once.
+	mitmInitOnce sync.Once
+	// Stores the result of the MITM initialization attempt.
+	mitmInitError error
+	// Tracks whether MITM is successfully configured globally.
+	isMITMEnabled bool
 )
 
 // RequestHandler defines the signature for functions that inspect or modify requests.
@@ -56,18 +57,22 @@ func NewInterceptionProxy(caCert, caKey []byte, clientConfig *ClientConfig, logg
 	var cfgCopy ClientConfig
 	if clientConfig == nil {
 		cfgCopy = *NewDefaultClientConfig()
+		// Default behavior for proxy upstream connections should often be permissive.
 		cfgCopy.IgnoreTLSErrors = true
 		log.Info("Using default client config with IgnoreTLSErrors enabled for upstream connections.")
 	} else {
 		cfgCopy = *clientConfig
 	}
+	// Use the robust HTTP transport for upstream connections.
 	proxy.Tr = NewHTTPTransport(&cfgCopy)
 
 	if caCert != nil && caKey != nil {
+		// Attempt to initialize MITM capabilities using the provided CA.
+		// This function ensures initialization happens only once globally.
 		if err := configureMITM(caCert, caKey); err != nil {
-			return nil, fmt.Errorf("failed to configure MITM capabilities: %w", err)
+			return nil, fmt.Errorf("failed to configure global MITM capabilities: %w", err)
 		}
-		log.Info("MITM capabilities enabled.")
+		log.Info("MITM capabilities initialized.")
 	} else {
 		log.Warn("CA certificate or key missing, MITM disabled. Operating in tunneling mode.")
 	}
@@ -99,14 +104,14 @@ func (ip *InterceptionProxy) AddResponseHook(handler ResponseHandler) {
 
 // setupHandlers configures the core interception logic.
 func (ip *InterceptionProxy) setupHandlers() {
+	// Configure the CONNECT handler to decide between MITM and tunneling.
 	ip.proxy.OnRequest().HandleConnect(goproxy.FuncHttpsHandler(func(host string, ctx *goproxy.ProxyCtx) (*goproxy.ConnectAction, string) {
-		mitmConfigMutex.Lock()
-		isMITMConfigured := goproxy.GoproxyCa.PrivateKey != nil
-		mitmConfigMutex.Unlock()
-
-		if isMITMConfigured {
+		// Check the global state set during initialization.
+		if isMITMEnabled {
+			// MITM is configured and ready.
 			return goproxy.MitmConnect, host
 		}
+		// MITM is not configured, fall back to tunneling.
 		return goproxy.OkConnect, host
 	}))
 
@@ -248,35 +253,44 @@ func (ip *InterceptionProxy) Start(ctx context.Context, addr string) error {
 
 // configureMITM sets up the certificate authority for the proxy.
 // CRITICAL: This function modifies global state within the goproxy library.
-// It is intended to be called ONLY ONCE during application startup.
-// This implementation enforces the single-call rule; subsequent calls will return an error.
+// It uses sync.Once to ensure it is executed exactly once during the application lifecycle.
+// Subsequent calls will return the result of the first invocation.
 func configureMITM(caCert, caKey []byte) error {
-	if !atomic.CompareAndSwapUint32(&mitmInitialized, 0, 1) {
-		return errors.New("MITM capabilities can only be configured once per process")
-	}
+	mitmInitOnce.Do(func() {
+		// sync.Once handles the synchronization; no extra mutex is needed here to protect the initialization itself.
 
-	mitmConfigMutex.Lock()
-	defer mitmConfigMutex.Unlock()
+		ca, err := tls.X509KeyPair(caCert, caKey)
+		if err != nil {
+			mitmInitError = fmt.Errorf("invalid CA certificate/key pair: %w", err)
+			return
+		}
+		if len(ca.Certificate) == 0 {
+			mitmInitError = errors.New("CA certificate chain is empty")
+			return
+		}
+		// Parse the certificate to populate the Leaf field.
+		if ca.Leaf, err = x509.ParseCertificate(ca.Certificate[0]); err != nil {
+			mitmInitError = fmt.Errorf("failed to parse CA certificate leaf: %w", err)
+			return
+		}
 
-	ca, err := tls.X509KeyPair(caCert, caKey)
-	if err != nil {
-		return fmt.Errorf("invalid CA certificate/key pair: %w", err)
-	}
-	if len(ca.Certificate) == 0 {
-		return errors.New("CA certificate chain is empty")
-	}
-	if ca.Leaf, err = x509.ParseCertificate(ca.Certificate[0]); err != nil {
-		return fmt.Errorf("failed to parse CA certificate leaf: %w", err)
-	}
+		// Configure the global goproxy CA and TLS configuration.
+		goproxy.GoproxyCa = ca
+		tlsConfig := goproxy.TLSConfigFromCA(&ca)
 
-	goproxy.GoproxyCa = ca
-	tlsConfig := goproxy.TLSConfigFromCA(&ca)
-	goproxy.OkConnect = &goproxy.ConnectAction{Action: goproxy.ConnectAccept, TLSConfig: tlsConfig}
-	goproxy.MitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: tlsConfig}
-	goproxy.HTTPMitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectHTTPMitm, TLSConfig: tlsConfig}
-	goproxy.RejectConnect = &goproxy.ConnectAction{Action: goproxy.ConnectReject, TLSConfig: tlsConfig}
+		// Update the global CONNECT actions used by goproxy.
+		goproxy.OkConnect = &goproxy.ConnectAction{Action: goproxy.ConnectAccept, TLSConfig: tlsConfig}
+		goproxy.MitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectMitm, TLSConfig: tlsConfig}
+		goproxy.HTTPMitmConnect = &goproxy.ConnectAction{Action: goproxy.ConnectHTTPMitm, TLSConfig: tlsConfig}
+		goproxy.RejectConnect = &goproxy.ConnectAction{Action: goproxy.ConnectReject, TLSConfig: tlsConfig}
 
-	return nil
+		// Success
+		isMITMEnabled = true
+		// mitmInitError remains nil.
+	})
+
+	// Return the result of the initialization attempt.
+	return mitmInitError
 }
 
 // getRequestURL is a helper to safely extract the request URL from the context for logging.
