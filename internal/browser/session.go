@@ -1,13 +1,14 @@
-// internal/browser/session.go
 package browser
 
 import (
 	"context"
 	"encoding/json"
+	"errors" // Import added
 	"fmt"
 	"math/rand"
 	"reflect"
 	"runtime/debug"
+	"strings" // FIX: Added strings import for error message checks
 	"sync"
 	"time"
 
@@ -22,6 +23,7 @@ import (
 )
 
 // Session represents a single, isolated browser context and its primary page.
+// It implements both schemas.SessionContext and humanoid.Controller.
 type Session struct {
 	id      string
 	ctx     context.Context    // Context derived from the request/task, controls session lifecycle.
@@ -34,14 +36,22 @@ type Session struct {
 	pwContext playwright.BrowserContext
 	page      playwright.Page
 
-	harvester    *Harvester
-	interactor   *Interactor
-	humanoidCfg  *humanoid.Config // Configuration for human-like behavior.
+	harvester  *Harvester
+	interactor *Interactor
+
+	// Humanoid components
+	humanoidCtrl humanoid.Controller // The high level humanoid controller.
+	humanoidCfg  *humanoid.Config    // Configuration for human like behavior.
+
 	findingsChan chan<- schemas.Finding
 
-	onClose   func()
+	onClose func()
 	closeOnce sync.Once
 }
+
+// Ensure Session implements the required interfaces.
+var _ schemas.SessionContext = (*Session)(nil)
+var _ humanoid.Controller = (*Session)(nil)
 
 // NewSession creates the structure for a new browser session. Initialization happens in Initialize().
 func NewSession(
@@ -68,8 +78,12 @@ func NewSession(
 	}
 
 	// Configure humanoid behavior if enabled.
+	var hCfg *humanoid.Config
 	if cfg.Browser.Humanoid.Enabled {
-		s.humanoidCfg = &cfg.Browser.Humanoid
+		// Create a copy of the config for this session persona initialization.
+		cfgCopy := cfg.Browser.Humanoid
+		hCfg = &cfgCopy
+		s.humanoidCfg = hCfg
 	}
 
 	// Define the stabilization function used by the interactor.
@@ -78,11 +92,12 @@ func NewSession(
 		if s.cfg.Network.PostLoadWait > 0 {
 			quietPeriod = s.cfg.Network.PostLoadWait
 		}
+		// Delegating to the session's internal stabilize function, which uses the Harvester.
 		return s.stabilize(ctx, quietPeriod)
 	}
 
 	// Initialize the interactor. Page is set later.
-	s.interactor = NewInteractor(log, s.humanoidCfg, stabilizeFn)
+	s.interactor = NewInteractor(log, hCfg, stabilizeFn)
 
 	return s, nil
 }
@@ -95,8 +110,8 @@ func (s *Session) Initialize(ctx context.Context, browser playwright.Browser, ta
 	options := s.prepareContextOptions()
 
 	// 2. Create the isolated BrowserContext.
-	// We pass the session context (s.ctx) so operations on the context respect the session lifecycle.
-	pwContext, err := browser.NewContext(s.ctx, options)
+	// NewContext relies on implicit browser context and does not take a context.
+	pwContext, err := browser.NewContext(options)
 	if err != nil {
 		return fmt.Errorf("failed to create new browser context: %w", err)
 	}
@@ -107,7 +122,7 @@ func (s *Session) Initialize(ctx context.Context, browser playwright.Browser, ta
 
 	// 3. Apply advanced stealth evasions (JS injection).
 	if err := stealth.ApplyEvasions(s.pwContext, s.persona, s.logger); err != nil {
-		s.logger.Warn("Failed to apply advanced stealth evasions (non-critical).", zap.Error(err))
+		s.logger.Warn("Failed to apply advanced stealth evasions (non critical).", zap.Error(err))
 	}
 	// 4. Initialize IAST Shim if enabled.
 	if s.cfg.IAST.Enabled {
@@ -117,38 +132,48 @@ func (s *Session) Initialize(ctx context.Context, browser playwright.Browser, ta
 	}
 
 	// 5. Create the main Page within the context.
-	page, err := pwContext.NewPage(s.ctx)
+	// NewPage relies on context from pwContext and does not take a context.
+	page, err := pwContext.NewPage()
 	if err != nil {
 		return fmt.Errorf("failed to create new page: %w", err)
 	}
 	s.page = page
 	s.interactor.SetPage(page) // Link the page to the interactor.
 
-	// 6. Initialize the Harvester.
+	// 6. Initialize the Humanoid Controller if configured.
+	if s.humanoidCfg != nil {
+		// Create the adapter which implements the humanoid.Executor interface using this session.
+		executorAdapter := NewPlaywrightExecutorAdapter(s)
+		// Initialize the humanoid controller with the configuration and the adapter.
+		s.humanoidCtrl = humanoid.New(*s.humanoidCfg, s.logger.Named("humanoid"), executorAdapter)
+	}
+
+	// 7. Initialize the Harvester.
 	s.harvester = NewHarvester(s.ctx, s.logger, s.cfg.Network.CaptureResponseBodies)
 	s.harvester.Start(page)
 
 	return nil
 }
 
+// configureTimeouts sets Playwright specific timeouts based on the global config.
 func (s *Session) configureTimeouts() {
 	navTimeoutMs := float64(s.cfg.Network.NavigationTimeout.Milliseconds())
 	if navTimeoutMs <= 0 {
 		navTimeoutMs = 60000 // Default 60s if not specified
 	}
 	s.pwContext.SetDefaultNavigationTimeout(navTimeoutMs)
-	// Set a slightly longer default timeout for actions.
+	// Crucial: Set default timeout for actions (clicks, evaluations) as they don't take context arguments.
 	s.pwContext.SetDefaultTimeout(navTimeoutMs + 5000)
 }
 
 // prepareContextOptions sets up the Playwright options based on the configuration and persona.
 func (s *Session) prepareContextOptions() playwright.BrowserNewContextOptions {
 	options := playwright.BrowserNewContextOptions{
-		UserAgent:          playwright.String(s.persona.UserAgent),
-		IgnoreHttpsErrors:  playwright.Bool(s.cfg.Browser.IgnoreTLSErrors || s.cfg.Network.IgnoreTLSErrors),
+		UserAgent:         playwright.String(s.persona.UserAgent),
+		IgnoreHttpsErrors: playwright.Bool(s.cfg.Browser.IgnoreTLSErrors || s.cfg.Network.IgnoreTLSErrors),
 		JavaScriptDisabled: playwright.Bool(false),
-		Locale:             playwright.String(s.persona.Locale),
-		TimezoneId:         playwright.String(s.persona.Timezone),
+		Locale:            playwright.String(s.persona.Locale),
+		TimezoneId:        playwright.String(s.persona.Timezone),
 	}
 
 	if s.persona.Width > 0 && s.persona.Height > 0 {
@@ -163,14 +188,15 @@ func (s *Session) prepareContextOptions() playwright.BrowserNewContextOptions {
 	return options
 }
 
-// initializeIAST sets up the client-side taint analysis instrumentation.
+// initializeIAST sets up the client side taint analysis instrumentation by exposing a Go callback
+// and injecting the IAST shim script.
 func (s *Session) initializeIAST(ctx context.Context, taintTemplate, taintConfig string) error {
 	// 1. Expose the Go callback function.
 	sinkEventHandler := func(eventData map[string]interface{}) {
 		finding := schemas.Finding{
 			ID:        uuid.New().String(),
 			Timestamp: time.Now(),
-			Target:    "Client-Side",
+			Target:    "Client Side",
 			Module:    "IAST",
 			Severity:  schemas.SeverityHigh,
 		}
@@ -186,7 +212,7 @@ func (s *Session) initializeIAST(ctx context.Context, taintTemplate, taintConfig
 			finding.Evidence = fmt.Sprintf("Payload: %s", v)
 		}
 
-		// Send the finding non-blocking.
+		// Send the finding non blocking to avoid stalling the browser.
 		select {
 		case s.findingsChan <- finding:
 		case <-s.ctx.Done():
@@ -196,15 +222,17 @@ func (s *Session) initializeIAST(ctx context.Context, taintTemplate, taintConfig
 		}
 	}
 
+	// The context parameter here is used for the Go logic flow in ExposeFunction.
 	if err := s.ExposeFunction(ctx, "__scalpel_sink_event", sinkEventHandler); err != nil {
 		return fmt.Errorf("could not expose taint sink event handler: %w", err)
 	}
 
-	// 2. Inject the IAST shim script. (Assumes caller builds the final script string).
-	scriptToInject := taintTemplate // Simplified: Should use shim builder in production.
+	// 2. Inject the IAST shim script.
+	scriptToInject := taintTemplate // Assumes caller builds the final script string.
 
 	if scriptToInject != "" {
-		if err := s.InjectScriptPersistently(scriptToInject); err != nil {
+		// Pass the context to the updated method signature.
+		if err := s.InjectScriptPersistently(ctx, scriptToInject); err != nil {
 			return fmt.Errorf("could not inject IAST shim script: %w", err)
 		}
 	}
@@ -225,10 +253,16 @@ func (s *Session) Close(ctx context.Context) error {
 
 		// 2. Close the Playwright BrowserContext.
 		if s.pwContext != nil {
-			// Use the provided context for the close operation to allow timeouts.
-			if err := s.pwContext.Close(ctx); err != nil {
-				// Check if the error is just because the target was already closed.
-				if !playwright.IsTargetClosedError(err) {
+			// Provide a 'Reason' for closure.
+			// Close relies on implicit timeouts and does not take a context.
+			closeOptions := playwright.BrowserContextCloseOptions{
+				Reason: playwright.String(fmt.Sprintf("Session %s finalized.", s.id)),
+			}
+			if err := s.pwContext.Close(closeOptions); err != nil {
+				// FIX: playwright.IsTargetClosedError is undefined. Fallback to string matching.
+				if err != nil && 
+					!strings.Contains(err.Error(), "Target closed") && 
+					!strings.Contains(err.Error(), "Context closed") {
 					s.logger.Warn("Error while closing browser context.", zap.Error(err))
 					if finalErr == nil {
 						finalErr = err
@@ -295,19 +329,21 @@ func (s *Session) CollectArtifacts(ctx context.Context) (*schemas.Artifacts, err
 		Storage: schemas.StorageState{},
 	}
 
-	// Combine context for collection operations.
+	// Combine context for collection operations (used for Go logic flow control).
 	opCtx, opCancel := CombineContext(s.ctx, ctx)
 	defer opCancel()
 
 	// 1. Collect DOM Snapshot.
-	dom, err := s.page.Content(opCtx)
+	// Content relies on implicit timeouts and does not take a context.
+	dom, err := s.page.Content()
 	if err != nil && opCtx.Err() == nil {
 		s.logger.Warn("Failed to collect DOM content.", zap.Error(err))
 	}
 	artifacts.DOM = dom
 
 	// 2. Collect Storage.
-	cookies, err := s.pwContext.Cookies(opCtx)
+	// Cookies relies on implicit timeouts and does not take a context.
+	cookies, err := s.pwContext.Cookies()
 	if err != nil && opCtx.Err() == nil {
 		s.logger.Warn("Failed to collect cookies.", zap.Error(err))
 	}
@@ -316,22 +352,23 @@ func (s *Session) CollectArtifacts(ctx context.Context) (*schemas.Artifacts, err
 	// Local and Session Storage via JS execution.
 	var storageData map[string]map[string]string
 	script := `
-			() => {
-				const data = { localStorage: {}, sessionStorage: {} };
-				for (let i = 0; i < localStorage.length; i++) {
-					const key = localStorage.key(i);
-					data.localStorage[key] = localStorage.getItem(key);
+				() => {
+					const data = { localStorage: {}, sessionStorage: {} };
+					for (let i = 0; i < localStorage.length; i++) {
+						const key = localStorage.key(i);
+						data.localStorage[key] = localStorage.getItem(key);
+					}
+					for (let i = 0; i < sessionStorage.length; i++) {
+						const key = sessionStorage.key(i);
+						data.sessionStorage[key] = sessionStorage.getItem(key);
+					}
+					return data;
 				}
-				for (let i = 0; i < sessionStorage.length; i++) {
-					const key = sessionStorage.key(i);
-					data.sessionStorage[key] = sessionStorage.getItem(key);
-				}
-				return data;
-			}
-		`
+			`
+	// Using s.ExecuteScript, which handles unmarshaling the result.
 	if err := s.ExecuteScript(opCtx, script, &storageData); err != nil && opCtx.Err() == nil {
 		s.logger.Warn("Failed to collect local/session storage.", zap.Error(err))
-	} else {
+	} else if storageData != nil {
 		artifacts.Storage.LocalStorage = storageData["localStorage"]
 		artifacts.Storage.SessionStorage = storageData["sessionStorage"]
 	}
@@ -347,7 +384,31 @@ func (s *Session) CollectArtifacts(ctx context.Context) (*schemas.Artifacts, err
 	return artifacts, nil
 }
 
-// --- Interaction Methods ---
+// AddFinding implements schemas.SessionContext. It sends a finding to the results channel.
+func (s *Session) AddFinding(finding schemas.Finding) error {
+	// Ensure the finding has essential metadata if not already set.
+	if finding.ID == "" {
+		finding.ID = uuid.New().String()
+	}
+	if finding.Timestamp.IsZero() {
+		finding.Timestamp = time.Now()
+	}
+
+	// Send the finding non-blocking.
+	select {
+	case s.findingsChan <- finding:
+		return nil
+	case <-s.ctx.Done():
+		s.logger.Warn("Could not add finding, session context is done.")
+		return s.ctx.Err()
+	default:
+		// Log if the channel is full.
+		s.logger.Warn("Findings channel full, dropping finding.", zap.String("vuln_name", finding.Vulnerability.Name))
+		return fmt.Errorf("findings channel full")
+	}
+}
+
+// -- Interaction Methods (schemas.SessionContext and humanoid.Controller implementations) --
 
 // Navigate loads the specified URL and waits for the page to stabilize.
 func (s *Session) Navigate(ctx context.Context, url string) error {
@@ -361,30 +422,32 @@ func (s *Session) Navigate(ctx context.Context, url string) error {
 	opCtx, opCancel := CombineContext(s.ctx, ctx)
 	defer opCancel()
 
-	// Playwright's Goto uses the default navigation timeout configured on the context.
-	// We wait until 'load' by default, but stabilization handles 'networkidle'.
-	_, err := s.page.Goto(opCtx, url, playwright.PageGotoOptions{
+	// Goto relies on implicit timeouts and does not take a context.
+	_, err := s.page.Goto(url, playwright.PageGotoOptions{
 		WaitUntil: playwright.WaitUntilLoad,
 	})
 
 	if err != nil {
+		// Check if the Go context was cancelled during the navigation.
 		if opCtx.Err() != nil {
 			return fmt.Errorf("navigation canceled or timed out: %w", opCtx.Err())
 		}
-		if playwright.IsTimeoutError(err) {
+		
+		// FIX: playwright.TimeoutError is undefined. Fallback to checking the error message for "Timeout"
+		if strings.Contains(err.Error(), "Timeout") {
 			return fmt.Errorf("navigation timed out (%s): %w", s.cfg.Network.NavigationTimeout, err)
 		}
 		return fmt.Errorf("navigation failed: %w", err)
 	}
 
-	// Post-navigation stabilization.
+	// Post navigation stabilization.
 	quietPeriod := 1500 * time.Millisecond
 	if s.cfg.Network.PostLoadWait > 0 {
 		quietPeriod = s.cfg.Network.PostLoadWait
 	}
 
 	if err := s.stabilize(opCtx, quietPeriod); err != nil {
-		// Stabilization errors are generally non-critical unless the context was canceled.
+		// Stabilization errors are generally non critical unless the context was canceled.
 		if opCtx.Err() == nil {
 			s.logger.Debug("Page stabilization incomplete after navigation.", zap.Error(err))
 		} else {
@@ -393,7 +456,13 @@ func (s *Session) Navigate(ctx context.Context, url string) error {
 	}
 
 	// Simulate cognitive pause if configured.
-	if s.humanoidCfg != nil {
+	if s.humanoidCfg != nil && s.humanoidCtrl != nil {
+		// Use the humanoid controller for a realistic pause.
+		if err := s.humanoidCtrl.CognitivePause(opCtx, 300, 150); err != nil {
+			return err
+		}
+	} else if s.humanoidCfg != nil {
+		// Fallback to simple sleep if controller failed to initialize but config exists.
 		pauseDuration := time.Duration(300+rand.Intn(150)) * time.Millisecond
 		select {
 		case <-time.After(pauseDuration):
@@ -405,101 +474,181 @@ func (s *Session) Navigate(ctx context.Context, url string) error {
 	return nil
 }
 
-// Click interacts with the element matching the selector.
-func (s *Session) Click(selector string) error {
-	s.logger.Debug("Attempting to click element", zap.String("selector", selector))
-	if s.page == nil {
+// Click implementation for schemas.SessionContext.
+// If humanoid is enabled, it delegates to the humanoid controller. Otherwise, uses standard Playwright click.
+func (s *Session) Click(ctx context.Context, selector string) error {
+	// Combine the operation context (ctx) with the session lifecycle context (s.ctx).
+	opCtx, opCancel := CombineContext(s.ctx, ctx)
+	defer opCancel()
+
+	if s.humanoidCtrl != nil {
+		s.logger.Debug("Delegating click to Humanoid Controller", zap.String("selector", selector))
+		return s.humanoidCtrl.IntelligentClick(opCtx, selector, nil)
+	}
+
+	s.logger.Debug("Attempting standard click element", zap.String("selector", selector))
+	if s.page == nil || s.page.IsClosed() {
 		return fmt.Errorf("page not initialized")
 	}
 
-	// Use a specific timeout for the click action, respecting the session context.
-	clickCtx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
-	defer cancel()
+	// Check context before proceeding.
+	if opCtx.Err() != nil {
+		return opCtx.Err()
+	}
 
 	options := playwright.PageClickOptions{
-		Timeout: playwright.Float(30000),
+		Timeout: playwright.Float(30000), // Note: Playwright uses implicit timeout here, but we guard with Go context.
 	}
 
-	// Apply humanoid configuration if available.
-	if s.humanoidCfg != nil {
-		// Calculate random delay based on configuration.
-		minMs := int(s.humanoidCfg.ClickHoldMinMs)
-		maxMs := int(s.humanoidCfg.ClickHoldMaxMs)
-		if maxMs > minMs {
-			delay := float64(minMs + rand.Intn(maxMs-minMs))
-			options.Delay = playwright.Float(delay)
+	// Click relies on implicit timeouts and does not take a context.
+	err := s.page.Click(selector, options)
+	if err != nil {
+		// Check if the Go context was cancelled during the action.
+		if opCtx.Err() != nil {
+			return opCtx.Err()
 		}
+		return err
 	}
-
-	return s.page.Click(clickCtx, selector, options)
+	return nil
 }
 
-// Type inputs text into the element matching the selector.
-func (s *Session) Type(selector string, text string) error {
-	s.logger.Debug("Attempting to type into element", zap.String("selector", selector))
-	if s.page == nil {
+// Type implementation for schemas.SessionContext.
+// If humanoid is enabled, it delegates to the humanoid controller. Otherwise, uses standard Playwright type/fill.
+func (s *Session) Type(ctx context.Context, selector string, text string) error {
+	// Combine the operation context (ctx) with the session lifecycle context (s.ctx).
+	opCtx, opCancel := CombineContext(s.ctx, ctx)
+	defer opCancel()
+
+	if s.humanoidCtrl != nil {
+		s.logger.Debug("Delegating type to Humanoid Controller", zap.String("selector", selector))
+		return s.humanoidCtrl.Type(opCtx, selector, text)
+	}
+
+	s.logger.Debug("Attempting standard type into element", zap.String("selector", selector))
+	if s.page == nil || s.page.IsClosed() {
 		return fmt.Errorf("page not initialized")
 	}
 
-	typeCtx, cancel := context.WithTimeout(s.ctx, 30*time.Second)
-	defer cancel()
-
-	// Use Type for humanoid behavior (key-by-key delay), otherwise use Fill.
-	if s.humanoidCfg != nil && s.humanoidCfg.KeyHoldMeanMs > 0 {
-		// Clear the field first using Fill for reliability.
-		if err := s.page.Fill(typeCtx, selector, "", playwright.PageFillOptions{Timeout: playwright.Float(5000)}); err != nil {
-			return fmt.Errorf("failed to clear input field before typing: %w", err)
-		}
-
-		// Use Type with a delay to simulate keyboard events.
-		delay := float64(s.humanoidCfg.KeyHoldMeanMs * (1.0 + rand.Float64()*0.5)) // Add some variance
-		typeOptions := playwright.PageTypeOptions{
-			Timeout: playwright.Float(30000),
-			Delay:   playwright.Float(delay),
-		}
-		return s.page.Type(typeCtx, selector, text, typeOptions)
+	// Check context before proceeding.
+	if opCtx.Err() != nil {
+		return opCtx.Err()
 	}
 
-	// Use Fill for standard, fast input.
-	return s.page.Fill(typeCtx, selector, text, playwright.PageFillOptions{Timeout: playwright.Float(30000)})
+	// Use Fill for standard, fast input when humanoid is disabled.
+	// Fill relies on implicit timeouts and does not take a context.
+	err := s.page.Fill(selector, text, playwright.PageFillOptions{Timeout: playwright.Float(30000)})
+	if err != nil {
+		// Check if the Go context was cancelled during the action.
+		if opCtx.Err() != nil {
+			return opCtx.Err()
+		}
+		return err
+	}
+	return nil
+}
+
+// Implementations for the humanoid.Controller interface.
+
+// MoveTo implements humanoid.Controller.
+func (s *Session) MoveTo(ctx context.Context, selector string, field *humanoid.PotentialField) error {
+	if s.humanoidCtrl != nil {
+		return s.humanoidCtrl.MoveTo(ctx, selector, field)
+	}
+	// If humanoid is disabled, perform a standard move (less realistic).
+	if s.page == nil {
+		return fmt.Errorf("page not initialized")
+	}
+	// Hover relies on implicit timeouts and does not take a context.
+	return s.page.Hover(selector)
+}
+
+// IntelligentClick implements humanoid.Controller.
+func (s *Session) IntelligentClick(ctx context.Context, selector string, field *humanoid.PotentialField) error {
+	if s.humanoidCtrl != nil {
+		return s.humanoidCtrl.IntelligentClick(ctx, selector, field)
+	}
+	// Fallback to standard click if humanoid is disabled. Pass the context.
+	return s.Click(ctx, selector)
+}
+
+// DragAndDrop implements humanoid.Controller.
+func (s *Session) DragAndDrop(ctx context.Context, startSelector, endSelector string) error {
+	if s.humanoidCtrl != nil {
+		return s.humanoidCtrl.DragAndDrop(ctx, startSelector, endSelector)
+	}
+	// Fallback if humanoid is disabled.
+	if s.page == nil {
+		return fmt.Errorf("page not initialized")
+	}
+	// DragAndDrop relies on implicit timeouts and does not take a context.
+	return s.page.DragAndDrop(startSelector, endSelector)
+}
+
+// CognitivePause implements humanoid.Controller.
+func (s *Session) CognitivePause(ctx context.Context, meanMs, stdDevMs float64) error {
+	if s.humanoidCtrl != nil {
+		return s.humanoidCtrl.CognitivePause(ctx, meanMs, stdDevMs)
+	}
+	// Fallback: Simple context aware sleep if humanoid is disabled.
+	duration := time.Duration(meanMs) * time.Millisecond
+	select {
+	case <-time.After(duration):
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 // Submit attempts to submit the form associated with the selector.
-func (s *Session) Submit(selector string) error {
+func (s *Session) Submit(ctx context.Context, selector string) error {
 	s.logger.Debug("Attempting to submit form", zap.String("selector", selector))
-	if s.page == nil {
+	if s.page == nil || s.page.IsClosed() {
 		return fmt.Errorf("page not initialized")
 	}
 
-	submitCtx, cancel := context.WithTimeout(s.ctx, 15*time.Second)
-	defer cancel()
+	opCtx, opCancel := CombineContext(s.ctx, ctx)
+	defer opCancel()
+
+	if opCtx.Err() != nil {
+		return opCtx.Err()
+	}
 
 	// Execute JavaScript to submit the form reliably.
 	script := `(element) => {
-			if (!element) throw new Error("Element not found");
-			if (element.form) {
-				element.form.submit();
-			} else if (element.tagName === 'FORM') {
-				element.submit();
-			} else {
-				throw new Error("Element is not a form or part of a form.");
-			}
-		}`
+				if (!element) throw new Error("Element not found");
+				if (element.form) {
+					element.form.submit();
+				} else if (element.tagName === 'FORM') {
+					element.submit();
+				} else {
+					throw new Error("Element is not a form or part of a form.");
+				}
+			}`
 
-	// Evaluate on the specific element matching the selector.
-	_, err := s.page.EvaluateOnSelector(submitCtx, selector, script, nil)
-	return err
+	// EvalOnSelector relies on implicit timeouts and does not take a context.
+	_, err := s.page.EvalOnSelector(selector, script, nil)
+	if err != nil {
+		if opCtx.Err() != nil {
+			return opCtx.Err()
+		}
+		return err
+	}
+	return nil
 }
 
 // ScrollPage simulates scrolling the page.
-func (s *Session) ScrollPage(direction string) error {
+func (s *Session) ScrollPage(ctx context.Context, direction string) error {
 	s.logger.Debug("Scrolling page", zap.String("direction", direction))
-	if s.page == nil {
+	if s.page == nil || s.page.IsClosed() {
 		return fmt.Errorf("page not initialized")
 	}
 
-	scrollCtx, cancel := context.WithTimeout(s.ctx, 10*time.Second)
-	defer cancel()
+	opCtx, opCancel := CombineContext(s.ctx, ctx)
+	defer opCancel()
+
+	if opCtx.Err() != nil {
+		return opCtx.Err()
+	}
 
 	var script string
 	switch direction {
@@ -515,15 +664,31 @@ func (s *Session) ScrollPage(direction string) error {
 		return fmt.Errorf("invalid scroll direction: %s", direction)
 	}
 
-	_, err := s.page.Evaluate(scrollCtx, script)
-	return err
+	// Evaluate relies on implicit timeouts and does not take a context.
+	_, err := s.page.Evaluate(script)
+	if err != nil {
+		if opCtx.Err() != nil {
+			return opCtx.Err()
+		}
+		return err
+	}
+	return nil
 }
 
 // WaitForAsync pauses execution for a specified duration.
-func (s *Session) WaitForAsync(milliseconds int) error {
+func (s *Session) WaitForAsync(ctx context.Context, milliseconds int) error {
 	s.logger.Debug("Waiting for async operations", zap.Int("duration_ms", milliseconds))
-	// Use the session context for the wait operation.
-	return s.page.WaitForTimeout(s.ctx, float64(milliseconds))
+
+	// Use Go context-aware sleep for better responsiveness to cancellation.
+	opCtx, opCancel := CombineContext(s.ctx, ctx)
+	defer opCancel()
+
+	select {
+	case <-time.After(time.Duration(milliseconds) * time.Millisecond):
+		return nil
+	case <-opCtx.Done():
+		return opCtx.Err()
+	}
 }
 
 // Interact triggers the automated recursive interaction logic.
@@ -540,7 +705,7 @@ func (s *Session) Interact(ctx context.Context, config schemas.InteractionConfig
 	return s.interactor.RecursiveInteract(opCtx, config)
 }
 
-// --- Management Methods ---
+// -- Management Methods --
 
 // ExposeFunction allows Go functions to be called from the browser's JavaScript context.
 func (s *Session) ExposeFunction(ctx context.Context, name string, function interface{}) error {
@@ -619,7 +784,8 @@ func (s *Session) ExposeFunction(ctx context.Context, name string, function inte
 	}
 
 	// Expose the function on the context.
-	return s.pwContext.ExposeFunction(ctx, name, wrappedFunc)
+	// ExposeFunction relies on implicit timeouts and does not take a context.
+	return s.pwContext.ExposeFunction(name, wrappedFunc)
 }
 
 // Helper to process reflection results into (interface{}, error) expected by Playwright.
@@ -632,9 +798,13 @@ func processResults(results []reflect.Value) (interface{}, error) {
 	var errVal error
 
 	for _, res := range results {
-		if err, ok := res.Interface().(error); ok && !res.IsNil() {
-			errVal = err
+		// Check for error return value
+		if res.Type().Implements(reflect.TypeOf((*error)(nil)).Elem()) {
+			if !res.IsNil() {
+				errVal = res.Interface().(error)
+			}
 		} else if res.IsValid() && (res.Kind() != reflect.Ptr || !res.IsNil()) {
+			// This is a non-error return value (e.g., string, map, struct)
 			resultVal = res.Interface()
 		}
 	}
@@ -642,15 +812,25 @@ func processResults(results []reflect.Value) (interface{}, error) {
 }
 
 // InjectScriptPersistently adds a script that will be executed on all new documents.
-func (s *Session) InjectScriptPersistently(script string) error {
+func (s *Session) InjectScriptPersistently(ctx context.Context, script string) error {
 	if s.pwContext == nil {
 		return fmt.Errorf("browser context not initialized")
 	}
 
+	// Check context before proceeding.
+	if ctx.Err() != nil {
+		return ctx.Err()
+	}
+
+	// AddInitScript does not take context.
 	err := s.pwContext.AddInitScript(playwright.Script{
 		Content: playwright.String(script),
 	})
 	if err != nil {
+		// Check if the Go context was cancelled during the operation.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 		return fmt.Errorf("could not inject persistent script: %w", err)
 	}
 	s.logger.Debug("Injected persistent script.")
@@ -658,16 +838,23 @@ func (s *Session) InjectScriptPersistently(script string) error {
 }
 
 // ExecuteScript runs a snippet of JavaScript in the current document's main frame.
+// This implements the schemas.SessionContext interface.
 func (s *Session) ExecuteScript(ctx context.Context, script string, res interface{}) error {
 	if s.page == nil || s.page.IsClosed() {
 		return fmt.Errorf("page not initialized or closed")
 	}
 
+	// Combine context for Go logic flow control.
 	opCtx, opCancel := CombineContext(s.ctx, ctx)
 	defer opCancel()
 
-	result, err := s.page.Evaluate(opCtx, script)
+	// Evaluate relies on implicit timeouts and does not take a context.
+	result, err := s.page.Evaluate(script)
 	if err != nil {
+		// Check if the Go context was cancelled during evaluation.
+		if opCtx.Err() != nil {
+			return opCtx.Err()
+		}
 		return fmt.Errorf("failed to execute script: %w", err)
 	}
 

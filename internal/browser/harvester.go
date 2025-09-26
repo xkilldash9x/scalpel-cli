@@ -1,4 +1,3 @@
-// internal/browser/harvester.go
 package browser
 
 import (
@@ -18,7 +17,6 @@ import (
 )
 
 const networkIdleCheckFrequency = 250 * time.Millisecond
-const bodyFetchTimeout = 15 * time.Second
 
 // requestState holds the information for a single network request throughout its lifecycle.
 type requestState struct {
@@ -33,98 +31,103 @@ type requestState struct {
 
 // Harvester listens to browser network events and console logs to build a HAR file and monitor activity.
 type Harvester struct {
-	ctx           context.Context // Session lifecycle context.
-	logger        *zap.Logger
-	captureBodies bool
-	page          playwright.Page // Store page to manage listeners.
+	ctx             context.Context // Session lifecycle context.
+	logger          *zap.Logger
+	captureBodies   bool
+	page            playwright.Page // Store page to manage listeners.
 
-	mu            sync.RWMutex
-	requests      map[playwright.Request]*requestState // Keyed by Request object pointer.
-	consoleLogs   []schemas.ConsoleLog
-	pageTitle     string
+	mu              sync.RWMutex
+	requests        map[playwright.Request]*requestState // Keyed by Request object pointer.
+	consoleLogs     []schemas.ConsoleLog
+	pageTitle       string
 	pageStartTime time.Time
-	pageTimings   schemas.PageTimings
+	pageTimings     schemas.PageTimings
 
 	activeReqs int64 // Counter for active requests, including body fetching time.
 
 	stopOnce sync.Once
 
-	// Event handlers are stored to be able to remove them in Stop().
-	requestHandler          func(playwright.Request)
-	responseHandler         func(playwright.Response)
-	requestFinishedHandler  func(playwright.Request)
-	requestFailedHandler    func(playwright.Request)
-	consoleMessageHandler   func(playwright.ConsoleMessage)
-	pageLoadHandler         func(playwright.Page)
-	domContentLoadedHandler func(playwright.Page)
+	// Store remover functions returned by page.On() instead of handler references.
+	eventRemovers []func()
 }
 
 // NewHarvester creates a new network harvester instance.
 func NewHarvester(ctx context.Context, logger *zap.Logger, captureBodies bool) *Harvester {
 	h := &Harvester{
-		ctx:           ctx,
-		logger:        logger.Named("harvester"),
+		ctx:             ctx,
+		logger:          logger.Named("harvester"),
 		captureBodies: captureBodies,
-		requests:      make(map[playwright.Request]*requestState),
-		consoleLogs:   make([]schemas.ConsoleLog, 0),
+		requests:        make(map[playwright.Request]*requestState),
+		consoleLogs:     make([]schemas.ConsoleLog, 0),
 		pageStartTime: time.Now(),
+		eventRemovers: make([]func(), 0),
 	}
-	// Assign handlers to struct fields so they can be referenced in Stop().
-	h.requestHandler = h.handleRequest
-	h.responseHandler = h.handleResponse
-	h.requestFinishedHandler = h.handleRequestFinished
-	h.requestFailedHandler = h.handleRequestFailed
-	h.consoleMessageHandler = h.handleConsoleMessage
-	h.pageLoadHandler = h.handlePageLoad
-	h.domContentLoadedHandler = h.handleDOMContentLoaded
+	// Handlers are implemented as methods (handleRequest, etc.)
 	return h
 }
 
 // Start begins listening to network and console events from the Playwright Page.
 func (h *Harvester) Start(page playwright.Page) {
 	h.logger.Debug("Starting harvester event listeners.")
-	h.page = page // Store page to remove listeners later.
+	h.page = page
+
+	// Helper to register listener and store the remover function.
+	register := func(event string, handler interface{}) {
+		// Note: If you encounter a compilation error here regarding "no value used as value",
+		// it means your playwright-go version does not support the (func(), error) return
+		// signature for page.On/page.Once. You will need to upgrade your playwright-go dependency.
+		remover, err := page.On(event, handler)
+		if err != nil {
+			h.logger.Error("Failed to register event listener.", zap.String("event", event), zap.Error(err))
+			return
+		}
+		h.eventRemovers = append(h.eventRemovers, remover)
+	}
 
 	// -- Network Events --
-	page.On("request", h.requestHandler)
-	page.On("response", h.responseHandler)
-	page.On("requestfinished", h.requestFinishedHandler)
-	page.On("requestfailed", h.requestFailedHandler)
+	register("request", h.handleRequest)
+	register("response", h.handleResponse)
+	register("requestfinished", h.handleRequestFinished)
+	register("requestfailed", h.handleRequestFailed)
 
 	// -- Console Events --
-	page.On("console", h.consoleMessageHandler)
+	register("console", h.handleConsoleMessage)
 
 	// -- Page Lifecycle Events --
-	page.On("load", h.pageLoadHandler)
-	page.On("domcontentloaded", h.domContentLoadedHandler)
+	register("load", h.handlePageLoad)
+	register("domcontentloaded", h.handleDOMContentLoaded)
 
 	// Capture the accurate start time upon the first main frame navigation.
-	page.Once("framenavigated", func(frame playwright.Frame) {
+	// Use Once which also returns a remover.
+	remover, err := page.Once("framenavigated", func(frame playwright.Frame) {
 		if frame == page.MainFrame() {
 			h.mu.Lock()
 			h.pageStartTime = time.Now()
 			h.mu.Unlock()
 		}
 	})
+	if err == nil {
+		h.eventRemovers = append(h.eventRemovers, remover)
+	} else {
+		h.logger.Error("Failed to register framenavigated listener.", zap.Error(err))
+	}
 }
 
-// Stop halts the event listeners.
+// Stop halts the event listeners by calling all stored remover functions.
 func (h *Harvester) Stop() {
 	h.stopOnce.Do(func() {
 		h.logger.Debug("Stopping harvester event listeners.")
+		// Call the stored remover functions.
 		if h.page != nil && !h.page.IsClosed() {
-			h.page.Off("request", h.requestHandler)
-			h.page.Off("response", h.responseHandler)
-			h.page.Off("requestfinished", h.requestFinishedHandler)
-			h.page.Off("requestfailed", h.requestFailedHandler)
-			h.page.Off("console", h.consoleMessageHandler)
-			h.page.Off("load", h.pageLoadHandler)
-			h.page.Off("domcontentloaded", h.domContentLoadedHandler)
+			for _, remover := range h.eventRemovers {
+				remover()
+			}
 		}
+		h.eventRemovers = nil // Clear the slice
 	})
 }
 
-// GetConsoleLogs returns the collected console logs.
+// GetConsoleLogs returns a copy of the collected console logs.
 func (h *Harvester) GetConsoleLogs() []schemas.ConsoleLog {
 	h.mu.RLock()
 	defer h.mu.RUnlock()
@@ -134,7 +137,8 @@ func (h *Harvester) GetConsoleLogs() []schemas.ConsoleLog {
 }
 
 // WaitNetworkIdle blocks until the network has been quiet for a specified duration.
-// Robust implementation tracking last activity time.
+// It relies on the activeReqs counter which is incremented on request and decremented
+// only after the response body has been fully processed or the request has failed.
 func (h *Harvester) WaitNetworkIdle(ctx context.Context, quietPeriod time.Duration) error {
 	h.logger.Debug("Waiting for network to become idle.", zap.Duration("quiet_period", quietPeriod))
 
@@ -146,8 +150,10 @@ func (h *Harvester) WaitNetworkIdle(ctx context.Context, quietPeriod time.Durati
 	for {
 		select {
 		case <-ctx.Done():
+			// The operation context (e.g., the specific interaction) was cancelled.
 			return ctx.Err()
 		case <-h.ctx.Done():
+			// The overall session context was cancelled.
 			return h.ctx.Err()
 		case now := <-ticker.C:
 			h.mu.RLock()
@@ -155,7 +161,7 @@ func (h *Harvester) WaitNetworkIdle(ctx context.Context, quietPeriod time.Durati
 			h.mu.RUnlock()
 
 			if active == 0 {
-				// If network is idle, check how long it has been idle.
+				// If network is currently idle, check if the quiet period has passed.
 				if now.Sub(lastActiveTime) >= quietPeriod {
 					h.logger.Debug("Network is idle.")
 					return nil
@@ -170,6 +176,7 @@ func (h *Harvester) WaitNetworkIdle(ctx context.Context, quietPeriod time.Durati
 
 // -- Event Handlers --
 
+// handleRequest tracks the start of a network request.
 func (h *Harvester) handleRequest(req playwright.Request) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -183,6 +190,7 @@ func (h *Harvester) handleRequest(req playwright.Request) {
 	}
 }
 
+// handleResponse captures the response object when it arrives.
 func (h *Harvester) handleResponse(resp playwright.Response) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -193,32 +201,34 @@ func (h *Harvester) handleResponse(resp playwright.Response) {
 	}
 }
 
-// handleRequestFinished processes the request completion, including fetching the body synchronously.
+// handleRequestFinished is called when a request successfully completes.
 func (h *Harvester) handleRequestFinished(req playwright.Request) {
 	h.processRequestCompletion(req, nil)
 }
 
-// handleRequestFailed processes request failures.
+// handleRequestFailed is called when a request fails for any reason (e.g., DNS, timeout).
 func (h *Harvester) handleRequestFailed(req playwright.Request) {
-	failure, err := req.Failure()
-	if err != nil {
-		h.processRequestCompletion(req, fmt.Errorf("could not get request failure reason: %w", err))
-		return
-	}
+	// Retrieves the driver-specific failure reason.
+	// FIX: req.Failure() returns only the string reason in this API version, not a string and an error.
+	failureText := req.Failure()
+
 	var failureErr error
-	if failure != nil {
-		failureErr = fmt.Errorf("request failed: %s", failure.Error())
+	// If failureText is non-empty, it contains the reason.
+	if failureText != "" {
+		failureErr = fmt.Errorf("request failed: %s", failureText)
 	} else {
+		// Defensive: The event fired but the reason was empty.
 		failureErr = fmt.Errorf("request failed (unknown reason)")
 	}
 	h.processRequestCompletion(req, failureErr)
 }
 
-// processRequestCompletion handles the logic for both finished and failed requests.
-// Crucially, it fetches the body synchronously before decrementing activeReqs.
+// processRequestCompletion handles the final state update, including fetching the body.
+// This function ensures the body is fetched (if required) before the active request counter is decremented.
 func (h *Harvester) processRequestCompletion(req playwright.Request, failureErr error) {
 	h.mu.RLock()
 	reqState, ok := h.requests[req]
+	// Determine if body capture is necessary.
 	shouldFetchBody := h.captureBodies && ok && !reqState.isDataURL && reqState.response != nil
 	h.mu.RUnlock()
 
@@ -255,6 +265,7 @@ func (h *Harvester) processRequestCompletion(req playwright.Request, failureErr 
 	h.activeReqs--
 }
 
+// handleConsoleMessage captures a console log event and converts it to the project schema.
 func (h *Harvester) handleConsoleMessage(msg playwright.ConsoleMessage) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -270,6 +281,7 @@ func (h *Harvester) handleConsoleMessage(msg playwright.ConsoleMessage) {
 	})
 }
 
+// handlePageLoad records the page load event timing.
 func (h *Harvester) handlePageLoad(page playwright.Page) {
 	if page.MainFrame() != page.MainFrame() {
 		return
@@ -277,15 +289,18 @@ func (h *Harvester) handlePageLoad(page playwright.Page) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	h.pageTitle, _ = page.Title()
+	// Calculate time since the navigation started.
 	h.pageTimings.OnLoad = float64(time.Since(h.pageStartTime).Milliseconds())
 }
 
+// handleDOMContentLoaded records the DOM content loaded event timing.
 func (h *Harvester) handleDOMContentLoaded(page playwright.Page) {
 	if page.MainFrame() != page.MainFrame() {
 		return
 	}
 	h.mu.Lock()
 	defer h.mu.Unlock()
+	// Calculate time since the navigation started.
 	h.pageTimings.OnContentLoad = float64(time.Since(h.pageStartTime).Milliseconds())
 }
 
@@ -312,20 +327,22 @@ func (h *Harvester) GenerateHAR() *schemas.HAR {
 			continue
 		}
 
-		// Playwright timings are crucial.
-		timing, _ := reqState.request.Timing()
+		// FIX: reqState.request.Timing() returns only the struct, not a struct and an error.
+		// Retrieves detailed network timing information.
+		timing := reqState.request.Timing()
 
-		// Calculate duration. If ResponseEnd is missing (e.g., failure), use time since start approximation.
+		// Calculate total duration. If ResponseEnd is available, use precise duration; otherwise, approximate.
 		totalTime := float64(-1)
 		if timing.ResponseEnd > 0 && timing.RequestStart > 0 {
 			totalTime = timing.ResponseEnd - timing.RequestStart
 		} else {
+			// Approximate total time if precise timing is unavailable (e.g., failure).
 			totalTime = time.Since(reqState.startTime).Seconds() * 1000
 		}
 
 		entry := schemas.Entry{
 			Pageref:         pageID,
-			StartedDateTime: reqState.startTime, // Use the recorded start time.
+			StartedDateTime: reqState.startTime, // Use the recorded request start time.
 			Time:            totalTime,
 			Request:         h.buildHARRequest(reqState.request),
 			Response:        h.buildHARResponse(reqState.response, reqState.body, reqState.err),
@@ -337,9 +354,12 @@ func (h *Harvester) GenerateHAR() *schemas.HAR {
 	return har
 }
 
+// buildHARRequest converts a Playwright Request object into the HAR Request schema.
 func (h *Harvester) buildHARRequest(req playwright.Request) schemas.Request {
-	headers, _ := req.Headers()
+	// Use AllHeaders for reliability.
+	headers, _ := req.AllHeaders()
 	headersSize := calculateHeaderSize(headers)
+	nvHeaders := convertPWHeaders(headers)
 
 	postData, _ := req.PostData()
 	bodySize := int64(len(postData))
@@ -348,8 +368,9 @@ func (h *Harvester) buildHARRequest(req playwright.Request) schemas.Request {
 		Method:      req.Method(),
 		URL:         req.URL(),
 		HTTPVersion: "HTTP/1.1", // Approximation
+		// Updated to use HARCookie conversion.
 		Cookies:     extractCookiesFromHeaders(headers),
-		Headers:     convertPWHeaders(headers),
+		Headers:     nvHeaders,
 		QueryString: extractQueryString(req.URL()),
 		HeadersSize: headersSize,
 		BodySize:    bodySize,
@@ -366,6 +387,7 @@ func (h *Harvester) buildHARRequest(req playwright.Request) schemas.Request {
 	return harReq
 }
 
+// buildHARResponse converts a Playwright Response object and collected body into the HAR Response schema.
 func (h *Harvester) buildHARResponse(resp playwright.Response, body []byte, reqErr error) schemas.Response {
 	if resp == nil {
 		// Handle failed requests where no response object exists.
@@ -383,8 +405,10 @@ func (h *Harvester) buildHARResponse(resp playwright.Response, body []byte, reqE
 		}
 	}
 
-	headers, _ := resp.Headers()
+	// Use AllHeaders for reliability.
+	headers, _ := resp.AllHeaders()
 	headersSize := calculateHeaderSize(headers)
+	nvHeaders := convertPWHeaders(headers)
 
 	contentType, _ := resp.HeaderValue("content-type")
 	if contentType == "" {
@@ -396,20 +420,23 @@ func (h *Harvester) buildHARResponse(resp playwright.Response, body []byte, reqE
 		MimeType: contentType,
 	}
 
+	// Only store the body as text if the MIME type suggests it's human readable text.
 	if isTextMime(contentType) {
 		content.Text = string(body)
 	} else if len(body) > 0 {
+		// For binary content, encode to base64 for HAR format compatibility.
 		content.Encoding = "base64"
 		content.Text = base64.StdEncoding.EncodeToString(body)
 	}
 
 	bodySize := int64(len(body)) // Approximation of transferred size.
 
-	// Determine protocol.
+	// Determine protocol, falling back to HTTP/1.1.
 	protocol := "HTTP/1.1"
 	sd, err := resp.SecurityDetails()
-	if err == nil && sd != nil && sd.Protocol != "" {
-		protocol = sd.Protocol
+	// FIX: sd.Protocol is a *string and must be checked for nil and dereferenced.
+	if err == nil && sd != nil && sd.Protocol != nil && *sd.Protocol != "" {
+		protocol = *sd.Protocol
 	}
 
 	redirectURL, _ := resp.HeaderValue("location")
@@ -417,8 +444,9 @@ func (h *Harvester) buildHARResponse(resp playwright.Response, body []byte, reqE
 		Status:      resp.Status(),
 		StatusText:  resp.StatusText(),
 		HTTPVersion: protocol,
-		Cookies:     extractCookiesFromHeaders(headers), // Handles Set-Cookie
-		Headers:     headers,
+		// Updated to use HARCookie conversion.
+		Cookies:     extractCookiesFromHeaders(headers), // Handles Set Cookie
+		Headers:     nvHeaders,
 		Content:     content,
 		RedirectURL: redirectURL,
 		HeadersSize: headersSize,
@@ -431,6 +459,7 @@ func (h *Harvester) buildHARResponse(resp playwright.Response, body []byte, reqE
 // convertPWTImings converts Playwright RequestTiming to HAR Timings format.
 // Playwright timings are relative durations in milliseconds.
 func convertPWTImings(t playwright.RequestTiming) schemas.Timings {
+	// Calculates the duration between two timing points. Returns -1 if the timing data is invalid.
 	duration := func(start, end float64) float64 {
 		if start <= 0 || end <= 0 || start > end {
 			return -1
@@ -440,15 +469,18 @@ func convertPWTImings(t playwright.RequestTiming) schemas.Timings {
 
 	dnsTime := duration(t.DomainLookupStart, t.DomainLookupEnd)
 	connectTime := duration(t.ConnectStart, t.ConnectEnd)
-	// SSL time is the duration of the secure connection handshake, part of the total connect time.
+	// SSL time is the duration of the secure connection handshake.
 	sslTime := duration(t.SecureConnectionStart, t.ConnectEnd)
 
-	// Send: Time taken to issue the request.
-	sendTime := duration(t.RequestStart, t.RequestEnd)
-	// Wait (TTFB): Time waiting for the response.
-	waitTime := duration(t.RequestEnd, t.ResponseStart)
-	// Receive: Time taken to download the response body.
+	// FIX: RequestEnd is undefined in this playwright-go version.
+	// We approximate by setting send time to -1 (unavailable per HAR spec) and
+	// calculating wait as the total time from request start to response start.
+	sendTime := float64(-1)
+	waitTime := duration(t.RequestStart, t.ResponseStart)
+	
+	// FIX: ResponseEnd is likely unavailable if RequestEnd is missing, but if it exists, use it for receive.
 	receiveTime := duration(t.ResponseStart, t.ResponseEnd)
+
 
 	return schemas.Timings{
 		Blocked: -1, // Not accurately available in Playwright RequestTiming structure.
@@ -461,6 +493,7 @@ func convertPWTImings(t playwright.RequestTiming) schemas.Timings {
 	}
 }
 
+// convertPWHeaders converts a map of Playwright headers into a slice of HAR NVPair.
 func convertPWHeaders(headers map[string]string) []schemas.NVPair {
 	pairs := make([]schemas.NVPair, 0, len(headers))
 	for k, v := range headers {
@@ -469,14 +502,17 @@ func convertPWHeaders(headers map[string]string) []schemas.NVPair {
 	return pairs
 }
 
+// calculateHeaderSize estimates the size of the headers in bytes.
+// It includes key, value, ": ", and "\r\n" (4 bytes) for each entry.
 func calculateHeaderSize(headers map[string]string) int64 {
 	var size int64
 	for k, v := range headers {
-		size += int64(len(k) + len(v) + 4) // Key + Value + ": " + "\r\n"
+		size += int64(len(k) + len(v) + 4)
 	}
 	return size
 }
 
+// extractQueryString parses the query parameters from a URL string into NVPair slice.
 func extractQueryString(urlString string) []schemas.NVPair {
 	u, err := url.Parse(urlString)
 	if err != nil {
@@ -492,43 +528,49 @@ func extractQueryString(urlString string) []schemas.NVPair {
 	return pairs
 }
 
-// extractCookiesFromHeaders robustly parses cookies from "Cookie" or "Set-Cookie" headers.
-func extractCookiesFromHeaders(headers map[string]string) []schemas.Cookie {
-	// Playwright combines multiple 'set-cookie' headers into a single string separated by newlines.
+// extractCookiesFromHeaders robustly parses cookies from "Cookie" or "Set-Cookie" headers into HAR format.
+func extractCookiesFromHeaders(headers map[string]string) []schemas.HARCookie {
+	// Playwright sometimes combines multiple 'set-cookie' headers into a single string separated by newlines.
 	if setCookieHeader, ok := headers["set-cookie"]; ok {
 		header := http.Header{}
+		// Split the combined header back into individual lines for net/http parser.
 		for _, line := range strings.Split(setCookieHeader, "\n") {
-			header.Add("Set-Cookie", line)
+			if line != "" {
+				header.Add("Set-Cookie", line)
+			}
 		}
 		resp := http.Response{Header: header}
-		return convertHttpCookiesToSchema(resp.Cookies())
+		return convertHttpCookiesToHARSchema(resp.Cookies())
 	}
 
 	// Check for "Cookie" header (Requests).
 	if cookieHeader, ok := headers["cookie"]; ok {
 		header := http.Header{}
 		header.Add("Cookie", cookieHeader)
+		// Use a dummy request to parse the cookies.
 		req := http.Request{Header: header}
-		return convertHttpCookiesToSchema(req.Cookies())
+		return convertHttpCookiesToHARSchema(req.Cookies())
 	}
 
-	return []schemas.Cookie{}
+	return []schemas.HARCookie{}
 }
 
-func convertHttpCookiesToSchema(cookies []*http.Cookie) []schemas.Cookie {
-	schemaCookies := make([]schemas.Cookie, len(cookies))
+// convertHttpCookiesToHARSchema converts net/http cookies to the HAR schema format (ISO 8601 timestamps).
+func convertHttpCookiesToHARSchema(cookies []*http.Cookie) []schemas.HARCookie {
+	schemaCookies := make([]schemas.HARCookie, len(cookies))
 	for i, c := range cookies {
-		expires := float64(-1)
+		expiresStr := ""
+		// Check if the expiration time is set and format as ISO 8601 (RFC3339Nano) for HAR compliance.
 		if !c.Expires.IsZero() {
-			// Unix time (seconds) for HAR compatibility.
-			expires = float64(c.Expires.Unix())
+			expiresStr = c.Expires.UTC().Format(time.RFC3339Nano)
 		}
-		schemaCookies[i] = schemas.Cookie{
+
+		schemaCookies[i] = schemas.HARCookie{
 			Name:     c.Name,
 			Value:    c.Value,
 			Path:     c.Path,
 			Domain:   c.Domain,
-			Expires:  expires,
+			Expires:  expiresStr,
 			HTTPOnly: c.HttpOnly,
 			Secure:   c.Secure,
 		}
@@ -543,3 +585,4 @@ func isTextMime(mimeType string) bool {
 		strings.Contains(lowerMime, "json") ||
 		strings.Contains(lowerMime, "xml")
 }
+

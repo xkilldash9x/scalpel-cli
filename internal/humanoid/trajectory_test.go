@@ -113,16 +113,25 @@ func (m *mockExecutor) ExecuteScript(ctx context.Context, script string, args []
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	// Default mock behavior for scrolling, simulating immediate completion.
+	
+	// -- Executor Best Practice Mock --
+	// The scrollIterationJS is called by intelligentScroll and expects a scrollResult struct.
 	if script == scrollIterationJS {
+		// This simulates immediate success, which is a fine default for a mock.
 		result := scrollResult{
 			IsIntersecting: true,
 			IsComplete:     true,
 			ElementExists:  true,
 		}
-		jsonBytes, _ := json.Marshal(result)
-		return json.Marshal(string(jsonBytes))
+		// The Go side expects JSON bytes representing the JS object.
+		jsonBytes, err := json.Marshal(result)
+		if err != nil {
+			return nil, err
+		}
+		return jsonBytes, nil
 	}
+	
+	// Default mock behavior for other scripts.
 	return json.Marshal(map[string]interface{}{})
 }
 

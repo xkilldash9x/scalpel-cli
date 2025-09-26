@@ -1,4 +1,3 @@
-// internal/browser/manager.go
 package browser
 
 import (
@@ -22,8 +21,8 @@ type Manager struct {
 	cfg     *config.Config
 
 	sessions map[string]*Session
-	mu       sync.RWMutex
-	wg       sync.WaitGroup // WaitGroup to ensure all sessions are closed before shutting down the browser.
+	mu      sync.RWMutex
+	wg      sync.WaitGroup // WaitGroup to ensure all sessions are closed before shutting down the browser.
 
 	// Initialization state management
 	initOnce sync.Once
@@ -36,8 +35,8 @@ const shutdownGracePeriod = 15 * time.Second
 // NewManager creates a new browser manager. Initialization is deferred until the first session is requested.
 func NewManager(ctx context.Context, cfg *config.Config, logger *zap.Logger) (*Manager, error) {
 	m := &Manager{
-		logger:   logger.Named("browser_manager"),
-		cfg:      cfg,
+		logger:  logger.Named("browser_manager"),
+		cfg:     cfg,
 		sessions: make(map[string]*Session),
 	}
 	m.logger.Info("Browser manager created (initialization deferred).")
@@ -56,6 +55,7 @@ func (m *Manager) initialize(ctx context.Context) error {
 		}
 
 		// 2. Start the Playwright driver.
+		// API Compliance: playwright.Run() does not take context.
 		pw, err := playwright.Run()
 		if err != nil {
 			m.initErr = fmt.Errorf("failed to start playwright driver: %w", err)
@@ -65,6 +65,7 @@ func (m *Manager) initialize(ctx context.Context) error {
 
 		// 3. Launch the browser instance (Chromium).
 		launchOptions := m.prepareLaunchOptions()
+		// API Compliance: Launch does not take context.
 		browser, err := pw.Chromium.Launch(launchOptions)
 		if err != nil {
 			pw.Stop() // Clean up the driver if browser launch fails.
@@ -90,6 +91,7 @@ func (m *Manager) ensureInstallation(ctx context.Context) error {
 		options := &playwright.RunOptions{
 			Browsers: []string{"chromium"},
 		}
+		// Install Playwright dependencies.
 		if err := playwright.Install(options); err != nil {
 			installErrChan <- fmt.Errorf("failed to install playwright browsers: %w", err)
 		} else {
@@ -120,7 +122,7 @@ func (m *Manager) prepareLaunchOptions() playwright.BrowserTypeLaunchOptions {
 		"--enable-automation", // Explicitly enabling automation features.
 	}
 
-	// Merge default args with user-provided args (simple merge, duplicates are okay for browser args).
+	// Merge default args with user provided args (simple merge, duplicates are okay for browser args).
 	launchOptions.Args = append(defaultArgs, launchOptions.Args...)
 	return launchOptions
 }
@@ -198,6 +200,7 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, url string) ([]string,
 		sessionCtx.Close(cleanupCtx)
 	}()
 
+	// Navigate to the provided URL.
 	if err := sessionCtx.Navigate(ctx, url); err != nil {
 		return nil, fmt.Errorf("failed to navigate to %s: %w", url, err)
 	}
@@ -217,6 +220,7 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, url string) ([]string,
 			return links;
 		}
 	`
+	// Execute the script on the page.
 	if err := sessionCtx.ExecuteScript(ctx, script, &hrefs); err != nil {
 		return nil, fmt.Errorf("failed to extract links: %w", err)
 	}
@@ -245,7 +249,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	// Initiate close concurrently.
 	for _, s := range sessionsToClose {
 		go func(s *Session) {
-			// Use the provided context for closing, allowing timeout control.
+			// Use the provided context for closing, allowing timeout control for the Go logic.
 			if err := s.Close(ctx); err != nil {
 				m.logger.Warn("Error during session close in shutdown.", zap.String("session_id", s.ID()), zap.Error(err))
 			}
@@ -259,6 +263,7 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 		close(done)
 	}()
 
+	// Use the provided context to time bound the wait.
 	select {
 	case <-done:
 		m.logger.Info("All sessions closed gracefully.")
@@ -267,20 +272,22 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	}
 
 	// 3. Close the browser instance and driver.
-	// Use a fresh context for final cleanup steps.
-	cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), shutdownGracePeriod)
-	defer cleanupCancel()
-
 	var shutdownErr error
 
 	if m.browser != nil {
-		if err := m.browser.Close(cleanupCtx); err != nil {
+		// Modernization: Provide a 'Reason' for closure.
+		// API Compliance: Close does not take context.
+		closeOptions := playwright.BrowserCloseOptions{
+			Reason: playwright.String("Application shutdown initiated."),
+		}
+		if err := m.browser.Close(closeOptions); err != nil {
 			m.logger.Error("Failed to close browser instance.", zap.Error(err))
 			shutdownErr = fmt.Errorf("failed to close browser: %w", err)
 		}
 	}
 
-	if err := m.pw.Stop(cleanupCtx); err != nil {
+	// API Compliance: Stop does not take context.
+	if err := m.pw.Stop(); err != nil {
 		m.logger.Error("Failed to stop Playwright driver.", zap.Error(err))
 		if shutdownErr == nil {
 			shutdownErr = fmt.Errorf("failed to stop playwright driver: %w", err)
@@ -290,3 +297,4 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	m.logger.Info("Browser manager shutdown complete.")
 	return shutdownErr
 }
+
