@@ -30,8 +30,8 @@ type StabilizationFunc func(ctx context.Context) error
 // Interactor is responsible for intelligently interacting with web pages using Playwright.
 type Interactor struct {
 	logger      *zap.Logger
-	page        playwright.Page  // The page being interacted with.
-	humanoidCfg *humanoid.Config // Configuration for human-like behavior.
+	page        playwright.Page // The page being interacted with.
+	humanoidCfg *humanoid.Config // Configuration for human-like behavior (basic parameters only).
 	stabilizeFn StabilizationFunc
 	rng         *rand.Rand
 }
@@ -49,9 +49,9 @@ type interactiveElement struct {
 
 // ElementData holds essential information about a DOM node, extracted via JS evaluation.
 type ElementData struct {
-	NodeName   string            `json:"nodeName"`
-	Attributes map[string]string `json:"attributes"`
-	TextContent string           `json:"textContent"`
+	NodeName      string              `json:"nodeName"`
+	Attributes    map[string]string `json:"attributes"`
+	TextContent   string            `json:"textContent"`
 	// For SELECT elements.
 	SelectOptions []SelectOptionData `json:"selectOptions"`
 }
@@ -215,8 +215,8 @@ const interactiveSelectors = "a[href], button, [onclick], [role=button], [role=l
 // discoveryScript performs discovery, visibility checks, data extraction, and temporary tagging in a single JS evaluation.
 const discoveryScript = `
 	(selectors) => {
-	    const elementsData = [];
-	    const candidates = document.querySelectorAll(selectors);
+		const elementsData = [];
+		const candidates = document.querySelectorAll(selectors);
 		const maxTextLength = 64;
 
 		// Helper to check visibility (approximating Playwright's checks).
@@ -236,15 +236,15 @@ const discoveryScript = `
 			return el.disabled || el.getAttribute('aria-disabled') === 'true';
 		};
 
-	    candidates.forEach((el, index) => {
+		candidates.forEach((el, index) => {
 			// 1. Filter: Visibility and Disabled status.
 			if (!isVisible(el) || isDisabled(el)) return;
 
-	        // 2. Data Extraction
-	        const attributes = {};
-	        for (const attr of el.attributes) {
-	            attributes[attr.name] = attr.value;
-	        }
+			// 2. Data Extraction
+			const attributes = {};
+			for (const attr of el.attributes) {
+				attributes[attr.name] = attr.value;
+			}
 
 			let textContent = (el.textContent || "").trim();
 			if (textContent.length > maxTextLength) {
@@ -265,21 +265,21 @@ const discoveryScript = `
 			// 4. Generate unique tag ID for robust targeting.
 			const tagId = 'scalpel-id-' + index + '-' + Date.now() + Math.random().toString(36).substring(2, 15);
 
-	        elementsData.push({
+			elementsData.push({
 				tagId: tagId,
-	            data: {
+				data: {
 					nodeName: el.tagName,
 					attributes: attributes,
 					textContent: textContent,
 					selectOptions: selectOptions
 				}
-	        });
+			});
 
 			// 5. Tag the element immediately.
 			el.setAttribute('data-scalpel-discovery-id', tagId);
-	    });
+		});
 
-	    return elementsData;
+		return elementsData;
 	}
 	`
 
@@ -293,16 +293,19 @@ func (i *Interactor) discoverElements(ctx context.Context, interacted map[string
 		return nil, fmt.Errorf("page not available for discovery")
 	}
 
-	// Use a specific timeout for the discovery query.
-	queryCtx, cancelQuery := context.WithTimeout(ctx, 30*time.Second)
-	defer cancelQuery()
+	// Note: The original code used a specific timeout context (queryCtx) and attempted to pass it to Evaluate.
+	// In playwright-go, Evaluate relies on the page's default timeout.
 
 	var results []discoveryResult
 
 	// Execute the optimized script.
-	// We must use the context (queryCtx) with the Evaluate call for proper timeout handling.
-	rawResult, err := i.page.Evaluate(queryCtx, discoveryScript, interactiveSelectors)
+	// API Compliance: Evaluate does not take context.
+	rawResult, err := i.page.Evaluate(discoveryScript, interactiveSelectors)
 	if err != nil {
+		// Check if the parent context was cancelled during evaluation.
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
 		return nil, fmt.Errorf("failed to execute discovery script: %w", err)
 	}
 
@@ -329,18 +332,17 @@ func (i *Interactor) cleanupDiscoveryAttributes() {
 	}
 
 	script := `() => {
-			document.querySelectorAll('[data-scalpel-discovery-id]').forEach(el => {
-				el.removeAttribute('data-scalpel-discovery-id');
-			});
-		}`
-	// Use a short timeout for the cleanup task, running in the background.
-	cleanupCtx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-	defer cancel()
+				document.querySelectorAll('[data-scalpel-discovery-id]').forEach(el => {
+					el.removeAttribute('data-scalpel-discovery-id');
+				});
+			}`
 
 	// Execute cleanup non-blockingly.
 	go func() {
-		_, err := i.page.Evaluate(cleanupCtx, script)
-		if err != nil && cleanupCtx.Err() == nil && !errors.Is(err, playwright.ErrTargetClosed) {
+		// API Compliance: Evaluate does not take context.
+		_, err := i.page.Evaluate(script)
+		// We only log if the error is not due to the page closing during cleanup.
+		if err != nil && !errors.Is(err, playwright.ErrTargetClosed) {
 			i.logger.Debug("Failed to clean up discovery attributes.", zap.Error(err))
 		}
 	}()
@@ -391,6 +393,9 @@ func (i *Interactor) executeInteraction(ctx context.Context, element interactive
 	// The selector targets the element using the temporary attribute set during discovery.
 	var err error
 
+	// Note: This interaction logic uses standard Playwright actions, not the full humanoid controller.
+	// The Session.Click/Type methods handle the delegation if the full humanoid simulation is desired.
+
 	if element.IsInput {
 		if strings.ToUpper(element.InputData.NodeName) == "SELECT" {
 			err = i.handleSelectInteraction(ctx, element.Selector, element.InputData)
@@ -406,7 +411,7 @@ func (i *Interactor) executeInteraction(ctx context.Context, element interactive
 		// Check if the error is because the element disappeared (common in SPAs) or is no longer visible/interactive.
 		// Playwright throws specific errors for these cases due to its auto-waiting.
 		if strings.Contains(err.Error(), "element not found") || strings.Contains(err.Error(), "not visible") || strings.Contains(err.Error(), "not enabled") {
-			log.Debug("Element disappeared or became non-interactive before action.", zap.String("selector", element.Selector))
+			log.Debug("Element disappeared or became non interactive before action.", zap.String("selector", element.Selector))
 			return false, nil // Not successful, but also not a critical error.
 		}
 		return false, fmt.Errorf("interaction failed: %w", err)
@@ -429,14 +434,16 @@ func (i *Interactor) executeClick(ctx context.Context, selector string) error {
 		}
 	}
 
-	return i.page.Click(ctx, selector, options)
+	// API Compliance: Click does not take context.
+	return i.page.Click(selector, options)
 }
 
 func (i *Interactor) executeType(ctx context.Context, selector string, text string) error {
-	// Use Type for humanoid behavior (key-by-key delay), otherwise use Fill.
+	// Use Type for humanoid behavior (key by key delay), otherwise use Fill.
 	if i.humanoidCfg != nil && i.humanoidCfg.KeyHoldMeanMs > 0 {
 		// Clear the field first using Fill for reliability.
-		if err := i.page.Fill(ctx, selector, "", playwright.PageFillOptions{Timeout: playwright.Float(5000)}); err != nil {
+		// API Compliance: Fill does not take context.
+		if err := i.page.Fill(selector, "", playwright.PageFillOptions{Timeout: playwright.Float(5000)}); err != nil {
 			return fmt.Errorf("failed to clear input field before typing: %w", err)
 		}
 
@@ -446,16 +453,18 @@ func (i *Interactor) executeType(ctx context.Context, selector string, text stri
 			Timeout: playwright.Float(10000),
 			Delay:   playwright.Float(delay),
 		}
-		return i.page.Type(ctx, selector, text, typeOptions)
+		// API Compliance: Type does not take context.
+		return i.page.Type(selector, text, typeOptions)
 	}
 
 	// Standard Fill.
-	return i.page.Fill(ctx, selector, text, playwright.PageFillOptions{Timeout: playwright.Float(10000)})
+	// API Compliance: Fill does not take context.
+	return i.page.Fill(selector, text, playwright.PageFillOptions{Timeout: playwright.Float(10000)})
 }
 
 func (i *Interactor) handleSelectInteraction(ctx context.Context, selector string, data ElementData) error {
 	var options []string
-	// Find available, non-empty options.
+	// Find available, non empty options.
 	for _, opt := range data.SelectOptions {
 		if !opt.Disabled && opt.Value != "" {
 			options = append(options, opt.Value)
@@ -472,13 +481,14 @@ func (i *Interactor) handleSelectInteraction(ctx context.Context, selector strin
 	if i.humanoidCfg != nil {
 		// Optionally click first to simulate opening the dropdown.
 		if err := i.executeClick(ctx, selector); err != nil {
-			i.logger.Debug("Humanoid click before select failed (non-critical).", zap.Error(err))
+			i.logger.Debug("Humanoid click before select failed (non critical).", zap.Error(err))
 		}
 		i.hesitate(ctx, 100*time.Millisecond)
 	}
 
 	// Use Playwright's SelectOption.
-	_, err := i.page.SelectOption(ctx, selector, playwright.SelectOptionValues{
+	// API Compliance: SelectOption does not take context.
+	_, err := i.page.SelectOption(selector, playwright.SelectOptionValues{
 		Values: playwright.StringSlice(selectedValue),
 	}, playwright.PageSelectOptionOptions{
 		Timeout: playwright.Float(5000),
@@ -563,6 +573,7 @@ func generateNodeFingerprint(data ElementData, attrs map[string]string) (string,
 	}
 
 	description := sb.String()
+	// Skip elements where the description is just the tag name, as they are not unique enough.
 	if tagNameLower == description {
 		return "", ""
 	}
@@ -584,6 +595,7 @@ func isInputElement(data ElementData) bool {
 	if name == "INPUT" {
 		inputType := strings.ToLower(attrs["type"])
 		switch inputType {
+		// These types typically perform immediate actions or are not text entry fields.
 		case "hidden", "submit", "button", "reset", "image":
 			return false
 		default:
@@ -595,5 +607,6 @@ func isInputElement(data ElementData) bool {
 		return true
 	}
 
+	// Supports contenteditable elements.
 	return attrs["contenteditable"] == "true"
 }
