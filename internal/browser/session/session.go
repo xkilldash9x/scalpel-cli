@@ -423,6 +423,13 @@ func (s *Session) Close(ctx context.Context) error {
 	return nil
 }
 
+// SetOnClose sets a callback function to be executed when the session is closed.
+func (s *Session) SetOnClose(fn func()) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.onClose = fn
+}
+
 // stabilize waits for the system to reach a stable state (Network Idle + JS Idle).
 func (s *Session) stabilize(ctx context.Context) error {
 	stabCtx, stabCancel := CombineContext(s.ctx, ctx)
@@ -615,10 +622,11 @@ func (s *Session) processResponse(resp *http.Response) error {
 		}
 
 		// Parse for DOM.
-		doc, err = htmlquery.Parse(bytes.NewReader(bodyBytes))
-		if err != nil {
+		var parseErr error
+		doc, parseErr = htmlquery.Parse(bytes.NewReader(bodyBytes))
+		if parseErr != nil {
 			// Log the error but continue, as the DOM might be partially usable.
-			s.logger.Error("Failed to parse HTML response.", zap.Error(err), zap.String("url", resp.Request.URL.String()))
+			s.logger.Error("Failed to parse HTML response.", zap.Error(parseErr), zap.String("url", resp.Request.URL.String()))
 		}
 
 		// Parse for CSS.

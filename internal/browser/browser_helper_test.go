@@ -15,8 +15,10 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
+	// FIX: Import the session package to resolve the undefined Session type.
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/session"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
 var (
@@ -82,7 +84,8 @@ func TestMain(m *testing.M) {
 }
 
 type testFixture struct {
-	Session      *Session
+	// FIX: Use the correctly namespaced type from the imported session package.
+	Session      *session.Session
 	Config       *config.Config
 	Manager      *Manager
 	Logger       *zap.Logger
@@ -165,21 +168,22 @@ func newTestFixture(t *testing.T, configurators ...fixtureConfigurator) *testFix
 	)
 	require.NoError(t, err, "Failed to create new analysis context (session)")
 
-	session, ok := sessionInterface.(*Session)
-	require.True(t, ok, "session must be of type *Session")
+	// FIX: Cast to the correctly namespaced session.Session type.
+	sess, ok := sessionInterface.(*session.Session)
+	require.True(t, ok, "session must be of type *session.Session")
 
 	// Ensure the session is closed when the test finishes.
 	t.Cleanup(func() {
 		// Use a background context with timeout for cleanup.
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), shutdownTimeout/3)
 		defer closeCancel()
-		if err := session.Close(closeCtx); err != nil {
+		if err := sess.Close(closeCtx); err != nil {
 			t.Logf("Warning: Error during session close in cleanup: %v", err)
 		}
 	})
 
 	return &testFixture{
-		Session:      session,
+		Session:      sess,
 		Config:       &cfgCopy,
 		Manager:      manager,
 		Logger:       logger,
@@ -202,3 +206,4 @@ func createStaticTestServer(t *testing.T, htmlContent string) *httptest.Server {
 		fmt.Fprintln(w, htmlContent)
 	}))
 }
+
