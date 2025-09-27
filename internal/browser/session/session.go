@@ -492,13 +492,25 @@ func (s *Session) Navigate(ctx context.Context, targetURL string) error {
 
 	s.logger.Info("Navigating", zap.String("url", resolvedURL.String()))
 
-	// 2. Dispatch 'beforeunload' event. A real browser would check the return value.
-	// Here, we dispatch it for script compatibility but don't yet handle cancellation.
+	s.logger.Info("Navigating", zap.String("url", resolvedURL.String()))
+
+	s.logger.Info("Navigating", zap.String("url", resolvedURL.String()))
+
+	// 2. Dispatch 'beforeunload' event synchronously.
+	// We use a channel to block the Navigate function until the event loop
+	// has finished processing the event. This prevents the main goroutine
+	// from racing ahead and modifying the DOM bridge while the event loop is
+	// still trying to use the old one.
+	done := make(chan struct{})
 	s.eventLoop.RunOnLoop(func(vm *goja.Runtime) {
+		s.mu.RLock() // Use a read lock inside the loop for safety
+		defer s.mu.RUnlock()
 		if s.domBridge != nil {
 			s.domBridge.DispatchEventOnNode(s.domBridge.document, "beforeunload")
 		}
+		close(done) // Signal that the event has been processed
 	})
+	<-done // Wait for the signal
 
 	// 3. Create the request.
 	req, err := http.NewRequestWithContext(navCtx, http.MethodGet, resolvedURL.String(), nil)
@@ -648,27 +660,19 @@ func (s *Session) processResponse(resp *http.Response) error {
 }
 
 // extractAndParseCSS finds, fetches, and parses CSS from <link> and <style> tags.
+// This function is refactored to use a channel-based approach for fetching external stylesheets concurrently.
 func (s *Session) extractAndParseCSS(doc *html.Node, baseURL *url.URL) {
 	if doc == nil {
 		return
 	}
 
 	// -- 1. Reset the Layout Engine (Robust Synchronization) --
-
-	// We must synchronize access to the s.layoutEngine pointer, as it is accessed concurrently
-	// by other methods (e.g., IsVisible) and asynchronous fetches.
 	s.mu.Lock()
-
-	// Reset the layout engine. Since the upstream library removed Reset(), we re-initialize
-	// the engine to guarantee a clean state, preventing style leakage across navigations.
 	s.layoutEngine = layout.NewEngine()
-
-	// CRITICAL: Capture the reference to the newly created engine instance.
-	// This solves a race condition where asynchronous CSS fetches from a previous navigation
-	// might complete after this reset, potentially applying stale styles to the new engine.
+	// CRITICAL: Capture the reference to the newly created engine instance for this specific navigation.
+	// This prevents a race condition where async fetches from a previous navigation might apply stale
+	// styles to the new engine.
 	currentEngine := s.layoutEngine
-
-	// We can unlock after initialization and capturing the reference.
 	s.mu.Unlock()
 
 	// -- 2. Parse Inline <style> tags (Synchronous) --
@@ -677,19 +681,20 @@ func (s *Session) extractAndParseCSS(doc *html.Node, baseURL *url.URL) {
 		cssContent := htmlquery.InnerText(tag)
 		p := parser.NewParser(cssContent)
 		stylesheet := p.Parse()
-
-		// Synchronize the addition of the stylesheet.
-		s.mu.Lock()
-		// Verify that the engine instance we initialized is still the active one before applying styles.
-		// (Handles rapid successive navigations).
-		if s.layoutEngine == currentEngine {
-			s.layoutEngine.AddStyleSheet(stylesheet)
-		}
-		s.mu.Unlock()
+		// CORRECTED: Pass the struct value directly.
+		currentEngine.AddStyleSheet(stylesheet) // Add directly to the captured engine instance.
 	}
 
-	// -- 3. Fetch and Parse External <link> tags (Asynchronous) --
+	// -- 3. Fetch and Parse External <link> tags (Asynchronous using Channels) --
 	linkTags := htmlquery.Find(doc, "//link[@rel='stylesheet' and @href]")
+	if len(linkTags) == 0 {
+		return
+	}
+
+	var wg sync.WaitGroup
+	// Create a buffered channel to receive parsed stylesheets from worker goroutines.
+	stylesheetChan := make(chan *parser.StyleSheet, len(linkTags))
+
 	for _, tag := range linkTags {
 		href := htmlquery.SelectAttr(tag, "href")
 		if href == "" {
@@ -701,44 +706,55 @@ func (s *Session) extractAndParseCSS(doc *html.Node, baseURL *url.URL) {
 			continue
 		}
 
-		// Asynchronously fetch the CSS, passing the specific engine instance associated with this navigation.
-		s.fetchAndParseCSS(cssURL.String(), currentEngine)
+		wg.Add(1)
+		// Launch a worker goroutine to fetch and parse a single stylesheet.
+		go func(url string) {
+			defer wg.Done()
+			s.logger.Debug("Fetching external stylesheet", zap.String("url", url))
+			req, err := http.NewRequestWithContext(s.ctx, "GET", url, nil)
+			if err != nil {
+				return
+			}
+			s.prepareRequestHeaders(req)
+
+			resp, err := s.client.Do(req)
+			if err != nil || resp.StatusCode != http.StatusOK {
+				return
+			}
+			defer resp.Body.Close()
+
+			body, err := io.ReadAll(resp.Body)
+			if err != nil {
+				return
+			}
+
+			p := parser.NewParser(string(body))
+			stylesheet := p.Parse()
+			// CORRECTED: Send the memory address of the struct value.
+			stylesheetChan <- &stylesheet
+		}(cssURL.String())
 	}
-}
 
-// fetchAndParseCSS fetches an external stylesheet and adds it to the specified layout engine instance.
-func (s *Session) fetchAndParseCSS(url string, targetEngine *layout.Engine) { // Updated signature
+	// Launch a goroutine to close the channel once all workers are done.
+	// This signals the collector loop below that no more results are coming.
 	go func() {
-		s.logger.Debug("Fetching external stylesheet", zap.String("url", url))
-		req, err := http.NewRequestWithContext(s.ctx, "GET", url, nil)
-		if err != nil {
-			return
-		}
-		s.prepareRequestHeaders(req)
-
-		resp, err := s.client.Do(req)
-		if err != nil || resp.StatusCode != http.StatusOK {
-			return
-		}
-		defer resp.Body.Close()
-
-		body, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return
-		}
-
-		p := parser.NewParser(string(body))
-		stylesheet := p.Parse()
-
-		// Synchronize the addition of the stylesheet.
-		s.mu.Lock()
-		// CRITICAL: Check if the target engine from the original navigation is still the active session engine.
-		if s.layoutEngine == targetEngine {
-			s.layoutEngine.AddStyleSheet(stylesheet)
-		}
-		// else: Navigation occurred before fetch completed; discard the stylesheet.
-		s.mu.Unlock()
+		wg.Wait()
+		close(stylesheetChan)
 	}()
+
+	// The main goroutine now acts as the single collector. It ranges over the
+	// channel, receiving results until the channel is closed.
+	for stylesheet := range stylesheetChan {
+		// This is the only place where stylesheets are added from concurrent operations.
+		// We still need to lock to protect against other session methods, and check
+		// that the engine we are modifying is still the active one.
+		s.mu.Lock()
+		if s.layoutEngine == currentEngine {
+			// Dereference the pointer to get the value for the method call.
+			s.layoutEngine.AddStyleSheet(*stylesheet)
+		}
+		s.mu.Unlock()
+	}
 }
 
 // updateState updates the session's current URL and resets the DOM/JS environment.
@@ -2908,6 +2924,3 @@ func setAttr(n *html.Node, key, val string) {
 	}
 	n.Attr = append(n.Attr, html.Attribute{Key: key, Val: val})
 }
-
-
-
