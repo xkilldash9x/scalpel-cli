@@ -22,7 +22,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
-	"github.com/xkilldash9x/scalpel-cli/internal/humanoid"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 )
 
 // loginResult represents the semantic outcome of a single login attempt.

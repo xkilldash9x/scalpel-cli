@@ -7,7 +7,7 @@ import (
 	"net/http"
 
 	// This is your application's main, feature-rich HTTP client.
-	"github.com/xkilldash9x/scalpel-cli/internal/network"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
 )
 
 // HTTPClient interface (defined elsewhere in discovery package, e.g., passive.go):

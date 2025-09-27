@@ -21,7 +21,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/discovery"
 	"github.com/xkilldash9x/scalpel-cli/internal/engine"
-	"github.com/xkilldash9x/scalpel-cli/internal/network"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"github.com/xkilldash9x/scalpel-cli/internal/orchestrator"
 	"github.com/xkilldash9x/scalpel-cli/internal/reporting"

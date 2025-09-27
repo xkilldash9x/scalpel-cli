@@ -18,7 +18,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/humanoid" // Added import
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid" // Added import
 )
 
 //go:embed taint_shim.js

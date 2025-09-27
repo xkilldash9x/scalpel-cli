@@ -16,7 +16,7 @@ import (
 
 	"github.com/antchfx/htmlquery"
 	"golang.org/x/net/html"
-	"github.com/xkilldash9x/scalpel-cli/internal/humanoid"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 )
 
 // -- Structs and Types --
@@ -160,7 +160,7 @@ func (i *Interactor) interactDepth(
 		interactedElements[element.Fingerprint] = true
 
 		if err != nil {
-			// Log failure but continue exploration with other elements.
+			// Log failnure but continue exploration with other elements.
             if actionCtx.Err() == nil {
 			    i.logger.Debug(fmt.Sprintf("Interaction failed: %v", err))
             }
