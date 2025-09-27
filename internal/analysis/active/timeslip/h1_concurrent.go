@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/network"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
 )
 
 // ExecuteH1Concurrent implements the "dogpile" strategy.

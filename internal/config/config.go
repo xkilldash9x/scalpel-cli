@@ -6,7 +6,7 @@ import (
 	"time"
 
 	"github.com/spf13/viper"
-	"github.com/xkilldash9x/scalpel-cli/internal/humanoid"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 )
 
 var (

@@ -18,7 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/security"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/security"
 )
 
 // -- Test Helpers --

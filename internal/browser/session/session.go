@@ -28,7 +28,7 @@ import (
 	// User specific imports
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
-	"github.com/xkilldash9x/scalpel-cli/internal/humanoid"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 )
 
 // Session represents a single browsing session (Pure Go implementation).
