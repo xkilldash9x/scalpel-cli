@@ -12,6 +12,7 @@ import (
 
 	"github.com/aquilax/go-perlin"
 	"github.com/stretchr/testify/assert"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"go.uber.org/zap"
 )
 
@@ -21,7 +22,7 @@ import (
 
 // mockExecutor implements the new, agnostic Executor interface for testing.
 type mockExecutor struct {
-	dispatchedEvents []MouseEventData
+	dispatchedEvents []schemas.MouseEventData
 	sentKeys         []string
 	sleepDurations   []time.Duration
 	returnErr        error
@@ -34,22 +35,22 @@ type mockExecutor struct {
 	cancelFunc   context.CancelFunc
 
 	// Mocks for the new interface methods.
-	MockGetElementGeometry func(ctx context.Context, selector string) (*ElementGeometry, error)
+	MockGetElementGeometry func(ctx context.Context, selector string) (*schemas.ElementGeometry, error)
 	// ADDED: Mock function for ExecuteScript
-	MockExecuteScript      func(ctx context.Context, script string, args []interface{}) (json.RawMessage, error)
+	MockExecuteScript func(ctx context.Context, script string, args []interface{}) (json.RawMessage, error)
 }
 
 // newMockExecutor creates a new mock executor.
 func newMockExecutor() *mockExecutor {
 	return &mockExecutor{
-		dispatchedEvents: make([]MouseEventData, 0),
+		dispatchedEvents: make([]schemas.MouseEventData, 0),
 		sentKeys:         make([]string, 0),
 		sleepDurations:   make([]time.Duration, 0),
 	}
 }
 
 // DispatchMouseEvent records the mouse event dispatch call using the agnostic MouseEventData.
-func (m *mockExecutor) DispatchMouseEvent(ctx context.Context, data MouseEventData) error {
+func (m *mockExecutor) DispatchMouseEvent(ctx context.Context, data schemas.MouseEventData) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	m.callCount++
@@ -90,7 +91,7 @@ func (m *mockExecutor) SendKeys(ctx context.Context, keys string) error {
 }
 
 // GetElementGeometry mocks geometry retrieval using the agnostic ElementGeometry type.
-func (m *mockExecutor) GetElementGeometry(ctx context.Context, selector string) (*ElementGeometry, error) {
+func (m *mockExecutor) GetElementGeometry(ctx context.Context, selector string) (*schemas.ElementGeometry, error) {
 	if m.MockGetElementGeometry != nil {
 		return m.MockGetElementGeometry(ctx, selector)
 	}
@@ -98,7 +99,7 @@ func (m *mockExecutor) GetElementGeometry(ctx context.Context, selector string) 
 		return nil, ctx.Err()
 	}
 	// Default mock behavior.
-	return &ElementGeometry{
+	return &schemas.ElementGeometry{
 		Vertices: []float64{0, 0, 10, 0, 10, 10, 0, 10},
 		Width:    10,
 		Height:   10,
@@ -113,7 +114,7 @@ func (m *mockExecutor) ExecuteScript(ctx context.Context, script string, args []
 	if ctx.Err() != nil {
 		return nil, ctx.Err()
 	}
-	
+
 	// -- Executor Best Practice Mock --
 	// The scrollIterationJS is called by intelligentScroll and expects a scrollResult struct.
 	if script == scrollIterationJS {
@@ -130,11 +131,10 @@ func (m *mockExecutor) ExecuteScript(ctx context.Context, script string, args []
 		}
 		return jsonBytes, nil
 	}
-	
+
 	// Default mock behavior for other scripts.
 	return json.Marshal(map[string]interface{}{})
 }
-
 
 // newTestHumanoid creates a Humanoid instance with deterministic dependencies for testing.
 func newTestHumanoid(executor Executor) *Humanoid {
@@ -198,7 +198,7 @@ func TestSimulateTrajectory_Success(t *testing.T) {
 	field := NewPotentialField()
 
 	// 2. Execution
-	finalVelocity, err := h.simulateTrajectory(context.Background(), start, end, field, ButtonNone)
+	finalVelocity, err := h.simulateTrajectory(context.Background(), start, end, field, schemas.ButtonNone)
 
 	// 3. Assertions
 	assert.NoError(t, err)
@@ -212,8 +212,8 @@ func TestSimulateTrajectory_Success(t *testing.T) {
 
 	// Check properties of the dispatched events.
 	firstEvent := mock.dispatchedEvents[0]
-	assert.Equal(t, MouseMove, firstEvent.Type)
-	assert.Equal(t, ButtonNone, firstEvent.Button)
+	assert.Equal(t, schemas.MouseMove, firstEvent.Type)
+	assert.Equal(t, schemas.ButtonNone, firstEvent.Button)
 	assert.Equal(t, int64(0), firstEvent.Buttons, "no buttons should be held down")
 
 	// Check final velocity (it will be non-zero due to momentum).
@@ -229,7 +229,7 @@ func TestSimulateTrajectory_Drag(t *testing.T) {
 	end := Vector2D{X: 200, Y: 200}
 
 	// 2. Execution - Pass ButtonLeft to simulate a drag.
-	_, err := h.simulateTrajectory(context.Background(), start, end, nil, ButtonLeft)
+	_, err := h.simulateTrajectory(context.Background(), start, end, nil, schemas.ButtonLeft)
 
 	// 3. Assertions
 	assert.NoError(t, err)
@@ -256,7 +256,7 @@ func TestSimulateTrajectory_ContextCancel(t *testing.T) {
 	start := Vector2D{X: 0, Y: 0}
 	end := Vector2D{X: 800, Y: 600} // A long move to ensure cancellation happens mid-way.
 	// 2. Execution
-	_, err := h.simulateTrajectory(ctx, start, end, nil, ButtonNone)
+	_, err := h.simulateTrajectory(ctx, start, end, nil, schemas.ButtonNone)
 
 	// 3. Assertions
 	assert.ErrorIs(t, err, context.Canceled, "error should be context.Canceled")

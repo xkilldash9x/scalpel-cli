@@ -3,13 +3,11 @@ package humanoid
 import (
 	"context"
 	"fmt"
-
-	// "github.com/chromedp/cdproto/input" // Removed this dependency
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"go.uber.org/zap"
 )
 
-// DragAndDrop simulates a human-like drag & drop action from a start element to an end element.
-// It executes immediately using the provided context.
+// DragAndDrop simulates a human-like drag and drop action from a start element to an end element.
 func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector string) error {
 	var start, end Vector2D
 	var err error
@@ -22,7 +20,8 @@ func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector s
 	if err != nil {
 		h.logger.Error("DragAndDrop failed: could not get starting element position",
 			zap.String("selector", startSelector),
-			zap.Error(err))
+			zap.Error(err),
+		)
 		return fmt.Errorf("could not get starting element position: %w", err)
 	}
 
@@ -30,7 +29,8 @@ func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector s
 	if err != nil {
 		h.logger.Error("DragAndDrop failed: could not get ending element position",
 			zap.String("selector", endSelector),
-			zap.Error(err))
+			zap.Error(err),
+		)
 		return fmt.Errorf("could not get ending element position: %w", err)
 	}
 
@@ -44,17 +44,16 @@ func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector s
 		return err
 	}
 
-	// --- Mouse down (Grab) ---
+	// -- Mouse down (Grab) --
 	h.mu.Lock()
 	currentPos := h.currentPos
 	h.mu.Unlock()
 
-	// REFACTORED: Use the agnostic MouseEventData struct instead of chromedp types.
-	mouseDownData := MouseEventData{
-		Type:       MousePress,
+	mouseDownData := schemas.MouseEventData{
+		Type:       schemas.MousePress,
 		X:          currentPos.X,
 		Y:          currentPos.Y,
-		Button:     ButtonLeft,
+		Button:     schemas.ButtonLeft,
 		ClickCount: 1,
 		Buttons:    1, // Bitfield: 1 indicates the left button is now pressed.
 	}
@@ -66,7 +65,7 @@ func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector s
 
 	// Update the internal state to reflect the button being held down.
 	h.mu.Lock()
-	h.currentButtonState = ButtonLeft
+	h.currentButtonState = schemas.ButtonLeft
 	h.mu.Unlock()
 
 	// Pause briefly after pressing down to simulate holding the object.
@@ -75,7 +74,7 @@ func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector s
 		return err
 	}
 
-	// --- Execute the drag movement ---
+	// -- Execute the drag movement --
 	field := NewPotentialField()
 	h.mu.Lock()
 	attractionStrength := h.dynamicConfig.FittsA
@@ -100,33 +99,30 @@ func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector s
 		return err
 	}
 
-	// --- Mouse up (Drop) ---
+	// -- Mouse up (Drop) --
 	return h.releaseMouse(ctx)
 }
 
 // releaseMouse is a helper function to handle the mouse up event and update internal state.
-// It includes error handling to prevent the mouse from getting stuck in a "pressed" state.
 func (h *Humanoid) releaseMouse(ctx context.Context) error {
 	h.mu.Lock()
 	currentPos := h.currentPos
 	// Only release if our state shows the left button is currently pressed.
-	if h.currentButtonState != ButtonLeft {
+	if h.currentButtonState != schemas.ButtonLeft {
 		h.mu.Unlock()
 		return nil // Nothing to do.
 	}
 	h.mu.Unlock()
 
-	// REFACTORED: Use the agnostic MouseEventData struct.
-	mouseUpData := MouseEventData{
-		Type:       MouseRelease,
+	mouseUpData := schemas.MouseEventData{
+		Type:       schemas.MouseRelease,
 		X:          currentPos.X,
 		Y:          currentPos.Y,
-		Button:     ButtonLeft,
+		Button:     schemas.ButtonLeft,
 		ClickCount: 1,
 		Buttons:    0, // Bitfield: 0 indicates no buttons are pressed after release.
 	}
 
-	// Dispatch the "mouse up" event.
 	err := h.executor.DispatchMouseEvent(ctx, mouseUpData)
 
 	if err != nil {
@@ -136,9 +132,8 @@ func (h *Humanoid) releaseMouse(ctx context.Context) error {
 
 	// Always update the internal state to "none".
 	h.mu.Lock()
-	h.currentButtonState = ButtonNone
+	h.currentButtonState = schemas.ButtonNone
 	h.mu.Unlock()
 
-	// Return the original error if the dispatch failed.
 	return err
 }

@@ -11,10 +11,10 @@ import (
 )
 
 // SessionProvider is a function type that retrieves the currently active session.
-// FIX: It now returns the canonical schemas.SessionContext interface.
+// It returns the canonical schemas.SessionContext interface.
 type SessionProvider func() schemas.SessionContext
 
-// --- Executor Registry (Implementation) ---
+// -- Executor Registry (Implementation) --
 
 // ExecutorRegistry manages different executors and dispatches actions.
 type ExecutorRegistry struct {
@@ -80,9 +80,9 @@ func (r *ExecutorRegistry) register(exec ActionExecutor, types ...ActionType) {
 func (r *ExecutorRegistry) Execute(ctx context.Context, action Action) (*ExecutionResult, error) {
 	executor, ok := r.executors[action.Type]
 	if !ok {
-		// ActionConclude is handled by the Agent, not the registry.
-		if action.Type == ActionConclude {
-			return nil, fmt.Errorf("ActionConclude should not be dispatched to ExecutorRegistry")
+		// These actions are handled by the Agent, not the registry.
+		if action.Type == ActionConclude || action.Type == ActionPerformComplexTask {
+			return nil, fmt.Errorf("%s should not be dispatched to ExecutorRegistry", action.Type)
 		}
 		return nil, fmt.Errorf("no executor registered for action type: %s", action.Type)
 	}
@@ -93,7 +93,7 @@ func (r *ExecutorRegistry) Execute(ctx context.Context, action Action) (*Executi
 // -- Browser Executor --
 
 // ActionHandler defines the function signature (using internal Action model).
-// FIX: The session now uses the canonical schemas.SessionContext interface.
+// The session now uses the canonical schemas.SessionContext interface.
 type ActionHandler func(session schemas.SessionContext, action Action) error
 
 // BrowserExecutor implements the agent.ActionExecutor interface.
@@ -125,11 +125,34 @@ func (e *BrowserExecutor) registerHandlers() {
 	e.handlers[ActionWaitForAsync] = e.handleWaitForAsync
 }
 
+// parseBrowserError translates a raw Go error into a structured error for the Mind.
+func parseBrowserError(err error, action Action) (string, map[string]interface{}) {
+	errStr := err.Error()
+	details := map[string]interface{}{
+		"message": errStr,
+		"action":  action.Type,
+	}
+
+	// Simple heuristic based error classification
+	if strings.Contains(errStr, "selector") || strings.Contains(errStr, "no element found") {
+		details["selector"] = action.Selector
+		return "ELEMENT_NOT_FOUND", details
+	}
+	if strings.Contains(errStr, "timeout") {
+		return "TIMEOUT_ERROR", details
+	}
+	if strings.Contains(errStr, "net::ERR") {
+		return "NAVIGATION_ERROR", details
+	}
+
+	return "GENERIC_BROWSER_ERROR", details
+}
+
 // Execute looks up and runs the appropriate handler (using internal models).
 func (e *BrowserExecutor) Execute(ctx context.Context, action Action) (*ExecutionResult, error) {
 	session := e.sessionProvider()
 	if session == nil {
-		// Pre-execution failure.
+		// Pre execution failure.
 		return nil, fmt.Errorf("cannot execute browser action (%s): no active browser session", action.Type)
 	}
 
@@ -145,9 +168,11 @@ func (e *BrowserExecutor) Execute(ctx context.Context, action Action) (*Executio
 		ObservationType: ObservedDOMChange,
 	}
 	if err != nil {
-		// Execution failure.
+		// Execution failure, create a structured error.
 		result.Status = "failed"
-		result.Error = err.Error()
+		errorCode, errorDetails := parseBrowserError(err, action)
+		result.ErrorCode = errorCode
+		result.ErrorDetails = errorDetails
 		e.logger.Warn("Browser action execution failed", zap.String("action", string(action.Type)), zap.Error(err))
 	}
 
@@ -164,25 +189,27 @@ func (e *BrowserExecutor) handleNavigate(session schemas.SessionContext, action 
 	return session.Navigate(context.Background(), action.Value)
 }
 
+// NOTE: All interaction methods now include context.Background() to match the updated interface.
+// This allows for potential future timeout/cancellation propagation for DOM interactions.
 func (e *BrowserExecutor) handleClick(session schemas.SessionContext, action Action) error {
 	if action.Selector == "" {
 		return fmt.Errorf("ActionClick requires a 'selector'")
 	}
-	return session.Click(action.Selector)
+	return session.Click(context.Background(), action.Selector)
 }
 
 func (e *BrowserExecutor) handleInputText(session schemas.SessionContext, action Action) error {
 	if action.Selector == "" {
 		return fmt.Errorf("ActionInputText requires a 'selector'")
 	}
-	return session.Type(action.Selector, action.Value)
+	return session.Type(context.Background(), action.Selector, action.Value)
 }
 
 func (e *BrowserExecutor) handleSubmitForm(session schemas.SessionContext, action Action) error {
 	if action.Selector == "" {
 		return fmt.Errorf("ActionSubmitForm requires a 'selector'")
 	}
-	return session.Submit(action.Selector)
+	return session.Submit(context.Background(), action.Selector)
 }
 
 func (e *BrowserExecutor) handleScroll(session schemas.SessionContext, action Action) error {
@@ -190,7 +217,7 @@ func (e *BrowserExecutor) handleScroll(session schemas.SessionContext, action Ac
 	if strings.EqualFold(action.Value, "up") {
 		direction = "up"
 	}
-	return session.ScrollPage(direction)
+	return session.ScrollPage(context.Background(), direction)
 }
 
 func (e *BrowserExecutor) handleWaitForAsync(session schemas.SessionContext, action Action) error {
@@ -211,5 +238,5 @@ func (e *BrowserExecutor) handleWaitForAsync(session schemas.SessionContext, act
 			e.logger.Warn("Invalid type for duration_ms, using default.", zap.String("type", fmt.Sprintf("%T", v)))
 		}
 	}
-	return session.WaitForAsync(durationMs)
+	return session.WaitForAsync(context.Background(), durationMs)
 }

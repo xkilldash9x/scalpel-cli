@@ -10,7 +10,7 @@ import (
 	"github.com/antchfx/htmlquery"
 	"golang.org/x/net/html"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/parser"
 )
 
@@ -84,7 +84,7 @@ func (b *LayoutBox) GetInlineContainer() *LayoutBox {
 
 // StyledNode represents a DOM node combined with its computed styles.
 type StyledNode struct {
-	Node     *html.Node
+	Node *html.Node
 	// Map of CSS property names to their computed values.
 	ComputedStyles map[parser.Property]parser.Value
 	Children       []*StyledNode
@@ -814,7 +814,7 @@ func max(a, b float64) float64 {
 // --- Public Interface for Geometry Retrieval ---
 
 // GetElementGeometry finds the LayoutBox corresponding to the XPath selector and returns its geometry.
-func (e *Engine) GetElementGeometry(layoutRoot *LayoutBox, selector string) (*humanoid.ElementGeometry, error) {
+func (e *Engine) GetElementGeometry(layoutRoot *LayoutBox, selector string) (*schemas.ElementGeometry, error) {
 	if layoutRoot == nil {
 		return nil, fmt.Errorf("layout tree is nil")
 	}
@@ -850,7 +850,7 @@ func (e *Engine) GetElementGeometry(layoutRoot *LayoutBox, selector string) (*hu
 }
 
 // ToElementGeometry converts the LayoutBox dimensions (the padding box) into the standard geometry format.
-func (b *LayoutBox) ToElementGeometry() *humanoid.ElementGeometry {
+func (b *LayoutBox) ToElementGeometry() *schemas.ElementGeometry {
 	d := b.Dimensions
 	// Calculate the padding box coordinates (similar to getBoundingClientRect).
 	x := d.Content.X - d.Padding.Left
@@ -866,7 +866,7 @@ func (b *LayoutBox) ToElementGeometry() *humanoid.ElementGeometry {
 		x, y + height,
 	}
 
-	return &humanoid.ElementGeometry{
+	return &schemas.ElementGeometry{
 		Vertices: vertices,
 		Width:    int64(math.Round(width)),
 		Height:   int64(math.Round(height)),

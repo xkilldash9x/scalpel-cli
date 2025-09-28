@@ -205,14 +205,11 @@ func (i *Interactor) interactDepth(
 
 // -- Element Discovery Logic --
 
-// Comprehensive XPath selectors for interactive elements based on HTML semantics and ARIA roles.
+// A broader XPath to find candidates, with refined filtering done in Go.
 const interactiveXPath = `
-    //a[@href] | //button[not(@disabled)] |
-    //input[not(@type='hidden')][not(@disabled)] |
-    //textarea[not(@disabled)] | //select[not(@disabled)] |
-    //summary | //details |
+    //a[@href] | //button | //input | //textarea | //select | //summary | //details |
     //*[normalize-space(@contenteditable)='true' or normalize-space(@contenteditable)=''] |
-    //*[(@role='button' or @role='link' or @role='tab' or @role='menuitem' or @role='checkbox' or @role='radio') and not(@aria-disabled='true')]
+    //*[(@role='button' or @role='link' or @role='tab' or @role='menuitem' or @role='checkbox' or @role='radio')]
 `
 
 // discoverElements finds, analyzes, and fingerprints interactive elements in the current DOM.
@@ -316,14 +313,38 @@ func (i *Interactor) filterAndFingerprint(results []discoveryResult, interacted 
 		data := result.Data
 		attrs := data.Attributes
 
-		// Skip readonly inputs if they are text-based inputs.
+		// -- FILTERING LOGIC --
+		// 0. Skip structural elements that are not typically interactive.
+		nodeNameLower := strings.ToLower(data.NodeName)
+		if nodeNameLower == "html" || nodeNameLower == "body" {
+			continue
+		}
+
+		// 1. Skip disabled elements
+		if _, disabled := attrs["disabled"]; disabled {
+			continue
+		}
+
+		// 2. Skip aria-disabled elements
+		if val, ariaDisabled := attrs["aria-disabled"]; ariaDisabled && val == "true" {
+			continue
+		}
+
+		// 3. Skip readonly text inputs
 		if isTextInputElement(data) {
 			if _, readonly := attrs["readonly"]; readonly {
 				continue
 			}
 		}
 
-		// Generate fingerprint and description.
+		// 4. Skip hidden inputs
+		if data.NodeName == "INPUT" {
+			if inputType, ok := attrs["type"]; ok && inputType == "hidden" {
+				continue
+			}
+		}
+
+		// -- FINGERPRINTING & APPENDING --
 		fingerprint, description := generateNodeFingerprint(data)
 		if fingerprint == "" {
 			continue
@@ -577,3 +598,4 @@ func isTextInputElement(data ElementData) bool {
 	}
 	return false
 }
+

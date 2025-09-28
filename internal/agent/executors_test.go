@@ -12,11 +12,11 @@ import (
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap/zaptest"
 
-	// FIX: Import schemas to use the canonical interfaces.
+	// Using schemas to get the canonical interfaces.
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
-// NOTE: MockSessionContext definition removed. It is now centralized in internal/agent/mocks_test.go.
+// NOTE: MockSessionContext definition is now centralized in internal/agent/mocks_test.go.
 
 // Test Setup Helper
 
@@ -32,7 +32,7 @@ func setupBrowserExecutor(t *testing.T, provideSession bool) (*BrowserExecutor, 
 	if provideSession {
 		// MockSessionContext is defined in mocks_test.go and implements schemas.SessionContext.
 		mockSession = new(MockSessionContext)
-		// FIX: Provider function must return schemas.SessionContext.
+		// Provider function must return schemas.SessionContext.
 		provider = func() schemas.SessionContext {
 			return mockSession
 		}
@@ -92,7 +92,7 @@ func TestExecute_Success(t *testing.T) {
 
 	action := Action{Type: ActionNavigate, Value: "http://test.com"}
 
-	// FIX: Update mock expectation. The implementation (executors.go) explicitly passes context.Background() to session.Navigate.
+	// The implementation (executors.go) explicitly passes context.Background() to session.Navigate.
 	// We use mock.Anything to match this behavior reliably, as the test's 'ctx' won't match the implementation's context.Background().
 	mockSession.On("Navigate", mock.Anything, "http://test.com").Return(nil).Once()
 
@@ -114,8 +114,9 @@ func TestExecute_ActionFailure(t *testing.T) {
 	action := Action{Type: ActionClick, Selector: "#missing"}
 	expectedError := errors.New("element not found")
 
-	// Click does not take context in this interface definition.
-	mockSession.On("Click", "#missing").Return(expectedError).Once()
+	// Update the mock expectation to account for the new context argument.
+	// We use mock.Anything since the exact context instance doesn't matter for this test.
+	mockSession.On("Click", mock.Anything, "#missing").Return(expectedError).Once()
 
 	result, err := executor.Execute(ctx, action)
 
@@ -141,7 +142,8 @@ func TestHandler_InputText_Validation(t *testing.T) {
 
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "requires a 'selector'")
-	mockSession.AssertNotCalled(t, "Type", mock.Anything, mock.Anything)
+	// Update the mock assertion to include the new context argument.
+	mockSession.AssertNotCalled(t, "Type", mock.Anything, mock.Anything, mock.Anything)
 }
 
 // Verifies the robust parsing of the duration_ms metadata.
@@ -164,7 +166,8 @@ func TestHandler_WaitForAsync_MetadataParsing(t *testing.T) {
 
 			action := Action{Type: ActionWaitForAsync, Metadata: tt.metadata}
 
-			mockSession.On("WaitForAsync", tt.expectedDuration).Return(nil).Once()
+			// Update mock expectation to include the context argument.
+			mockSession.On("WaitForAsync", mock.Anything, tt.expectedDuration).Return(nil).Once()
 
 			// We pass the mockSession which implements schemas.SessionContext.
 			err := executor.handleWaitForAsync(mockSession, action)

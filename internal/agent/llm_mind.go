@@ -208,7 +208,15 @@ func (m *LLMMind) executeDecisionCycle(ctx context.Context) {
     })
     if err != nil {
         m.logger.Error("Failed to post action to CognitiveBus", zap.Error(err))
-        if updateErr := m.updateActionStatus(ctx, action.ID, schemas.StatusError, fmt.Sprintf("Bus error: %v", err)); updateErr != nil {
+        // Create a placeholder result for the bus failure.
+        busErrorResult := ExecutionResult{
+            Status:    "failed",
+            ErrorCode: "BUS_POST_FAILURE",
+            ErrorDetails: map[string]interface{}{
+                "message": err.Error(),
+            },
+        }
+        if updateErr := m.updateActionStatus(ctx, action.ID, schemas.StatusError, busErrorResult); updateErr != nil {
             m.logger.Error("Failed to update the action status after bus failure", zap.Error(updateErr))
             m.updateState(StateFailed)
         } else {
@@ -226,7 +234,7 @@ func (m *LLMMind) executeDecisionCycle(ctx context.Context) {
     }
 }
 
-// gatherContext performs a depth-limited BFS graph traversal.
+// gatherContext performs a depth limited BFS graph traversal.
 func (m *LLMMind) gatherContext(ctx context.Context, missionID string) (*schemas.Subgraph, error) {
     type bfsItem struct {
         nodeID string
@@ -340,13 +348,11 @@ Available Action Types:
 - CLICK: Click on an element specified by a CSS selector.
 - INPUT_TEXT: Type text into a field.
 - SUBMIT_FORM: Submit a form.
+- GATHER_CODEBASE_CONTEXT: Read source code for a module to gain deeper insight.
+- PERFORM_COMPLEX_TASK: Instruct the agent to perform a multi step, high level action like 'LOGIN'. Use this to avoid micromanaging common workflows.
 - CONCLUDE: Finish the mission successfully.
 
-**NEW CAPABILITY: Codebase Research**
-If you are confused, lack context about how a feature works, or need to understand the underlying logic of a module, you can use the 'GATHER_CODEBASE_CONTEXT' action.
-- This action reads the source code for a specified module and adds it to your knowledge graph.
-- Use this when you need deeper insight before proceeding with other actions.
-- Example: { "type": "GATHER_CODEBASE_CONTEXT", "metadata": { "module_path": "internal/reporting" }, "rationale": "I need to understand the reporting module's structure to test it effectively." }
+**Error Handling**: If a previous action failed (indicated by "error_code" in the observation), analyze the error and decide on a recovery strategy. For example, if an ELEMENT_NOT_FOUND error occurred, you might try a different selector or navigate elsewhere.
 
 Analyze the provided state and objective, then decide your next move. Your response must be only the JSON for your chosen action.`
 }
@@ -517,19 +523,17 @@ func (m *LLMMind) addDependenciesToKG(ctx context.Context, sourceObservationID s
 }
 
 func (m *LLMMind) updateActionStatusFromObservation(ctx context.Context, obs Observation) error {
-    result := obs.Result
     status := schemas.StatusAnalyzed
-    errMsg := ""
-
-    if result.Status == "failed" {
+    if obs.Result.Status == "failed" {
         status = schemas.StatusError
     }
-    errMsg = result.Error
-
-    return m.updateActionStatus(ctx, obs.SourceActionID, status, errMsg)
+    return m.updateActionStatus(ctx, obs.SourceActionID, status, obs.Result)
 }
 
-func (m *LLMMind) updateActionStatus(ctx context.Context, actionID string, status schemas.NodeStatus, errMsg string) error {
+// -- REFACTORING NOTE --
+// This function now accepts the full ExecutionResult to record structured error data
+// in the knowledge graph, giving the Mind better context for future decisions.
+func (m *LLMMind) updateActionStatus(ctx context.Context, actionID string, status schemas.NodeStatus, result ExecutionResult) error {
     node, err := m.kg.GetNode(ctx, actionID)
     if err != nil {
         return fmt.Errorf("kg.GetNode failed for action status update: %w", err)
@@ -546,10 +550,11 @@ func (m *LLMMind) updateActionStatus(ctx context.Context, actionID string, statu
         }
     }
 
-    if errMsg != "" {
-        propsMap["error"] = errMsg
-    }
     propsMap["status"] = string(status)
+    if result.ErrorCode != "" {
+        propsMap["error_code"] = result.ErrorCode
+        propsMap["error_details"] = result.ErrorDetails
+    }
 
     updatedProps, err := json.Marshal(propsMap)
     if err != nil {
@@ -579,7 +584,9 @@ func (m *LLMMind) recordObservationKG(ctx context.Context, obs Observation) erro
         "timestamp":   obs.Timestamp,
         "data_raw":    obs.Data,
         "exec_status": obs.Result.Status,
-        "exec_error":  obs.Result.Error,
+        // Store structured error info if it exists
+        "exec_error_code":    obs.Result.ErrorCode,
+        "exec_error_details": obs.Result.ErrorDetails,
     }
     propsBytes, err := m.marshalProperties(propsMap)
     if err != nil {

@@ -206,4 +206,3 @@ func createStaticTestServer(t *testing.T, htmlContent string) *httptest.Server {
 		fmt.Fprintln(w, htmlContent)
 	}))
 }
-
