@@ -5,7 +5,7 @@ import (
 	"math"
 	"time"
 
-	// "github.com/chromedp/cdproto/input" // Removed final dependency
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"go.uber.org/zap"
 )
 
@@ -17,15 +17,15 @@ func computeEaseInOutCubic(t float64) float64 {
 	return 1 - math.Pow(-2*t+2, 3)/2
 }
 
-// calculateFittsLaw determines a realistic movement duration based on Fitts's Law,
-// which models the time required to move to a target area.
+// calculateFittsLaw determines a realistic movement duration based on Fitts's Law.
 func (h *Humanoid) calculateFittsLaw(distance float64) time.Duration {
 	const W = 30.0 // Assumed default target width (W) in pixels.
 
-	// Index of Difficulty (ID)
+	// The Index of Difficulty (ID) is the core of Fitts's Law.
 	id := math.Log2(1.0 + distance/W)
 
 	h.mu.Lock()
+	// Use dynamic config parameters which are affected by fatigue.
 	A := h.dynamicConfig.FittsA
 	B := h.dynamicConfig.FittsB
 	rng := h.rng
@@ -34,14 +34,13 @@ func (h *Humanoid) calculateFittsLaw(distance float64) time.Duration {
 	// Movement Time (MT) in milliseconds
 	mt := A + B*id
 
-	// Add slight randomization (+/- 15%)
-	mt += mt * (rng.Float64()*0.3 - 0.15)
+	// Add slight randomization to make each movement unique.
+	mt += mt * (rng.Float64()*0.3 - 0.15) // +/- 15%
 
 	return time.Duration(mt) * time.Millisecond
 }
 
-// generateIdealPath creates a human-like trajectory (a Bezier curve) that is
-// deformed by forces from a potential field.
+// generateIdealPath creates a human like trajectory using a Bezier curve.
 func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField, numSteps int) []Vector2D {
 	p0, p3 := start, end
 	mainVec := end.Sub(start)
@@ -53,20 +52,20 @@ func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField,
 
 	mainDir := mainVec.Normalize()
 
-	// Sample forces at 1/3rd and 2/3rds along the path to create control points.
+	// Sample forces at 1/3rd and 2/3rds along the path to create control points for the curve.
 	samplePoint1 := start.Add(mainDir.Mul(dist / 3.0))
 	force1 := field.CalculateNetForce(samplePoint1)
 	samplePoint2 := start.Add(mainDir.Mul(dist * 2.0 / 3.0))
 	force2 := field.CalculateNetForce(samplePoint2)
 
-	// Create control points based on the forces.
+	// Create control points based on the sampled forces.
 	p1 := samplePoint1.Add(force1.Mul(dist * 0.1))
 	p2 := samplePoint2.Add(force2.Mul(dist * 2.0 / 3.0))
 
 	path := make([]Vector2D, numSteps)
 	for i := 0; i < numSteps; i++ {
 		t := float64(i) / float64(numSteps-1)
-		// Cubic Bezier curve formula.
+		// This is the cubic Bezier curve formula.
 		omt := 1.0 - t
 		omt2 := omt * omt
 		omt3 := omt2 * omt
@@ -80,10 +79,10 @@ func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField,
 }
 
 // simulateTrajectory moves the mouse along a generated path, dispatching events via the executor.
-// REFACTORED: Signature now uses the agnostic MouseButton type.
-func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, field *PotentialField, buttonState MouseButton) (Vector2D, error) {
+func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, field *PotentialField, buttonState schemas.MouseButton) (Vector2D, error) {
 	dist := start.Dist(end)
 	duration := h.calculateFittsLaw(dist)
+	// The number of steps is proportional to the duration, creating smoother moves for longer distances.
 	numSteps := int(duration.Seconds() * 100)
 	if numSteps < 2 {
 		numSteps = 2
@@ -94,8 +93,6 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 	}
 
 	idealPath := h.generateIdealPath(start, end, field, numSteps)
-
-	// REFACTORED: Pre-calculate the bitfield for the held button.
 	buttonsBitfield := h.calculateButtonsBitfield(buttonState)
 
 	var velocity Vector2D
@@ -108,17 +105,17 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 			return velocity, ctx.Err()
 		}
 
-		// Apply easing to time to simulate acceleration/deceleration.
+		// Apply easing to time to simulate acceleration and deceleration.
 		t := float64(i) / float64(len(idealPath)-1)
 		easedT := computeEaseInOutCubic(t)
-		
+
 		pathIndex := int(easedT * float64(len(idealPath)-1))
 		if pathIndex >= len(idealPath) {
 			pathIndex = len(idealPath) - 1
 		}
 		currentPos := idealPath[pathIndex]
 
-		// Calculate target time for this step and sleep if we're ahead.
+		// Calculate target time for this step and sleep if we're ahead of schedule.
 		currentTime := startTime.Add(time.Duration(easedT * float64(duration)))
 		sleepDur := time.Until(currentTime)
 		if sleepDur > 0 {
@@ -127,7 +124,7 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 			}
 		}
 
-		// Update velocity and timing information.
+		// Update velocity and timing information for the next step.
 		now := time.Now()
 		dt := now.Sub(lastTime).Seconds()
 		if dt > 1e-6 {
@@ -136,12 +133,12 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 		lastPos = currentPos
 		lastTime = now
 
-		// Apply Perlin and Gaussian noise to the cursor position.
+		// Apply Perlin and Gaussian noise to the cursor position for realism.
 		h.mu.Lock()
 		perlinMagnitude := h.dynamicConfig.PerlinAmplitude
 		rng := h.rng
 		h.mu.Unlock()
-		
+
 		perlinFrequency := 0.8
 		timeElapsed := now.Sub(startTime).Seconds()
 		perlinDrift := Vector2D{
@@ -151,12 +148,11 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 		driftAppliedPos := currentPos.Add(perlinDrift)
 		finalPerturbedPoint := h.applyGaussianNoise(driftAppliedPos)
 
-		// REFACTORED: Create the agnostic MouseEventData struct.
-		eventData := MouseEventData{
-			Type:   MouseMove,
+		eventData := schemas.MouseEventData{
+			Type:   schemas.MouseMove,
 			X:      finalPerturbedPoint.X,
 			Y:      finalPerturbedPoint.Y,
-			Button: ButtonNone, // For MouseMove, 'Button' is typically None.
+			Button: schemas.ButtonNone, // For MouseMove, 'Button' is typically None.
 		}
 
 		// If a button is held down (e.g., for dragging), set the Buttons bitfield.
@@ -164,7 +160,7 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 			eventData.Buttons = buttonsBitfield
 		}
 
-		// Dispatch the event via the executor.
+		// Dispatch the final calculated mouse event via the executor.
 		if err := h.executor.DispatchMouseEvent(ctx, eventData); err != nil {
 			if ctx.Err() == nil {
 				h.logger.Warn("Humanoid: Failed to dispatch mouse move event", zap.Error(err))

@@ -12,41 +12,41 @@ import (
 )
 
 const testHTML = `
-<html>
-<body>
-	<div id="header">
-		<h1>Welcome</h1>
-	</div>
-	<div class="content">
-		<p>P1</p><p>P2</p>
-		<ul>
-			<li>Item 1</li>
-			<li>Item 2</li>
-			<li id="special">Item 3</li>
-		</ul>
-	</div>
-	<div class="content"><p>P3</p></div>
-</body>
-</html>
-`
+	<html>
+	<body>
+		<div id="header">
+			<h1>Welcome</h1>
+		</div>
+		<div class="content">
+			<p>P1</p><p>P2</p>
+			<ul>
+				<li>Item 1</li>
+				<li>Item 2</li>
+				<li id="special">Item 3</li>
+			</ul>
+		</div>
+		<div class="content"><p>P3</p></div>
+	</body>
+	</html>
+	`
 
 func TestGenerateUniqueXPath(t *testing.T) {
 	doc, err := htmlquery.Parse(strings.NewReader(testHTML))
 	require.NoError(t, err)
 
 	tests := []struct {
-		name         string
-		targetXPath  string
+		name          string
+		targetXPath   string
 		expectedXPath string
 	}{
 		{"Body", "//body", "/html[1]/body[1]"},
-		{"Element with ID", "//div[@id='header']", `id("header")`},
-		{"Child of ID element", "//h1", `id("header")/h1[1]`},
+		{"Element with ID", "//div[@id='header']", `//*[@id='header']`},
+		{"Child of ID element", "//h1", `//*[@id='header']/h1[1]`},
 		// Use (//p)[index] for selecting the nth paragraph globally for the targetXPath
 		{"Specific index", "(//p)[2]", "/html[1]/body[1]/div[2]/p[2]"},
 		{"Ambiguous classes", "(//div[@class='content'])[2]/p", "/html[1]/body[1]/div[3]/p[1]"},
 		{"List item skipping comments", "//ul/li[2]", "/html[1]/body[1]/div[2]/ul[1]/li[2]"},
-		{"List item with ID (Optimization)", "//li[@id='special']", `id("special")`},
+		{"List item with ID (Optimization)", "//li[@id='special']", `//*[@id='special']`},
 	}
 
 	for _, tt := range tests {

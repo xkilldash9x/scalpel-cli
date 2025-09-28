@@ -1,59 +1,37 @@
-// internal/humanoid/humanoid.go
 package humanoid
 
 import (
+	"math/rand"
 	"sync"
 	"time"
-	"math/rand"
 
 	"github.com/aquilax/go-perlin"
-	// "github.com/chromedp/cdproto/cdp" // Removed
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"go.uber.org/zap"
 )
 
-// maxVelocity defines the maximum physiological mouse velocity (pixels per second).
 const maxVelocity = 6000.0
 
-// NOTE: MouseButton type and constants are now defined in types.go.
-
-// Humanoid manages the state and execution of human-like interactions.
+// Humanoid defines the state and capabilities for simulating human like interactions.
 type Humanoid struct {
-	// Base configuration (defines the session persona)
-	baseConfig Config
-	// Dynamic configuration (current state, affected by fatigue)
-	dynamicConfig Config
-
-	// Browser context, logging, and execution
-	// browserContextID cdp.BrowserContextID // Removed
-	logger            *zap.Logger
-	executor          Executor // Facilitates interaction via the Executor interface.
-
-	// Internal state synchronization
-	mu sync.Mutex
-
-	// Current cursor position and state
-	currentPos          Vector2D
-	currentButtonState  MouseButton // Uses agnostic type from types.go
-
-	// Fatigue modeling
-	fatigueLevel float64 // Ranges from 0.0 (rested) to 1.0 (exhausted)
-
-	// State tracking
-	lastActionTime        time.Time
-	lastMovementDistance  float64 // Tracks the distance of the last MoveTo action for Fitts's Law.
-	noiseTime             float64
-
-	// Noise generation
-	rng     *rand.Rand
-	noiseX  *perlin.Perlin
-	noiseY  *perlin.Perlin
+	baseConfig         Config
+	dynamicConfig      Config
+	logger             *zap.Logger
+	executor           Executor
+	mu                 sync.Mutex
+	currentPos         Vector2D
+	currentButtonState schemas.MouseButton
+	fatigueLevel       float64
+	lastActionTime     time.Time
+	lastMovementDistance float64
+	noiseTime          float64
+	rng                *rand.Rand
+	noiseX             *perlin.Perlin
+	noiseY             *perlin.Perlin
 }
 
-// New creates a new Humanoid instance with the given configuration and executor.
-// The executor is required for all browser interactions.
-// We remove the dependency on cdp.BrowserContextID.
+// New creates and initializes a new Humanoid instance.
 func New(config Config, logger *zap.Logger, executor Executor) *Humanoid {
-	// 1. Initialize RNG
 	var seed int64
 	var rng *rand.Rand
 	if config.Rng == nil {
@@ -61,28 +39,28 @@ func New(config Config, logger *zap.Logger, executor Executor) *Humanoid {
 		source := rand.NewSource(seed)
 		rng = rand.New(source)
 	} else {
-		// If an RNG is provided, use it. Use a randomized seed for Perlin noise.
+		// Even if a specific rng is provided, we seed the perlin noise
+		// with a unique value to ensure it's not the same across all instances.
 		seed = time.Now().UnixNano()
 		rng = config.Rng
 	}
 
-	// 2. Finalize the Session Persona
 	config.NormalizeTypoRates()
 	config.FinalizeSessionPersona(rng)
 
-	// Standard Perlin parameters
+	// Standard Perlin noise parameters.
 	alpha, beta, n := 2.0, 2.0, int32(3)
 
 	h := &Humanoid{
-		baseConfig:          config,
-		dynamicConfig:       config, // Start with the base config
-		logger:              logger,
-		executor:            executor, // Initialize the executor
-		rng:                 rng,
-		lastActionTime:      time.Now(),
-		currentButtonState:  ButtonNone, // Use constant from types.go
-		noiseX:              perlin.NewPerlin(alpha, beta, n, seed),
-		noiseY:              perlin.NewPerlin(alpha, beta, n, seed+1), // Offset seed for Y noise
+		baseConfig:         config,
+		dynamicConfig:      config,
+		logger:             logger,
+		executor:           executor,
+		rng:                rng,
+		lastActionTime:     time.Now(),
+		currentButtonState: schemas.ButtonNone,
+		noiseX:             perlin.NewPerlin(alpha, beta, n, seed),
+		noiseY:             perlin.NewPerlin(alpha, beta, n, seed+1),
 	}
 	return h
 }

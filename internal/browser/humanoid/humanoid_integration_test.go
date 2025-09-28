@@ -14,6 +14,7 @@ import (
 	"github.com/playwright-community/playwright-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
 // =============================================================================
@@ -27,24 +28,24 @@ type playwrightExecutor struct {
 }
 
 // DispatchMouseEvent translates agnostic MouseEventData to a Playwright command.
-func (e *playwrightExecutor) DispatchMouseEvent(ctx context.Context, data MouseEventData) error {
+func (e *playwrightExecutor) DispatchMouseEvent(ctx context.Context, data schemas.MouseEventData) error {
 	switch data.Type {
-	case MouseMove:
+	case schemas.MouseMove:
 		err := e.page.Mouse().Move(data.X, data.Y)
 		return err
-	case MousePress:
+	case schemas.MousePress:
 		btn := playwright.MouseButton(data.Button)
 		return e.page.Mouse().Down(playwright.MouseDownOptions{
 			Button:     &btn,
 			ClickCount: playwright.Int(data.ClickCount),
 		})
-	case MouseRelease:
+	case schemas.MouseRelease:
 		btn := playwright.MouseButton(data.Button)
 		return e.page.Mouse().Up(playwright.MouseUpOptions{
 			Button:     &btn,
 			ClickCount: playwright.Int(data.ClickCount),
 		})
-	case MouseWheel:
+	case schemas.MouseWheel:
 		return e.page.Mouse().Wheel(data.DeltaX, data.DeltaY)
 	}
 	return fmt.Errorf("playwrightExecutor: unsupported mouse event type: %s", data.Type)
@@ -67,7 +68,7 @@ func (e *playwrightExecutor) Sleep(ctx context.Context, d time.Duration) error {
 }
 
 // GetElementGeometry translates the agnostic call to a series of Playwright actions.
-func (e *playwrightExecutor) GetElementGeometry(ctx context.Context, selector string) (*ElementGeometry, error) {
+func (e *playwrightExecutor) GetElementGeometry(ctx context.Context, selector string) (*schemas.ElementGeometry, error) {
 	element, err := e.page.WaitForSelector(selector, playwright.PageWaitForSelectorOptions{
 		State: playwright.WaitForSelectorStateVisible,
 	})
@@ -84,7 +85,7 @@ func (e *playwrightExecutor) GetElementGeometry(ctx context.Context, selector st
 	}
 
 	// Translate Playwright BoundingBox to agnostic ElementGeometry.
-	return &ElementGeometry{
+	return &schemas.ElementGeometry{
 		Vertices: []float64{
 			box.X, box.Y,
 			box.X + box.Width, box.Y,
@@ -138,13 +139,13 @@ func setupTestEnvironment(t *testing.T) (context.Context, playwright.Page, *http
 	// Create the test server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, `
-			<html><body>
-				<h1>Test Page</h1>
-				<div id='target' style='width:100px;height:100px;background:red;margin-top:50px;'>Target</div>
-				<div id='dragSource' style='width:50px;height:50px;background:blue;'>Drag Me</div>
-				<input id="inputField" type="text" />
-			</body></html>
-		`)
+				<html><body>
+					<h1>Test Page</h1>
+					<div id='target' style='width:100px;height:100px;background:red;margin-top:50px;'>Target</div>
+					<div id='dragSource' style='width:50px;height:50px;background:blue;'>Drag Me</div>
+					<input id="inputField" type="text" />
+				</body></html>
+			`)
 	}))
 
 	// Navigate to the test server

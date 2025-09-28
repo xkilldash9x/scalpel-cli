@@ -11,7 +11,6 @@ import (
 	"sync"
 	"testing"
 
-	"github.com/antchfx/htmlquery"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -30,7 +29,7 @@ func (m *MockCorePagePrimitives) ExecuteClick(ctx context.Context, selector stri
 	defer m.mu.Unlock()
 	m.Interactions = append(m.Interactions, fmt.Sprintf("Click(%s)", selector))
 	// Simulate state change on specific interaction
-	if strings.Contains(selector, "id(\"change-state-btn\")") {
+	if strings.Contains(selector, "id='change-state-btn'") {
 		m.DOMSnapshot = `<html><body><p>Changed!</p><a href="/new">New Link</a></body></html>`
 	}
 	return nil
@@ -58,6 +57,12 @@ func (m *MockCorePagePrimitives) GetDOMSnapshot(ctx context.Context) (io.Reader,
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	return strings.NewReader(m.DOMSnapshot), nil
+}
+
+// IsVisible implements the missing method to satisfy the CorePagePrimitives interface.
+// For the mock, we default to returning true, assuming elements are visible unless a test specifies otherwise.
+func (m *MockCorePagePrimitives) IsVisible(ctx context.Context, selector string) bool {
+	return true
 }
 
 func mockStabilizeFn(mock *MockCorePagePrimitives) StabilizationFunc {
@@ -118,16 +123,16 @@ func TestIsTextInputElement(t *testing.T) {
 
 func TestInteractor_DiscoveryAndFiltering(t *testing.T) {
 	html := `
-	<html><body>
-		<a href="/home">Visible Link</a>
-		<button disabled>Disabled Button</button>
-		<button id="active-btn">Active Button</button>
-		<input type="text" name="username">
-		<input type="hidden" name="csrf">
-		<input type="email" readonly value="admin@example.com">
-		<div role="button" aria-disabled="true">Disabled ARIA</div>
-	</body></html>
-	`
+		<html><body>
+			<a href="/home">Visible Link</a>
+			<button disabled>Disabled Button</button>
+			<button id="active-btn">Active Button</button>
+			<input type="text" name="username">
+			<input type="hidden" name="csrf">
+			<input type="email" readonly value="admin@example.com">
+			<div role="button" aria-disabled="true">Disabled ARIA</div>
+		</body></html>
+		`
 	mockPage := &MockCorePagePrimitives{DOMSnapshot: html}
 	logger := &NopLogger{}
 	interactor := NewInteractor(logger, NewDefaultHumanoidConfig(), nil, mockPage)
@@ -148,7 +153,7 @@ func TestInteractor_DiscoveryAndFiltering(t *testing.T) {
 	}
 
 	fullDesc := strings.Join(descriptions, "|")
-	assert.Contains(t, fullDesc, "id=\"active-btn\"")
+	assert.Contains(t, fullDesc, "#active-btn")
 	assert.NotContains(t, fullDesc, "Disabled Button")
 	assert.NotContains(t, fullDesc, "readonly")
 	assert.NotContains(t, fullDesc, "Disabled ARIA")
@@ -184,3 +189,4 @@ func TestInteractor_RecursiveInteract_FlowAndStateChange(t *testing.T) {
 	mockPage.mu.Unlock()
 	assert.Contains(t, finalDOM, "Changed!")
 }
+

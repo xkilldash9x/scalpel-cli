@@ -2,33 +2,36 @@ package agent
 
 import (
 	"context"
+	"encoding/json"
 	"sync"
+	"time"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	// Removed imports related to internal interfaces that are no longer mocked directly here.
 )
 
-// Mocks the schemas.LLMClient interface used by LLMMind.
+// -- LLM Client Mock --
+
+// MockLLMClient mocks the schemas.LLMClient interface used by LLMMind.
 type MockLLMClient struct {
 	mock.Mock
 }
 
-// Generate mocks the LLM generation call (matching schemas.LLMClient.Generate).
+// Generate mocks the LLM generation call.
 func (m *MockLLMClient) Generate(ctx context.Context, req schemas.GenerationRequest) (string, error) {
 	args := m.Called(ctx, req)
 	return args.String(0), args.Error(1)
 }
 
-// Mocks the knowledgegraph.GraphStore interface based on usage in llm_mind.go (BFS Traversal).
+// -- Knowledge Graph Store Mock --
+
+// MockGraphStore mocks the knowledgegraph.GraphStore interface.
 type MockGraphStore struct {
 	mock.Mock
 	mu sync.RWMutex
 }
 
-// Implement methods used by LLMMind (AddNode, AddEdge, GetNode, GetNeighbors, GetEdges)
-
-// Mocks AddNode (using schemas.Node).
+// AddNode mocks the corresponding method in the graph store.
 func (m *MockGraphStore) AddNode(ctx context.Context, node schemas.Node) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -36,7 +39,7 @@ func (m *MockGraphStore) AddNode(ctx context.Context, node schemas.Node) error {
 	return args.Error(0)
 }
 
-// Mocks AddEdge (using schemas.Edge).
+// AddEdge mocks the corresponding method in the graph store.
 func (m *MockGraphStore) AddEdge(ctx context.Context, edge schemas.Edge) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
@@ -44,7 +47,7 @@ func (m *MockGraphStore) AddEdge(ctx context.Context, edge schemas.Edge) error {
 	return args.Error(0)
 }
 
-// Mocks GetNode (required for BFS traversal).
+// GetNode mocks the corresponding method in the graph store.
 func (m *MockGraphStore) GetNode(ctx context.Context, id string) (schemas.Node, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -55,7 +58,7 @@ func (m *MockGraphStore) GetNode(ctx context.Context, id string) (schemas.Node, 
 	return args.Get(0).(schemas.Node), args.Error(1)
 }
 
-// Mocks GetNeighbors (required for BFS traversal).
+// GetNeighbors mocks the corresponding method in the graph store.
 func (m *MockGraphStore) GetNeighbors(ctx context.Context, id string) ([]schemas.Node, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -66,7 +69,7 @@ func (m *MockGraphStore) GetNeighbors(ctx context.Context, id string) ([]schemas
 	return args.Get(0).([]schemas.Node), args.Error(1)
 }
 
-// Mocks GetEdges (required for BFS traversal).
+// GetEdges mocks the corresponding method in the graph store.
 func (m *MockGraphStore) GetEdges(ctx context.Context, id string) ([]schemas.Edge, error) {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -77,45 +80,56 @@ func (m *MockGraphStore) GetEdges(ctx context.Context, id string) ([]schemas.Edg
 	return args.Get(0).([]schemas.Edge), args.Error(1)
 }
 
-// MockSessionContext implements schemas.SessionContext for testing.
-// Consolidated here to prevent redeclaration errors across test files.
+// -- Session Context Mock --
+
+// MockSessionContext implements the schemas.SessionContext interface for testing.
 type MockSessionContext struct {
 	mock.Mock
 }
 
-// Implement all methods required by schemas.SessionContext interface.
+// -- High Level Interaction Methods --
+
+func (m *MockSessionContext) ID() string {
+	args := m.Called()
+	return args.String(0)
+}
 
 func (m *MockSessionContext) Navigate(ctx context.Context, url string) error {
-	// Ensure Called arguments match the signature (ctx, url).
 	args := m.Called(ctx, url)
 	return args.Error(0)
 }
 
-// Note: Based on the contracts used in executors.go, these methods do not take context when called by the handlers.
-func (m *MockSessionContext) Click(selector string) error {
-	args := m.Called(selector)
+func (m *MockSessionContext) Click(ctx context.Context, selector string) error {
+	args := m.Called(ctx, selector)
 	return args.Error(0)
 }
 
-func (m *MockSessionContext) Type(selector string, text string) error {
-	args := m.Called(selector, text)
+func (m *MockSessionContext) Type(ctx context.Context, selector string, text string) error {
+	args := m.Called(ctx, selector, text)
 	return args.Error(0)
 }
 
-func (m *MockSessionContext) Submit(selector string) error {
-	args := m.Called(selector)
+func (m *MockSessionContext) Submit(ctx context.Context, selector string) error {
+	args := m.Called(ctx, selector)
 	return args.Error(0)
 }
 
-func (m *MockSessionContext) ScrollPage(direction string) error {
-	args := m.Called(direction)
+func (m *MockSessionContext) ScrollPage(ctx context.Context, direction string) error {
+	args := m.Called(ctx, direction)
 	return args.Error(0)
 }
 
-func (m *MockSessionContext) WaitForAsync(milliseconds int) error {
-	args := m.Called(milliseconds)
+func (m *MockSessionContext) WaitForAsync(ctx context.Context, milliseconds int) error {
+	args := m.Called(ctx, milliseconds)
 	return args.Error(0)
 }
+
+func (m *MockSessionContext) Interact(ctx context.Context, config schemas.InteractionConfig) error {
+	args := m.Called(ctx, config)
+	return args.Error(0)
+}
+
+// -- Session State & Control --
 
 func (m *MockSessionContext) GetContext() context.Context {
 	args := m.Called()
@@ -124,6 +138,13 @@ func (m *MockSessionContext) GetContext() context.Context {
 	}
 	return args.Get(0).(context.Context)
 }
+
+func (m *MockSessionContext) Close(ctx context.Context) error {
+	args := m.Called(ctx)
+	return args.Error(0)
+}
+
+// -- Scripting and Callbacks --
 
 func (m *MockSessionContext) ExposeFunction(ctx context.Context, name string, function interface{}) error {
 	args := m.Called(ctx, name, function)
@@ -135,19 +156,14 @@ func (m *MockSessionContext) InjectScriptPersistently(ctx context.Context, scrip
 	return args.Error(0)
 }
 
-func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string, res interface{}) error {
-	args := m.Called(ctx, script, res)
-	return args.Error(0)
-}
+// -- Data Collection --
 
-func (m *MockSessionContext) Interact(ctx context.Context, config schemas.InteractionConfig) error {
-	args := m.Called(ctx, config)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Close(ctx context.Context) error {
+func (m *MockSessionContext) CollectArtifacts(ctx context.Context) (*schemas.Artifacts, error) {
 	args := m.Called(ctx)
-	return args.Error(0)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(*schemas.Artifacts), args.Error(1)
 }
 
 func (m *MockSessionContext) AddFinding(finding schemas.Finding) error {
@@ -155,16 +171,35 @@ func (m *MockSessionContext) AddFinding(finding schemas.Finding) error {
 	return args.Error(0)
 }
 
-func (m *MockSessionContext) CollectArtifacts() (*schemas.Artifacts, error) {
-	args := m.Called()
+// -- humanoid.Executor Methods --
+
+func (m *MockSessionContext) Sleep(ctx context.Context, d time.Duration) error {
+	args := m.Called(ctx, d)
+	return args.Error(0)
+}
+
+func (m *MockSessionContext) DispatchMouseEvent(ctx context.Context, data schemas.MouseEventData) error {
+	args := m.Called(ctx, data)
+	return args.Error(0)
+}
+
+func (m *MockSessionContext) SendKeys(ctx context.Context, keys string) error {
+	args := m.Called(ctx, keys)
+	return args.Error(0)
+}
+
+func (m *MockSessionContext) GetElementGeometry(ctx context.Context, selector string) (*schemas.ElementGeometry, error) {
+	args := m.Called(ctx, selector)
 	if args.Get(0) == nil {
 		return nil, args.Error(1)
 	}
-	return args.Get(0).(*schemas.Artifacts), args.Error(1)
+	return args.Get(0).(*schemas.ElementGeometry), args.Error(1)
 }
 
-func (m *MockSessionContext) ID() string {
-	args := m.Called()
-	return args.String(0)
+func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string, scriptArgs []interface{}) (json.RawMessage, error) {
+	args := m.Called(ctx, script, scriptArgs)
+	if args.Get(0) == nil {
+		return nil, args.Error(1)
+	}
+	return args.Get(0).(json.RawMessage), args.Error(1)
 }
-

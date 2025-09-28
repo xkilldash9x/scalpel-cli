@@ -5,90 +5,86 @@ import (
 	"math"
 	"time"
 
-	// "github.com/chromedp/cdproto/input" // Removed
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
-// IntelligentClick combines movement, timing, and clicking.
-// It executes immediately using the provided context and the Humanoid's executor.
+// IntelligentClick combines movement, timing, and clicking into a single fluid action.
 func (h *Humanoid) IntelligentClick(ctx context.Context, selector string, field *PotentialField) error {
-	// ... (Steps 1 and 2: Movement and Fitts's Law delay remain the same) ...
+	// (Full movement logic is in movement.go, this is the final click part)
+	if err := h.MoveTo(ctx, selector, field); err != nil {
+		return err
+	}
 
-	// 3. Mouse down.
+	// After moving, press the mouse button.
 	h.mu.Lock()
 	currentPos := h.currentPos
 	h.mu.Unlock()
 
-	// Prepare mouse press parameters using the agnostic struct.
-	mouseDownData := MouseEventData{
-		Type:       MousePress,
+	mouseDownData := schemas.MouseEventData{
+		Type:       schemas.MousePress,
 		X:          currentPos.X,
 		Y:          currentPos.Y,
-		Button:     ButtonLeft,
+		Button:     schemas.ButtonLeft,
 		ClickCount: 1,
-		// When pressed, the 'Buttons' field must reflect the state (1=Left).
-		Buttons: 1,
+		Buttons:    1, // Bitfield: 1 indicates the left button is now pressed.
 	}
-
-	// Dispatch via the executor.
 	if err := h.executor.DispatchMouseEvent(ctx, mouseDownData); err != nil {
 		return err
 	}
 
 	h.mu.Lock()
-	h.currentButtonState = ButtonLeft
+	h.currentButtonState = schemas.ButtonLeft
 	h.mu.Unlock()
 
-	// 4. Realistic hold duration.
-	// ... (Step 4: Hold duration calculation and sleep remain the same) ...
+	// Determine a realistic hold duration.
+	h.mu.Lock()
+	rng := h.rng
+	h.mu.Unlock()
+	holdDuration := time.Duration(60+rng.NormFloat64()*20) * time.Millisecond
+	if err := h.executor.Sleep(ctx, holdDuration); err != nil {
+		return err
+	}
 
-	// 5. Mouse up.
+	// Release the mouse button.
+	// We read the position again in case a microscopic hesitation move occurred.
 	h.mu.Lock()
 	currentPos = h.currentPos
 	h.mu.Unlock()
 
-	// Prepare mouse release parameters.
-	mouseUpData := MouseEventData{
-		Type:       MouseRelease,
+	mouseUpData := schemas.MouseEventData{
+		Type:       schemas.MouseRelease,
 		X:          currentPos.X,
 		Y:          currentPos.Y,
-		Button:     ButtonLeft,
+		Button:     schemas.ButtonLeft,
 		ClickCount: 1,
-		// When released, the 'Buttons' field must be 0.
-		Buttons: 0,
+		Buttons:    0, // Bitfield: 0 indicates no buttons are pressed after release.
 	}
-
-	// Dispatch via the executor.
 	if err := h.executor.DispatchMouseEvent(ctx, mouseUpData); err != nil {
 		return err
 	}
 
 	h.mu.Lock()
-	h.currentButtonState = ButtonNone
+	h.currentButtonState = schemas.ButtonNone
 	h.mu.Unlock()
 
 	return nil
 }
 
-// calculateTerminalFittsLaw determines the time required before initiating a click (terminal latency).
-// MT = A + B * log2(1 + D/W).
+// calculateTerminalFittsLaw determines the time required before initiating a click
+// after the cursor has arrived at the target.
 func (h *Humanoid) calculateTerminalFittsLaw(distance float64) time.Duration {
 	const W = 20.0 // Assumed default target width (W) in pixels for the terminal phase.
 
-	// Index of Difficulty (ID)
 	id := math.Log2(1.0 + distance/W)
 
 	h.mu.Lock()
-	// Use dynamic config parameters (already affected by fatigue).
 	A := h.dynamicConfig.FittsA
 	B := h.dynamicConfig.FittsB
 	rng := h.rng
 	h.mu.Unlock()
 
-	// Movement Time (MT) in milliseconds
 	mt := A + B*id
-
-	// Add slight randomization (+/- 10%)
-	mt += mt * (rng.Float64()*0.2 - 0.1)
+	mt += mt * (rng.Float64()*0.2 - 0.1) // Add +/- 10% jitter
 
 	if mt < 0 {
 		mt = 0

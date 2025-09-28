@@ -23,7 +23,7 @@ func GenerateUniqueXPath(node *html.Node) string {
 			continue
 		}
 
-        // Use lowercase for tag names as is conventional in HTML XPath.
+		// Use lowercase for tag names as is conventional in HTML XPath.
 		tag := strings.ToLower(n.Data)
 		if tag == "" {
 			continue
@@ -32,8 +32,8 @@ func GenerateUniqueXPath(node *html.Node) string {
 		// Optimization: If an element has an ID, use it as the base and stop traversal.
 		id := htmlquery.SelectAttr(n, "id")
 		if id != "" {
-			// Use the standard XPath function id() for robust selection.
-			path = append(path, fmt.Sprintf(`id("%s")`, id))
+			// Use the standard XPath selector for ID, which is more compatible than the id() function.
+			path = append(path, fmt.Sprintf(`//*[@id='%s']`, id))
 			break
 		}
 
@@ -61,9 +61,10 @@ func GenerateUniqueXPath(node *html.Node) string {
 		path[i], path[j] = path[j], path[i]
 	}
 
-	// If the path started with id(), it's already relative to the root. Otherwise, prefix with '/'.
+	// Join the path segments.
 	xpath := strings.Join(path, "/")
-	if !strings.HasPrefix(xpath, "id(") {
+	// If the path started with an ID selector, it's already absolute. Otherwise, make it absolute.
+	if !strings.HasPrefix(xpath, "//*[@id=") {
 		xpath = "/" + xpath
 	}
 	return xpath

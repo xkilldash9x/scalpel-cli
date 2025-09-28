@@ -1,5 +1,3 @@
-// internal/browser/session/session.go
-
 // Package session implements a functional, headless browser engine in pure Go.
 // It integrates a robust network stack, a Go-based DOM representation (golang.org/x/net/html),
 // and the Goja JavaScript runtime, synchronized via an event loop and a custom DOM bridge.
@@ -8,6 +6,7 @@ package session
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"fmt"
 	"io"
 	"math/rand"
@@ -61,18 +60,19 @@ and coordinate based interactions.
 // Session represents a single, functional browsing context (equivalent to a tab).
 // It implements schemas.SessionContext.
 type Session struct {
-	id      string
-	ctx     context.Context
-	cancel  context.CancelFunc
-	logger  *zap.Logger
-	cfg     *config.Config
+	id     string
+	ctx    context.Context
+	cancel context.CancelFunc
+	logger *zap.Logger
+	cfg    *config.Config
 	persona schemas.Persona
 
 	// Core functional components
-	client       *http.Client
-	interactor   *dom.Interactor
-	harvester    *Harvester
-	layoutEngine *layout.Engine
+	client             *http.Client
+	interactor         *dom.Interactor
+	harvester          *Harvester
+	layoutEngine       *layout.Engine
+	humanoidController humanoid.Controller
 
 	// JavaScript Engine and Event Loop
 	eventLoop  *eventloop.EventLoop
@@ -128,6 +128,9 @@ var _ schemas.SessionContext = (*Session)(nil)
 // We also implement dom.CorePagePrimitives for compatibility with the automated Interactor.
 var _ dom.CorePagePrimitives = (*Session)(nil)
 
+// And we implement humanoid.Executor to drive the humanoid controller.
+var _ humanoid.Executor = (*Session)(nil)
+
 // NewSession initializes a new browsing session.
 func NewSession(
 	parentCtx context.Context,
@@ -164,15 +167,15 @@ func NewSession(
 
 	// 2. Configure Humanoid behavior.
 	var domHCfg dom.HumanoidConfig
+	humanoidCfg := cfg.Browser.Humanoid
 	if cfg.Browser.Humanoid.Enabled {
-		cfgCopy := cfg.Browser.Humanoid
-		if cfgCopy.Rng == nil {
+		if humanoidCfg.Rng == nil {
 			source := rand.NewSource(time.Now().UnixNano())
 			//nolint:gosec
-			cfgCopy.Rng = rand.New(source)
+			humanoidCfg.Rng = rand.New(source)
 		}
-		cfgCopy.FinalizeSessionPersona(cfgCopy.Rng)
-		s.humanoidCfg = &cfgCopy
+		humanoidCfg.FinalizeSessionPersona(humanoidCfg.Rng)
+		s.humanoidCfg = &humanoidCfg
 
 		domHCfg = dom.HumanoidConfig{
 			Enabled:        true,
@@ -181,6 +184,8 @@ func NewSession(
 			ClickHoldMaxMs: int(s.humanoidCfg.ClickHoldMaxMs),
 		}
 	}
+	// The session itself (s) acts as the executor for the humanoid controller.
+	s.humanoidController = humanoid.New(humanoidCfg, log.Named("humanoid"), s)
 
 	// 3. Initialize the Network Stack.
 	if err := s.initializeNetworkStack(log); err != nil {
@@ -492,10 +497,6 @@ func (s *Session) Navigate(ctx context.Context, targetURL string) error {
 
 	s.logger.Info("Navigating", zap.String("url", resolvedURL.String()))
 
-	s.logger.Info("Navigating", zap.String("url", resolvedURL.String()))
-
-	s.logger.Info("Navigating", zap.String("url", resolvedURL.String()))
-
 	// 2. Dispatch 'beforeunload' event synchronously.
 	// We use a channel to block the Navigate function until the event loop
 	// has finished processing the event. This prevents the main goroutine
@@ -553,7 +554,11 @@ func (s *Session) executeRequest(ctx context.Context, req *http.Request) error {
 
 		resp, err := s.client.Do(currentReq)
 		if err != nil {
-			return fmt.Errorf("request failed: %w", err)
+			return &NavigationError{
+				URL:     currentReq.URL.String(),
+				Message: fmt.Sprintf("request for '%s' failed: %v", currentReq.URL.String(), err),
+				Err:     err,
+			}
 		}
 
 		// Check for redirects (3xx status codes).
@@ -1238,8 +1243,16 @@ func (s *Session) InjectScriptPersistently(ctx context.Context, script string) e
 }
 
 // ExecuteScript runs a snippet of JavaScript in the current document context.
-func (s *Session) ExecuteScript(ctx context.Context, script string, res interface{}) error {
-	return s.executeScriptInternal(ctx, script, res)
+func (s *Session) ExecuteScript(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
+	var result interface{}
+	err := s.executeScriptInternal(ctx, script, &result)
+	if err != nil {
+		return nil, err
+	}
+	if result == nil {
+		return json.RawMessage("null"), nil
+	}
+	return json.Marshal(result)
 }
 
 // executeScriptInternal handles the execution logic on the event loop and marshals the result.
@@ -1322,6 +1335,34 @@ func (s *Session) executeScriptInternal(ctx context.Context, script string, res 
 		// This case handles timeout before the task even started executing on the loop or during the wait for the result.
 		return execCtx.Err()
 	}
+}
+
+// -- Implementation of humanoid.Executor --
+
+func (s *Session) Sleep(ctx context.Context, d time.Duration) error {
+	return hesitate(ctx, d)
+}
+
+func (s *Session) DispatchMouseEvent(ctx context.Context, data schemas.MouseEventData) error {
+	s.logger.Debug("Dispatching mouse event", zap.String("type", string(data.Type)), zap.Float64("x", data.X), zap.Float64("y", data.Y))
+	// In a real implementation, this would trigger JS events via the bridge.
+	// For now, this is a placeholder.
+	return nil
+}
+
+func (s *Session) SendKeys(ctx context.Context, keys string) error {
+	s.logger.Debug("Dispatching keys", zap.String("keys", keys))
+	// Placeholder for sending keyboard events.
+	return nil
+}
+
+func (s *Session) GetElementGeometry(ctx context.Context, selector string) (*schemas.ElementGeometry, error) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	if s.layoutRoot == nil {
+		return nil, fmt.Errorf("layout tree is not built, cannot get geometry for '%s'", selector)
+	}
+	return s.layoutEngine.GetElementGeometry(s.layoutRoot, selector)
 }
 
 // -- Artifact Collection and Management --
@@ -2525,7 +2566,7 @@ func (b *DOMBridge) QuerySelector(selector string) (*html.Node, error) {
 
 	node := htmlquery.FindOne(b.document, selector)
 	if node == nil {
-		return nil, fmt.Errorf("element not found matching selector '%s'", selector)
+		return nil, NewElementNotFoundError(selector)
 	}
 	return node, nil
 }
