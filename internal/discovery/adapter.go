@@ -6,8 +6,8 @@ import (
 	"io"
 	"net/http"
 
-	// This is your application's main, feature-rich HTTP client.
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
+	// This import is no longer needed since we are using the standard http.Client.
+	// "github.com/xkilldash9x/scalpel-cli/internal/browser/network"
 )
 
 // HTTPClient interface (defined elsewhere in discovery package, e.g., passive.go):
@@ -18,19 +18,20 @@ type HTTPClient interface {
 */
 
 // networkClientAdapter implements the local discovery.HTTPClient interface
-// by wrapping the main application's network.Client.
+// by wrapping the standard library's http.Client.
 type networkClientAdapter struct {
-	client *network.Client
+	// FIX: Changed from *network.Client to the standard library *http.Client.
+	client *http.Client
 }
 
-// NewHTTPClientAdapter is the public constructor that solves the "undefined" error.
-func NewHTTPClientAdapter(client *network.Client) HTTPClient {
+// NewHTTPClientAdapter is the public constructor that accepts a standard http.Client.
+// FIX: Changed the parameter type from *network.Client to *http.Client.
+func NewHTTPClientAdapter(client *http.Client) HTTPClient {
 	return &networkClientAdapter{client: client}
 }
 
 // Get is the method that fulfills the interface contract.
-// FIX: network.Client embeds http.Client, which does not have a Get method matching this signature.
-// We must adapt the standard http.Client behavior (using Do) to the required interface.
+// It uses the standard http.Client's Do method to execute the request.
 func (a *networkClientAdapter) Get(ctx context.Context, url string) ([]byte, int, error) {
 	// 1. Create the request with the provided context.
 	req, err := http.NewRequestWithContext(ctx, http.MethodGet, url, nil)
@@ -38,7 +39,7 @@ func (a *networkClientAdapter) Get(ctx context.Context, url string) ([]byte, int
 		return nil, 0, err
 	}
 
-	// 2. Execute the request using the underlying network.Client (which has the Do method).
+	// 2. Execute the request using the underlying client's Do method.
 	resp, err := a.client.Do(req)
 	if err != nil {
 		// Network error or timeout.
