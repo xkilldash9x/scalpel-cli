@@ -1,3 +1,4 @@
+// internal/agent/executors.go
 package agent
 
 import (
@@ -10,55 +11,70 @@ import (
 	"go.uber.org/zap"
 )
 
+// -- UPGRADE NOTE: Defined Constants --
+// Adding standardized error codes for consistent error reporting back to the Mind.
+// These are now used by the exported ParseBrowserError function.
+const (
+	ErrCodeElementNotFound         = "ELEMENT_NOT_FOUND"
+	ErrCodeHumanoidGeometryInvalid = "HUMANOID_GEOMETRY_INVALID"
+	ErrCodeTimeoutError            = "TIMEOUT_ERROR"
+	ErrCodeNavigationError         = "NAVIGATION_ERROR"
+)
+
 // SessionProvider is a function type that retrieves the currently active session.
-// It returns the canonical schemas.SessionContext interface.
 type SessionProvider func() schemas.SessionContext
 
-// -- Executor Registry (Implementation) --
+// -- Executor Registry --
 
 // ExecutorRegistry manages different executors and dispatches actions.
+// Its role is now focused on handling non-interactive or specialized actions,
+// as complex user-like interactions are handled directly by the Agent's humanoid controller.
 type ExecutorRegistry struct {
 	logger    *zap.Logger
 	executors map[ActionType]ActionExecutor
 
-	// sessionProvider holds the current provider function, protected by a mutex for safe dynamic updates.
 	sessionProvider SessionProvider
 	providerMu      sync.RWMutex
 }
 
-// NewExecutorRegistry creates and initializes the registry.
+// NewExecutorRegistry creates and initializes the registry with its reduced set of executors.
 func NewExecutorRegistry(logger *zap.Logger, projectRoot string) *ExecutorRegistry {
 	r := &ExecutorRegistry{
 		logger:          logger.Named("executor_registry"),
 		executors:       make(map[ActionType]ActionExecutor),
-		sessionProvider: nil, // Initialized as nil
+		sessionProvider: nil,
 	}
 
-	// Initialize executors. We pass the registry's safe getter function.
 	// This getter ensures that the latest session provider is used at execution time.
 	safeProviderGetter := r.GetSessionProvider()
 
+	// Initialize the executors that this registry still manages.
 	browserExec := NewBrowserExecutor(logger, safeProviderGetter)
 	codebaseExec := NewCodebaseExecutor(logger, projectRoot)
 
-	// Register executors.
+	// -- REFACTORING NOTE --
+	// The registry for BrowserExecutor is now smaller. CLICK and INPUT_TEXT
+	// have been removed because they are now orchestrated by the Agent via the Humanoid module.
 	r.register(browserExec,
-		ActionNavigate, ActionClick, ActionInputText, ActionSubmitForm, ActionScroll, ActionWaitForAsync)
+		ActionNavigate, ActionSubmitForm, ActionScroll, ActionWaitForAsync)
 
+	// The CodebaseExecutor is still managed here as it's a non-interactive, specialized task.
 	r.register(codebaseExec,
 		ActionGatherCodebaseContext)
 
 	return r
 }
 
-// UpdateSessionProvider updates the provider function (called by Agent when session is ready).
+// UpdateSessionProvider allows the Agent to dynamically update the session provider function
+// once a browser session has been established.
 func (r *ExecutorRegistry) UpdateSessionProvider(provider SessionProvider) {
 	r.providerMu.Lock()
 	defer r.providerMu.Unlock()
 	r.sessionProvider = provider
 }
 
-// GetSessionProvider returns a function that safely retrieves the current session.
+// GetSessionProvider returns a function that safely retrieves the current session,
+// preventing race conditions.
 func (r *ExecutorRegistry) GetSessionProvider() SessionProvider {
 	return func() schemas.SessionContext {
 		r.providerMu.RLock()
@@ -70,6 +86,7 @@ func (r *ExecutorRegistry) GetSessionProvider() SessionProvider {
 	}
 }
 
+// register associates an executor with one or more action types.
 func (r *ExecutorRegistry) register(exec ActionExecutor, types ...ActionType) {
 	for _, t := range types {
 		r.executors[t] = exec
@@ -80,11 +97,14 @@ func (r *ExecutorRegistry) register(exec ActionExecutor, types ...ActionType) {
 func (r *ExecutorRegistry) Execute(ctx context.Context, action Action) (*ExecutionResult, error) {
 	executor, ok := r.executors[action.Type]
 	if !ok {
-		// These actions are handled by the Agent, not the registry.
-		if action.Type == ActionConclude || action.Type == ActionPerformComplexTask {
-			return nil, fmt.Errorf("%s should not be dispatched to ExecutorRegistry", action.Type)
+		// This switch provides a more helpful error if an action that should be
+		// handled by the Agent's main actionLoop accidentally gets dispatched here.
+		switch action.Type {
+		case ActionConclude, ActionPerformComplexTask, ActionClick, ActionInputText, ActionHumanoidDragAndDrop:
+			return nil, fmt.Errorf("%s should be handled by the Agent, not dispatched to ExecutorRegistry", action.Type)
+		default:
+			return nil, fmt.Errorf("no executor registered for action type: %s", action.Type)
 		}
-		return nil, fmt.Errorf("no executor registered for action type: %s", action.Type)
 	}
 
 	return executor.Execute(ctx, action)
@@ -92,17 +112,18 @@ func (r *ExecutorRegistry) Execute(ctx context.Context, action Action) (*Executi
 
 // -- Browser Executor --
 
-// ActionHandler defines the function signature (using internal Action model).
-// The session now uses the canonical schemas.SessionContext interface.
-type ActionHandler func(session schemas.SessionContext, action Action) error
+// ActionHandler defines the function signature for a browser action.
+// It now accepts a context.Context to allow for timeouts and cancellations.
+type ActionHandler func(ctx context.Context, session schemas.SessionContext, action Action) error
 
-// BrowserExecutor implements the agent.ActionExecutor interface.
+// BrowserExecutor implements the agent.ActionExecutor interface for the remaining simple browser tasks.
 type BrowserExecutor struct {
 	logger          *zap.Logger
 	sessionProvider SessionProvider
 	handlers        map[ActionType]ActionHandler
 }
 
+// इंश्योर BrowserExecutor implements the agent.ActionExecutor interface.
 var _ ActionExecutor = (*BrowserExecutor)(nil)
 
 // NewBrowserExecutor creates a new BrowserExecutor.
@@ -116,64 +137,72 @@ func NewBrowserExecutor(logger *zap.Logger, provider SessionProvider) *BrowserEx
 	return e
 }
 
+// registerHandlers registers the subset of actions this executor still handles.
 func (e *BrowserExecutor) registerHandlers() {
 	e.handlers[ActionNavigate] = e.handleNavigate
-	e.handlers[ActionClick] = e.handleClick
-	e.handlers[ActionInputText] = e.handleInputText
 	e.handlers[ActionSubmitForm] = e.handleSubmitForm
 	e.handlers[ActionScroll] = e.handleScroll
 	e.handlers[ActionWaitForAsync] = e.handleWaitForAsync
 }
 
-// parseBrowserError translates a raw Go error into a structured error for the Mind.
-func parseBrowserError(err error, action Action) (string, map[string]interface{}) {
+// -- REFACTORING NOTE --
+// This function is now exported (ParseBrowserError) so it can be shared and used
+// by the Agent's `executeHumanoidAction` method. This centralizes error parsing logic.
+// It uses more specific error codes and checks for more nuanced failure conditions.
+func ParseBrowserError(err error, action Action) (string, map[string]interface{}) {
 	errStr := err.Error()
 	details := map[string]interface{}{
 		"message": errStr,
 		"action":  action.Type,
 	}
 
-	// Simple heuristic based error classification
-	if strings.Contains(errStr, "selector") || strings.Contains(errStr, "no element found") {
+	// Heuristic based error classification.
+	if strings.Contains(errStr, "selector") || strings.Contains(errStr, "no element found") || strings.Contains(errStr, "geometry retrieval failed") {
 		details["selector"] = action.Selector
-		return "ELEMENT_NOT_FOUND", details
+		return ErrCodeElementNotFound, details
+	}
+	// This check is particularly useful for the Humanoid module, which might find an
+	// element that is visually obstructed or has a size of zero.
+	if strings.Contains(errStr, "not interactable") || strings.Contains(errStr, "zero size") {
+		details["selector"] = action.Selector
+		return ErrCodeHumanoidGeometryInvalid, details
 	}
 	if strings.Contains(errStr, "timeout") {
-		return "TIMEOUT_ERROR", details
+		return ErrCodeTimeoutError, details
 	}
 	if strings.Contains(errStr, "net::ERR") {
-		return "NAVIGATION_ERROR", details
+		return ErrCodeNavigationError, details
 	}
 
-	return "GENERIC_BROWSER_ERROR", details
+	return ErrCodeExecutionFailure, details
 }
 
-// Execute looks up and runs the appropriate handler (using internal models).
+// Execute looks up and runs the appropriate handler for a given browser action.
 func (e *BrowserExecutor) Execute(ctx context.Context, action Action) (*ExecutionResult, error) {
 	session := e.sessionProvider()
 	if session == nil {
-		// Pre execution failure.
 		return nil, fmt.Errorf("cannot execute browser action (%s): no active browser session", action.Type)
 	}
 
 	handler, ok := e.handlers[action.Type]
 	if !ok {
-		return nil, fmt.Errorf("BrowserExecutor internal error: handler not found for type: %s", action.Type)
+		return nil, fmt.Errorf("BrowserExecutor internal error: handler not found for type: %s (it may be handled by Humanoid now)", action.Type)
 	}
 
-	err := handler(session, action)
+	// The context from the agent's main loop is passed down to the handler.
+	err := handler(ctx, session, action)
 
 	result := &ExecutionResult{
 		Status:          "success",
 		ObservationType: ObservedDOMChange,
 	}
 	if err != nil {
-		// Execution failure, create a structured error.
+		// If the handler fails, create a structured error response for the Mind.
 		result.Status = "failed"
-		errorCode, errorDetails := parseBrowserError(err, action)
+		errorCode, errorDetails := ParseBrowserError(err, action)
 		result.ErrorCode = errorCode
 		result.ErrorDetails = errorDetails
-		e.logger.Warn("Browser action execution failed", zap.String("action", string(action.Type)), zap.Error(err))
+		e.logger.Warn("Browser action execution failed", zap.String("action", string(action.Type)), zap.String("error_code", errorCode), zap.Error(err))
 	}
 
 	return result, nil
@@ -181,50 +210,33 @@ func (e *BrowserExecutor) Execute(ctx context.Context, action Action) (*Executio
 
 // -- Action Handlers --
 
-func (e *BrowserExecutor) handleNavigate(session schemas.SessionContext, action Action) error {
+func (e *BrowserExecutor) handleNavigate(ctx context.Context, session schemas.SessionContext, action Action) error {
 	if action.Value == "" {
 		return fmt.Errorf("ActionNavigate requires a 'value' (URL)")
 	}
-	// The session context passed to Navigate is the context of the entire agent mission.
-	return session.Navigate(context.Background(), action.Value)
+	return session.Navigate(ctx, action.Value)
 }
 
-// NOTE: All interaction methods now include context.Background() to match the updated interface.
-// This allows for potential future timeout/cancellation propagation for DOM interactions.
-func (e *BrowserExecutor) handleClick(session schemas.SessionContext, action Action) error {
-	if action.Selector == "" {
-		return fmt.Errorf("ActionClick requires a 'selector'")
-	}
-	return session.Click(context.Background(), action.Selector)
-}
-
-func (e *BrowserExecutor) handleInputText(session schemas.SessionContext, action Action) error {
-	if action.Selector == "" {
-		return fmt.Errorf("ActionInputText requires a 'selector'")
-	}
-	return session.Type(context.Background(), action.Selector, action.Value)
-}
-
-func (e *BrowserExecutor) handleSubmitForm(session schemas.SessionContext, action Action) error {
+func (e *BrowserExecutor) handleSubmitForm(ctx context.Context, session schemas.SessionContext, action Action) error {
 	if action.Selector == "" {
 		return fmt.Errorf("ActionSubmitForm requires a 'selector'")
 	}
-	return session.Submit(context.Background(), action.Selector)
+	return session.Submit(ctx, action.Selector)
 }
 
-func (e *BrowserExecutor) handleScroll(session schemas.SessionContext, action Action) error {
+func (e *BrowserExecutor) handleScroll(ctx context.Context, session schemas.SessionContext, action Action) error {
 	direction := "down"
 	if strings.EqualFold(action.Value, "up") {
 		direction = "up"
 	}
-	return session.ScrollPage(context.Background(), direction)
+	return session.ScrollPage(ctx, direction)
 }
 
-func (e *BrowserExecutor) handleWaitForAsync(session schemas.SessionContext, action Action) error {
+func (e *BrowserExecutor) handleWaitForAsync(ctx context.Context, session schemas.SessionContext, action Action) error {
 	durationMs := 1000 // Default wait time
 	val, exists := action.Metadata["duration_ms"]
 	if exists {
-		// Handle different numeric types robustly
+		// Robustly handle different numeric types that can come from JSON unmarshaling.
 		switch v := val.(type) {
 		case float64:
 			durationMs = int(v)
@@ -238,5 +250,5 @@ func (e *BrowserExecutor) handleWaitForAsync(session schemas.SessionContext, act
 			e.logger.Warn("Invalid type for duration_ms, using default.", zap.String("type", fmt.Sprintf("%T", v)))
 		}
 	}
-	return session.WaitForAsync(context.Background(), durationMs)
+	return session.WaitForAsync(ctx, durationMs)
 }

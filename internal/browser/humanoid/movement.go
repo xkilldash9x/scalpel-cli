@@ -1,3 +1,4 @@
+// internal/browser/humanoid/movement.go
 package humanoid
 
 import (
@@ -10,7 +11,7 @@ import (
 )
 
 // MoveTo simulates human-like movement to a target element.
-func (h *Humanoid) MoveTo(ctx context.Context, selector string, field *PotentialField) error {
+func (h *Humanoid) MoveTo(ctx context.Context, selector string, opts *InteractionOptions) error {
 	// (Scrolling and planning logic would go here)
 
 	geo, err := h.getElementBoxBySelector(ctx, selector)
@@ -24,17 +25,22 @@ func (h *Humanoid) MoveTo(ctx context.Context, selector string, field *Potential
 	}
 
 	target := h.calculateTargetPoint(geo, center, Vector2D{X: 0, Y: 0})
-	return h.MoveToVector(ctx, target, field)
+	return h.MoveToVector(ctx, target, opts)
 }
 
 // MoveToVector simulates human-like movement to a specific coordinate.
-func (h *Humanoid) MoveToVector(ctx context.Context, target Vector2D, field *PotentialField) error {
+func (h *Humanoid) MoveToVector(ctx context.Context, target Vector2D, opts *InteractionOptions) error {
 	h.mu.Lock()
 	startPos := h.currentPos
 	h.mu.Unlock()
 
 	dist := startPos.Dist(target)
 	h.updateFatigue(dist / 1000.0) // Fatigue based on distance
+
+	var field *PotentialField
+	if opts != nil {
+		field = opts.Field
+	}
 
 	finalVelocity, err := h.simulateTrajectory(ctx, startPos, target, field, schemas.ButtonNone)
 	if err != nil {

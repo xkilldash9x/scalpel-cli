@@ -21,6 +21,18 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/llmclient"
 )
 
+// -- UPGRADE NOTE: Defined Constants --
+// Adding some structured error codes and new action types here for clarity.
+// This helps make the observations sent back to the Mind more consistent.
+const (
+	ErrCodeNotImplemented            = "NOT_IMPLEMENTED"
+	ErrCodeExecutionFailure          = "EXECUTION_FAILURE"
+	ErrCodeHumanoidInteractionFailed = "HUMANOID_INTERACTION_FAILED"
+
+	// This assumes ActionHumanoidDragAndDrop is a new action type.
+	ActionHumanoidDragAndDrop ActionType = "HUMANOID_DRAG_AND_DROP"
+)
+
 // Agent orchestrates the components of an autonomous security mission.
 type Agent struct {
 	mission    Mission
@@ -33,15 +45,17 @@ type Agent struct {
 	resultChan chan MissionResult
 	isFinished bool
 	mu         sync.Mutex
-	humanoid   *humanoid.Humanoid
-	// -- REFACTORING NOTE --
-	// The agent now holds a direct reference to the knowledge graph and LLM client
-	// to support advanced behaviors like the intelligent mission conclusion.
+
+	// -- UPGRADE NOTE: Interface-based Humanoid Controller --
+	// The agent now holds the humanoid instance as an interface.
+	// This makes it easier to swap out implementations or mock for testing.
+	humanoid humanoid.Controller
+
 	kg        GraphStore
 	llmClient schemas.LLMClient
 }
 
-// NewGraphStoreFromConfig acts as a factory to create the appropriate GraphStore.
+// Acts as a factory to create the appropriate GraphStore.
 func NewGraphStoreFromConfig(
 	ctx context.Context,
 	cfg config.KnowledgeGraphConfig,
@@ -61,12 +75,7 @@ func NewGraphStoreFromConfig(
 	}
 }
 
-// -- REFACTORING NOTE --
-// The `New` function now accepts a pre configured `SessionContext`. This decouples the agent's
-// creation from the browser session's lifecycle, making the agent more modular and easier to test.
-// The humanoid instance is created immediately using this session.
-
-// New creates and initializes a fully featured agent instance.
+// Creates and initializes a fully featured agent instance.
 func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, session schemas.SessionContext) (*Agent, error) {
 	agentID := uuid.New().String()[:8]
 	logger := globalCtx.Logger.With(zap.String("agent_id", agentID), zap.String("mission_id", mission.ID))
@@ -92,7 +101,7 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 	// 5. Initialize Executors
 	projectRoot, _ := os.Getwd()
 	executors := NewExecutorRegistry(logger, projectRoot)
-	// Immediately update the provider with the session we were given.
+	// Provide the session for actions that are still managed by the registry.
 	executors.UpdateSessionProvider(func() schemas.SessionContext {
 		return session
 	})
@@ -109,19 +118,15 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 		bus:        bus,
 		executors:  executors,
 		resultChan: make(chan MissionResult, 1),
-		humanoid:   h,
-		kg:         kg,
-		llmClient:  llmRouter,
+		// Assign the concrete humanoid instance to our new interface field.
+		humanoid:  h,
+		kg:        kg,
+		llmClient: llmRouter,
 	}
 	return agent, nil
 }
 
-// -- REFACTORING NOTE --
-// `RunMission` no longer creates the browser session. It assumes the agent was already
-// initialized with an active session in the `New` function. This simplifies the run loop
-// and reinforces the decoupling of agent logic from session management.
-
-// RunMission executes the agent's main loop.
+// Executes the agent's main loop.
 func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 	a.logger.Info("Agent is commencing mission.", zap.String("objective", a.mission.Objective))
 	missionCtx, cancelMission := context.WithCancel(ctx)
@@ -132,6 +137,8 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 	go func() {
 		defer a.wg.Done()
 		if err := a.mind.Start(missionCtx); err != nil {
+			// Only log an error if the context wasn't cancelled.
+			// Otherwise it's just expected shutdown behavior.
 			if missionCtx.Err() == nil {
 				a.logger.Error("Mind process failed", zap.Error(err))
 			}
@@ -157,6 +164,11 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 	}
 }
 
+// -- UPGRADE NOTE: Action Loop as a Switchboard --
+// This is the new, refactored action loop. It acts as a central orchestrator.
+// Instead of a series of 'if' checks, it uses a clean switch statement to route
+// actions to the correct handler, whether it's a meta-action, the humanoid
+// controller, or the basic executor registry. This is way more maintainable.
 func (a *Agent) actionLoop(ctx context.Context) {
 	defer a.wg.Done()
 	actionChan, unsubscribe := a.bus.Subscribe(MessageTypeAction)
@@ -169,6 +181,7 @@ func (a *Agent) actionLoop(ctx context.Context) {
 				return
 			}
 
+			// Spin up a goroutine to handle the action so we don't block the main loop.
 			go func(actionMsg CognitiveMessage) {
 				defer a.bus.Acknowledge(actionMsg)
 
@@ -178,25 +191,13 @@ func (a *Agent) actionLoop(ctx context.Context) {
 					return
 				}
 
-				// -- REFACTORING NOTE: Agent as Orchestrator --
-				// The agent now intercepts high level tasks before they reach the simple executor registry.
-				// This allows the agent to use its own complex capabilities (like humanoid) to perform
-				// multi step actions, making the Mind's job easier and the process more robust.
-				if action.Type == ActionPerformComplexTask {
-					a.logger.Info("Agent is orchestrating a complex task", zap.Any("metadata", action.Metadata))
-					// In a real implementation, this would dispatch to different humanoid behaviors.
-					// For now, it's a placeholder to demonstrate the architectural pattern.
-					execResult := &ExecutionResult{
-						Status:          "failed",
-						ObservationType: ObservedSystemState,
-						ErrorCode:       "NOT_IMPLEMENTED",
-						ErrorDetails:    map[string]interface{}{"task_name": action.Metadata["task_name"]},
-					}
-					a.postObservation(ctx, action, execResult)
-					return // End handling for this action here.
-				}
+				var execResult *ExecutionResult
 
-				if action.Type == ActionConclude {
+				// -- Action Orchestration Switchboard --
+				switch action.Type {
+
+				// -- Meta Actions --
+				case ActionConclude:
 					a.logger.Info("Mind decided to conclude mission.", zap.String("rationale", action.Rationale))
 					result, err := a.concludeMission(ctx)
 					if err != nil {
@@ -205,20 +206,53 @@ func (a *Agent) actionLoop(ctx context.Context) {
 					if result != nil {
 						a.finish(*result)
 					}
-					return
-				}
+					return // CONCLUDE stops further processing for this message.
 
-				execResult, err := a.executors.Execute(ctx, action)
-				if err != nil {
-					a.logger.Error("Executor failed", zap.String("action_type", string(action.Type)), zap.Error(err))
-					// Create a structured error for execution failures.
+				// -- Humanoid Browser Actions (Basic and Advanced) --
+				// These actions are intercepted by the Agent and handled by the Humanoid module for more realistic interaction.
+				case ActionClick, ActionInputText, ActionHumanoidDragAndDrop:
+					a.logger.Debug("Orchestrating humanoid action", zap.String("type", string(action.Type)))
+					// Pass the mission context to the humanoid action for cancellation/timeout propagation.
+					execResult = a.executeHumanoidAction(ctx, action)
+
+				// -- Complex/High-Level Actions (Placeholders for now) --
+				case ActionPerformComplexTask:
+					a.logger.Info("Agent is orchestrating a complex task (Placeholder)", zap.Any("metadata", action.Metadata))
+					taskName, _ := action.Metadata["task_name"].(string)
 					execResult = &ExecutionResult{
 						Status:          "failed",
 						ObservationType: ObservedSystemState,
-						ErrorCode:       "EXECUTION_FAILURE",
-						ErrorDetails:    map[string]interface{}{"message": err.Error()},
+						ErrorCode:       ErrCodeNotImplemented,
+						ErrorDetails:    map[string]interface{}{"task_name": taskName},
+					}
+
+				// -- Delegated Actions (Static analysis, remaining browser actions) --
+				// These are dispatched to the ExecutorRegistry.
+				case ActionGatherCodebaseContext, ActionNavigate, ActionWaitForAsync, ActionSubmitForm, ActionScroll:
+					a.logger.Debug("Dispatching action to ExecutorRegistry", zap.String("type", string(action.Type)))
+					var err error
+					execResult, err = a.executors.Execute(ctx, action)
+					if err != nil {
+						// Create a structured error if the executor returns a raw Go error.
+						a.logger.Error("ExecutorRegistry failed with raw error", zap.String("action_type", string(action.Type)), zap.Error(err))
+						execResult = &ExecutionResult{
+							Status:          "failed",
+							ObservationType: ObservedSystemState,
+							ErrorCode:       ErrCodeExecutionFailure,
+							ErrorDetails:    map[string]interface{}{"message": err.Error()},
+						}
+					}
+
+				default:
+					a.logger.Warn("Received unknown action type", zap.String("type", string(action.Type)))
+					execResult = &ExecutionResult{
+						Status:          "failed",
+						ObservationType: ObservedSystemState,
+						ErrorCode:       "UNKNOWN_ACTION_TYPE",
 					}
 				}
+
+				// Post the result of the execution back to the bus as an observation.
 				a.postObservation(ctx, action, execResult)
 
 			}(msg)
@@ -229,7 +263,80 @@ func (a *Agent) actionLoop(ctx context.Context) {
 	}
 }
 
-// postObservation is a helper to create and post an observation to the bus.
+// -- UPGRADE NOTE: New Humanoid Action Handler --
+// This function is the dedicated handler for all actions that require the humanoid
+// module. It maps our abstract Action types to concrete humanoid method calls and,
+// critically, translates any errors into structured, meaningful feedback for the Mind.
+func (a *Agent) executeHumanoidAction(ctx context.Context, action Action) *ExecutionResult {
+	var err error
+
+	// Map the Action to the corresponding humanoid method.
+	switch action.Type {
+	case ActionClick:
+		if action.Selector == "" {
+			err = fmt.Errorf("ActionClick requires a 'selector'")
+			break
+		}
+		// Use IntelligentClick for realistic interaction.
+		err = a.humanoid.IntelligentClick(ctx, action.Selector, nil)
+
+	case ActionInputText:
+		if action.Selector == "" {
+			err = fmt.Errorf("ActionInputText requires a 'selector'")
+			break
+		}
+		// Use Type for realistic typing simulation.
+		err = a.humanoid.Type(ctx, action.Selector, action.Value)
+
+	case ActionHumanoidDragAndDrop:
+		startSelector := action.Selector
+		targetSelectorRaw, okMeta := action.Metadata["target_selector"]
+		targetSelector, okCast := targetSelectorRaw.(string)
+
+		if !okMeta || !okCast || startSelector == "" || targetSelector == "" {
+			err = fmt.Errorf("ActionHumanoidDragAndDrop requires 'selector' (start) and 'metadata.target_selector' (end, string)")
+			break
+		}
+		err = a.humanoid.DragAndDrop(ctx, startSelector, targetSelector)
+
+	default:
+		// This should ideally not happen if actionLoop is configured correctly.
+		err = fmt.Errorf("unsupported humanoid action type: %s", action.Type)
+	}
+
+	// Standardize the result format.
+	result := &ExecutionResult{
+		Status:          "success",
+		ObservationType: ObservedDOMChange, // Assume DOM change for successful interaction.
+	}
+
+	if err != nil {
+		// -- Enhanced Feedback Loop --
+		// Here we translate raw errors from the humanoid into something the LLM can understand.
+		result.Status = "failed"
+
+		// Assuming ParseBrowserError is a function that can parse common CDP errors.
+		// It might live in the executors package or a shared utility package.
+		errorCode, errorDetails := ParseBrowserError(err, action)
+
+		// Refine the error code based on the humanoid context. If the generic parser
+		// couldn't figure it out, we can give it a more specific code here.
+		if errorCode == ErrCodeExecutionFailure {
+			errStr := err.Error()
+			if strings.Contains(errStr, "failed to click") || strings.Contains(errStr, "failed to type") {
+				errorCode = ErrCodeHumanoidInteractionFailed
+			}
+		}
+
+		result.ErrorCode = errorCode
+		result.ErrorDetails = errorDetails
+		a.logger.Warn("Humanoid action execution failed", zap.String("action", string(action.Type)), zap.String("error_code", errorCode), zap.Error(err))
+	}
+
+	return result
+}
+
+// A helper to create and post an observation to the bus.
 func (a *Agent) postObservation(ctx context.Context, sourceAction Action, result *ExecutionResult) {
 	obs := Observation{
 		ID:             uuid.New().String(),
@@ -246,11 +353,7 @@ func (a *Agent) postObservation(ctx context.Context, sourceAction Action, result
 	}
 }
 
-// -- REFACTORING NOTE: Intelligent Mission Conclusion --
-// This function is now implemented to perform a final act of intelligence. It triggers
-// a specialized OODA loop to synthesize the mission's findings into a coherent summary
-// by leveraging the knowledge graph and the LLM one last time.
-
+// Performs a final act of intelligence to synthesize the mission's findings.
 func (a *Agent) concludeMission(ctx context.Context) (*MissionResult, error) {
 	a.logger.Info("Concluding mission with intelligent summary.")
 	// 1. OBSERVE: Gather the entire mission's subgraph from the Knowledge Graph.
@@ -298,8 +401,7 @@ func (a *Agent) concludeMission(ctx context.Context) (*MissionResult, error) {
 	}, nil
 }
 
-// gatherMissionContext is a helper to collect all nodes related to the mission.
-// It's adapted from the logic in llm_mind.go for a complete, non depth limited traversal.
+// A helper to collect all nodes related to the mission.
 func (a *Agent) gatherMissionContext(ctx context.Context, missionID string) (*schemas.Subgraph, error) {
 	queue := []string{missionID}
 	visitedNodes := make(map[string]schemas.Node)
@@ -346,6 +448,7 @@ func (a *Agent) gatherMissionContext(ctx context.Context, missionID string) (*sc
 	return &schemas.Subgraph{Nodes: subgraphNodes, Edges: subgraphEdges}, nil
 }
 
+// Safely sends the final result and shuts down the agent's components.
 func (a *Agent) finish(result MissionResult) {
 	a.mu.Lock()
 	defer a.mu.Unlock()
@@ -356,4 +459,25 @@ func (a *Agent) finish(result MissionResult) {
 	a.mind.Stop()
 	a.bus.Shutdown()
 	a.resultChan <- result
+}
+
+// A placeholder for a utility function that would parse
+// common browser automation errors into structured codes.
+func ParseBrowserError(err error, action Action) (string, map[string]interface{}) {
+	// In a real implementation, this would inspect the error string for patterns like:
+	// "no node found for selector", "waiting for selector timed out", etc.
+	errStr := err.Error()
+	details := map[string]interface{}{"message": errStr}
+	if action.Selector != "" {
+		details["selector"] = action.Selector
+	}
+
+	if strings.Contains(errStr, "no node found") || strings.Contains(errStr, "could not find element") {
+		return "ELEMENT_NOT_FOUND", details
+	}
+	if strings.Contains(errStr, "timed out") {
+		return "TIMEOUT_ERROR", details
+	}
+
+	return ErrCodeExecutionFailure, details
 }

@@ -2,1051 +2,1051 @@
 package jsbind
 
 import (
+	"bytes"
 	"fmt"
+	"net/url"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/antchfx/htmlquery"
 	"github.com/dop251/goja"
+	"github.com/dop251/goja_nodejs/eventloop"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
 	"golang.org/x/net/html"
 )
 
-// DOMBridge manages the connection between the Goja runtime and the Go DOM representation.
+// listenerGroup stores event listeners separated by phase (Capturing vs Bubbling/Target).
+// This structure is essential for W3C compliant event propagation.
+type listenerGroup struct {
+	// Listeners invoked during the Capturing phase (useCapture = true).
+	Capturing []goja.Value
+	// Listeners invoked during the Target or Bubbling phase (useCapture = false).
+	Bubbling []goja.Value
+}
+
+// =================================================================================================
+// DOM Bridge and Core Wrappers
+// =================================================================================================
+
+// DOMBridge manages the synchronization between the *html.Node DOM representation and the Goja runtime.
 type DOMBridge struct {
-	vm     *goja.Runtime
-	logger *zap.Logger
+	// mu protects access to the bridge state (e.g., DOM structure, eventListeners, nodeMap, storage).
+	// It is crucial for synchronizing access between the main Go routines (via Session methods)
+	// and the single-threaded JavaScript Event Loop.
+	mu       sync.RWMutex
+	document *html.Node // The root of the HTML document.
+	runtime  *goja.Runtime
+	logger   *zap.Logger
 
-	// Reference to the current DOM root.
-	// Access must be protected by the mutex.
-	mu   sync.RWMutex
-	root *html.Node
+	// eventLoop is essential for handling asynchronous JS operations like setTimeout or Promises.
+	eventLoop *eventloop.EventLoop
 
-	window   *Window
-	document *Document
+	// Mapping between *html.Node pointers and their corresponding Goja wrapper objects.
+	nodeMap map[*html.Node]*goja.Object
+
+	// Event listeners registered via addEventListener.
+	eventListeners map[*html.Node]map[string]*listenerGroup
+
+	// Storage simulation (LocalStorage/SessionStorage)
+	localStorage   map[string]string
+	sessionStorage map[string]string
+
+	// Callbacks provided by the Session for interactive location management.
+	navigateCallback        NavigationFunc
+	notifyURLChangeCallback NavigationFunc
+
+	// Stores the current location state for the active JS context.
+	currentLocationState map[string]string
 }
 
-// NewDOMBridge initializes the bridge and sets up the Goja runtime.
-func NewDOMBridge(vm *goja.Runtime, logger *zap.Logger) *DOMBridge {
-	if logger == nil {
-		logger = zap.NewNop()
-	}
-
-	bridge := &DOMBridge{
-		vm:     vm,
-		logger: logger.Named("dom_bridge"),
-	}
-
-	// Initialize the core objects.
-	bridge.document = newDocument(bridge)
-	bridge.window = newWindow(bridge)
-
-	// Expose the core objects to the Goja runtime.
-	bridge.initializeRuntime()
-
-	return bridge
-}
-
-// initializeRuntime sets the global variables (window, document) in the JS context.
-func (b *DOMBridge) initializeRuntime() {
-	// Expose the 'window' object as the global object itself and also as 'window' and 'self'.
-	global := b.vm.GlobalObject()
-	if err := global.Set("window", b.window.Object); err != nil {
-		b.logger.Error("Failed to set 'window' global", zap.Error(err))
-	}
-	if err := global.Set("self", b.window.Object); err != nil {
-		b.logger.Error("Failed to set 'self' global", zap.Error(err))
-	}
-
-	// Expose the 'document' object.
-	if err := global.Set("document", b.document.Object); err != nil {
-		b.logger.Error("Failed to set 'document' global", zap.Error(err))
-	}
-
-	// Implement basic console logging and timers.
-	b.initConsole()
-	b.initTimers()
-}
-
-// UpdateDOM sets the current DOM root used by the bridge.
-func (b *DOMBridge) UpdateDOM(root *html.Node) {
-	b.mu.Lock()
-	defer b.mu.Unlock()
-	b.root = root
-	b.document.updateRoot(root)
-}
-
-// --- Window Object (Global Scope) ---
-
-// Window represents the browser window object.
-type Window struct {
-	bridge *DOMBridge
-	Object *goja.Object
-}
-
-func newWindow(bridge *DOMBridge) *Window {
-	w := &Window{
-		bridge: bridge,
-	}
-	w.Object = bridge.vm.NewObject()
-
-	// Define basic properties and methods.
-	// (FUTURE IMPROVEMENT: Implement full Location object).
-	w.Object.Set("location", "about:blank")
-	w.Object.Set("alert", w.Alert)
-	w.Object.Set("confirm", w.Confirm)
-
-	return w
-}
-
-func (w *Window) Alert(call goja.FunctionCall) goja.Value {
-	message := call.Argument(0).String()
-	w.bridge.logger.Info("[JS Alert]", zap.String("message", message))
-	return goja.Undefined()
-}
-
-func (w *Window) Confirm(call goja.FunctionCall) goja.Value {
-	message := call.Argument(0).String()
-	w.bridge.logger.Info("[JS Confirm]", zap.String("message", message))
-	return w.bridge.vm.ToValue(true) // Always confirm
-}
-
-// --- Document Object ---
-
-// Document represents the HTML document object.
-type Document struct {
-	bridge *DOMBridge
-	Object *goja.Object
-	root   *html.Node
-}
-
-func newDocument(bridge *DOMBridge) *Document {
-	d := &Document{
-		bridge: bridge,
-	}
-	d.Object = bridge.vm.NewObject()
-
-	// Define methods of the document object.
-	d.Object.Set("querySelector", d.QuerySelector)
-	d.Object.Set("querySelectorAll", d.QuerySelectorAll)
-	d.Object.Set("getElementById", d.GetElementById)
-	d.Object.Set("getElementsByTagName", d.GetElementsByTagName)
-	d.Object.Set("getElementsByClassName", d.GetElementsByClassName)
-	d.Object.Set("createElement", d.CreateElement)
-	d.Object.Set("createTextNode", d.CreateTextNode)
-
-	return d
-}
-
-func (d *Document) updateRoot(root *html.Node) {
-	// Called under the bridge's write lock from UpdateDOM.
-	d.root = root
-
-	// Update document properties like body and head.
-	if root != nil {
-		bodyNode := htmlquery.FindOne(root, "//body")
-		if bodyNode != nil {
-			d.Object.Set("body", d.bridge.WrapNode(bodyNode))
-		} else {
-			d.Object.Set("body", goja.Null())
-		}
-		headNode := htmlquery.FindOne(root, "//head")
-		if headNode != nil {
-			d.Object.Set("head", d.bridge.WrapNode(headNode))
-		} else {
-			d.Object.Set("head", goja.Null())
-		}
-	} else {
-		d.Object.Set("body", goja.Null())
-		d.Object.Set("head", goja.Null())
-	}
-}
-
-// QuerySelector finds the first element matching the CSS selector (translated to XPath).
-func (d *Document) QuerySelector(call goja.FunctionCall) goja.Value {
-	selector := call.Argument(0).String()
-
-	// CRITICAL: Lock the DOM for reading during the query.
-	d.bridge.mu.RLock()
-	defer d.bridge.mu.RUnlock()
-
-	if d.root == nil {
-		return goja.Null()
-	}
-
-	xpath := translateCSSToXPath(selector)
-
-	node, err := htmlquery.Query(d.root, xpath)
-	if err != nil {
-		// Throw a DOMException (SyntaxError) for invalid selectors.
-		panic(d.bridge.vm.NewGoError(fmt.Errorf("invalid selector: %s", selector)))
-	}
-
-	if node == nil {
-		return goja.Null()
-	}
-
-	return d.bridge.WrapNode(node)
-}
-
-// QuerySelectorAll finds all elements matching the CSS selector.
-func (d *Document) QuerySelectorAll(call goja.FunctionCall) goja.Value {
-	selector := call.Argument(0).String()
-
-	d.bridge.mu.RLock()
-	defer d.bridge.mu.RUnlock()
-
-	if d.root == nil {
-		return d.bridge.vm.NewArray()
-	}
-
-	xpath := translateCSSToXPath(selector)
-	nodes, err := htmlquery.QueryAll(d.root, xpath)
-	if err != nil {
-		panic(d.bridge.vm.NewGoError(fmt.Errorf("invalid selector: %s", selector)))
-	}
-
-	return d.bridge.WrapNodeList(nodes)
-}
-
-// GetElementById finds an element by its ID.
-func (d *Document) GetElementById(call goja.FunctionCall) goja.Value {
-	id := call.Argument(0).String()
-	// Basic protection against complex IDs that might break the simple XPath.
-	if strings.Contains(id, "'") {
-		return goja.Null()
-	}
-	xpath := fmt.Sprintf("//*[@id='%s']", id)
-
-	d.bridge.mu.RLock()
-	defer d.bridge.mu.RUnlock()
-
-	if d.root == nil {
-		return goja.Null()
-	}
-
-	node, err := htmlquery.Query(d.root, xpath)
-	if err != nil || node == nil {
-		return goja.Null()
-	}
-
-	return d.bridge.WrapNode(node)
-}
-
-func (d *Document) GetElementsByTagName(call goja.FunctionCall) goja.Value {
-	tagName := strings.ToLower(call.Argument(0).String())
-	xpath := fmt.Sprintf("//%s", tagName)
-
-	d.bridge.mu.RLock()
-	defer d.bridge.mu.RUnlock()
-
-	if d.root == nil {
-		return d.bridge.vm.NewArray()
-	}
-
-	nodes, _ := htmlquery.QueryAll(d.root, xpath)
-	return d.bridge.WrapNodeList(nodes)
-}
-
-func (d *Document) GetElementsByClassName(call goja.FunctionCall) goja.Value {
-	className := call.Argument(0).String()
-	// XPath way to check for a class in a space-separated list.
-	xpath := fmt.Sprintf("//*[contains(concat(' ', normalize-space(@class), ' '), ' %s ')]", className)
-
-	d.bridge.mu.RLock()
-	defer d.bridge.mu.RUnlock()
-
-	if d.root == nil {
-		return d.bridge.vm.NewArray()
-	}
-
-	nodes, _ := htmlquery.QueryAll(d.root, xpath)
-	return d.bridge.WrapNodeList(nodes)
-}
-
-// CreateElement creates a new detached DOM node.
-func (d *Document) CreateElement(call goja.FunctionCall) goja.Value {
-	tagName := call.Argument(0).String()
-
-	// Create the new node in Go. No lock needed as it's detached.
-	newNode := &html.Node{
-		Type: html.ElementNode,
-		Data: strings.ToLower(tagName),
-	}
-
-	return d.bridge.WrapNode(newNode)
-}
-
-// CreateTextNode creates a new detached text node.
-func (d *Document) CreateTextNode(call goja.FunctionCall) goja.Value {
-	data := call.Argument(0).String()
-
-	newNode := &html.Node{
-		Type: html.TextNode,
-		Data: data,
-	}
-
-	return d.bridge.WrapNode(newNode)
-}
-
-// --- Element Object (and Node interface) ---
-
-// Element represents a DOM element wrapper.
+// Element is a Goja wrapper for an *html.Node that represents an element.
 type Element struct {
 	bridge *DOMBridge
 	Node   *html.Node
 	Object *goja.Object
 }
 
-// WrapNodeList converts a slice of *html.Node into a JS Array (NodeList equivalent).
-func (b *DOMBridge) WrapNodeList(nodes []*html.Node) goja.Value {
-	wrappedNodes := make([]interface{}, len(nodes))
-	for i, node := range nodes {
-		wrappedNodes[i] = b.WrapNode(node)
+// NavigationFunc is the function signature for callbacks used by the DOMBridge
+// to communicate with the Session regarding URL changes.
+type NavigationFunc func(targetURL string)
+
+// NewDOMBridge creates a new DOMBridge instance and initializes the JS runtime environment.
+func NewDOMBridge(logger *zap.Logger, eventLoop *eventloop.EventLoop, navigateCallback NavigationFunc, notifyURLChangeCallback NavigationFunc) *DOMBridge {
+	if logger == nil {
+		logger = zap.NewNop()
 	}
-	return b.vm.NewArray(wrappedNodes...)
+
+	bridge := &DOMBridge{
+		logger:                  logger.Named("dom_bridge"),
+		eventLoop:               eventLoop,
+		nodeMap:                 make(map[*html.Node]*goja.Object),
+		eventListeners:          make(map[*html.Node]map[string]*listenerGroup),
+		localStorage:            make(map[string]string),
+		sessionStorage:          make(map[string]string),
+		navigateCallback:        navigateCallback,
+		notifyURLChangeCallback: notifyURLChangeCallback,
+		currentLocationState:    make(map[string]string),
+	}
+	return bridge
 }
 
-// WrapNode converts an *html.Node into a JS Element object.
-func (b *DOMBridge) WrapNode(node *html.Node) goja.Value {
+// BindToRuntime injects the DOM APIs into the Goja runtime.
+// This function must be executed on the event loop thread.
+func (b *DOMBridge) BindToRuntime(vm *goja.Runtime) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.runtime = vm
+	global := vm.GlobalObject()
+
+	// 1. Create and bind the 'document' object.
+	documentObj := b.wrapNode(b.document)
+	_ = global.Set("document", documentObj)
+
+	// 2. Create and bind the 'window' object, which is the global 'this'.
+	_ = global.Set("window", global)
+	_ = global.Set("self", global)
+
+	// 3. Bind timers (setTimeout, etc.) using the event loop.
+	b.initTimers()
+
+	// 4. Bind Storage APIs to the window.
+	b.bindStorageAPIs()
+
+	// 5. Bind scroll APIs to the window.
+	b.bindScrollAPIs()
+
+	// Basic simulation of dimensions.
+	if goja.IsUndefined(global.Get("innerWidth")) {
+		_ = global.Set("innerWidth", 1920)
+		_ = global.Set("innerHeight", 1080)
+	}
+	if goja.IsUndefined(global.Get("scrollX")) {
+		_ = global.Set("scrollX", 0)
+		_ = global.Set("scrollY", 0)
+	}
+}
+
+// UpdateDOM safely replaces the root document node for the bridge.
+func (b *DOMBridge) UpdateDOM(doc *html.Node, initialURL string) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	b.document = doc
+	// Clear the node map to prevent stale references from the old DOM.
+	b.nodeMap = make(map[*html.Node]*goja.Object)
+	// Reset event listeners as well.
+	b.eventListeners = make(map[*html.Node]map[string]*listenerGroup)
+
+	if b.runtime != nil {
+		// Re-initialize document and head/body properties
+		documentObj := b.wrapNode(b.document)
+		_ = b.runtime.Set("document", documentObj)
+		b.bindDocumentAndElementMethods(documentObj, b.document)
+
+		// Re-initialize location object for the new page context
+		b.InitializeLocation(initialURL)
+	}
+}
+
+// GetDocumentNode provides thread safe access to the root document node.
+func (b *DOMBridge) GetDocumentNode() *html.Node {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	return b.document
+}
+
+// GetEventLoop returns the associated event loop.
+func (b *DOMBridge) GetEventLoop() *eventloop.EventLoop {
+	return b.eventLoop
+}
+
+// =================================================================================================
+// Node Wrapping and JS Object Creation
+// =================================================================================================
+
+// wrapNode creates or retrieves the Goja object wrapper for a given *html.Node.
+// This is the core of maintaining object identity between Go and JavaScript.
+func (b *DOMBridge) wrapNode(node *html.Node) *goja.Object {
 	if node == nil {
-		return goja.Null()
-	}
-
-	// (FUTURE IMPROVEMENT: Implement an Identity Map (e.g., map[*html.Node]*goja.Object) for consistency).
-
-	e := &Element{
-		bridge: b,
-		Node:   node,
-	}
-	// Create the JS object representation.
-	e.Object = b.vm.NewObject()
-
-	// Store a reference back to the Go struct internally for unwrapping.
-	// Use a non-enumerable property name.
-	e.Object.DefineDataProperty("__go_node_wrapper__", b.vm.ToValue(e), goja.FLAG_FALSE, goja.FLAG_FALSE, goja.FLAG_TRUE)
-
-	// Define core Node properties and methods.
-	e.Object.Set("nodeType", e.NodeType())
-	e.Object.Set("nodeName", e.NodeName())
-
-	// Use getters for dynamic relationship properties.
-	e.defineGetter("parentNode", e.ParentNode)
-	e.defineGetter("childNodes", e.ChildNodes)
-	e.defineGetter("firstChild", e.FirstChild)
-	e.defineGetter("lastChild", e.LastChild)
-	e.defineGetter("nextSibling", e.NextSibling)
-	e.defineGetter("previousSibling", e.PreviousSibling)
-
-	e.Object.Set("appendChild", e.AppendChild)
-	e.Object.Set("removeChild", e.RemoveChild)
-	e.Object.Set("insertBefore", e.InsertBefore)
-	e.Object.Set("cloneNode", e.CloneNode)
-
-	// Define type-specific properties and methods.
-	if node.Type == html.ElementNode {
-		e.Object.Set("tagName", strings.ToUpper(node.Data))
-		e.defineGetter("id", e.GetId)
-		e.defineSetter("id", e.SetId)
-		e.defineGetter("className", e.GetClassName)
-		e.defineSetter("className", e.SetClassName)
-
-		// Getters/setters for content manipulation.
-		e.defineGetter("innerHTML", e.InnerHTML)
-		e.defineSetter("innerHTML", e.SetInnerHTML)
-		e.defineGetter("outerHTML", e.OuterHTML)
-		e.defineGetter("textContent", e.TextContent)
-		e.defineSetter("textContent", e.SetTextContent)
-
-		// Attribute methods
-		e.Object.Set("getAttribute", e.GetAttribute)
-		e.Object.Set("setAttribute", e.SetAttribute)
-		e.Object.Set("removeAttribute", e.RemoveAttribute)
-
-		// Query methods (scoped)
-		e.Object.Set("querySelector", e.QuerySelector)
-		e.Object.Set("querySelectorAll", e.QuerySelectorAll)
-		e.Object.Set("getElementsByTagName", e.GetElementsByTagName)
-		e.Object.Set("getElementsByClassName", e.GetElementsByClassName)
-
-		// Basic EventTarget implementation (Dummy for compatibility)
-		e.Object.Set("addEventListener", e.AddEventListener)
-		e.Object.Set("removeEventListener", e.RemoveEventListener)
-		e.Object.Set("dispatchEvent", e.DispatchEvent)
-
-	} else if node.Type == html.TextNode || node.Type == html.CommentNode {
-		// Properties for text/comment nodes.
-		e.defineGetter("textContent", e.NodeValue)
-		e.defineSetter("textContent", e.SetNodeValue)
-		e.defineGetter("nodeValue", e.NodeValue)
-		e.defineSetter("nodeValue", e.SetNodeValue)
-		e.defineGetter("data", e.NodeValue)
-		e.defineSetter("data", e.SetNodeValue)
-	}
-
-	return e.Object
-}
-
-// Helper to define a getter property.
-func (e *Element) defineGetter(name string, getter func() goja.Value) {
-	getterFunc := e.bridge.vm.ToValue(func(call goja.FunctionCall) goja.Value {
-		return getter()
-	})
-	// Configurable: false, Enumerable: true
-	err := e.Object.DefineAccessorProperty(name, getterFunc, goja.Undefined(), goja.FLAG_FALSE, goja.FLAG_TRUE)
-	if err != nil {
-		e.bridge.logger.Error("Failed to define getter", zap.String("property", name), zap.Error(err))
-	}
-}
-
-// Helper to define a setter property.
-func (e *Element) defineSetter(name string, setter func(goja.Value)) {
-	setterFunc := e.bridge.vm.ToValue(func(call goja.FunctionCall) goja.Value {
-		setter(call.Argument(0))
-		return goja.Undefined()
-	})
-	err := e.Object.DefineAccessorProperty(name, goja.Undefined(), setterFunc, goja.FLAG_FALSE, goja.FLAG_TRUE)
-	if err != nil {
-		e.bridge.logger.Error("Failed to define setter", zap.String("property", name), zap.Error(err))
-	}
-}
-
-// --- Node Properties Implementation ---
-
-func (e *Element) NodeType() int {
-	// Standard DOM node types.
-	switch e.Node.Type {
-	case html.ElementNode:
-		return 1 // ELEMENT_NODE
-	case html.TextNode:
-		return 3 // TEXT_NODE
-	case html.CommentNode:
-		return 8 // COMMENT_NODE
-	case html.DocumentNode:
-		return 9 // DOCUMENT_NODE
-	default:
-		return 0
-	}
-}
-
-func (e *Element) NodeName() string {
-	if e.Node.Type == html.ElementNode {
-		return strings.ToUpper(e.Node.Data)
-	}
-	if e.Node.Type == html.TextNode {
-		return "#text"
-	}
-	if e.Node.Type == html.CommentNode {
-		return "#comment"
-	}
-	return ""
-}
-
-func (e *Element) ParentNode() goja.Value {
-	e.bridge.mu.RLock()
-	defer e.bridge.mu.RUnlock()
-
-	if e.Node.Parent != nil {
-		return e.bridge.WrapNode(e.Node.Parent)
-	}
-	return goja.Null()
-}
-
-func (e *Element) ChildNodes() goja.Value {
-	e.bridge.mu.RLock()
-	defer e.bridge.mu.RUnlock()
-
-	var children []*html.Node
-	for c := e.Node.FirstChild; c != nil; c = c.NextSibling {
-		children = append(children, c)
-	}
-	return e.bridge.WrapNodeList(children)
-}
-
-func (e *Element) FirstChild() goja.Value {
-	e.bridge.mu.RLock()
-	defer e.bridge.mu.RUnlock()
-	return e.bridge.WrapNode(e.Node.FirstChild)
-}
-
-func (e *Element) LastChild() goja.Value {
-	e.bridge.mu.RLock()
-	defer e.bridge.mu.RUnlock()
-	return e.bridge.WrapNode(e.Node.LastChild)
-}
-
-func (e *Element) NextSibling() goja.Value {
-	e.bridge.mu.RLock()
-	defer e.bridge.mu.RUnlock()
-	return e.bridge.WrapNode(e.Node.NextSibling)
-}
-
-func (e *Element) PreviousSibling() goja.Value {
-	e.bridge.mu.RLock()
-	defer e.bridge.mu.RUnlock()
-	return e.bridge.WrapNode(e.Node.PrevSibling)
-}
-
-func (e *Element) NodeValue() goja.Value {
-	e.bridge.mu.RLock()
-	defer e.bridge.mu.RUnlock()
-	if e.Node.Type == html.TextNode || e.Node.Type == html.CommentNode {
-		return e.bridge.vm.ToValue(e.Node.Data)
-	}
-	return goja.Null()
-}
-
-func (e *Element) SetNodeValue(val goja.Value) {
-	e.bridge.mu.Lock()
-	defer e.bridge.mu.Unlock()
-	if e.Node.Type == html.TextNode || e.Node.Type == html.CommentNode {
-		e.Node.Data = val.String()
-	}
-}
-
-// --- Element Properties Implementation ---
-
-func (e *Element) GetId() goja.Value {
-	return e.GetAttributeValue("id")
-}
-
-func (e *Element) SetId(val goja.Value) {
-	e.SetAttributeValue("id", val.String())
-}
-
-func (e *Element) GetClassName() goja.Value {
-	return e.GetAttributeValue("class")
-}
-
-func (e *Element) SetClassName(val goja.Value) {
-	e.SetAttributeValue("class", val.String())
-}
-
-// InnerHTML returns the serialized HTML of the element's children.
-func (e *Element) InnerHTML() goja.Value {
-	e.bridge.mu.RLock()
-	defer e.bridge.mu.RUnlock()
-
-	return e.bridge.vm.ToValue(renderInnerHTML(e.Node))
-}
-
-func renderInnerHTML(node *html.Node) string {
-	var sb strings.Builder
-	for c := node.FirstChild; c != nil; c = c.NextSibling {
-		// Use the rendering function from golang.org/x/net/html
-		if err := html.Render(&sb, c); err != nil {
-			// Errors during rendering are difficult to handle here.
-		}
-	}
-	return sb.String()
-}
-
-// SetInnerHTML parses the provided HTML string and replaces the element's children.
-func (e *Element) SetInnerHTML(val goja.Value) {
-	htmlContent := val.String()
-
-	// Parse the HTML fragment. The context node (e.Node) is required for correct parsing rules.
-	newNodes, err := html.ParseFragment(strings.NewReader(htmlContent), e.Node)
-	if err != nil {
-		// Throw a DOMException (SyntaxError).
-		panic(e.bridge.vm.NewGoError(fmt.Errorf("failed to parse HTML: %w", err)))
-	}
-
-	// CRITICAL: Lock the DOM for writing.
-	e.bridge.mu.Lock()
-	defer e.bridge.mu.Unlock()
-
-	// 1. Remove all existing children.
-	for c := e.Node.FirstChild; c != nil; {
-		next := c.NextSibling
-		e.Node.RemoveChild(c)
-		c = next
-	}
-
-	// 2. Append the new nodes.
-	for _, newNode := range newNodes {
-		e.Node.AppendChild(newNode)
-	}
-}
-
-// OuterHTML returns the serialized HTML of the element itself and its children.
-func (e *Element) OuterHTML() goja.Value {
-	e.bridge.mu.RLock()
-	defer e.bridge.mu.RUnlock()
-
-	var sb strings.Builder
-	if err := html.Render(&sb, e.Node); err != nil {
-		return e.bridge.vm.ToValue("")
-	}
-	return e.bridge.vm.ToValue(sb.String())
-}
-
-// TextContent returns the concatenated text content of the element and its descendants.
-func (e *Element) TextContent() goja.Value {
-	e.bridge.mu.RLock()
-	defer e.bridge.mu.RUnlock()
-
-	// Use htmlquery's InnerText helper.
-	text := htmlquery.InnerText(e.Node)
-	return e.bridge.vm.ToValue(text)
-}
-
-// SetTextContent replaces the children of the element with a single text node.
-func (e *Element) SetTextContent(val goja.Value) {
-	text := val.String()
-
-	e.bridge.mu.Lock()
-	defer e.bridge.mu.Unlock()
-
-	// 1. Remove all existing children.
-	for c := e.Node.FirstChild; c != nil; {
-		next := c.NextSibling
-		e.Node.RemoveChild(c)
-		c = next
-	}
-
-	// 2. Create and append the new text node.
-	textNode := &html.Node{
-		Type: html.TextNode,
-		Data: text,
-	}
-	e.Node.AppendChild(textNode)
-}
-
-// --- Node Methods Implementation (DOM Manipulation) ---
-
-// Helper to unwrap a JS Element/Node object back to the Go *Element wrapper.
-func (b *DOMBridge) unwrapElement(val goja.Value) (*Element, error) {
-	if val == nil || goja.IsNull(val) || goja.IsUndefined(val) {
-		return nil, fmt.Errorf("node is null or undefined")
-	}
-
-	obj := val.ToObject(b.vm)
-	if obj == nil {
-		return nil, fmt.Errorf("value is not an object")
-	}
-
-	// Retrieve the hidden property that holds the reference to the Go struct.
-	wrapperVal := obj.Get("__go_node_wrapper__")
-	if wrapperVal == nil || goja.IsUndefined(wrapperVal) {
-		return nil, fmt.Errorf("value is not a recognized DOM Node wrapper")
-	}
-
-	// Export the value back to the Go struct.
-	if element, ok := wrapperVal.Export().(*Element); ok {
-		return element, nil
-	}
-
-	return nil, fmt.Errorf("failed to export wrapper back to Go struct")
-}
-
-func (e *Element) AppendChild(call goja.FunctionCall) goja.Value {
-	newChildVal := call.Argument(0)
-	newChildWrapper, err := e.bridge.unwrapElement(newChildVal)
-
-	if err != nil {
-		// DOMException (TypeError)
-		panic(e.bridge.vm.NewGoError(fmt.Errorf("appendChild: invalid argument: %w", err)))
-	}
-
-	nodeToAppend := newChildWrapper.Node
-
-	e.bridge.mu.Lock()
-	defer e.bridge.mu.Unlock()
-
-	// Detach from any previous parent (DOM spec requirement).
-	if nodeToAppend.Parent != nil {
-		nodeToAppend.Parent.RemoveChild(nodeToAppend)
-	}
-
-	e.Node.AppendChild(nodeToAppend)
-
-	// Returns the appended child.
-	return newChildVal
-}
-
-func (e *Element) RemoveChild(call goja.FunctionCall) goja.Value {
-	childVal := call.Argument(0)
-	childWrapper, err := e.bridge.unwrapElement(childVal)
-
-	if err != nil {
-		panic(e.bridge.vm.NewGoError(fmt.Errorf("removeChild: invalid argument: %w", err)))
-	}
-
-	nodeToRemove := childWrapper.Node
-
-	e.bridge.mu.Lock()
-	defer e.bridge.mu.Unlock()
-
-	// Check if the node is actually a child of this element.
-	if nodeToRemove.Parent != e.Node {
-		// DOMException (NotFoundError)
-		panic(e.bridge.vm.NewGoError(fmt.Errorf("removeChild: The node to be removed is not a child of this node")))
-	}
-
-	e.Node.RemoveChild(nodeToRemove)
-
-	return childVal
-}
-
-func (e *Element) InsertBefore(call goja.FunctionCall) goja.Value {
-	newChildVal := call.Argument(0)
-	refChildVal := call.Argument(1)
-
-	newChildWrapper, err := e.bridge.unwrapElement(newChildVal)
-	if err != nil {
-		panic(e.bridge.vm.NewGoError(fmt.Errorf("insertBefore: invalid newChild argument: %w", err)))
-	}
-	nodeToInsert := newChildWrapper.Node
-
-	var refNode *html.Node
-	if !goja.IsNull(refChildVal) && !goja.IsUndefined(refChildVal) {
-		refChildWrapper, err := e.bridge.unwrapElement(refChildVal)
-		if err != nil {
-			panic(e.bridge.vm.NewGoError(fmt.Errorf("insertBefore: invalid refChild argument: %w", err)))
-		}
-		refNode = refChildWrapper.Node
-
-		// Validate refNode parent.
-		if refNode.Parent != e.Node {
-			panic(e.bridge.vm.NewGoError(fmt.Errorf("insertBefore: The reference node is not a child of this node")))
-		}
-	}
-
-	e.bridge.mu.Lock()
-	defer e.bridge.mu.Unlock()
-
-	// Detach from any previous parent.
-	if nodeToInsert.Parent != nil {
-		nodeToInsert.Parent.RemoveChild(nodeToInsert)
-	}
-
-	// If refNode is nil, insertBefore acts like appendChild.
-	e.Node.InsertBefore(nodeToInsert, refNode)
-
-	return newChildVal
-}
-
-func (e *Element) CloneNode(call goja.FunctionCall) goja.Value {
-	deep := call.Argument(0).ToBoolean()
-
-	e.bridge.mu.RLock()
-	clonedNode := cloneHTMLNode(e.Node, deep)
-	e.bridge.mu.RUnlock()
-
-	return e.bridge.WrapNode(clonedNode)
-}
-
-// Helper function to deep or shallow clone an *html.Node.
-func cloneHTMLNode(n *html.Node, deep bool) *html.Node {
-	if n == nil {
 		return nil
 	}
-	clone := &html.Node{
-		Type:      n.Type,
-		DataAtom:  n.DataAtom,
-		Data:      n.Data,
-		Namespace: n.Namespace,
-		Attr:      make([]html.Attribute, len(n.Attr)),
-	}
-	copy(clone.Attr, n.Attr)
 
-	if deep {
-		for c := n.FirstChild; c != nil; c = c.NextSibling {
-			clone.AppendChild(cloneHTMLNode(c, true))
+	// Check the cache first to ensure the same JS object is returned for the same Go node.
+	if obj, exists := b.nodeMap[node]; exists {
+		return obj
+	}
+
+	obj := b.runtime.NewObject()
+
+	// -- Core Node Properties --
+	_ = obj.Set("nodeType", node.Type)
+	_ = obj.Set("nodeName", strings.ToUpper(node.Data))
+	_ = obj.Set("parentNode", func(call goja.FunctionCall) goja.Value {
+		b.mu.RLock()
+		defer b.mu.RUnlock()
+		return b.runtime.ToValue(b.wrapNode(node.Parent))
+	})
+	b.defineChildNodesProperty(obj, node)
+
+	// -- DOM Manipulation Methods --
+	_ = obj.Set("appendChild", b.jsAppendChild(node))
+	// Add removeChild, insertBefore etc. here if needed.
+
+	// -- Event Target Methods --
+	_ = obj.Set("addEventListener", b.jsAddEventListener(node))
+	_ = obj.Set("removeEventListener", b.jsRemoveEventListener(node)) // Placeholder for completeness
+	_ = obj.Set("dispatchEvent", b.jsDispatchEvent(node))         // Placeholder for completeness
+
+	// Bind methods and properties specific to Element nodes or the Document node.
+	b.bindDocumentAndElementMethods(obj, node)
+
+	// Cache the newly created wrapper.
+	b.nodeMap[node] = obj
+	return obj
+}
+
+// unwrapNode finds the *html.Node corresponding to a Goja object wrapper.
+func (b *DOMBridge) unwrapNode(obj *goja.Object) *html.Node {
+	if obj == nil {
+		return nil
+	}
+	// This O(N) search is a bottleneck. In a high performance scenario,
+	// this would be optimized, perhaps using Goja's private value storage.
+	for node, wrapper := range b.nodeMap {
+		if wrapper == obj {
+			return node
 		}
 	}
-	return clone
+	return nil
 }
 
-// --- Element Methods Implementation (Attributes) ---
+// bindDocumentAndElementMethods attaches the appropriate APIs based on the node type.
+func (b *DOMBridge) bindDocumentAndElementMethods(obj *goja.Object, node *html.Node) {
+	// Methods applicable to both Document and Element nodes.
+	_ = obj.Set("querySelector", b.jsQuerySelector(node))
+	_ = obj.Set("querySelectorAll", b.jsQuerySelectorAll(node))
 
-func (e *Element) GetAttribute(call goja.FunctionCall) goja.Value {
-	name := call.Argument(0).String()
-	return e.GetAttributeValue(name)
-}
+	if node.Type == html.DocumentNode {
+		_ = obj.Set("getElementById", b.jsGetElementById())
+		_ = obj.Set("createElement", b.jsCreateElement())
+		_ = obj.Set("write", b.jsDocumentWrite())
 
-func (e *Element) GetAttributeValue(name string) goja.Value {
-	e.bridge.mu.RLock()
-	defer e.bridge.mu.RUnlock()
-
-	for _, attr := range e.Node.Attr {
-		if attr.Key == name {
-			return e.bridge.vm.ToValue(attr.Val)
+		// Expose essential elements (body, head).
+		body := htmlquery.FindOne(b.document, "//body")
+		if body != nil {
+			_ = obj.Set("body", b.wrapNode(body))
 		}
+		head := htmlquery.FindOne(b.document, "//head")
+		if head != nil {
+			_ = obj.Set("head", b.wrapNode(head))
+		}
+
+	} else if node.Type == html.ElementNode {
+		// -- Element-specific Properties --
+		_ = obj.Set("tagName", strings.ToUpper(node.Data))
+		b.defineHTMLProperties(obj, node)
+		b.defineValueProperty(obj, node)
+		b.defineDatasetProperty(obj, node)
+
+		// -- Element-specific Methods --
+		b.bindAttributeMethods(obj, node)
+		_ = obj.Set("click", b.jsClick(node))
+		_ = obj.Set("focus", b.jsFocus(node))
+		_ = obj.Set("blur", b.jsBlur(node))
 	}
-	return goja.Null()
 }
 
-func (e *Element) SetAttribute(call goja.FunctionCall) goja.Value {
-	name := call.Argument(0).String()
-	value := call.Argument(1).String()
-	e.SetAttributeValue(name, value)
-	return goja.Undefined()
+// =================================================================================================
+// JS Property Definitions (Getters/Setters)
+// =================================================================================================
+
+// defineChildNodesProperty sets up a live getter for the 'childNodes' property.
+func (b *DOMBridge) defineChildNodesProperty(obj *goja.Object, node *html.Node) {
+	getter := func(goja.FunctionCall) goja.Value {
+		b.mu.RLock()
+		defer b.mu.RUnlock()
+		var children []*goja.Object
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			wrapped := b.wrapNode(c)
+			if wrapped != nil {
+				children = append(children, wrapped)
+			}
+		}
+		return b.runtime.ToValue(children)
+	}
+	b.DefineProperty(obj, "childNodes", getter, nil)
 }
 
-func (e *Element) SetAttributeValue(name, value string) {
-	e.bridge.mu.Lock()
-	defer e.bridge.mu.Unlock()
+// defineHTMLProperties sets up getters and setters for innerHTML and outerHTML.
+func (b *DOMBridge) defineHTMLProperties(obj *goja.Object, node *html.Node) {
+	getter := func(goja.FunctionCall) goja.Value {
+		b.mu.RLock()
+		defer b.mu.RUnlock()
+		var buf bytes.Buffer
+		for c := node.FirstChild; c != nil; c = c.NextSibling {
+			_ = html.Render(&buf, c)
+		}
+		return b.runtime.ToValue(buf.String())
+	}
+	setter := func(call goja.FunctionCall) goja.Value {
+		htmlContent := call.Argument(0).String()
+		nodes, err := html.ParseFragment(strings.NewReader(htmlContent), node)
+		if err != nil {
+			b.logger.Warn("Failed to parse HTML for innerHTML assignment", zap.Error(err))
+			return goja.Undefined()
+		}
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		for c := node.FirstChild; c != nil; {
+			next := c.NextSibling
+			node.RemoveChild(c)
+			c = next
+		}
+		for _, newNode := range nodes {
+			node.AppendChild(newNode)
+		}
+		return call.Argument(0)
+	}
+	b.DefineProperty(obj, "innerHTML", getter, setter)
+}
 
-	// Update existing attribute.
-	for i, attr := range e.Node.Attr {
-		if attr.Key == name {
-			e.Node.Attr[i].Val = value
+// defineValueProperty sets up the getter/setter for the 'value' property on form elements.
+func (b *DOMBridge) defineValueProperty(obj *goja.Object, node *html.Node) {
+	getter := func(goja.FunctionCall) goja.Value {
+		b.mu.RLock()
+		defer b.mu.RUnlock()
+		tagName := strings.ToLower(node.Data)
+		if tagName == "textarea" {
+			return b.runtime.ToValue(htmlquery.InnerText(node))
+		}
+		return b.runtime.ToValue(htmlquery.SelectAttr(node, "value"))
+	}
+	setter := func(call goja.FunctionCall) goja.Value {
+		value := call.Argument(0).String()
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		tagName := strings.ToLower(node.Data)
+		if tagName == "textarea" {
+			for c := node.FirstChild; c != nil; {
+				next := c.NextSibling
+				node.RemoveChild(c)
+				c = next
+			}
+			node.AppendChild(&html.Node{Type: html.TextNode, Data: value})
+		} else {
+			setAttr(node, "value", value)
+		}
+		return call.Argument(0)
+	}
+	b.DefineProperty(obj, "value", getter, setter)
+}
+
+// defineDatasetProperty implements element.dataset using a JS Proxy for live access to data-* attributes.
+func (b *DOMBridge) defineDatasetProperty(obj *goja.Object, elementNode *html.Node) {
+	getter := func(goja.FunctionCall) goja.Value {
+		target := b.runtime.NewObject()
+		trapConfig := &goja.ProxyTrapConfig{
+			Get: func(t *goja.Object, p goja.Value) goja.Value {
+				propName := p.String()
+				attrName := "data-" + camelToKebab(propName)
+				b.mu.RLock()
+				defer b.mu.RUnlock()
+				val := htmlquery.SelectAttr(elementNode, attrName)
+				for _, attr := range elementNode.Attr {
+					if attr.Key == attrName {
+						return b.runtime.ToValue(val)
+					}
+				}
+				return goja.Undefined()
+			},
+			Set: func(t *goja.Object, p goja.Value, v goja.Value) bool {
+				propName := p.String()
+				value := v.String()
+				attrName := "data-" + camelToKebab(propName)
+				b.mu.Lock()
+				defer b.mu.Unlock()
+				setAttr(elementNode, attrName, value)
+				return true
+			},
+		}
+		proxy := b.runtime.NewProxy(target, trapConfig)
+		if proxy == nil {
+			b.logger.Warn("JS Proxy creation failed; dataset functionality will be degraded.")
+			return b.runtime.NewObject()
+		}
+		return b.runtime.ToValue(proxy)
+	}
+	b.DefineProperty(obj, "dataset", getter, nil)
+}
+
+// =================================================================================================
+// JS Method Implementations (Element, Document, etc.)
+// =================================================================================================
+
+// -- Document Methods --
+
+func (b *DOMBridge) jsGetElementById() goja.Callable {
+	return b.runtime.ToValue(func(call goja.FunctionCall) goja.Value {
+		id := call.Argument(0).String()
+		b.mu.RLock()
+		defer b.mu.RUnlock()
+		escapedID := strings.ReplaceAll(id, "'", "\\'")
+		xpath := fmt.Sprintf("//*[@id='%s']", escapedID)
+		node := htmlquery.FindOne(b.document, xpath)
+		if node == nil {
+			return goja.Null()
+		}
+		return b.runtime.ToValue(b.wrapNode(node))
+	}).(goja.Callable)
+}
+
+func (b *DOMBridge) jsCreateElement() goja.Callable {
+	return b.runtime.ToValue(func(call goja.FunctionCall) goja.Value {
+		tagName := call.Argument(0).String()
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		node := &html.Node{
+			Type: html.ElementNode,
+			Data: strings.ToLower(tagName),
+		}
+		return b.runtime.ToValue(b.wrapNode(node))
+	}).(goja.Callable)
+}
+
+func (b *DOMBridge) jsDocumentWrite() goja.Callable {
+	return b.runtime.ToValue(func(call goja.FunctionCall) goja.Value {
+		content := call.Argument(0).String()
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		body := htmlquery.FindOne(b.document, "//body")
+		if body == nil {
+			return goja.Undefined()
+		}
+		nodes, err := html.ParseFragment(strings.NewReader(content), body)
+		if err != nil {
+			return goja.Undefined()
+		}
+		for _, node := range nodes {
+			body.AppendChild(node)
+		}
+		return goja.Undefined()
+	}).(goja.Callable)
+}
+
+// -- Shared Element/Document Query Methods --
+
+func (b *DOMBridge) jsQuerySelector(contextNode *html.Node) goja.Callable {
+	return b.runtime.ToValue(func(call goja.FunctionCall) goja.Value {
+		selector := call.Argument(0).String()
+		b.mu.RLock()
+		defer b.mu.RUnlock()
+		node, err := htmlquery.Query(contextNode, selector)
+		if err != nil {
+			b.logger.Warn("Error evaluating XPath selector in querySelector", zap.String("selector", selector), zap.Error(err))
+			return goja.Null()
+		}
+		if node == nil {
+			return goja.Null()
+		}
+		return b.runtime.ToValue(b.wrapNode(node))
+	}).(goja.Callable)
+}
+
+func (b *DOMBridge) jsQuerySelectorAll(contextNode *html.Node) goja.Callable {
+	return b.runtime.ToValue(func(call goja.FunctionCall) goja.Value {
+		selector := call.Argument(0).String()
+		b.mu.RLock()
+		defer b.mu.RUnlock()
+		nodes, err := htmlquery.QueryAll(contextNode, selector)
+		if err != nil {
+			b.logger.Warn("Error evaluating XPath selector in querySelectorAll", zap.String("selector", selector), zap.Error(err))
+			return b.runtime.ToValue([]interface{}{})
+		}
+		var results []*goja.Object
+		for _, node := range nodes {
+			results = append(results, b.wrapNode(node))
+		}
+		return b.runtime.ToValue(results)
+	}).(goja.Callable)
+}
+
+// -- Element Methods --
+
+func (b *DOMBridge) jsClick(node *html.Node) goja.Callable {
+	return b.runtime.ToValue(func(call goja.FunctionCall) goja.Value {
+		b.DispatchEventOnNode(node, "mousedown")
+		b.DispatchEventOnNode(node, "mouseup")
+		b.DispatchEventOnNode(node, "click")
+		b.mu.RLock()
+		tagName := strings.ToLower(node.Data)
+		href := htmlquery.SelectAttr(node, "href")
+		b.mu.RUnlock()
+		if tagName == "a" && href != "" {
+			location := b.runtime.Get("location").ToObject(b.runtime)
+			if location != nil {
+				propDesc, _ := location.Get("href")
+				if propDesc != nil && !goja.IsUndefined(propDesc) {
+					setter := propDesc.ToObject(b.runtime).Get("set")
+					if setterFunc, ok := goja.AssertFunction(setter); ok {
+						_, _ = setterFunc(location, b.runtime.ToValue(href))
+					}
+				}
+			}
+		}
+		return goja.Undefined()
+	}).(goja.Callable)
+}
+
+func (b *DOMBridge) jsFocus(node *html.Node) goja.Callable {
+	return b.runtime.ToValue(func(call goja.FunctionCall) goja.Value {
+		b.DispatchEventOnNode(node, "focus")
+		return goja.Undefined()
+	}).(goja.Callable)
+}
+
+func (b *DOMBridge) jsBlur(node *html.Node) goja.Callable {
+	return b.runtime.ToValue(func(call goja.FunctionCall) goja.Value {
+		b.DispatchEventOnNode(node, "blur")
+		return goja.Undefined()
+	}).(goja.Callable)
+}
+
+func (b *DOMBridge) bindAttributeMethods(obj *goja.Object, node *html.Node) {
+	_ = obj.Set("getAttribute", func(call goja.FunctionCall) goja.Value {
+		name := call.Argument(0).String()
+		b.mu.RLock()
+		defer b.mu.RUnlock()
+		val := htmlquery.SelectAttr(node, name)
+		for _, attr := range node.Attr {
+			if attr.Key == name {
+				return b.runtime.ToValue(val)
+			}
+		}
+		return goja.Null()
+	})
+	_ = obj.Set("setAttribute", func(call goja.FunctionCall) goja.Value {
+		name := call.Argument(0).String()
+		value := call.Argument(1).String()
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		setAttr(node, name, value)
+		return goja.Undefined()
+	})
+	_ = obj.Set("removeAttribute", func(call goja.FunctionCall) goja.Value {
+		name := call.Argument(0).String()
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		removeAttr(node, name)
+		return goja.Undefined()
+	})
+}
+
+func (b *DOMBridge) jsAppendChild(parentNode *html.Node) goja.Callable {
+	return b.runtime.ToValue(func(call goja.FunctionCall) goja.Value {
+		childObj := call.Argument(0).ToObject(b.runtime)
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		childNode := b.unwrapNode(childObj)
+		if childNode != nil {
+			if childNode.Parent != nil {
+				childNode.Parent.RemoveChild(childNode)
+			}
+			parentNode.AppendChild(childNode)
+		}
+		return call.Argument(0)
+	}).(goja.Callable)
+}
+
+// =================================================================================================
+// EventTarget Implementation (addEventListener, DispatchEvent)
+// =================================================================================================
+
+func (b *DOMBridge) jsAddEventListener(node *html.Node) goja.Callable {
+	return b.runtime.ToValue(func(call goja.FunctionCall) goja.Value {
+		if len(call.Arguments) < 2 {
+			return goja.Undefined()
+		}
+		eventType := call.Argument(0).String()
+		listenerVal := call.Argument(1)
+		if _, ok := goja.AssertFunction(listenerVal); !ok {
+			return goja.Undefined()
+		}
+		useCapture := false
+		if len(call.Arguments) > 2 {
+			optionsArg := call.Argument(2)
+			if !goja.IsUndefined(optionsArg) {
+				if obj, ok := optionsArg.Export().(map[string]interface{}); ok {
+					if captureVal, ok := obj["capture"].(bool); ok {
+						useCapture = captureVal
+					}
+				} else {
+					useCapture = optionsArg.ToBoolean()
+				}
+			}
+		}
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		b.addEventListener(node, eventType, listenerVal, useCapture)
+		return goja.Undefined()
+	}).(goja.Callable)
+}
+
+func (b *DOMBridge) jsRemoveEventListener(node *html.Node) goja.Callable {
+	return b.runtime.ToValue(func(call goja.FunctionCall) goja.Value {
+		return goja.Undefined()
+	}).(goja.Callable)
+}
+
+func (b *DOMBridge) jsDispatchEvent(node *html.Node) goja.Callable {
+	return b.runtime.ToValue(func(call goja.FunctionCall) goja.Value {
+		return goja.Undefined()
+	}).(goja.Callable)
+}
+
+func (b *DOMBridge) addEventListener(node *html.Node, eventType string, listenerVal goja.Value, useCapture bool) {
+	nodeListeners, exists := b.eventListeners[node]
+	if !exists {
+		nodeListeners = make(map[string]*listenerGroup)
+		b.eventListeners[node] = nodeListeners
+	}
+	group, exists := nodeListeners[eventType]
+	if !exists {
+		group = &listenerGroup{}
+		nodeListeners[eventType] = group
+	}
+	var targetList *[]goja.Value
+	if useCapture {
+		targetList = &group.Capturing
+	} else {
+		targetList = &group.Bubbling
+	}
+	for _, existingListener := range *targetList {
+		if existingListener.SameAs(listenerVal) {
 			return
 		}
 	}
-
-	// Add new attribute.
-	e.Node.Attr = append(e.Node.Attr, html.Attribute{Key: name, Val: value})
+	*targetList = append(*targetList, listenerVal)
 }
 
-func (e *Element) RemoveAttribute(call goja.FunctionCall) goja.Value {
-	name := call.Argument(0).String()
-
-	e.bridge.mu.Lock()
-	defer e.bridge.mu.Unlock()
-
-	for i, attr := range e.Node.Attr {
-		if attr.Key == name {
-			e.Node.Attr = append(e.Node.Attr[:i], e.Node.Attr[i+1:]...)
-			return goja.Undefined()
+func (b *DOMBridge) DispatchEventOnNode(targetNode *html.Node, eventType string) {
+	const (
+		EventPhaseCapturing = 1
+		EventPhaseAtTarget  = 2
+		EventPhaseBubbling  = 3
+	)
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if b.runtime == nil || targetNode == nil {
+		return
+	}
+	bubbles := true
+	switch eventType {
+	case "focus", "blur", "load", "scroll":
+		bubbles = false
+	}
+	var (
+		stopPropagation bool
+		currentPhase    uint16
+	)
+	var ancestors []*html.Node
+	for n := targetNode.Parent; n != nil; n = n.Parent {
+		ancestors = append(ancestors, n)
+	}
+	eventObj := b.runtime.NewObject()
+	_ = eventObj.Set("type", eventType)
+	_ = eventObj.Set("bubbles", bubbles)
+	_ = eventObj.Set("target", b.wrapNode(targetNode))
+	_ = eventObj.Set("stopPropagation", func(call goja.FunctionCall) goja.Value {
+		stopPropagation = true
+		return goja.Undefined()
+	})
+	getter := func(goja.FunctionCall) goja.Value {
+		return b.runtime.ToValue(currentPhase)
+	}
+	b.DefineProperty(eventObj, "eventPhase", getter, nil)
+	invokeListeners := func(node *html.Node, phase uint16) {
+		group, exists := b.eventListeners[node][eventType]
+		if !exists {
+			return
 		}
-	}
-	return goja.Undefined()
-}
-
-// QuerySelector (scoped to the element)
-func (e *Element) QuerySelector(call goja.FunctionCall) goja.Value {
-	selector := call.Argument(0).String()
-	xpath := translateCSSToXPath(selector)
-
-	// Ensure the XPath is relative to the current element.
-	if !strings.HasPrefix(xpath, ".") {
-		xpath = "." + xpath
-	}
-
-	e.bridge.mu.RLock()
-	defer e.bridge.mu.RUnlock()
-
-	node, err := htmlquery.Query(e.Node, xpath)
-	if err != nil {
-		panic(e.bridge.vm.NewGoError(fmt.Errorf("invalid selector: %s", selector)))
-	}
-
-	if node == nil {
-		return goja.Null()
-	}
-
-	return e.bridge.WrapNode(node)
-}
-
-// QuerySelectorAll (scoped to the element)
-func (e *Element) QuerySelectorAll(call goja.FunctionCall) goja.Value {
-	selector := call.Argument(0).String()
-	xpath := translateCSSToXPath(selector)
-
-	if !strings.HasPrefix(xpath, ".") {
-		xpath = "." + xpath
-	}
-
-	e.bridge.mu.RLock()
-	defer e.bridge.mu.RUnlock()
-
-	nodes, err := htmlquery.QueryAll(e.Node, xpath)
-	if err != nil {
-		panic(e.bridge.vm.NewGoError(fmt.Errorf("invalid selector: %s", selector)))
-	}
-
-	return e.bridge.WrapNodeList(nodes)
-}
-
-func (e *Element) GetElementsByTagName(call goja.FunctionCall) goja.Value {
-	tagName := strings.ToLower(call.Argument(0).String())
-	xpath := fmt.Sprintf(".//%s", tagName)
-
-	e.bridge.mu.RLock()
-	defer e.bridge.mu.RUnlock()
-
-	nodes, _ := htmlquery.QueryAll(e.Node, xpath)
-	return e.bridge.WrapNodeList(nodes)
-}
-
-func (e *Element) GetElementsByClassName(call goja.FunctionCall) goja.Value {
-	className := call.Argument(0).String()
-	xpath := fmt.Sprintf(".//*[contains(concat(' ', normalize-space(@class), ' '), ' %s ')]", className)
-
-	e.bridge.mu.RLock()
-	defer e.bridge.mu.RUnlock()
-
-	nodes, _ := htmlquery.QueryAll(e.Node, xpath)
-	return e.bridge.WrapNodeList(nodes)
-}
-
-// --- EventTarget Implementation (Basic/Dummy) ---
-
-// Basic implementation allows scripts to register listeners without erroring.
-// A proper event system requires an event loop and management (FUTURE IMPROVEMENT).
-
-func (e *Element) AddEventListener(call goja.FunctionCall) goja.Value {
-	// eventType := call.Argument(0).String()
-	return goja.Undefined()
-}
-
-func (e *Element) RemoveEventListener(call goja.FunctionCall) goja.Value {
-	return goja.Undefined()
-}
-
-func (e *Element) DispatchEvent(call goja.FunctionCall) goja.Value {
-	return e.bridge.vm.ToValue(true) // Indicates event was dispatched.
-}
-
-// --- Helpers ---
-
-// translateCSSToXPath provides a rudimentary translation of simple CSS selectors to XPath.
-func translateCSSToXPath(css string) string {
-	// This is highly simplified and only handles basic cases (tag, id, class).
-
-	// Trim whitespace and handle universal selector.
-	css = strings.TrimSpace(css)
-	if css == "*" {
-		return "//*"
-	}
-
-	// If it looks like XPath, use it directly.
-	if strings.HasPrefix(css, "/") || strings.HasPrefix(css, "./") || strings.HasPrefix(css, "(") {
-		return css
-	}
-
-	var xpath strings.Builder
-	xpath.WriteString("//")
-
-	// Basic tokenization (assumes space is always descendant selector).
-	parts := strings.Fields(css)
-	for i, part := range parts {
-		if i > 0 {
-			xpath.WriteString("//") // Descendant selector (space)
+		var listeners []goja.Value
+		if phase == EventPhaseCapturing {
+			listeners = group.Capturing
+		} else {
+			listeners = group.Bubbling
 		}
-
-		tagName := "*"
-		var predicates []string
-		hasExplicitTag := false
-
-		// Extract components (ID, classes, tag name).
-		currentToken := part
-
-		for len(currentToken) > 0 {
-			if strings.HasPrefix(currentToken, "#") {
-				// ID
-				idEnd := strings.IndexAny(currentToken[1:], ".#")
-				if idEnd == -1 {
-					idEnd = len(currentToken)
-				} else {
-					idEnd += 1
-				}
-				id := currentToken[1:idEnd]
-				// Basic handling for simple IDs.
-				if !strings.Contains(id, "'") {
-					predicates = append(predicates, fmt.Sprintf("@id='%s'", id))
-				}
-				currentToken = currentToken[idEnd:]
-			} else if strings.HasPrefix(currentToken, ".") {
-				// Class
-				classEnd := strings.IndexAny(currentToken[1:], ".#")
-				if classEnd == -1 {
-					classEnd = len(currentToken)
-				} else {
-					classEnd += 1
-				}
-				className := currentToken[1:classEnd]
-				if !strings.Contains(className, "'") {
-					predicates = append(predicates, fmt.Sprintf("contains(concat(' ', normalize-space(@class), ' '), ' %s ')", className))
-				}
-				currentToken = currentToken[classEnd:]
-			} else if !hasExplicitTag {
-				// Tag name
-				tagEnd := strings.IndexAny(currentToken, ".#")
-				if tagEnd == -1 {
-					tagEnd = len(currentToken)
-				}
-				tagName = currentToken[:tagEnd]
-				hasExplicitTag = true
-				currentToken = currentToken[tagEnd:]
-			} else {
-				// Unexpected token
-				break
+		thisObj := b.wrapNode(node)
+		for _, listener := range listeners {
+			if fn, ok := goja.AssertFunction(listener); ok {
+				_, _ = fn(thisObj, eventObj)
 			}
 		}
-
-		xpath.WriteString(tagName)
-		if len(predicates) > 0 {
-			xpath.WriteString("[")
-			xpath.WriteString(strings.Join(predicates, " and "))
-			xpath.WriteString("]")
+	}
+	currentPhase = EventPhaseCapturing
+	for i := len(ancestors) - 1; i >= 0; i-- {
+		invokeListeners(ancestors[i], EventPhaseCapturing)
+		if stopPropagation {
+			return
 		}
 	}
-
-	return xpath.String()
-}
-
-// initConsole implements a basic console object.
-func (b *DOMBridge) initConsole() {
-	console := b.vm.NewObject()
-	logFunc := func(level zapcore.Level) func(goja.FunctionCall) goja.Value {
-		return func(call goja.FunctionCall) goja.Value {
-			args := make([]string, len(call.Arguments))
-			for i, arg := range call.Arguments {
-				// Attempt to use JSON.stringify for objects/arrays if available.
-				if obj := arg.ToObject(b.vm); obj != nil {
-					if jsJSON := b.vm.Get("JSON"); jsJSON != nil && !goja.IsUndefined(jsJSON) {
-						if stringify, ok := goja.AssertFunction(jsJSON.ToObject(b.vm).Get("stringify")); ok {
-							if result, err := stringify(goja.Undefined(), arg); err == nil {
-								args[i] = result.String()
-								continue
-							}
-						}
-					}
-				}
-				args[i] = arg.String()
+	currentPhase = EventPhaseAtTarget
+	invokeListeners(targetNode, EventPhaseBubbling)
+	invokeListeners(targetNode, EventPhaseCapturing)
+	if stopPropagation {
+		return
+	}
+	if bubbles {
+		currentPhase = EventPhaseBubbling
+		for _, node := range ancestors {
+			invokeListeners(node, EventPhaseBubbling)
+			if stopPropagation {
+				return
 			}
-			b.logger.Log(level, "[JS Console]", zap.String("message", strings.Join(args, " ")))
-			return goja.Undefined()
 		}
 	}
-
-	console.Set("log", logFunc(zap.InfoLevel))
-	console.Set("info", logFunc(zap.InfoLevel))
-	console.Set("warn", logFunc(zap.WarnLevel))
-	console.Set("error", logFunc(zap.ErrorLevel))
-	console.Set("debug", logFunc(zap.DebugLevel))
-
-	b.vm.GlobalObject().Set("console", console)
 }
 
-// initTimers implements synchronous placeholders for setTimeout/clearTimeout.
+// =================================================================================================
+// Window APIs (Timers, Storage, Location, Scroll)
+// =================================================================================================
+
 func (b *DOMBridge) initTimers() {
-	// Synchronous setTimeout (executes immediately).
-	// This is a limitation as we lack a full event loop integration.
-	setTimeout := func(call goja.FunctionCall) goja.Value {
-		callback := call.Argument(0)
-
-		if cb, ok := goja.AssertFunction(callback); ok {
-			// Execute immediately (synchronously).
-			_, err := cb(goja.Undefined())
-			if err != nil {
-				// Errors within the callback are caught by the runtime.
+	timerFunc := func(isInterval bool) func(goja.FunctionCall) goja.Value {
+		return func(call goja.FunctionCall) goja.Value {
+			if b.eventLoop == nil {
+				b.logger.Warn("Timer function called but no event loop is available.")
+				return goja.Undefined()
 			}
+			callback, ok := goja.AssertFunction(call.Argument(0))
+			if !ok {
+				return goja.Undefined()
+			}
+			delay := call.Argument(1).ToInteger()
+			if delay < 0 {
+				delay = 0
+			}
+			var callbackArgs []goja.Value
+			if len(call.Arguments) > 2 {
+				callbackArgs = call.Arguments[2:]
+			}
+			timerCallback := func() {
+				_, err := callback(goja.Undefined(), callbackArgs...)
+				if err != nil {
+					b.logger.Error("An error occurred in a timer callback", zap.Error(err))
+				}
+			}
+			var timer interface{}
+			duration := time.Duration(delay) * time.Millisecond
+			if isInterval {
+				timer = b.eventLoop.SetInterval(timerCallback, duration)
+			} else {
+				timer = b.eventLoop.SetTimeout(timerCallback, duration)
+			}
+			return b.runtime.ToValue(timer)
 		}
-		// Return a dummy timer ID.
-		return b.vm.ToValue(1)
 	}
-
-	clearTimeout := func(call goja.FunctionCall) goja.Value {
-		// No-op.
+	clearTimerFunc := func(call goja.FunctionCall) goja.Value {
+		if b.eventLoop == nil {
+			return goja.Undefined()
+		}
+		timerID := call.Argument(0).Export()
+		if timerID != nil {
+			b.eventLoop.ClearTimeout(timerID)
+		}
 		return goja.Undefined()
 	}
+	global := b.runtime.GlobalObject()
+	_ = global.Set("setTimeout", timerFunc(false))
+	_ = global.Set("clearTimeout", clearTimerFunc)
+	_ = global.Set("setInterval", timerFunc(true))
+	_ = global.Set("clearInterval", clearTimerFunc)
+}
 
-	b.vm.GlobalObject().Set("setTimeout", setTimeout)
-	b.vm.GlobalObject().Set("clearTimeout", clearTimeout)
+func (b *DOMBridge) bindStorageAPIs() {
+	createStorageObject := func(storageMap map[string]string) *goja.Object {
+		obj := b.runtime.NewObject()
+		_ = obj.Set("getItem", func(call goja.FunctionCall) goja.Value {
+			key := call.Argument(0).String()
+			b.mu.RLock()
+			defer b.mu.RUnlock()
+			if val, exists := storageMap[key]; exists {
+				return b.runtime.ToValue(val)
+			}
+			return goja.Null()
+		})
+		_ = obj.Set("setItem", func(call goja.FunctionCall) goja.Value {
+			key := call.Argument(0).String()
+			value := call.Argument(1).String()
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			storageMap[key] = value
+			return goja.Undefined()
+		})
+		_ = obj.Set("removeItem", func(call goja.FunctionCall) goja.Value {
+			key := call.Argument(0).String()
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			delete(storageMap, key)
+			return goja.Undefined()
+		})
+		_ = obj.Set("clear", func(call goja.FunctionCall) goja.Value {
+			b.mu.Lock()
+			defer b.mu.Unlock()
+			for k := range storageMap {
+				delete(storageMap, k)
+			}
+			return goja.Undefined()
+		})
+		getter := func(goja.FunctionCall) goja.Value {
+			b.mu.RLock()
+			defer b.mu.RUnlock()
+			return b.runtime.ToValue(len(storageMap))
+		}
+		b.DefineProperty(obj, "length", getter, nil)
+		return obj
+	}
+	global := b.runtime.GlobalObject()
+	_ = global.Set("localStorage", createStorageObject(b.localStorage))
+	_ = global.Set("sessionStorage", createStorageObject(b.sessionStorage))
+}
+
+func (b *DOMBridge) bindScrollAPIs() {
+	window := b.runtime.GlobalObject()
+	updateScroll := func(x, y int64) {
+		if x < 0 {
+			x = 0
+		}
+		if y < 0 {
+			y = 0
+		}
+		_ = window.Set("scrollX", x)
+		_ = window.Set("scrollY", y)
+		if b.document != nil {
+			b.DispatchEventOnNode(b.document, "scroll")
+		}
+	}
+	_ = window.Set("scrollTo", func(call goja.FunctionCall) goja.Value {
+		var x, y int64
+		if len(call.Arguments) > 0 {
+			x = call.Argument(0).ToInteger()
+		}
+		if len(call.Arguments) > 1 {
+			y = call.Argument(1).ToInteger()
+		}
+		updateScroll(x, y)
+		return goja.Undefined()
+	})
+	_ = window.Set("scrollBy", func(call goja.FunctionCall) goja.Value {
+		var dx, dy int64
+		if len(call.Arguments) > 0 {
+			dx = call.Argument(0).ToInteger()
+		}
+		if len(call.Arguments) > 1 {
+			dy = call.Argument(1).ToInteger()
+		}
+		currentX := window.Get("scrollX").ToInteger()
+		currentY := window.Get("scrollY").ToInteger()
+		updateScroll(currentX+dx, currentY+dy)
+		return goja.Undefined()
+	})
+}
+
+func (b *DOMBridge) InitializeLocation(initialURLString string) {
+	if b.runtime == nil {
+		return
+	}
+	parsedURL, err := url.Parse(initialURLString)
+	if err != nil || initialURLString == "" {
+		parsedURL, _ = url.Parse("about:blank")
+	}
+	b.updateStateFromURL(parsedURL)
+	location := b.runtime.NewObject()
+	_ = b.runtime.Set("location", location)
+	getter := func(propName string) func(goja.FunctionCall) goja.Value {
+		return func(goja.FunctionCall) goja.Value {
+			return b.runtime.ToValue(b.currentLocationState[propName])
+		}
+	}
+	createStandardSetter := func(modifier func(*url.URL, string)) func(goja.FunctionCall) goja.Value {
+		return func(call goja.FunctionCall) goja.Value {
+			newValue := call.Argument(0).String()
+			currentHref := b.currentLocationState["href"]
+			u, err := url.Parse(currentHref)
+			if err != nil {
+				return call.Argument(0)
+			}
+			modifier(u, newValue)
+			if u.String() != currentHref {
+				b.updateStateFromURL(u)
+				if b.navigateCallback != nil {
+					b.navigateCallback(u.String())
+				}
+			}
+			return call.Argument(0)
+		}
+	}
+	setterHref := func(call goja.FunctionCall) goja.Value {
+		newHref := call.Argument(0).String()
+		currentHref := b.currentLocationState["href"]
+		baseU, _ := url.Parse(currentHref)
+		resolvedU, err := baseU.Parse(newHref)
+		if err != nil {
+			return call.Argument(0)
+		}
+		baseCopy, resolvedBase := *baseU, *resolvedU
+		baseCopy.Fragment, resolvedBase.Fragment = "", ""
+		if baseCopy.String() == resolvedBase.String() && currentHref != "about:blank" {
+			return b.handleHashChange(resolvedU.Fragment)
+		}
+		b.updateStateFromURL(resolvedU)
+		if b.navigateCallback != nil {
+			b.navigateCallback(resolvedU.String())
+		}
+		return call.Argument(0)
+	}
+	b.DefineProperty(location, "href", getter("href"), setterHref)
+	setterHash := func(call goja.FunctionCall) goja.Value {
+		newHash := strings.TrimPrefix(call.Argument(0).String(), "#")
+		return b.handleHashChange(newHash)
+	}
+	b.DefineProperty(location, "hash", getter("hash"), setterHash)
+	b.DefineProperty(location, "protocol", getter("protocol"), createStandardSetter(func(u *url.URL, v string) { u.Scheme = strings.TrimSuffix(v, ":") }))
+	b.DefineProperty(location, "host", getter("host"), createStandardSetter(func(u *url.URL, v string) { u.Host = v }))
+	b.DefineProperty(location, "hostname", getter("hostname"), createStandardSetter(func(u *url.URL, v string) { u.Host = v + ":" + u.Port() }))
+	b.DefineProperty(location, "port", getter("port"), createStandardSetter(func(u *url.URL, v string) { u.Host = u.Hostname() + ":" + v }))
+	b.DefineProperty(location, "pathname", getter("pathname"), createStandardSetter(func(u *url.URL, v string) { u.Path = v }))
+	b.DefineProperty(location, "search", getter("search"), createStandardSetter(func(u *url.URL, v string) { u.RawQuery = strings.TrimPrefix(v, "?") }))
+	b.DefineProperty(location, "origin", getter("origin"), nil)
+	_ = location.Set("reload", func(call goja.FunctionCall) goja.Value {
+		if b.navigateCallback != nil {
+			b.navigateCallback(b.currentLocationState["href"])
+		}
+		return goja.Undefined()
+	})
+	_ = location.Set("assign", setterHref)
+	_ = location.Set("replace", setterHref)
+	_ = location.Set("toString", func(call goja.FunctionCall) goja.Value { return b.runtime.ToValue(b.currentLocationState["href"]) })
+}
+
+func (b *DOMBridge) handleHashChange(newHash string) goja.Value {
+	currentHref := b.currentLocationState["href"]
+	u, _ := url.Parse(currentHref)
+	if u.Fragment == newHash {
+		return b.runtime.ToValue(newHash)
+	}
+	u.Fragment = newHash
+	b.updateStateFromURL(u)
+	if b.notifyURLChangeCallback != nil {
+		b.notifyURLChangeCallback(u.String())
+	}
+	b.DispatchEventOnNode(b.document, "hashchange")
+	return b.runtime.ToValue(newHash)
+}
+
+func (b *DOMBridge) updateStateFromURL(u *url.URL) {
+	if u == nil {
+		return
+	}
+	b.currentLocationState["href"] = u.String()
+	b.currentLocationState["protocol"] = u.Scheme + ":"
+	b.currentLocationState["host"] = u.Host
+	b.currentLocationState["hostname"] = u.Hostname()
+	b.currentLocationState["port"] = u.Port()
+	b.currentLocationState["pathname"] = u.Path
+	b.currentLocationState["search"] = ""
+	if u.RawQuery != "" {
+		b.currentLocationState["search"] = "?" + u.RawQuery
+	}
+	b.currentLocationState["hash"] = ""
+	if u.Fragment != "" {
+		b.currentLocationState["hash"] = "#" + u.Fragment
+	}
+	b.currentLocationState["origin"] = u.Scheme + "://" + u.Host
+}
+
+// =================================================================================================
+// Go-side Utilities (Public API for Session)
+// =================================================================================================
+
+func (b *DOMBridge) QuerySelector(selector string) (*html.Node, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	node := htmlquery.FindOne(b.document, selector)
+	if node == nil {
+		return nil, NewElementNotFoundError(selector)
+	}
+	return node, nil
+}
+
+func (b *DOMBridge) GetOuterHTML() (string, error) {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	var buf bytes.Buffer
+	if err := html.Render(&buf, b.document); err != nil {
+		return "", err
+	}
+	return buf.String(), nil
+}
+
+// =================================================================================================
+// Internal Helper Functions
+// =================================================================================================
+
+func (b *DOMBridge) DefineProperty(obj *goja.Object, propName string, getter interface{}, setter interface{}) {
+	if b.runtime == nil {
+		return
+	}
+	descriptor := b.runtime.NewObject()
+	if getter != nil {
+		_ = descriptor.Set("get", getter)
+	}
+	if setter != nil {
+		_ = descriptor.Set("set", setter)
+	}
+	_ = descriptor.Set("enumerable", true)
+	_ = descriptor.Set("configurable", true)
+	objectConstructor := b.runtime.GlobalObject().Get("Object").ToObject(b.runtime)
+	defineProperty, _ := goja.AssertFunction(objectConstructor.Get("defineProperty"))
+	_, err := defineProperty(goja.Undefined(), obj, b.runtime.ToValue(propName), descriptor)
+	if err != nil {
+		b.logger.Error("Failed to define property", zap.String("property", propName), zap.Error(err))
+	}
+}
+
+func camelToKebab(s string) string {
+	var result strings.Builder
+	for i, r := range s {
+		if i > 0 && 'A' <= r && r <= 'Z' {
+			result.WriteRune('-')
+		}
+		result.WriteRune(r)
+	}
+	return strings.ToLower(result.String())
+}
+
+func removeAttr(n *html.Node, key string) {
+	if n == nil {
+		return
+	}
+	for i, attr := range n.Attr {
+		if attr.Key == key {
+			n.Attr = append(n.Attr[:i], n.Attr[i+1:]...)
+			return
+		}
+	}
+}
+
+func setAttr(n *html.Node, key, val string) {
+	if n == nil {
+		return
+	}
+	for i, attr := range n.Attr {
+		if attr.Key == key {
+			n.Attr[i].Val = val
+			return
+		}
+	}
+	n.Attr = append(n.Attr, html.Attribute{Key: key, Val: val})
 }

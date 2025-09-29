@@ -58,8 +58,11 @@ func (h *Humanoid) getElementBoxBySelector(ctx context.Context, selector string)
 	return geo, nil
 }
 
-// getCenterOfElement is a convenience wrapper to get the center point of an element.
-func (h *Humanoid) getCenterOfElement(ctx context.Context, selector string) (Vector2D, error) {
+// getCenterOfElement is a convenience wrapper to get the center point of an element, ensuring it's visible first.
+func (h *Humanoid) getCenterOfElement(ctx context.Context, selector string, opts *InteractionOptions) (Vector2D, error) {
+	if err := h.ensureVisible(ctx, selector, opts); err != nil {
+		return Vector2D{}, err
+	}
 	geo, err := h.getElementBoxBySelector(ctx, selector)
 	if err != nil {
 		return Vector2D{}, err

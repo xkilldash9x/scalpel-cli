@@ -1,3 +1,4 @@
+// internal/browser/humanoid/interface.go
 package humanoid
 
 import (
@@ -8,18 +9,23 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
-// -- REFACTORING NOTE --
-// This file establishes the core interfaces for the humanoid package.
-// It now imports the canonical types directly from the api/schemas package.
-// This change removes the local `types.go` file and centralizes all definitions.
+// InteractionOptions provides a flexible way to configure humanoid actions.
+type InteractionOptions struct {
+	// If true, the humanoid will automatically scroll until the element is in view before interacting.
+	// This defaults to true if the options struct is nil.
+	EnsureVisible bool
+	// PotentialField can be used to influence the mouse trajectory.
+	Field *PotentialField
+	// More options like timeouts, custom scroll alignment, etc., can be added here.
+}
 
 // Controller defines the high-level interface for human-like interactions.
 // This is the interface implemented by the Humanoid struct itself.
 type Controller interface {
-	MoveTo(ctx context.Context, selector string, field *PotentialField) error
-	IntelligentClick(ctx context.Context, selector string, field *PotentialField) error
-	DragAndDrop(ctx context.Context, startSelector, endSelector string) error
-	Type(ctx context.Context, selector string, text string) error
+	MoveTo(ctx context.Context, selector string, opts *InteractionOptions) error
+	IntelligentClick(ctx context.Context, selector string, opts *InteractionOptions) error
+	DragAndDrop(ctx context.Context, startSelector, endSelector string, opts *InteractionOptions) error
+	Type(ctx context.Context, selector string, text string, opts *InteractionOptions) error
 	CognitivePause(ctx context.Context, meanMs, stdDevMs float64) error
 }
 
@@ -41,3 +47,5 @@ const (
 	KeyTab       ControlKey = "\t"   // Tab
 	KeyEscape    ControlKey = "\x1b" // Escape
 )
+
+

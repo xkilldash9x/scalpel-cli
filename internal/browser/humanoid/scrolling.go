@@ -1,4 +1,4 @@
-// internal/humanoid/scrolling.go --
+// internal/browser/humanoid/scrolling.go --
 package humanoid
 
 import (

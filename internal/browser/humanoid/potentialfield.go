@@ -1,4 +1,4 @@
-// internal/humanoid/potentialfield.go
+// internal/browser/humanoid/potentialfield.go
 package humanoid
 
 import "math"

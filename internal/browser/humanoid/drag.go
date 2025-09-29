@@ -8,7 +8,7 @@ import (
 )
 
 // DragAndDrop simulates a human-like drag and drop action from a start element to an end element.
-func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector string) error {
+func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector string, opts *InteractionOptions) error {
 	var start, end Vector2D
 	var err error
 
@@ -16,7 +16,8 @@ func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector s
 	h.updateFatigue(1.5)
 
 	// Get the center coordinates of the start and end elements.
-	start, err = h.getCenterOfElement(ctx, startSelector)
+	// We pass 'opts' here to ensure visibility is checked correctly.
+	start, err = h.getCenterOfElement(ctx, startSelector, opts)
 	if err != nil {
 		h.logger.Error("DragAndDrop failed: could not get starting element position",
 			zap.String("selector", startSelector),
@@ -25,7 +26,7 @@ func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector s
 		return fmt.Errorf("could not get starting element position: %w", err)
 	}
 
-	end, err = h.getCenterOfElement(ctx, endSelector)
+	end, err = h.getCenterOfElement(ctx, endSelector, opts)
 	if err != nil {
 		h.logger.Error("DragAndDrop failed: could not get ending element position",
 			zap.String("selector", endSelector),
@@ -35,7 +36,7 @@ func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector s
 	}
 
 	// Move the cursor to the starting element.
-	if err := h.MoveTo(ctx, startSelector, nil); err != nil {
+	if err := h.MoveTo(ctx, startSelector, opts); err != nil {
 		return err
 	}
 
@@ -76,6 +77,10 @@ func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector s
 
 	// -- Execute the drag movement --
 	field := NewPotentialField()
+	if opts != nil && opts.Field != nil {
+		field = opts.Field
+	}
+
 	h.mu.Lock()
 	attractionStrength := h.dynamicConfig.FittsA
 	if attractionStrength <= 0 {
@@ -87,7 +92,8 @@ func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector s
 	field.AddSource(start, -attractionStrength*0.2, 100.0)
 
 	// Execute the vector-based move to the target.
-	if err := h.MoveToVector(ctx, end, field); err != nil {
+	moveOpts := &InteractionOptions{Field: field, EnsureVisible: false} // Skip visibility, we know it's visible.
+	if err := h.MoveToVector(ctx, end, moveOpts); err != nil {
 		h.logger.Warn("Humanoid: Drag movement failed, attempting cleanup (mouse release)", zap.Error(err))
 		h.releaseMouse(context.Background()) // Use background context for cleanup.
 		return err

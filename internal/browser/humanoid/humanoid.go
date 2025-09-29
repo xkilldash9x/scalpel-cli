@@ -1,6 +1,8 @@
+// internal/browser/humanoid/humanoid.go
 package humanoid
 
 import (
+	"context"
 	"math/rand"
 	"sync"
 	"time"
@@ -63,4 +65,16 @@ func New(config Config, logger *zap.Logger, executor Executor) *Humanoid {
 		noiseY:             perlin.NewPerlin(alpha, beta, n, seed+1),
 	}
 	return h
+}
+
+// ensureVisible is a private helper that checks options and performs scrolling if needed.
+// It's the core of the new "implicit scrolling" design.
+func (h *Humanoid) ensureVisible(ctx context.Context, selector string, opts *InteractionOptions) error {
+	// Default behavior is to ensure visibility. This check makes the API easier to use,
+	// as callers can just pass 'nil' for default options.
+	if opts == nil || opts.EnsureVisible {
+		// Calls the unexported method from scrolling.go
+		return h.intelligentScroll(ctx, selector)
+	}
+	return nil
 }

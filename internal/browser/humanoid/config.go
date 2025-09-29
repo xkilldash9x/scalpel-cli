@@ -9,7 +9,7 @@ import (
 // Config holds the parameters defining the behavior of the simulation.
 type Config struct {
 	Enabled bool `json:"enabled" yaml:"enabled"`
-	Rng *rand.Rand
+	Rng     *rand.Rand
 
 	// Fitts's Law Parameters
 	FittsAMean, FittsAStdDev float64
@@ -18,74 +18,104 @@ type Config struct {
 
 	// Motor Control Dynamics
 	OmegaMean, OmegaStdDev float64
-	ZetaMean, ZetaStdDev    float64
+	ZetaMean, ZetaStdDev   float64
 
 	// Noise and Tremor
 	GaussianStrengthMean, GaussianStrengthStdDev float64
-	PerlinAmplitudeMean, PerlinAmplitudeStdDev    float64
-	ClickNoiseMean, ClickNoiseStdDev              float64
+	PerlinAmplitudeMean, PerlinAmplitudeStdDev   float64
+	ClickNoiseMean, ClickNoiseStdDev             float64
 
 	// Typing Behavior
-	TypoRateMean, TypoRateStdDev    float64
-	KeyHoldMeanMs, KeyHoldStdDevMs  float64
+	TypoRateMean, TypoRateStdDev   float64
+	KeyHoldMeanMs, KeyHoldStdDevMs float64
 
 	// Instance Parameters
-	FittsA, FittsB              float64
-	Omega, Zeta                 float64
-	GaussianStrength            float64
-	PerlinAmplitude             float64
-	ClickNoise                  float64
-	TypoRate                    float64
-	KeyHoldMean, KeyHoldStdDev  float64
+	FittsA, FittsB             float64
+	Omega, Zeta                float64
+	GaussianStrength           float64
+	PerlinAmplitude            float64
+	ClickNoise                 float64
+	TypoRate                   float64
+	KeyHoldMean, KeyHoldStdDev float64
 
 	// Clicking Behavior
 	ClickHoldMinMs int `json:"click_hold_min_ms" yaml:"click_hold_min_ms"`
 	ClickHoldMaxMs int `json:"click_hold_max_ms" yaml:"click_hold_max_ms"`
 
 	// Typo Probabilities
-	TypoNeighborRate   float64
-	TypoTransposeRate  float64
-	TypoOmissionRate   float64
-	TypoInsertionRate  float64
+	TypoNeighborRate               float64 `json:"typoNeighborRate" yaml:"typoNeighborRate"`
+	TypoTransposeRate              float64 `json:"typoTransposeRate" yaml:"typoTransposeRate"`
+	TypoOmissionRate               float64 `json:"typoOmissionRate" yaml:"typoOmissionRate"`
+	TypoInsertionRate              float64 `json:"typoInsertionRate" yaml:"typoInsertionRate"`
+	TypoCorrectionProbability      float64 `json:"typoCorrectionProbability" yaml:"typoCorrectionProbability"`
+	TypoOmissionNoticeProbability  float64 `json:"typoOmissionNoticeProbability" yaml:"typoOmissionNoticeProbability"`
+	TypoInsertionNoticeProbability float64 `json:"typoInsertionNoticeProbability" yaml:"typoInsertionNoticeProbability"`
+	TypoShiftCorrectionProbability float64 `json:"typoShiftCorrectionProbability" yaml:"typoShiftCorrectionProbability"`
 
 	// Scrolling Behavior
-	ScrollReadDensityFactor      float64
-	ScrollMouseWheelProbability  float64
-	ScrollRegressionProbability  float64
-	ScrollOvershootProbability   float64
+	ScrollReadDensityFactor     float64
+	ScrollMouseWheelProbability float64
+	ScrollRegressionProbability float64
+	ScrollOvershootProbability  float64
 
 	// Fatigue Modeling
-	FatigueIncreaseRate  float64
-	FatigueRecoveryRate  float64
+	FatigueIncreaseRate float64
+	FatigueRecoveryRate float64
 
-	MicroCorrectionThreshold  float64
+	MicroCorrectionThreshold float64
+
+	// Key Pause (IKD) Parameters
+	KeyPauseMean          float64 `json:"keyPauseMean" yaml:"keyPauseMean"`
+	KeyPauseStdDev        float64 `json:"keyPauseStdDev" yaml:"keyPauseStdDev"`
+	KeyPauseMin           float64 `json:"keyPauseMin" yaml:"keyPauseMin"`
+	KeyPauseNgramFactor2  float64 `json:"keyPauseNgramFactor2" yaml:"keyPauseNgramFactor2"`
+	KeyPauseNgramFactor3  float64 `json:"keyPauseNgramFactor3" yaml:"keyPauseNgramFactor3"`
+	KeyPauseFatigueFactor float64 `json:"keyPauseFatigueFactor" yaml:"keyPauseFatigueFactor"`
+
+	// Typo Correction Behavior (Pause scaling factors)
+	TypoCorrectionPauseMeanScale  float64 `json:"typoCorrectionPauseMeanScale" yaml:"typoCorrectionPauseMeanScale"`
+	TypoCorrectionPauseStdDevScale float64 `json:"typoCorrectionPauseStdDevScale" yaml:"typoCorrectionPauseStdDevScale"`
 }
 
 // DefaultConfig returns a configuration representing an average user.
 func DefaultConfig() Config {
 	c := Config{
-		Rng:                       nil,
-		FittsAMean:                100.0, FittsAStdDev: 15.0,
-		FittsBMean:                120.0, FittsBStdDev: 20.0,
-		OmegaMean:                 28.0, OmegaStdDev: 4.0,
-		ZetaMean:                  1.0, ZetaStdDev: 0.1,
-		GaussianStrengthMean:      0.5, GaussianStrengthStdDev: 0.1,
-		PerlinAmplitudeMean:       2.5, PerlinAmplitudeStdDev: 0.5,
-		ClickNoiseMean:            2.0, ClickNoiseStdDev: 0.5,
-		TypoRateMean:              0.04, TypoRateStdDev: 0.01,
-		KeyHoldMeanMs:             55.0, KeyHoldStdDevMs: 15.0,
-		ClickHoldMinMs:            50, ClickHoldMaxMs: 120,
-		TypoNeighborRate:          0.40,
-		TypoTransposeRate:         0.25,
-		TypoOmissionRate:          0.20,
-		TypoInsertionRate:         0.15,
-		ScrollReadDensityFactor:     0.5,
-		ScrollMouseWheelProbability: 0.70,
-		ScrollRegressionProbability: 0.10,
-		ScrollOvershootProbability:  0.25,
-		FatigueIncreaseRate:       0.005,
-		FatigueRecoveryRate:       0.01,
-		MicroCorrectionThreshold:  50.0,
+		Rng:                            nil,
+		FittsAMean:                     100.0, FittsAStdDev: 15.0,
+		FittsBMean:                     120.0, FittsBStdDev: 20.0,
+		OmegaMean:                      28.0, OmegaStdDev: 4.0,
+		ZetaMean:                       1.0, ZetaStdDev: 0.1,
+		GaussianStrengthMean:           0.5, GaussianStrengthStdDev: 0.1,
+		PerlinAmplitudeMean:            2.5, PerlinAmplitudeStdDev: 0.5,
+		ClickNoiseMean:                 2.0, ClickNoiseStdDev: 0.5,
+		TypoRateMean:                   0.04, TypoRateStdDev: 0.01,
+		KeyHoldMeanMs:                  55.0, KeyHoldStdDevMs: 15.0,
+		ClickHoldMinMs:                 50, ClickHoldMaxMs: 120,
+		TypoNeighborRate:               0.40,
+		TypoTransposeRate:              0.25,
+		TypoOmissionRate:               0.20,
+		TypoInsertionRate:              0.15,
+		TypoCorrectionProbability:      0.85,
+		TypoOmissionNoticeProbability:  0.70,
+		TypoInsertionNoticeProbability: 0.80,
+		TypoShiftCorrectionProbability: 0.80,
+		ScrollReadDensityFactor:        0.5,
+		ScrollMouseWheelProbability:    0.70,
+		ScrollRegressionProbability:    0.10,
+		ScrollOvershootProbability:     0.25,
+		FatigueIncreaseRate:            0.005,
+		FatigueRecoveryRate:            0.01,
+		MicroCorrectionThreshold:       50.0,
+		// New Key Pause (IKD) Parameters
+		KeyPauseMean:          70.0,
+		KeyPauseStdDev:        28.0,
+		KeyPauseMin:           35.0,
+		KeyPauseNgramFactor2:  0.7,
+		KeyPauseNgramFactor3:  0.55,
+		KeyPauseFatigueFactor: 0.3,
+		// New Typo Correction Behavior
+		TypoCorrectionPauseMeanScale:  1.8,
+		TypoCorrectionPauseStdDevScale: 0.6,
 	}
 	c.NormalizeTypoRates()
 	return c

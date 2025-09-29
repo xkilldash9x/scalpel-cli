@@ -1,9 +1,8 @@
-// Filename: internal/humanoid/humanoid_integration_test.go
-package humanoid
+// internal/browser// internal/browser/humanoid/humanoid_integration_test.go
+package humanoid_test
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net/http"
@@ -11,206 +10,141 @@ import (
 	"testing"
 	"time"
 
-	"github.com/playwright-community/playwright-go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/session"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"go.uber.org/zap"
 )
 
 // =============================================================================
-// Test Infrastructure: Playwright Executor Adapter (The New Translator)
+// Test Infrastructure
 // =============================================================================
 
-// playwrightExecutor implements the agnostic Executor interface using a real Playwright page.
-// This adapter translates the agnostic Humanoid commands into specific Playwright actions.
-type playwrightExecutor struct {
-	page playwright.Page
-}
-
-// DispatchMouseEvent translates agnostic MouseEventData to a Playwright command.
-func (e *playwrightExecutor) DispatchMouseEvent(ctx context.Context, data schemas.MouseEventData) error {
-	switch data.Type {
-	case schemas.MouseMove:
-		err := e.page.Mouse().Move(data.X, data.Y)
-		return err
-	case schemas.MousePress:
-		btn := playwright.MouseButton(data.Button)
-		return e.page.Mouse().Down(playwright.MouseDownOptions{
-			Button:     &btn,
-			ClickCount: playwright.Int(data.ClickCount),
-		})
-	case schemas.MouseRelease:
-		btn := playwright.MouseButton(data.Button)
-		return e.page.Mouse().Up(playwright.MouseUpOptions{
-			Button:     &btn,
-			ClickCount: playwright.Int(data.ClickCount),
-		})
-	case schemas.MouseWheel:
-		return e.page.Mouse().Wheel(data.DeltaX, data.DeltaY)
-	}
-	return fmt.Errorf("playwrightExecutor: unsupported mouse event type: %s", data.Type)
-}
-
-// SendKeys translates an agnostic keys string to a playwright.Keyboard.Type action.
-func (e *playwrightExecutor) SendKeys(ctx context.Context, keys string) error {
-	// The contract is that the element is already focused, so we just type.
-	return e.page.Keyboard().Type(keys)
-}
-
-// Sleep uses a standard Go context-aware sleep.
-func (e *playwrightExecutor) Sleep(ctx context.Context, d time.Duration) error {
-	select {
-	case <-time.After(d):
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
-// GetElementGeometry translates the agnostic call to a series of Playwright actions.
-func (e *playwrightExecutor) GetElementGeometry(ctx context.Context, selector string) (*schemas.ElementGeometry, error) {
-	element, err := e.page.WaitForSelector(selector, playwright.PageWaitForSelectorOptions{
-		State: playwright.WaitForSelectorStateVisible,
-	})
-	if err != nil {
-		return nil, err
-	}
-
-	box, err := element.BoundingBox()
-	if err != nil {
-		return nil, err
-	}
-	if box == nil {
-		return nil, fmt.Errorf("playwrightExecutor: failed to get bounding box for selector: %s", selector)
-	}
-
-	// Translate Playwright BoundingBox to agnostic ElementGeometry.
-	return &schemas.ElementGeometry{
-		Vertices: []float64{
-			box.X, box.Y,
-			box.X + box.Width, box.Y,
-			box.X + box.Width, box.Y + box.Height,
-			box.X, box.Y + box.Height,
-		},
-		Width:  int64(box.Width),
-		Height: int64(box.Height),
-	}, nil
-}
-
-// ExecuteScript translates the agnostic script execution call to a page.Evaluate command.
-func (e *playwrightExecutor) ExecuteScript(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
-	// Playwright's Evaluate handles promises automatically and returns the final value.
-	result, err := e.page.Evaluate(script, args)
-	if err != nil {
-		return nil, err
-	}
-
-	// The result from Evaluate is already deserialized, so we just need to marshal it
-	// back to JSON to fit the interface contract.
-	return json.Marshal(result)
-}
-
-// =============================================================================
-// Test Infrastructure: Helpers and Setup (Refactored for Playwright)
-// =============================================================================
-
-// assertContextCancellation is unchanged as its logic is generic.
+// assertContextCancellation is a helper to verify that an error is due to context cancellation.
 func assertContextCancellation(t *testing.T, err error) {
 	require.Error(t, err, "Action should have been interrupted and returned an error")
+	// Check for the specific context cancellation errors.
 	isCanceled := errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
 	assert.True(t, isCanceled, "Expected context.Canceled or context.DeadlineExceeded, but got: %v", err)
 }
 
-func setupTestEnvironment(t *testing.T) (context.Context, playwright.Page, *httptest.Server) {
-	// Initialize Playwright
-	pw, err := playwright.Run()
-	require.NoError(t, err, "could not start playwright")
+// setupSessionTestEnvironment initializes a real browser session and a test server.
+// The session itself serves as the humanoid.Executor.
+func setupSessionTestEnvironment(t *testing.T) (context.Context, *session.Session, *httptest.Server) {
+	t.Helper()
 
-	// Launch a browser
-	browser, err := pw.Chromium.Launch(playwright.BrowserTypeLaunchOptions{
-		Headless: playwright.Bool(true),
-	})
-	require.NoError(t, err, "could not launch browser")
+	// -- Create a minimal configuration for the test --
+	cfg := config.NewDefaultConfig()
+	cfg.Browser.Humanoid.Enabled = true // Ensure humanoid is active
+	// Speed up tests by reducing delays
+	cfg.Browser.Humanoid.KeyHoldMeanMs = 5.0
+	cfg.Browser.Humanoid.ClickHoldMinMs = 5
+	cfg.Browser.Humanoid.ClickHoldMaxMs = 15
+	cfg.Network.PostLoadWait = 50 * time.Millisecond
 
-	// Create a new page
-	page, err := browser.NewPage()
-	require.NoError(t, err, "could not create page")
+	logger := zap.NewNop()
+	findingsChan := make(chan schemas.Finding, 10)
 
-	// Create the test server
+	// -- Create the session --
+	// This session will act as our executor, bridging humanoid actions to our browser engine.
+	sess, err := session.NewSession(context.Background(), cfg, schemas.DefaultPersona, logger, findingsChan)
+	require.NoError(t, err, "Failed to create a new session")
+
+	// -- Create the test HTTP server --
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// This simple HTML provides the targets for our interaction tests.
 		fmt.Fprintln(w, `
-				<html><body>
-					<h1>Test Page</h1>
-					<div id='target' style='width:100px;height:100px;background:red;margin-top:50px;'>Target</div>
-					<div id='dragSource' style='width:50px;height:50px;background:blue;'>Drag Me</div>
+			<html>
+				<head>
+					<style>
+						/* Basic styles to ensure elements have dimensions */
+						#target { width: 100px; height: 100px; background: blue; margin-top: 50px; }
+						#inputField { width: 200px; margin-top: 20px; }
+					</style>
+				</head>
+				<body>
+					<h1>Humanoid Integration Test</h1>
+					<div id='target'>Target Box</div>
 					<input id="inputField" type="text" />
-				</body></html>
-			`)
+				</body>
+			</html>
+		`)
 	}))
 
-	// Navigate to the test server
-	_, err = page.Goto(server.URL)
-	require.NoError(t, err, "could not navigate to test server")
+	// -- Navigate the session to the test server --
+	ctx := context.Background()
+	err = sess.Navigate(ctx, server.URL)
+	require.NoError(t, err, "Session could not navigate to the test server")
 
-	// Setup cleanup function
+	// -- Setup cleanup functions --
 	t.Cleanup(func() {
 		server.Close()
-		if err := browser.Close(); err != nil {
-			t.Logf("could not close browser: %v", err)
+		if err := sess.Close(context.Background()); err != nil {
+			t.Logf("Error closing session during cleanup: %v", err)
 		}
-		if err := pw.Stop(); err != nil {
-			t.Logf("could not stop playwright: %v", err)
-		}
+		close(findingsChan)
 	})
 
-	return context.Background(), page, server
+	return ctx, sess, server
 }
 
-// =============================================================================
-// Integration Tests (Largely Unchanged Logic)
-// =============================================================================
 
+// TestContextCancellation_DuringMovement verifies that a MoveTo operation
+// can be correctly interrupted by context cancellation.
 func TestContextCancellation_DuringMovement(t *testing.T) {
 	t.Parallel()
-	ctx, page, _ := setupTestEnvironment(t)
-	h := newTestHumanoid(&playwrightExecutor{page: page})
+	ctx, sess, _ := setupSessionTestEnvironment(t) // sess is now the executor
+	h := newTestHumanoid(sess)                      // Pass the session directly
 
+	// Create a new context that we can cancel independently for the action.
 	actionCtx, actionCancel := context.WithCancel(ctx)
 	errChan := make(chan error, 1)
+
 	go func() {
+		// The humanoid will use the session's GetElementGeometry, Sleep, etc.
 		errChan <- h.MoveTo(actionCtx, "#target", nil)
 	}()
 
+	// Give the MoveTo operation a moment to start.
 	time.Sleep(100 * time.Millisecond)
-	actionCancel()
+	actionCancel() // Cancel the operation.
 
+	// Wait for the error from the cancelled operation.
 	select {
 	case err := <-errChan:
 		assertContextCancellation(t, err)
 	case <-time.After(5 * time.Second):
-		t.Fatal("Test timed out waiting for movement action to return after cancellation.")
+		t.Fatal("Test timed out waiting for the MoveTo action to return after cancellation.")
 	}
 }
 
+// TestContextCancellation_DuringTyping verifies that a long Type operation
+// respects context cancellation.
 func TestContextCancellation_DuringTyping(t *testing.T) {
 	t.Parallel()
-	ctx, page, _ := setupTestEnvironment(t)
-	h := newTestHumanoid(&playwrightExecutor{page: page})
+	ctx, sess, _ := setupSessionTestEnvironment(t) // sess is now the executor
+	h := newTestHumanoid(sess)                      // Pass the session directly
 
 	actionCtx, actionCancel := context.WithCancel(ctx)
 	errChan := make(chan error, 1)
+
 	go func() {
-		// Use a long string to ensure typing is in progress when cancelled.
-		errChan <- h.Type(actionCtx, "#inputField", "This is a very long sentence that should take some time to type completely.")
+		// A long string ensures the typing action is in progress when we cancel it.
+		longSentence := "This is a very long sentence designed to take a significant amount of time to type, ensuring we can cancel it mid-operation."
+		errChan <- h.Type(actionCtx, "#inputField", longSentence, nil)
 	}()
 
-	time.Sleep(300 * time.Millisecond)
-	actionCancel()
+	// Allow the typing to get started.
+	time.Sleep(200 * time.Millisecond)
+	actionCancel() // Cancel the operation.
 
 	select {
 	case err := <-errChan:
 		assertContextCancellation(t, err)
 	case <-time.After(10 * time.Second):
-		t.Fatal("Test timed out waiting for typing action to return after cancellation.")
+		t.Fatal("Test timed out waiting for the Type action to return after cancellation.")
 	}
 }

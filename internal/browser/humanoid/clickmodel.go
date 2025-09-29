@@ -9,9 +9,9 @@ import (
 )
 
 // IntelligentClick combines movement, timing, and clicking into a single fluid action.
-func (h *Humanoid) IntelligentClick(ctx context.Context, selector string, field *PotentialField) error {
+func (h *Humanoid) IntelligentClick(ctx context.Context, selector string, opts *InteractionOptions) error {
 	// (Full movement logic is in movement.go, this is the final click part)
-	if err := h.MoveTo(ctx, selector, field); err != nil {
+	if err := h.MoveTo(ctx, selector, opts); err != nil {
 		return err
 	}
 

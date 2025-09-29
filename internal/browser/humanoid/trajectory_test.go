@@ -1,4 +1,4 @@
-// Filename: internal/humanoid/trajectory_test.go
+// Filename: internal/browser/humanoid/trajectory_test.go
 package humanoid
 
 import (

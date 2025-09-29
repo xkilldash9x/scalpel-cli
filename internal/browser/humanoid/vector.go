@@ -1,4 +1,4 @@
-// internal/humanoid/vector.go
+// internal/browser/humanoid/vector.go
 package humanoid
 
 import "math"
