@@ -44,8 +44,8 @@ func TestMain(m *testing.M) {
 	// Use sync.Once to ensure initialization happens only once.
 	suiteManagerOnce.Do(func() {
 		suiteLogger.Info("Initializing global browser test suite manager...")
-		// The config is now passed per-session in NewAnalysisContext.
-		suiteManager, suiteManagerErr = NewManager(ctx, suiteLogger)
+		// Pass the suite's default config to the manager upon creation.
+		suiteManager, suiteManagerErr = NewManager(ctx, suiteLogger, suiteConfig)
 		if suiteManagerErr != nil {
 			suiteLogger.Error("Failed to create global browser manager.", zap.Error(suiteManagerErr))
 			// We don't exit here yet, allowing tests to potentially run if they handle the error.
@@ -146,9 +146,10 @@ func newTestFixture(t *testing.T, configurators ...fixtureConfigurator) *testFix
 	t.Cleanup(func() { close(findingsChan) })
 
 	// Create a new session (BrowserContext) for the test.
-	// The context controls the test's execution lifecycle.
-	testCtx, testCancel := context.WithCancel(context.Background())
-	t.Cleanup(testCancel)
+	// FIX (6): Use t.Context() instead of context.WithCancel(context.Background()).
+	// This ensures the session respects the test's deadline (go test -timeout)
+	// and is cancelled automatically if the test times out.
+	testCtx := t.Context()
 
 	sessionInterface, err := manager.NewAnalysisContext(
 		testCtx,
@@ -165,11 +166,12 @@ func newTestFixture(t *testing.T, configurators ...fixtureConfigurator) *testFix
 
 	// Ensure the session is closed when the test finishes.
 	t.Cleanup(func() {
-		// FIX: Corrected all capitalization issues in this block.
 		// Use a background context with timeout for cleanup.
+		// This ensures cleanup can run even if the main testCtx has expired.
 		closeCtx, closeCancel := context.WithTimeout(context.Background(), shutdownTimeout/3)
 		defer closeCancel()
 		if err := sess.Close(closeCtx); err != nil {
+			// Use t.Logf in cleanup, as failure here shouldn't necessarily fail the main test.
 			t.Logf("Warning: Error during session close in cleanup: %v", err)
 		}
 	})
