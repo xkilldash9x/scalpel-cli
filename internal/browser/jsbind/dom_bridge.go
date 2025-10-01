@@ -160,7 +160,13 @@ func (b *DOMBridge) wrapNode(node *html.Node) *goja.Object {
 	}
 
 	native := &nativeNode{bridge: b, node: node}
-	obj := b.runtime.ToValue(native).ToObject(b.runtime)
+
+	// FIX: Create a standard JavaScript object instead of a Host object (reflection wrapper).
+	// Host objects do not support defining accessor properties (getters/setters).
+	// obj := b.runtime.ToValue(native).ToObject(b.runtime) // OLD
+	obj := b.runtime.NewObject()
+	// Store the Go data within the JS object.
+	_ = SetObjectData(b.runtime, obj, native)
 
 	_ = obj.Set("nodeType", node.Type)
 	_ = obj.Set("nodeName", strings.ToUpper(node.Data))
@@ -182,7 +188,21 @@ func unwrapNode(obj goja.Value) *nativeNode {
 	if obj == nil || goja.IsUndefined(obj) || goja.IsNull(obj) {
 		return nil
 	}
-	v, ok := obj.ToObject(nil).Export().(*nativeNode)
+
+	gojaObj := obj.ToObject(nil)
+	if gojaObj == nil {
+		return nil
+	}
+
+	// FIX: Retrieve the data using Data() instead of Export().
+	// v, ok := obj.ToObject(nil).Export().(*nativeNode) // OLD
+
+	data := GetObjectData(gojaObj)
+	if data == nil {
+		return nil
+	}
+
+	v, ok := data.(*nativeNode)
 	if !ok {
 		return nil
 	}
@@ -192,6 +212,11 @@ func unwrapNode(obj goja.Value) *nativeNode {
 // bindDocumentAndElementMethods attaches APIs based on the node type.
 func (b *DOMBridge) bindDocumentAndElementMethods(obj *goja.Object, node *html.Node) {
 	native := unwrapNode(obj)
+	// Add nil check for safety, although wrapNode should ensure native is set.
+	if native == nil {
+		return
+	}
+
 	_ = obj.Set("querySelector", b.jsQuerySelector(native))
 	_ = obj.Set("querySelectorAll", b.jsQuerySelectorAll(native))
 
@@ -894,7 +919,8 @@ func (b *DOMBridge) bindHistoryAPI() {
 			Title: title,
 			URL:   url.String(),
 		})
-	})
+})
+
 	b.DefineProperty(history, "length", func() goja.Value {
 		return b.runtime.ToValue(b.browser.GetHistoryLength())
 	}, nil)
@@ -1079,6 +1105,25 @@ func (b *DOMBridge) GetOuterHTML() (string, error) {
 }
 
 // -- Internal Helper Functions --
+
+// SetObjectData attaches an arbitrary Go value to a goja.Object using a hidden property.
+func SetObjectData(rt *goja.Runtime, obj *goja.Object, data interface{}) error {
+	wrappedData := rt.ToValue(data)
+	// Define a non-enumerable, non-writable, non-configurable property to store the data.
+	return obj.DefineDataProperty("__native__", wrappedData, goja.FLAG_FALSE, goja.FLAG_FALSE, goja.FLAG_FALSE)
+}
+
+// GetObjectData retrieves an arbitrary Go value previously attached by SetObjectData.
+func GetObjectData(obj *goja.Object) interface{} {
+	if obj == nil {
+		return nil
+	}
+	wrappedData := obj.Get("__native__")
+	if wrappedData == nil || goja.IsUndefined(wrappedData) || goja.IsNull(wrappedData) {
+		return nil
+	}
+	return wrappedData.Export()
+}
 
 func (b *DOMBridge) DefineProperty(obj *goja.Object, name string, getter interface{}, setter interface{}) {
 	if b.runtime == nil {

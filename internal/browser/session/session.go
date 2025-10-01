@@ -14,8 +14,10 @@ import (
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
+	"runtime/debug"
 	"strings"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"github.com/PuerkitoBio/goquery"
@@ -40,20 +42,20 @@ import (
 // Session represents a single, functional browsing context (equivalent to a tab).
 // It implements schemas.SessionContext.
 type Session struct {
-	id     string
-	ctx    context.Context // Master context for the session's lifecycle.
-	cancel context.CancelFunc
-	logger *zap.Logger
-	cfg    *config.Config
-	persona schemas.Persona
-
+	id          string
+	ctx         context.Context // Master context for the session's lifecycle.
+	cancel      context.CancelFunc
+	logger      *zap.Logger
+	cfg         *config.Config
+	persona     schemas.Persona
+	closeStatus int32 // 0 = open, 1 = closing
 	// Core functional components
 	client             *http.Client
 	interactor         *dom.Interactor
 	harvester          *Harvester
 	layoutEngine       *layout.Engine
 	humanoidController humanoid.Controller
-	jsRegistry *require.Registry
+	jsRegistry         *require.Registry
 
 	// JavaScript Engine and Event Loop
 	// Protected by 'mu' for safe access/shutdown.
@@ -69,7 +71,7 @@ type Session struct {
 
 	currentURL *url.URL
 	layoutRoot *layout.LayoutBox
-	domBridge *jsbind.DOMBridge
+	domBridge  *jsbind.DOMBridge
 
 	// History stack implementation (Protected by mu)
 	historyStack []*schemas.HistoryState
@@ -378,52 +380,62 @@ func (s *Session) GetContext() context.Context { return s.ctx }
 
 // Close gracefully terminates the session, respecting the provided context deadline.
 func (s *Session) Close(ctx context.Context) error {
+	// Atomically check and set the flag from 0 (open) to 1 (closing).
+	if !atomic.CompareAndSwapInt32(&s.closeStatus, 0, 1) {
+		s.logger.Debug("Close called on an already closing session.", zap.String("stack", string(debug.Stack())))
+		return nil
+	}
+
+	s.logger.Info("--- Close called for the FIRST time ---", zap.String("stack", string(debug.Stack())))
+
 	var returnErr error
+
 	s.closeOnce.Do(func() {
 		s.logger.Info("Initiating session shutdown.")
 
-		// 1. Cancel the master session context.
-		// This signals all derived contexts AND the VM itself (since vm.Interrupt(s.ctx.Done())).
-		s.cancel()
-
-		// 2. Atomically retrieve the event loop and nullify session references (DEF-PROG).
+		// 1. Atomically retrieve the event loop.
 		s.mu.Lock()
 		loop := s.eventLoop
-		s.eventLoop = nil
-		s.domBridge = nil
 		s.mu.Unlock()
 
-		// 3. Stop the event loop.
+		// 2. Stop the event loop first. This allows any running script to complete.
 		if loop != nil {
-			// eventLoop.Stop() blocks until the loop drains. Since the VM is interrupted (via s.cancel()), this should be fast.
 			stopDone := make(chan struct{})
 			go func() {
 				loop.Stop()
 				close(stopDone)
 			}()
 
-			// Wait for the stop to complete, respecting the caller's deadline.
 			select {
 			case <-stopDone:
 				s.logger.Debug("Event loop stopped gracefully.")
 			case <-ctx.Done():
-				s.logger.Warn("Timeout waiting for event loop to stop. Proceeding with forceful shutdown.", zap.Error(ctx.Err()))
+				s.logger.Warn("Timeout waiting for event loop to stop.", zap.Error(ctx.Err()))
 				returnErr = fmt.Errorf("timeout waiting for session event loop to close: %w", ctx.Err())
-				// The loop continues stopping in the background goroutine.
 			}
 		}
 
-		// 4. Cleanup network resources.
+		// 3. Now, cancel the master session context to signal other goroutines.
+		s.cancel()
+
+		// 4. Nullify session references.
+		s.mu.Lock()
+		s.eventLoop = nil
+		s.domBridge = nil
+		s.mu.Unlock()
+
+		// 5. Cleanup network resources.
 		if s.client != nil {
 			s.client.CloseIdleConnections()
 		}
 
-		// 5. Notify the manager.
+		// 6. Notify the manager.
 		if s.onClose != nil {
 			s.onClose()
 		}
 		s.logger.Info("Session closed.")
 	})
+
 	return returnErr
 }
 
@@ -518,19 +530,34 @@ func (s *Session) Navigate(ctx context.Context, targetURL string) error {
 		return err
 	}
 
-	if err := s.stabilize(navCtx); err != nil {
-		if navCtx.Err() != nil {
-			return navCtx.Err()
-		}
-		s.logger.Debug("Stabilization finished with potential issues after navigation.", zap.Error(err))
-	}
-
 	if s.humanoidCfg != nil && s.humanoidCfg.Enabled {
 		if err := hesitate(navCtx, 500*time.Millisecond+time.Duration(rand.Intn(1000))*time.Millisecond); err != nil {
 			return err
 		}
 	}
 	return nil
+}
+
+// waitForEventLoop ensures that any tasks currently queued on the JS event loop are executed.
+func (s *Session) waitForEventLoop(ctx context.Context) error {
+	loop := s.getEventLoop()
+	if loop == nil {
+		return errors.New("session closed while waiting for event loop")
+	}
+
+	done := make(chan struct{})
+	// Queue a no-op task. When it executes, all preceding tasks are complete.
+	loop.RunOnLoop(func(vm *goja.Runtime) {
+		close(done)
+	})
+
+	// Wait for our task to run or for the context to be canceled.
+	select {
+	case <-done:
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	}
 }
 
 func (s *Session) executeRequest(ctx context.Context, req *http.Request) error {
@@ -917,7 +944,8 @@ func (s *Session) Submit(ctx context.Context, selector string) error {
 		return err
 	}
 	return s.stabilize(ctx)
-}
+	}
+
 
 func (s *Session) ScrollPage(ctx context.Context, direction string) error {
 	scrollAmount := 500
@@ -960,6 +988,7 @@ func (s *Session) ExposeFunction(ctx context.Context, name string, function inte
 
 	errChan := make(chan error, 1)
 	loop.RunOnLoop(func(vm *goja.Runtime) {
+		vm.ClearInterrupt()	
 		errChan <- vm.Set(name, function)
 	})
 
@@ -986,7 +1015,7 @@ func (s *Session) InjectScriptPersistently(ctx context.Context, script string) e
 func (s *Session) ExecuteScript(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
 	var result interface{}
 	// The core logic is handled by the robustly refactored executeScriptInternal.
-	err := s.executeScriptInternal(ctx, script, &result)
+	err := s.executeScriptInternal(ctx, script, &result, args)
 	if err != nil {
 		return nil, err
 	}
@@ -998,7 +1027,7 @@ func (s *Session) ExecuteScript(ctx context.Context, script string, args []inter
 
 // executeScriptInternal is the core JS execution logic, refactored for robustness, context respect, and performance
 // based on the "Handle Swapping" pattern for dedicated, long-lived VMs.
-func (s *Session) executeScriptInternal(ctx context.Context, script string, res interface{}) error {
+func (s *Session) executeScriptInternal(ctx context.Context, script string, res interface{}, args []interface{}) error {
 	// 1. Create the execution context...
 	execCtx, execCancel := CombineContext(s.ctx, ctx)
 	defer execCancel()
@@ -1022,9 +1051,6 @@ func (s *Session) executeScriptInternal(ctx context.Context, script string, res 
 	// 5. Schedule the execution on the event loop.
 	loop.RunOnLoop(func(vm *goja.Runtime) {
 		// This block executes within the event loop's single goroutine.
-// CRITICAL FIX: Clear any stale interrupts from previous executions.
-		// As per Goja documentation, if the VM was previously interrupted, the flag persists
-		// and will cause the next Run*() call to fail immediately if not cleared.
 		vm.ClearInterrupt()
 
 		// 5.1. Create a specific interrupt handle for this execution.
@@ -1154,10 +1180,15 @@ func (s *Session) processScriptResult(ctx context.Context, value goja.Value, err
 		var gojaException *goja.Exception
 		var interruptedError *goja.InterruptedError
 
+		// If the error is an interrupt, it's because the context was cancelled.
+		// There can be a race where ctx.Err() is still nil for a moment after the interrupt fires.
+		// We treat any interrupt as a context error.
 		if errors.As(err, &interruptedError) {
-			if ctx.Err() != nil {
-				return fmt.Errorf("javascript execution interrupted by context: %w", ctx.Err())
+			// If the context has an error, use it for a more descriptive message.
+			if ctxErr := ctx.Err(); ctxErr != nil {
+				return fmt.Errorf("javascript execution interrupted by context: %w", ctxErr)
 			}
+			// Otherwise, return a generic interrupt error based on the goja error.
 			return fmt.Errorf("javascript execution interrupted (session closing): %w", err)
 		} else if errors.As(err, &gojaException) {
 			return fmt.Errorf("javascript exception: %s", gojaException.String())
