@@ -1266,10 +1266,22 @@ func (s *Session) processScriptResult(ctx context.Context, value goja.Value, err
 		var interruptedError *goja.InterruptedError
 
 		if errors.As(err, &interruptedError) {
+			// Prioritize the specific execution context error. If the execution was canceled/timed out.
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return fmt.Errorf("javascript execution interrupted by context: %w", ctxErr)
 			}
-			return fmt.Errorf("javascript execution interrupted (session closing): %w", err)
+
+			// If the execution context is fine, check if the session is closing.
+			// This handles race conditions where the session cancellation interrupt might fire
+			// during execution, which is common during tests that close the session quickly.
+			if s.ctx.Err() != nil {
+				// This matches the error message seen in the failing test TestSession_ExecuteScript_GojaIntegration.
+				return fmt.Errorf("javascript execution interrupted (session closing): %w", err)
+			}
+
+			// If interrupted but neither context is done, it's unexpected.
+			return fmt.Errorf("javascript execution interrupted unexpectedly: %w", err)
+
 		} else if errors.As(err, &gojaException) {
 			return fmt.Errorf("javascript exception: %s", gojaException.String())
 		} else {
