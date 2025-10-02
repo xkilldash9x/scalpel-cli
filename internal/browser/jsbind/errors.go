@@ -1,3 +1,4 @@
+// internal/browser/jsbind/errors.go
 package jsbind
 
 import "fmt"
@@ -9,17 +10,17 @@ import "fmt"
 // ElementNotFoundError is a specific, typed error for when a selector does not match any element.
 type ElementNotFoundError struct {
 	Selector string
-	Message  string
 }
 
-// Error implements the error interface.
-func (e *ElementNotFoundError) Error() string { return e.Message }
+// Error implements the error interface by formatting the message on the fly.
+func (e *ElementNotFoundError) Error() string {
+	return fmt.Sprintf("element not found matching selector '%s'", e.Selector)
+}
 
 // NewElementNotFoundError creates a new ElementNotFoundError.
 func NewElementNotFoundError(selector string) *ElementNotFoundError {
 	return &ElementNotFoundError{
 		Selector: selector,
-		Message:  fmt.Sprintf("element not found matching selector '%s'", selector),
 	}
 }
 
@@ -31,7 +32,11 @@ type NavigationError struct {
 }
 
 // Error implements the error interface.
-func (e *NavigationError) Error() string { return e.Message }
+func (e *NavigationError) Error() string {
+	return e.Message
+}
 
 // Unwrap provides the underlying error for use with errors.Is/As.
-func (e *NavigationError) Unwrap() error { return e.Err }
+func (e *NavigationError) Unwrap() error {
+	return e.Err
+}

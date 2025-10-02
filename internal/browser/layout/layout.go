@@ -17,11 +17,21 @@ import (
 // -- Constants and Configuration --
 
 const (
-    BaseFontSize    = 16.0 // Default root font size.
+    BaseFontSize      = 16.0 // Default root font size.
     DefaultLineHeight = 1.2  // Default multiplier for 'line-height: normal'.
 )
 
 // -- Core Structures: Box Model and Dimensions --
+
+// Axis represents the primary layout direction.
+type Axis int
+
+const (
+    // Horizontal axis for layout calculations.
+    Horizontal Axis = iota
+    // Vertical axis for layout calculations.
+    Vertical
+)
 
 // Dimensions defines the geometry of a layout box.
 type Dimensions struct {
@@ -210,6 +220,31 @@ func (m TransformMatrix) Apply(x, y float64) (float64, float64) {
     return newX, newY
 }
 
+// Inverse calculates the inverse of the transformation matrix.
+// If the matrix is not invertible (i.e., its determinant is zero),
+// it returns an error.
+func (m TransformMatrix) Inverse() (TransformMatrix, error) {
+    a, b, c, d, e, f := m.A, m.B, m.C, m.D, m.E, m.F
+
+    det := a*d - b*c
+    if det == 0 {
+        return TransformMatrix{}, fmt.Errorf("matrix is not invertible")
+    }
+
+    invDet := 1.0 / det
+
+    invA := d * invDet
+    invB := -b * invDet
+    invC := -c * invDet
+    invD := a * invDet
+    invE := (c*f - d*e) * invDet
+    invF := (b*e - a*f) * invDet
+
+    return TransformMatrix{
+        A: invA, B: invB, C: invC, D: invD, E: invE, F: invF,
+    }, nil
+}
+
 // TranslateMatrix creates a translation matrix.
 func TranslateMatrix(tx, ty float64) TransformMatrix {
     return TransformMatrix{A: 1, D: 1, E: tx, F: ty}
@@ -318,6 +353,15 @@ func (b *LayoutBox) EstablishesNewFormattingContext() bool {
     }
 
     return false
+}
+
+// getRoot finds the root of the layout tree.
+func (b *LayoutBox) getRoot() *LayoutBox {
+    current := b
+    for current.ContainingBlock != nil {
+        current = current.ContainingBlock
+    }
+    return current
 }
 
 // GetPositioningContainingBlock finds the containing block (PCB) for positioned elements.
@@ -941,12 +985,6 @@ func (b *LayoutBox) verticallyAlignLineBox(line *LineBox) {
 }
 
 // -- Flexbox, Grid, Table Layout --
-type Axis int
-
-const (
-    Horizontal Axis = iota
-    Vertical
-)
 
 // FlexDirectionInfo for easier axis management
 type FlexDirectionInfo struct {
@@ -1478,11 +1516,11 @@ type GridTrack struct {
     MaxSize      float64
 }
 type GridItem struct {
-    Box                *LayoutBox
-    RowStart, RowEnd   int
-    ColStart, ColEnd   int
-    Row, Col           int
-    RowSpan, ColSpan   int
+    Box              *LayoutBox
+    RowStart, RowEnd int
+    ColStart, ColEnd int
+    Row, Col         int
+    RowSpan, ColSpan int
 }
 
 // resolveGridTracks parses grid-template-rows/columns and calculates their final sizes.
@@ -2409,14 +2447,6 @@ func (b *LayoutBox) calculateInlineDimensions() {
 
 // -- Helpers --
 
-func (b *LayoutBox) getRoot() *LayoutBox {
-    root := b
-    for root.ContainingBlock != nil {
-        root = root.ContainingBlock
-    }
-    return root
-}
-
 func parseFloat(s string) (float64, error) {
     var result float64
     var sign float64 = 1
@@ -2541,4 +2571,3 @@ func findLayoutBoxForNode(root *LayoutBox, target *html.Node) *LayoutBox {
     }
     return nil
 }
-

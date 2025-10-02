@@ -1,6 +1,20 @@
 // Package session implements a functional, headless browser engine in pure Go.
 // It integrates a robust network stack, a Go based DOM representation (golang.org/x/net/html),
 // and the Goja JavaScript runtime, synchronized via an event loop and a custom DOM bridge (jsbind).
+//
+// CONCURRENCY MODEL:
+// This implementation adheres to Goja's single-threaded constraint by assigning one
+// dedicated Goja VM instance per Session, managed by an eventloop.EventLoop. This creates
+// a "browser tab" metaphor, where each session is an isolated, stateful environment.
+//
+// To manage concurrency at the application level, two layers of synchronization are used:
+// 1. High-Level Operation Lock (opMu): A sync.Mutex that serializes major, state-altering
+//    operations (e.g., Navigate, Click, ExecuteScript). This prevents logical race conditions,
+//    such as a script execution interfering with a page navigation. The acquireOpLock helper
+//    manages this lock with re-entrancy support via context.
+// 2. Low-Level VM Access (Event Loop): The eventloop ensures all JavaScript execution
+//    occurs on a single, dedicated goroutine, satisfying Goja's core requirement and
+//    preventing memory corruption within the VM's internal state.
 package session
 
 import (
@@ -41,7 +55,7 @@ import (
 	"golang.org/x/net/html"
 )
 
-// Context key for managing operation lock reentrancy.
+// Context key for managing operation lock re-entrancy.
 type opLockKey struct{}
 
 var operationLockKey = opLockKey{}
@@ -76,7 +90,7 @@ type Session struct {
 
 	// Operation serialization lock.
 	// opMu serializes high level operations (Navigation, Interactions, JS Execution)
-	// to ensure state consistency. Managed via acquireOpLock for reentrancy.
+	// to ensure state consistency. Managed via acquireOpLock for re-entrancy.
 	opMu sync.Mutex
 
 	// State management
@@ -105,7 +119,7 @@ type Session struct {
 }
 
 // acquireOpLock grabs the operation lock if it's not already held by the current goroutine.
-// This is tracked via context to enable reentrancy without deadlocking.
+// This is tracked via context to enable re-entrancy without deadlocking.
 // It returns a context marked as locked and a function to release the lock.
 func (s *Session) acquireOpLock(ctx context.Context) (context.Context, func()) {
 	if ctx.Value(operationLockKey) != nil {
@@ -938,7 +952,7 @@ func (s *Session) GetDOMSnapshot(ctx context.Context) (io.Reader, error) {
 }
 
 // Interact performs a sequence of interactions using the humanoid controller.
-// This is now the primary entry point for complex, multi-step actions.
+// This is now the primary entry point for complex, multi step actions.
 func (s *Session) Interact(ctx context.Context, config schemas.InteractionConfig) error {
 	lockedCtx, unlock := s.acquireOpLock(ctx)
 	defer unlock()
@@ -999,7 +1013,7 @@ func (s *Session) Interact(ctx context.Context, config schemas.InteractionConfig
 	return nil
 }
 
-// Click simulates a human-like mouse click by delegating to the humanoid controller.
+// Click simulates a human like mouse click by delegating to the humanoid controller.
 func (s *Session) Click(ctx context.Context, selector string) error {
 	lockedCtx, unlock := s.acquireOpLock(ctx)
 	defer unlock()
@@ -1010,7 +1024,7 @@ func (s *Session) Click(ctx context.Context, selector string) error {
 	return s.stabilize(lockedCtx)
 }
 
-// Type simulates human-like typing by delegating to the humanoid controller.
+// Type simulates human like typing by delegating to the humanoid controller.
 func (s *Session) Type(ctx context.Context, selector string, text string) error {
 	lockedCtx, unlock := s.acquireOpLock(ctx)
 	defer unlock()
@@ -1027,7 +1041,7 @@ func (s *Session) Submit(ctx context.Context, selector string) error {
 	return s.Click(ctx, selector)
 }
 
-// ScrollPage scrolls the page. This is for explicit full-page scrolling.
+// ScrollPage scrolls the page. This is for explicit full page scrolling.
 // Most scrolling is now handled implicitly by the humanoid controller.
 func (s *Session) ScrollPage(ctx context.Context, direction string) error {
 	lockedCtx, unlock := s.acquireOpLock(ctx)
@@ -1141,6 +1155,8 @@ func (s *Session) executeScriptInternal(ctx context.Context, script string, args
 }
 
 // executeScriptLowLevel handles the low level interaction with the Goja event loop.
+// It includes robust panic recovery to prevent a misbehaving script from
+// crashing the session's entire event loop goroutine.
 // Assumes s.opMu is held.
 func (s *Session) executeScriptLowLevel(ctx context.Context, script string, res interface{}, args []interface{}) error {
 	execCtx, execCancel := CombineContext(s.ctx, ctx)
@@ -1160,6 +1176,20 @@ func (s *Session) executeScriptLowLevel(ctx context.Context, script string, res 
 	}, 1)
 
 	loop.RunOnLoop(func(vm *goja.Runtime) {
+		// This defer/recover block is critical. It prevents a panic inside Goja
+		// (e.g., from a badly written script) from killing the event loop goroutine.
+		defer func() {
+			if r := recover(); r != nil {
+				err := fmt.Errorf("panic in javascript execution: %v", r)
+				s.logger.Error("Recovered from panic in event loop", zap.Error(err), zap.String("stack", string(debug.Stack())))
+				// Send the panic as an error to the calling function.
+				resultChan <- struct {
+					Value goja.Value
+					Error error
+				}{nil, err}
+			}
+		}()
+
 		vm.ClearInterrupt()
 		// Set up a specific interrupt channel for this execution.
 		execInterruptHandle := make(chan struct{})
@@ -1179,6 +1209,8 @@ func (s *Session) executeScriptLowLevel(ctx context.Context, script string, res 
 
 		var val goja.Value
 		var err error
+
+		// The actual script execution happens within this function scope.
 		func() {
 			defer close(executionDone)
 			// TODO: Handle args if provided.
@@ -1192,6 +1224,7 @@ func (s *Session) executeScriptLowLevel(ctx context.Context, script string, res 
 			Error error
 		}{val, err}:
 		case <-execCtx.Done():
+			// If context is done, don't block.
 		}
 	})
 
@@ -1265,37 +1298,39 @@ func (s *Session) processScriptResult(ctx context.Context, value goja.Value, err
 		var gojaException *goja.Exception
 		var interruptedError *goja.InterruptedError
 
+		// Check for interruption first. This is the most common case for cancellation.
 		if errors.As(err, &interruptedError) {
-			// Prioritize the specific execution context error. If the execution was canceled/timed out.
+			// If the script was interrupted, the definitive source of truth is the context passed to the function.
+			// Return the context's error to provide a clear reason (canceled or deadline exceeded).
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return fmt.Errorf("javascript execution interrupted by context: %w", ctxErr)
 			}
-
-			// If the execution context is fine, check if the session is closing.
-			// This handles race conditions where the session cancellation interrupt might fire
-			// during execution, which is common during tests that close the session quickly.
+			// If the context is fine but the session is closing, that's another valid reason.
 			if s.ctx.Err() != nil {
-				// This matches the error message seen in the failing test TestSession_ExecuteScript_GojaIntegration.
 				return fmt.Errorf("javascript execution interrupted (session closing): %w", err)
 			}
-
-			// If interrupted but neither context is done, it's unexpected.
+			// An interruption without a clear reason is unexpected.
 			return fmt.Errorf("javascript execution interrupted unexpectedly: %w", err)
+		}
 
-		} else if errors.As(err, &gojaException) {
+		// Check for a standard JS exception.
+		if errors.As(err, &gojaException) {
 			return fmt.Errorf("javascript exception: %s", gojaException.String())
-		} else {
-			return fmt.Errorf("javascript execution error: %w", err)
 		}
+		// Fallback for other errors, including panics that were recovered.
+		return fmt.Errorf("javascript execution error: %w", err)
 	}
 
+	// If the result is a Promise, we must wait for it to resolve.
 	if promise, ok := value.Export().(*goja.Promise); ok {
-		value, err = s.waitForPromise(ctx, promise)
-		if err != nil {
-			return err
+		var promiseErr error
+		value, promiseErr = s.waitForPromise(ctx, promise)
+		if promiseErr != nil {
+			return promiseErr
 		}
 	}
 
+	// Export the final value to the provided result interface.
 	if res != nil && value != nil && !goja.IsUndefined(value) && !goja.IsNull(value) {
 		loop := s.getEventLoop()
 		if loop == nil {
@@ -1343,17 +1378,26 @@ func (s *Session) executeClickInternal(ctx context.Context, selector string, min
 		// Placeholder for humanoid timing simulation.
 	}
 
+	bridge := s.getDOMBridge()
+	if bridge == nil {
+		return errors.New("session closed during click operation")
+	}
+
+	// The default action (state change, navigation) MUST happen before the event fires,
+	// just like in a real browser where the default action can be prevented by JS.
+	err = s.handleClickConsequenceInternal(ctx, element)
+	// Do not return yet, we must still fire the JS event.
+
+	// Now, dispatch the JavaScript 'click' event on the event loop.
 	loop := s.getEventLoop()
 	if loop != nil {
 		loop.RunOnLoop(func(vm *goja.Runtime) {
-			if bridge := s.getDOMBridge(); bridge != nil {
-				bridge.DispatchEventOnNode(element, "click")
-			}
+			bridge.DispatchEventOnNode(element, "click")
 		})
 	}
 
-	// Handle consequence. Use the internal version.
-	return s.handleClickConsequenceInternal(ctx, element)
+	// Return the original error from the consequence handler, if any.
+	return err
 }
 
 // ExecuteType performs the typing action. Concurrency safe. Implements humanoid.Executor.
@@ -1481,21 +1525,19 @@ func (s *Session) executeSelectInternal(ctx context.Context, selector string, va
 	escapedValue := strings.ReplaceAll(value, "'", "\\'")
 	escapedValue = strings.ReplaceAll(escapedValue, `\`, `\\`)
 
+	// REFACTOR: This script is more robust and efficient.
+	// It directly sets the .value property of the select element, which is how JS
+	// engines typically handle this. It then confirms the change by reading the value back.
+	// This avoids iterating through all options and is less code.
 	script := fmt.Sprintf(`
-        const select = document.querySelector('%s');
-        if (!select) { return false; }
-        const options = Array.from(select.options);
-        let found = false;
-        options.forEach(opt => {
-            if (opt.value === '%s') {
-                opt.selected = true;
-                found = true;
-            } else {
-                opt.selected = false;
-            }
-        });
-        if (found) { select.value = '%s'; }
-        return found;
+        (function() {
+            const select = document.querySelector('%s');
+            if (!select) { return false; }
+            select.value = '%s';
+            // Verify that the value was actually set. This handles cases
+            // where an option with the given value doesn't exist.
+            return select.value === '%s';
+        })()
     `, escapedSelector, escapedValue, escapedValue)
 
 	// Use the internal script execution version.
@@ -1745,12 +1787,34 @@ func (s *Session) Sleep(ctx context.Context, d time.Duration) error {
 
 // DispatchMouseEvent implements humanoid.Executor. Concurrency safe.
 func (s *Session) DispatchMouseEvent(ctx context.Context, data schemas.MouseEventData) error {
-	// Acquire operation lock if this interacts with the JS engine.
-	_, unlock := s.acquireOpLock(ctx)
-	defer unlock()
+	// We only care about the final "mouse up" to trigger a click.
+	if data.Type == schemas.MouseRelease {
+		// Acquire the high level operation lock to ensure state consistency during this action.
+		lockedCtx, unlock := s.acquireOpLock(ctx)
+		defer unlock()
 
-	s.logger.Debug("Dispatching mouse event (TODO: implement event dispatch)", zap.Any("data", data))
-	// TODO: Implement dispatching the event via the DOM bridge on the event loop.
+		// Check if the context was cancelled (e.g., session closing) before proceeding.
+		if lockedCtx.Err() != nil {
+			return lockedCtx.Err()
+		}
+
+		bridge := s.getDOMBridge()
+		if bridge == nil {
+			return errors.New("session is closed, DOM bridge unavailable")
+		}
+
+		// 1. Perform a "hit test" to find the element at the cursor.
+		// Note: FindNodeAtPoint is a temporary implementation.
+		hitNode := bridge.FindNodeAtPoint(data.X, data.Y)
+
+		if hitNode != nil {
+			// 2. Lock the DOM and perform the default action.
+			// The PerformDefaultClickAction function expects the lock to be held by the caller.
+			bridge.Lock()
+			defer bridge.Unlock()
+			bridge.PerformDefaultClickAction(hitNode)
+		}
+	}
 	return nil
 }
 
@@ -1912,15 +1976,71 @@ func (s *Session) findElementNode(selector string) (*html.Node, error) {
 // handleClickConsequenceInternal handles the consequences of a click.
 // Assumes s.opMu is held. Must be called with the locked context.
 func (s *Session) handleClickConsequenceInternal(ctx context.Context, element *html.Node) error {
+	// This function must now handle all possible default actions for a click.
+	bridge := s.getDOMBridge()
+	if bridge == nil {
+		return errors.New("session closed")
+	}
+
+	// Use the bridge's locking mechanism to ensure safe DOM manipulation.
+	bridge.Lock()
+	defer bridge.Unlock()
+
+	// 1. Handle form input elements (checkboxes, radios)
+	if strings.ToLower(element.Data) == "input" {
+		inputType := strings.ToLower(htmlquery.SelectAttr(element, "type"))
+		if inputType == "checkbox" {
+			// Toggle the "checked" attribute.
+			if _, isChecked := getAttr(element, "checked"); isChecked {
+				removeAttr(element, "checked")
+			} else {
+				addAttr(element, "checked", "checked")
+			}
+			return nil // No further action for a checkbox click.
+		}
+		if inputType == "radio" {
+			// Uncheck all other radios in the same group and check this one.
+			radioName := htmlquery.SelectAttr(element, "name")
+			if radioName != "" {
+				// Find the root to query from.
+				root := element
+				for root.Parent != nil {
+					root = root.Parent
+				}
+				// Query for all radios in the same form/document with the same name.
+				radios := htmlquery.Find(root, fmt.Sprintf(`//input[@type='radio' and @name='%s']`, radioName))
+				for _, radio := range radios {
+					removeAttr(radio, "checked")
+				}
+			}
+			// Check the clicked radio button.
+			addAttr(element, "checked", "checked")
+			return nil // No further action.
+		}
+	}
+
+	// 2. Handle navigation links (<a>)
 	if strings.ToLower(element.Data) == "a" {
 		if href := htmlquery.SelectAttr(element, "href"); href != "" {
 			// CRITICAL: Call navigateInternal, not Navigate, as the lock is already held.
 			return s.navigateInternal(ctx, href)
 		}
-	} else {
-		// If not a link, check if it's a submit button or inside a form
-		form := findParentForm(element)
-		if form != nil {
+	}
+
+	// 3. Handle form submissions
+	// If the element is a submit button or is inside a form, find the parent form.
+	form := findParentForm(element)
+	if form != nil {
+		// Check if the clicked element is a submit button, which is the default for buttons inside forms.
+		isSubmitButton := false
+		if strings.ToLower(element.Data) == "button" && strings.ToLower(htmlquery.SelectAttr(element, "type")) != "reset" {
+			isSubmitButton = true
+		}
+		if strings.ToLower(element.Data) == "input" && strings.ToLower(htmlquery.SelectAttr(element, "type")) == "submit" {
+			isSubmitButton = true
+		}
+
+		if isSubmitButton {
 			return s.submitFormInternal(ctx, form)
 		}
 	}
@@ -2041,6 +2161,36 @@ func getAttr(n *html.Node, key string) (string, bool) {
 		}
 	}
 	return "", false
+}
+
+// addAttr is a helper to add or update an attribute on a node.
+func addAttr(n *html.Node, key, val string) {
+	if n == nil {
+		return
+	}
+	// Check if the attribute already exists to update it.
+	for i := range n.Attr {
+		if n.Attr[i].Key == key {
+			n.Attr[i].Val = val
+			return
+		}
+	}
+	// If it doesn't exist, append it.
+	n.Attr = append(n.Attr, html.Attribute{Key: key, Val: val})
+}
+
+// removeAttr is a helper to remove an attribute from a node.
+func removeAttr(n *html.Node, key string) {
+	if n == nil {
+		return
+	}
+	newAttrs := make([]html.Attribute, 0, len(n.Attr))
+	for _, attr := range n.Attr {
+		if attr.Key != key {
+			newAttrs = append(newAttrs, attr)
+		}
+	}
+	n.Attr = newAttrs
 }
 
 func findParentForm(element *html.Node) *html.Node {

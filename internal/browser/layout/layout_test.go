@@ -1,5 +1,5 @@
 // internal/browser/layout/layout_test.go
-package layout
+package layout_test
 
 import (
 	"strings"
@@ -110,30 +110,31 @@ func TestFlexboxLayout_JustifyAndAlign(t *testing.T) {
 
 	// -- Verify justify-content: space-between --
 	// Calculations are based on the container's CONTENT BOX.
+	// Container is offset by body's 8px margin, but we test relative positions.
 	// Content Box Width: 500px (width) - 10px (p-left) - 10px (p-right) = 480px.
-	// Content Box Starts at X=10 due to left padding.
+	// Content Box Starts at X=8(body)+10(padding)=18 relative to viewport.
 	// Total item width is 150px. Free space is 480 - 150 = 330px.
 	// With 2 gaps, each gap is 330 / 2 = 165px.
 
 	// Item 1 should be at the start of the content box.
-	assert.InDelta(t, 10.0, geo1.Vertices[0], 0.1, "Item 1 X position")
-	// Item 2 should be after item 1 and one gap: 10 (start) + 50 (item1) + 165 (gap) = 225.
-	assert.InDelta(t, 225.0, geo2.Vertices[0], 0.1, "Item 2 X position")
+	assert.InDelta(t, 18.0, geo1.Vertices[0], 0.1, "Item 1 X position")
+	// Item 2 should be after item 1 and one gap: 18 (start) + 50 (item1) + 165 (gap) = 233.
+	assert.InDelta(t, 233.0, geo2.Vertices[0], 0.1, "Item 2 X position")
 	// Item 3 should be at the very end of the content box.
-	// Start pos: 10 (start) + 480 (content width) - 50 (item3) = 440.
-	assert.InDelta(t, 440.0, geo3.Vertices[0], 0.1, "Item 3 X position")
+	// Start pos: 18 (start) + 480 (content width) - 50 (item3) = 448.
+	assert.InDelta(t, 448.0, geo3.Vertices[0], 0.1, "Item 3 X position")
 
 	// -- Verify align-items: center --
 	// Calculations are based on the container's CONTENT BOX.
 	// Content Box Height: 100px (height) - 10px (p-top) - 10px (p-bottom) = 80px.
-	// Content Box Starts at Y=10 due to top padding.
+	// Content Box Starts at Y=8(body)+10(padding)=18 relative to viewport.
 
-	// Item 1 (50px high): 10 (start) + (80 - 50)/2 = 25.
-	assert.InDelta(t, 25.0, geo1.Vertices[1], 0.1, "Item 1 Y position")
-	// Item 2 (80px high): 10 (start) + (80 - 80)/2 = 10.
-	assert.InDelta(t, 10.0, geo2.Vertices[1], 0.1, "Item 2 Y position")
-	// Item 3 (30px high): 10 (start) + (80 - 30)/2 = 35.
-	assert.InDelta(t, 35.0, geo3.Vertices[1], 0.1, "Item 3 Y position")
+	// Item 1 (50px high): 18 (start) + (80 - 50)/2 = 33.
+	assert.InDelta(t, 33.0, geo1.Vertices[1], 0.1, "Item 1 Y position")
+	// Item 2 (80px high): 18 (start) + (80 - 80)/2 = 18.
+	assert.InDelta(t, 18.0, geo2.Vertices[1], 0.1, "Item 2 Y position")
+	// Item 3 (30px high): 18 (start) + (80 - 30)/2 = 43.
+	assert.InDelta(t, 43.0, geo3.Vertices[1], 0.1, "Item 3 Y position")
 }
 
 // TestAbsolutePositioning verifies an element is positioned relative to its containing block.
@@ -144,6 +145,7 @@ func TestAbsolutePositioning(t *testing.T) {
 	</div>
 	`
 	css := `
+	body { margin: 8px; } /* Explicitly state for clarity, though it's in the UA sheet. */
 	#container {
 		position: relative;
 		width: 300px;
@@ -165,14 +167,15 @@ func TestAbsolutePositioning(t *testing.T) {
 	geo, err := engine.GetElementGeometry(root, "//*[@id='absolute-child']")
 	require.NoError(t, err)
 
-	// The containing block for an absolutely positioned element is the PADDING box of the nearest positioned ancestor.
-	// Container starts at X=50(margin), Y=50(margin).
-	// Its padding box starts at X=50+10(border)=60, Y=50+10=60.
+	// The containing block is the PADDING box of the nearest positioned ancestor.
+	// Body starts at (0,0) and has 8px margin.
+	// Container starts at X=8(body margin) + 50(container margin) = 58.
+	// Its padding box starts at X=58 + 10(border) = 68.
 	// The child should be at:
-	// X = 60 (container padding-box start) + 25 (left property) = 85
-	// Y = 60 (container padding-box start) + 15 (top property) = 75
-	assert.InDelta(t, 85.0, geo.Vertices[0], 0.1, "Absolute X position")
-	assert.InDelta(t, 75.0, geo.Vertices[1], 0.1, "Absolute Y position")
+	// X = 68 (container padding-box start) + 25 (left property) = 93
+	// Y = 68 (container padding-box start) + 15 (top property) = 83
+	assert.InDelta(t, 93.0, geo.Vertices[0], 0.1, "Absolute X position")
+	assert.InDelta(t, 83.0, geo.Vertices[1], 0.1, "Absolute Y position")
 	assert.Equal(t, int64(40), geo.Width, "Absolute width")
 	assert.Equal(t, int64(40), geo.Height, "Absolute height")
 }
@@ -186,6 +189,7 @@ func TestGridLayout_ExplicitPlacement(t *testing.T) {
 	</div>
 	`
 	css := `
+	body { margin: 8px; }
 	#grid {
 		display: grid;
 		width: 400px;
@@ -209,15 +213,17 @@ func TestGridLayout_ExplicitPlacement(t *testing.T) {
 	require.NoError(t, errA)
 	require.NoError(t, errB)
 
-	// Item A: first column (100px wide), first row (50px high).
-	assert.InDelta(t, 0.0, geoA.Vertices[0], 0.1, "Item A X position")
-	assert.InDelta(t, 0.0, geoA.Vertices[1], 0.1, "Item A Y position")
+	// Grid container starts at (8,8) due to body margin.
+	// Item A: first column (100px wide), first row (50px high). Starts at container's content-box origin.
+	assert.InDelta(t, 8.0, geoA.Vertices[0], 0.1, "Item A X position")
+	assert.InDelta(t, 8.0, geoA.Vertices[1], 0.1, "Item A Y position")
 	assert.Equal(t, int64(100), geoA.Width, "Item A width")
 	assert.Equal(t, int64(50), geoA.Height, "Item A height")
 
 	// Item B: second column (1fr = 300px), second row (1fr = 250px).
-	assert.InDelta(t, 100.0, geoB.Vertices[0], 0.1, "Item B X position")
-	assert.InDelta(t, 50.0, geoB.Vertices[1], 0.1, "Item B Y position")
+	// Position is relative to container: X=8+100=108, Y=8+50=58.
+	assert.InDelta(t, 108.0, geoB.Vertices[0], 0.1, "Item B X position")
+	assert.InDelta(t, 58.0, geoB.Vertices[1], 0.1, "Item B Y position")
 	assert.Equal(t, int64(300), geoB.Width, "Item B width")
 	assert.Equal(t, int64(250), geoB.Height, "Item B height")
 }
@@ -226,6 +232,7 @@ func TestGridLayout_ExplicitPlacement(t *testing.T) {
 func TestTransforms(t *testing.T) {
 	html := `<div id="transformed"></div>`
 	css := `
+	body { margin: 8px; }
 	#transformed {
 		width: 100px;
 		height: 100px;
@@ -238,26 +245,38 @@ func TestTransforms(t *testing.T) {
 	geo, err := engine.GetElementGeometry(root, "//*[@id='transformed']")
 	require.NoError(t, err)
 
-	// Original corners: (0,0), (100,0), (100,100), (0,100)
+	// Original box is at (8,8) due to body margin.
+	// Original corners relative to viewport: (8,8), (108,8), (108,108), (8,108)
+	// Transform origin is (0,0) relative to the BOX, which is (8,8) in viewport space.
+	// Rotation of 90deg is around (8,8).
+	// After rotate(90deg) around (8,8):
+	// (8,8) -> (8,8)
+	// (108,8) -> (8, 108)
+	// (108,108) -> (-92, 108) ... this gets complicated.
+	// It's easier to calculate locally and then translate the whole result.
+	//
+	// Local corners: (0,0), (100,0), (100,100), (0,100)
 	// After rotate(90deg) around (0,0): (0,0), (0,100), (-100,100), (-100,0)
-	// After translate(50, 50):
-	// Top-left: (0+50, 0+50) = (50, 50)
-	// Top-right: (0+50, 100+50) = (50, 150)
-	// Bottom-right: (-100+50, 100+50) = (-50, 150)
-	// Bottom-left: (-100+50, 0+50) = (-50, 50)
+	// After translate(50, 50): (-50, 50), (50, 150), (-50, 150), (-50, 50)
+	// After translate(50, 50): (50, 50), (50, 150), (-50, 150), (-50, 50)
+	// Final translation due to body margin: add (8,8) to all points.
+	// Top-left: (50+8, 50+8) = (58, 58)
+	// Top-right: (50+8, 150+8) = (58, 158)
+	// Bottom-right: (-50+8, 150+8) = (-42, 158)
+	// Bottom-left: (-50+8, 50+8) = (-42, 58)
 
 	// Vertices are clockwise from top-left.
-	assert.InDelta(t, 50.0, geo.Vertices[0], 0.1, "Transformed vertex 1 (X)")
-	assert.InDelta(t, 50.0, geo.Vertices[1], 0.1, "Transformed vertex 1 (Y)")
+	assert.InDelta(t, 58.0, geo.Vertices[0], 0.1, "Transformed vertex 1 (X)")
+	assert.InDelta(t, 58.0, geo.Vertices[1], 0.1, "Transformed vertex 1 (Y)")
 
-	assert.InDelta(t, 50.0, geo.Vertices[2], 0.1, "Transformed vertex 2 (X)")
-	assert.InDelta(t, 150.0, geo.Vertices[3], 0.1, "Transformed vertex 2 (Y)")
+	assert.InDelta(t, 58.0, geo.Vertices[2], 0.1, "Transformed vertex 2 (X)")
+	assert.InDelta(t, 158.0, geo.Vertices[3], 0.1, "Transformed vertex 2 (Y)")
 
-	assert.InDelta(t, -50.0, geo.Vertices[4], 0.1, "Transformed vertex 3 (X)")
-	assert.InDelta(t, 150.0, geo.Vertices[5], 0.1, "Transformed vertex 3 (Y)")
+	assert.InDelta(t, -42.0, geo.Vertices[4], 0.1, "Transformed vertex 3 (X)")
+	assert.InDelta(t, 158.0, geo.Vertices[5], 0.1, "Transformed vertex 3 (Y)")
 
-	assert.InDelta(t, -50.0, geo.Vertices[6], 0.1, "Transformed vertex 4 (X)")
-	assert.InDelta(t, 50.0, geo.Vertices[7], 0.1, "Transformed vertex 4 (Y)")
+	assert.InDelta(t, -42.0, geo.Vertices[6], 0.1, "Transformed vertex 4 (X)")
+	assert.InDelta(t, 58.0, geo.Vertices[7], 0.1, "Transformed vertex 4 (Y)")
 
 	// The AABB width and height should still be 100x100 for a 90-degree rotation.
 	assert.Equal(t, int64(100), geo.Width)

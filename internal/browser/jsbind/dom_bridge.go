@@ -5,6 +5,8 @@ import (
 	"bytes"
 	"context"
 	"fmt"
+	"io"
+	"mime/multipart"
 	"net/url"
 	"sort"
 	"strings"
@@ -18,7 +20,9 @@ import (
 	"golang.org/x/net/html"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/layout"
 )
+
 
 // -- Interfaces and Core Structs --
 
@@ -46,6 +50,9 @@ type DOMBridge struct {
 
 	eventLoop *eventloop.EventLoop
 	browser   BrowserEnvironment
+
+	// Stores the root of the computed layout tree for hit-testing.
+	layoutRoot *layout.LayoutBox
 
 	// Re-introduced for O(1) Go -> JS lookups.
 	nodeMap map[*html.Node]*goja.Object
@@ -100,6 +107,7 @@ func (b *DOMBridge) BindToRuntime(vm *goja.Runtime, initialURL string) {
 	// Clear state from any previous binding.
 	b.nodeMap = make(map[*html.Node]*goja.Object)
 	b.eventListeners = make(map[*html.Node]map[string]*listenerGroup)
+	b.layoutRoot = nil // Clear layout tree on re-bind
 
 	if b.document == nil {
 		doc, err := html.Parse(strings.NewReader("<html><head></head><body></body></html>"))
@@ -141,6 +149,24 @@ func (b *DOMBridge) UpdateDOM(doc *html.Node) {
 	b.document = doc
 }
 
+// UpdateLayoutTree provides the DOMBridge with the latest calculated layout tree.
+// This should be called by the session after a layout pass.
+func (b *DOMBridge) UpdateLayoutTree(root *layout.LayoutBox) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	b.layoutRoot = root
+}
+
+// Lock exposes the write lock for external synchronization (e.g., from Session).
+func (b *DOMBridge) Lock() {
+	b.mu.Lock()
+}
+
+// Unlock exposes the write unlock for external synchronization.
+func (b *DOMBridge) Unlock() {
+	b.mu.Unlock()
+}
+
 // GetDocumentNode provides thread safe access to the root document node.
 func (b *DOMBridge) GetDocumentNode() *html.Node {
 	b.mu.RLock()
@@ -161,11 +187,7 @@ func (b *DOMBridge) wrapNode(node *html.Node) *goja.Object {
 
 	native := &nativeNode{bridge: b, node: node}
 
-	// FIX: Create a standard JavaScript object instead of a Host object (reflection wrapper).
-	// Host objects do not support defining accessor properties (getters/setters).
-	// obj := b.runtime.ToValue(native).ToObject(b.runtime) // OLD
 	obj := b.runtime.NewObject()
-	// Store the Go data within the JS object.
 	_ = SetObjectData(b.runtime, obj, native)
 
 	_ = obj.Set("nodeType", node.Type)
@@ -194,9 +216,6 @@ func unwrapNode(obj goja.Value) *nativeNode {
 		return nil
 	}
 
-	// FIX: Retrieve the data using Data() instead of Export().
-	// v, ok := obj.ToObject(nil).Export().(*nativeNode) // OLD
-
 	data := GetObjectData(gojaObj)
 	if data == nil {
 		return nil
@@ -212,7 +231,6 @@ func unwrapNode(obj goja.Value) *nativeNode {
 // bindDocumentAndElementMethods attaches APIs based on the node type.
 func (b *DOMBridge) bindDocumentAndElementMethods(obj *goja.Object, node *html.Node) {
 	native := unwrapNode(obj)
-	// Add nil check for safety, although wrapNode should ensure native is set.
 	if native == nil {
 		return
 	}
@@ -389,6 +407,7 @@ func (b *DOMBridge) defineCookieProperty(docObj *goja.Object) {
 	}
 	b.DefineProperty(docObj, "cookie", getter, setter)
 }
+
 // -- JS Method Implementations --
 
 func (b *DOMBridge) jsGetElementById() func(goja.FunctionCall) goja.Value {
@@ -416,7 +435,6 @@ func (b *DOMBridge) jsCreateElement() func(goja.FunctionCall) goja.Value {
 			Type: html.ElementNode,
 			Data: strings.ToLower(tagName),
 		}
-		// We wrap it, which also adds it to our internal tracking if needed.
 		return b.wrapNode(node)
 	}
 }
@@ -478,27 +496,16 @@ func (b *DOMBridge) jsQuerySelectorAll(contextNative *nativeNode) func(goja.Func
 
 func (b *DOMBridge) jsClick(native *nativeNode) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
-		// Event dispatching handles its own locking.
+		// Dispatch the standard JS events.
 		b.DispatchEventOnNode(native.node, "mousedown")
 		b.DispatchEventOnNode(native.node, "mouseup")
 		b.DispatchEventOnNode(native.node, "click")
 
-		b.mu.RLock()
-		tagName := strings.ToLower(native.node.Data)
-		href := htmlquery.SelectAttr(native.node, "href")
-		b.mu.RUnlock()
+		// Perform the browser's default action.
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		b.PerformDefaultClickAction(native.node)
 
-		// If it's a link with an href, simulate navigation.
-		if tagName == "a" && href != "" {
-			b.eventLoop.RunOnLoop(func(vm *goja.Runtime) {
-				locationVal := vm.Get("location")
-				if location, ok := locationVal.(*goja.Object); ok {
-					if err := location.Set("href", href); err != nil {
-						b.logger.Warn("Failed to set location.href during click simulation", zap.Error(err))
-					}
-				}
-			})
-		}
 		return goja.Undefined()
 	}
 }
@@ -560,12 +567,10 @@ func (b *DOMBridge) jsRemoveChild(parentNative *nativeNode) func(goja.FunctionCa
 	return func(call goja.FunctionCall) goja.Value {
 		childNative := unwrapNode(call.Argument(0))
 		if childNative == nil {
-			// In JS this would throw an error, we'll just no-op.
 			return goja.Undefined()
 		}
 		b.mu.Lock()
 		defer b.mu.Unlock()
-		// Verify the child actually belongs to this parent.
 		if childNative.node.Parent == parentNative.node {
 			parentNative.node.RemoveChild(childNative.node)
 		}
@@ -585,16 +590,13 @@ func (b *DOMBridge) jsInsertBefore(parentNative *nativeNode) func(goja.FunctionC
 		b.mu.Lock()
 		defer b.mu.Unlock()
 
-		// If the new node is already in the tree, remove it first.
 		if newNative.node.Parent != nil {
 			newNative.node.Parent.RemoveChild(newNative.node)
 		}
 
 		if refNative == nil {
-			// If reference node is null, append to the end.
 			parentNative.node.AppendChild(newNative.node)
 		} else {
-			// Verify the reference node is a child of the parent.
 			if refNative.node.Parent == parentNative.node {
 				parentNative.node.InsertBefore(newNative.node, refNative.node)
 			}
@@ -636,9 +638,31 @@ func (b *DOMBridge) jsAddEventListener(native *nativeNode) func(goja.FunctionCal
 
 func (b *DOMBridge) jsRemoveEventListener(native *nativeNode) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
-		// A full implementation would need to parse the arguments similar to addEventListener
-		// and then find and remove the matching function from the slice.
-		b.logger.Warn("removeEventListener is not fully implemented")
+		if len(call.Arguments) < 2 {
+			return goja.Undefined()
+		}
+		eventType := call.Argument(0).String()
+		listenerVal := call.Argument(1)
+		if _, ok := goja.AssertFunction(listenerVal); !ok {
+			// Real browsers silently ignore attempts to remove non-function listeners.
+			return goja.Undefined()
+		}
+
+		useCapture := false
+		if len(call.Arguments) > 2 {
+			optionsArg := call.Argument(2)
+			if obj, ok := optionsArg.Export().(map[string]interface{}); ok {
+				if captureVal, ok := obj["capture"].(bool); ok {
+					useCapture = captureVal
+				}
+			} else {
+				useCapture = optionsArg.ToBoolean()
+			}
+		}
+
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		b.removeEventListener(native.node, eventType, listenerVal, useCapture)
 		return goja.Undefined()
 	}
 }
@@ -655,8 +679,6 @@ func (b *DOMBridge) jsDispatchEvent(native *nativeNode) func(goja.FunctionCall) 
 	}
 }
 
-// addEventListener is the internal logic for adding a listener to the map.
-// It must be called while holding a write lock.
 func (b *DOMBridge) addEventListener(node *html.Node, eventType string, listenerVal goja.Value, useCapture bool) {
 	nodeListeners, exists := b.eventListeners[node]
 	if !exists {
@@ -674,7 +696,6 @@ func (b *DOMBridge) addEventListener(node *html.Node, eventType string, listener
 	} else {
 		targetList = &group.Bubbling
 	}
-	// Prevent duplicate listeners.
 	for _, existingListener := range *targetList {
 		if existingListener.SameAs(listenerVal) {
 			return
@@ -683,7 +704,48 @@ func (b *DOMBridge) addEventListener(node *html.Node, eventType string, listener
 	*targetList = append(*targetList, listenerVal)
 }
 
-// DispatchEventOnNode implements the W3C event propagation model: Capturing -> Target -> Bubbling.
+func (b *DOMBridge) removeEventListener(node *html.Node, eventType string, listenerVal goja.Value, useCapture bool) {
+	nodeListeners, exists := b.eventListeners[node]
+	if !exists {
+		return
+	}
+	group, exists := nodeListeners[eventType]
+	if !exists {
+		return
+	}
+
+	// Figure out if we're dealing with the bubbling or capturing phase listeners.
+	var targetList *[]goja.Value
+	if useCapture {
+		targetList = &group.Capturing
+	} else {
+		targetList = &group.Bubbling
+	}
+
+	// Find the index of the listener to remove.
+	// It's crucial to compare function references, which SameAs does.
+	foundIndex := -1
+	for i, existingListener := range *targetList {
+		if existingListener.SameAs(listenerVal) {
+			foundIndex = i
+			break
+		}
+	}
+
+	// If we found the listener, remove it from the slice.
+	if foundIndex != -1 {
+		*targetList = append((*targetList)[:foundIndex], (*targetList)[foundIndex+1:]...)
+	}
+
+	// Clean up empty maps to prevent memory leaks.
+	if len(group.Capturing) == 0 && len(group.Bubbling) == 0 {
+		delete(nodeListeners, eventType)
+	}
+	if len(nodeListeners) == 0 {
+		delete(b.eventListeners, node)
+	}
+}
+
 func (b *DOMBridge) DispatchEventOnNode(targetNode *html.Node, eventType string) {
 	const (
 		EventPhaseCapturing = 1
@@ -768,6 +830,61 @@ func (b *DOMBridge) DispatchEventOnNode(targetNode *html.Node, eventType string)
 			invokeListeners(node, EventPhaseBubbling)
 			if stopPropagation {
 				return
+			}
+		}
+	}
+}
+
+// PerformDefaultClickAction contains the core logic for what happens when an element is clicked.
+// It's called by both the JS .click() method and the native mouse event handler.
+// NOTE: This function assumes a write lock is already held on the DOMBridge.
+func (b *DOMBridge) PerformDefaultClickAction(node *html.Node) {
+	tagName := strings.ToLower(node.Data)
+
+	switch tagName {
+	case "a":
+		if href := htmlquery.SelectAttr(node, "href"); href != "" {
+			if b.browser != nil {
+				if resolvedURL, err := b.browser.ResolveURL(href); err == nil {
+					b.browser.JSNavigate(resolvedURL.String())
+				}
+			}
+		}
+
+	case "input":
+		inputType := strings.ToLower(htmlquery.SelectAttr(node, "type"))
+		switch inputType {
+		case "checkbox":
+			if _, hasChecked := getAttribute(node, "checked"); hasChecked {
+				removeAttr(node, "checked")
+			} else {
+				setAttr(node, "checked", "")
+			}
+		case "radio":
+			name := htmlquery.SelectAttr(node, "name")
+			if name == "" {
+				setAttr(node, "checked", "")
+				return
+			}
+			xpath := fmt.Sprintf("//input[@type='radio'][@name='%s']", name)
+			radioGroup, _ := htmlquery.QueryAll(b.document, xpath)
+			for _, radioNode := range radioGroup {
+				if radioNode != node {
+					removeAttr(radioNode, "checked")
+				}
+			}
+			setAttr(node, "checked", "")
+		case "submit":
+			if formNode := findParentForm(node); formNode != nil {
+				b.submitForm(formNode, node)
+			}
+		}
+
+	case "button":
+		buttonType := strings.ToLower(htmlquery.SelectAttr(node, "type"))
+		if buttonType == "submit" || buttonType == "" {
+			if formNode := findParentForm(node); formNode != nil {
+				b.submitForm(formNode, node)
 			}
 		}
 	}
@@ -919,7 +1036,7 @@ func (b *DOMBridge) bindHistoryAPI() {
 			Title: title,
 			URL:   url.String(),
 		})
-})
+	})
 
 	b.DefineProperty(history, "length", func() goja.Value {
 		return b.runtime.ToValue(b.browser.GetHistoryLength())
@@ -1084,6 +1201,81 @@ func (b *DOMBridge) updateStateFromURL(u *url.URL) {
 
 // -- Go-side Utilities --
 
+// FindNodeAtPoint performs a hit-test on the layout tree to find the top-most
+// rendered element at the given viewport coordinates (x, y).
+func (b *DOMBridge) FindNodeAtPoint(x, y float64) *html.Node {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+
+	if b.layoutRoot == nil {
+		b.logger.Warn("FindNodeAtPoint called but layout tree is not available.")
+		return nil
+	}
+
+	hitBox := b.hitTestRecursive(b.layoutRoot, x, y)
+	if hitBox != nil && hitBox.StyledNode != nil {
+		return hitBox.StyledNode.Node
+	}
+
+	return nil
+}
+
+// hitTestRecursive traverses the layout tree to find a matching box.
+// It checks children first in reverse rendering order (last child first).
+func (b *DOMBridge) hitTestRecursive(box *layout.LayoutBox, x, y float64) *layout.LayoutBox {
+	if box == nil {
+		return nil
+	}
+
+	// Hit test children first, from top-most to bottom-most in the stacking context.
+	for i := len(box.Children) - 1; i >= 0; i-- {
+		child := box.Children[i]
+		if found := b.hitTestRecursive(child, x, y); found != nil {
+			return found
+		}
+	}
+
+	// If no children were hit, check the current box itself.
+
+	// A proper hit test must account for transforms. We do this by applying the
+	// inverse transform to the point, and then checking if that transformed point
+	// lies within the original, untransformed bounding box of the element.
+	invTransform, err := box.Dimensions.Transform.Inverse()
+	if err != nil {
+		// Non-invertible transform, we can't accurately hit-test this element.
+		return nil
+	}
+	transformedX, transformedY := invTransform.Apply(x, y)
+
+	// Check if the node is actually visible and can be interacted with.
+	if box.StyledNode != nil && !box.StyledNode.IsVisible() {
+		return nil
+	}
+
+	// Ignore clicks on anonymous boxes, as they aren't real elements.
+	if box.BoxType == layout.AnonymousBlockBox {
+		return nil
+	}
+
+	// Respect the 'pointer-events: none' CSS property.
+	if box.StyledNode != nil && box.StyledNode.Lookup("pointer-events", "auto") == "none" {
+		return nil
+	}
+
+	// Perform the hit check against the untransformed border box.
+	borderBox := box.Dimensions.BorderBox()
+	isHit := transformedX >= borderBox.X &&
+		transformedX < borderBox.X+borderBox.Width &&
+		transformedY >= borderBox.Y &&
+		transformedY < borderBox.Y+borderBox.Height
+
+	if isHit {
+		return box
+	}
+
+	return nil
+}
+
 func (b *DOMBridge) QuerySelector(selector string) (*html.Node, error) {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -1106,14 +1298,11 @@ func (b *DOMBridge) GetOuterHTML() (string, error) {
 
 // -- Internal Helper Functions --
 
-// SetObjectData attaches an arbitrary Go value to a goja.Object using a hidden property.
 func SetObjectData(rt *goja.Runtime, obj *goja.Object, data interface{}) error {
 	wrappedData := rt.ToValue(data)
-	// Define a non-enumerable, non-writable, non-configurable property to store the data.
 	return obj.DefineDataProperty("__native__", wrappedData, goja.FLAG_FALSE, goja.FLAG_FALSE, goja.FLAG_FALSE)
 }
 
-// GetObjectData retrieves an arbitrary Go value previously attached by SetObjectData.
 func GetObjectData(obj *goja.Object) interface{} {
 	if obj == nil {
 		return nil
@@ -1275,4 +1464,196 @@ func setAttr(n *html.Node, key, val string) {
 		}
 	}
 	n.Attr = append(n.Attr, html.Attribute{Key: key, Val: val})
+}
+
+func findParentForm(node *html.Node) *html.Node {
+	curr := node
+	for curr != nil {
+		if curr.Type == html.ElementNode && strings.ToLower(curr.Data) == "form" {
+			return curr
+		}
+		curr = curr.Parent
+	}
+	return nil
+}
+
+// submitForm orchestrates the form submission process, handling GET and POST methods.
+// This function must be called while holding a write lock on the DOMBridge.
+func (b *DOMBridge) submitForm(formNode, submitterNode *html.Node) {
+	if b.browser == nil {
+		return
+	}
+
+	// 1. Determine method, action, and encoding type
+	method := strings.ToUpper(htmlquery.SelectAttr(formNode, "method"))
+	if method != "POST" {
+		method = "GET" // Default to GET
+	}
+
+	action := htmlquery.SelectAttr(formNode, "action")
+	resolvedURL, err := b.browser.ResolveURL(action)
+	if err != nil {
+		b.logger.Warn("Could not resolve form action URL", zap.String("action", action), zap.Error(err))
+		return
+	}
+
+	enctype := strings.ToLower(htmlquery.SelectAttr(formNode, "enctype"))
+	if enctype == "" {
+		enctype = "application/x-www-form-urlencoded" // Default enctype
+	}
+
+	// 2. Serialize form data based on method and enctype
+	formData := b.serializeForm(formNode, submitterNode)
+
+	b.logger.Info("Submitting form",
+		zap.String("method", method),
+		zap.String("action", resolvedURL.String()),
+		zap.String("enctype", enctype))
+
+	// 3. Execute the request
+	if method == "GET" {
+		// For GET requests, data is always in the URL, regardless of enctype.
+		resolvedURL.RawQuery = formData.Encode()
+		b.browser.JSNavigate(resolvedURL.String())
+		return
+	}
+
+	// Handle POST requests
+	var (
+		requestBody []byte
+		contentType string
+	)
+
+	if enctype == "multipart/form-data" {
+		// Serialize as multipart
+		body, ct, err := b.serializeMultipartForm(formData)
+		if err != nil {
+			b.logger.Error("Failed to serialize multipart form data", zap.Error(err))
+			return
+		}
+		requestBody = body
+		contentType = ct
+	} else {
+		// Default to urlencoded
+		requestBody = []byte(formData.Encode())
+		contentType = "application/x-www-form-urlencoded"
+	}
+
+	// Create and execute the fetch request for POST
+	req := schemas.FetchRequest{
+		URL:    resolvedURL.String(),
+		Method: "POST",
+		Headers: []schemas.NVPair{
+			{Name: "Content-Type", Value: contentType},
+		},
+		Body: requestBody,
+	}
+
+	// The browser environment is responsible for executing this request
+	// and handling the subsequent navigation or state update.
+	if _, err := b.browser.ExecuteFetch(context.Background(), req); err != nil {
+		b.logger.Error("Form POST submission failed", zap.Error(err))
+	}
+}
+
+// serializeMultipartForm takes form values and encodes them as multipart/form-data.
+// It returns the request body, the final Content-Type header (with boundary), and any error.
+func (b *DOMBridge) serializeMultipartForm(values url.Values) ([]byte, string, error) {
+	var bodyBuffer bytes.Buffer
+	multipartWriter := multipart.NewWriter(&bodyBuffer)
+
+	// Iterate over the form values and write them to the multipart buffer
+	for key, vals := range values {
+		for _, val := range vals {
+			fieldWriter, err := multipartWriter.CreateFormField(key)
+			if err != nil {
+				return nil, "", fmt.Errorf("failed to create form field '%s': %w", key, err)
+			}
+			if _, err := io.WriteString(fieldWriter, val); err != nil {
+				return nil, "", fmt.Errorf("failed to write value for field '%s': %w", key, err)
+			}
+		}
+	}
+
+	// Close the writer to finalize the body and write the trailing boundary
+	if err := multipartWriter.Close(); err != nil {
+		return nil, "", fmt.Errorf("failed to close multipart writer: %w", err)
+	}
+
+	// The Content-Type header includes the unique boundary string
+	contentType := multipartWriter.FormDataContentType()
+	body := bodyBuffer.Bytes()
+
+	return body, contentType, nil
+}
+
+func (b *DOMBridge) serializeForm(formNode, submitterNode *html.Node) url.Values {
+	values := make(url.Values)
+
+	elements, _ := htmlquery.QueryAll(formNode, ".//input|.//textarea|.//select|.//button")
+
+	for _, el := range elements {
+		if _, disabled := getAttribute(el, "disabled"); disabled {
+			continue
+		}
+
+		name, hasName := getAttribute(el, "name")
+		if !hasName || name == "" {
+			continue
+		}
+
+		tagName := strings.ToLower(el.Data)
+
+		if tagName == "input" {
+			inputType := strings.ToLower(htmlquery.SelectAttr(el, "type"))
+			_, isChecked := getAttribute(el, "checked")
+
+			switch inputType {
+			case "checkbox", "radio":
+				if isChecked {
+					val, _ := getAttribute(el, "value")
+					values.Add(name, val)
+				}
+			case "submit", "button", "reset", "image":
+				if el == submitterNode {
+					val, _ := getAttribute(el, "value")
+					values.Add(name, val)
+				}
+			default:
+				val, _ := getAttribute(el, "value")
+				values.Add(name, val)
+			}
+		} else if tagName == "textarea" {
+			values.Add(name, htmlquery.InnerText(el))
+		} else if tagName == "select" {
+			options, _ := htmlquery.QueryAll(el, ".//option")
+			var selected bool
+			for _, opt := range options {
+				if _, isSelected := getAttribute(opt, "selected"); isSelected {
+					val, _ := getAttribute(opt, "value")
+					values.Add(name, val)
+					selected = true
+				}
+			}
+			if !selected && len(options) > 0 {
+				val, _ := getAttribute(options[0], "value")
+				values.Add(name, val)
+			}
+		} else if tagName == "button" {
+			if el == submitterNode {
+				val, _ := getAttribute(el, "value")
+				values.Add(name, val)
+			}
+		}
+	}
+	return values
+}
+
+func getAttribute(n *html.Node, key string) (string, bool) {
+	for _, attr := range n.Attr {
+		if attr.Key == key {
+			return attr.Val, true
+		}
+	}
+	return "", false
 }
