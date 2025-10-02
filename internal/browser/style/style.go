@@ -28,9 +28,84 @@ type ShadowDOMProcessor interface {
 // -- Constants and Configuration --
 
 const (
-	BaseFontSize      = 16.0 // Default root font size.
+	BaseFontSize    = 16.0 // Default root font size.
 	DefaultLineHeight = 1.2  // Default multiplier for 'line-height: normal'.
 )
+
+// DefaultUserAgentCSS is a minimal stylesheet compatible with the current parser capabilities.
+// It provides basic rendering and intrinsic dimensions for form elements.
+const DefaultUserAgentCSS = `
+/* Basic Resets and Defaults */
+div, p, h1, h2, h3, h4, h5, h6, body, html, ul, ol, li, form, header, footer, section, article, nav, main {
+    display: block;
+    margin: 0;
+    padding: 0;
+}
+
+body {
+    margin: 8px;
+}
+
+/* Typography (Simplified) */
+h1 { font-size: 2em; margin: 0.67em 0; }
+h2 { font-size: 1.5em; margin: 0.83em 0; }
+p { margin: 1em 0; }
+
+/* Lists */
+ul, ol { padding-left: 40px; }
+li { display: list-item; }
+
+/* Form Elements - Crucial for layout stability */
+input, button, textarea, select {
+    display: inline-block;
+    box-sizing: border-box;
+    margin: 2px 0; /* Simplified margin */
+    padding: 1px 2px; /* Simplified padding */
+    border-width: 1px;
+    border-style: solid;
+    border-color: #767676; /* Simplified border */
+    /* Use 'inherit' for font-size to respect parent styles, fallback handled by inheritance logic */
+    font-size: inherit;
+    line-height: normal;
+}
+
+/* Specific input types need default dimensions.
+   We set a default for common text inputs and override specifics. */
+
+/* Default width for text-like inputs */
+input {
+    width: 170px; /* Common default width (approx 20 chars) */
+}
+
+/* Apply width to specific types explicitly as well, as the parser might prioritize specific selectors */
+input[type="text"], input[type="password"], input[type="email"], input[type="tel"], input[type="url"], input[type="number"] {
+    width: 170px;
+}
+
+/* Checkboxes and Radios have specific intrinsic sizes */
+input[type="checkbox"], input[type="radio"] {
+    width: 13px;
+    height: 13px;
+    padding: 0; /* They usually don't use padding */
+    margin: 3px;
+}
+
+/* Buttons use 'auto' width/height to allow layout engine to shrink-to-fit content */
+button, input[type="submit"], input[type="button"], input[type="reset"] {
+    width: auto;
+    height: auto;
+    padding: 1px 6px;
+    text-align: center;
+    cursor: default;
+}
+
+/* Links (using 'a' as pseudo-classes :link/:visited are unsupported) */
+a {
+    color: #0000EE;
+    text-decoration: underline;
+    cursor: pointer;
+}
+`
 
 // -- Style Engine --
 
@@ -47,8 +122,13 @@ type Engine struct {
 // NewEngine creates a new styling engine. It requires a ShadowDOMProcessor
 // to handle shadow DOM instantiation and slotting.
 func NewEngine(shadowEngine ShadowDOMProcessor) *Engine { // MODIFIED: Signature changed.
+	// Parse the default User Agent stylesheet.
+	p := parser.NewParser(DefaultUserAgentCSS)
+	uaSheet := p.Parse()
+
 	return &Engine{
-		shadowEngine: shadowEngine,
+		shadowEngine:    shadowEngine,
+		userAgentSheets: []parser.StyleSheet{uaSheet}, // Initialize with the UA sheet
 	}
 }
 
@@ -68,7 +148,7 @@ func (se *Engine) SetViewport(width, height float64) {
 // StyledNode represents a DOM node combined with its computed styles. It is the
 // bridge between the parser's output and the layout engine's input.
 type StyledNode struct {
-	Node *html.Node
+	Node           *html.Node
 	ComputedStyles map[parser.Property]parser.Value
 	Children       []*StyledNode
 	// ShadowRoot holds the encapsulated style tree for this node, if it's a shadow host.
@@ -582,7 +662,61 @@ func (se *Engine) matchesSimple(node *html.Node, selector parser.SimpleSelector)
 			}
 		}
 	}
+
+	// Attributes (e.g., [type="text"])
+	if len(selector.Attributes) > 0 {
+		for _, attrSel := range selector.Attributes {
+			if !matchesAttribute(node, attrSel) {
+				return false
+			}
+		}
+	}
+
 	return true
+}
+
+// matchesAttribute checks if a node matches a specific attribute selector.
+func matchesAttribute(node *html.Node, sel parser.AttributeSelector) bool {
+	var actualValue string
+	found := false
+	for _, attr := range node.Attr {
+		// Attribute names are case-insensitive in HTML.
+		if strings.EqualFold(attr.Key, sel.Name) {
+			actualValue = attr.Val
+			found = true
+			break
+		}
+	}
+
+	switch sel.Operator {
+	case "": // Presence: [attr]
+		return found
+	case "=": // Exact match: [attr="value"]
+		// Attribute values in selectors are generally case-sensitive unless specified otherwise.
+		return found && actualValue == sel.Value
+	case "~=": // Contains word: [attr~="value"]
+		if !found {
+			return false
+		}
+		words := strings.Fields(actualValue)
+		for _, word := range words {
+			if word == sel.Value {
+				return true
+			}
+		}
+		return false
+	case "|=": // Prefix hyphen: [attr|="value"]
+		return found && (actualValue == sel.Value || strings.HasPrefix(actualValue, sel.Value+"-"))
+	case "^=": // Starts with: [attr^="value"]
+		return found && strings.HasPrefix(actualValue, sel.Value)
+	case "$=": // Ends with: [attr$="value"]
+		return found && strings.HasSuffix(actualValue, sel.Value)
+	case "*=": // Contains substring: [attr*="value"]
+		return found && strings.Contains(actualValue, sel.Value)
+	default:
+		// Unknown operator
+		return false
+	}
 }
 
 // -- Value Lookup and Property Parsers --
