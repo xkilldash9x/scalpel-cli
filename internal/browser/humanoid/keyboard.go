@@ -7,6 +7,8 @@ import (
 	"strings"
 	"time"
 	"unicode"
+
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
 // -- keyboardNeighbors maps characters to their adjacent keys on a QWERTY layout --
@@ -27,23 +29,24 @@ var commonNgrams = map[string]bool{
 	"the": true, "and": true, "ing": true, "ion": true, "tio": true,
 }
 
-// Type simulates realistic human typing behavior, including pauses, fatigue, and typos.
-// It now models "burst" typing for words with longer cognitive pauses between them.
+// Type is the public entry point for typing and acquires the lock for the entire operation.
 func (h *Humanoid) Type(ctx context.Context, selector string, text string, opts *InteractionOptions) error {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
 	// Update fatigue based on the typing effort (length of text).
 	h.updateFatigue(float64(len(text)) * 0.05)
 
-	// 1. Preparation: Focus the element before typing. This will implicitly handle scrolling.
-	if err := h.IntelligentClick(ctx, selector, opts); err != nil {
+	// 1. Preparation: Use an internal helper to focus the element, avoiding a deadlock.
+	if err := h.clickToFocus(ctx, selector, opts); err != nil {
 		return fmt.Errorf("humanoid: failed to click/focus selector '%s': %w", selector, err)
 	}
 
 	// Pause after focusing to simulate cognitive planning.
-	if err := h.CognitivePause(ctx, 200, 80); err != nil {
+	if err := h.cognitivePause(ctx, 200, 80); err != nil {
 		return err
 	}
 
-	// Use strings.Fields to handle multiple spaces between words gracefully.
 	words := strings.Fields(text)
 
 	// 2. Execution Loop: Type word by word to simulate burst-and-pause rhythm.
@@ -67,14 +70,10 @@ func (h *Humanoid) Type(ctx context.Context, selector string, text string, opts 
 
 		// If it's not the last word, add a space and a longer pause.
 		if i < len(words)-1 {
-			// Inter-word pause, simulates locating the next word.
-			// The pause can be slightly longer if the next word is long.
 			nextWordLen := len(words[i+1])
-			h.mu.Lock()
 			rng := h.rng
-			h.mu.Unlock()
 			pauseMs := 100 + (float64(nextWordLen) * 5) + rng.Float64()*80
-			if err := h.CognitivePause(ctx, pauseMs, pauseMs*0.4); err != nil {
+			if err := h.cognitivePause(ctx, pauseMs, pauseMs*0.4); err != nil {
 				return err
 			}
 
@@ -87,26 +86,54 @@ func (h *Humanoid) Type(ctx context.Context, selector string, text string, opts 
 	return nil
 }
 
-// typeCharacter handles the logic for typing a single character, including pauses and typos.
-// It returns true if it processed more than one character (e.g., for transposition).
+// clickToFocus is a new internal helper that performs a click without acquiring a lock.
+func (h *Humanoid) clickToFocus(ctx context.Context, selector string, opts *InteractionOptions) error {
+	if err := h.moveToSelector(ctx, selector, opts); err != nil {
+		return err
+	}
+	// Simplified click logic for focus.
+	mouseDownData := schemas.MouseEventData{
+		Type:       schemas.MousePress,
+		X:          h.currentPos.X,
+		Y:          h.currentPos.Y,
+		Button:     schemas.ButtonLeft,
+		ClickCount: 1,
+		Buttons:    1,
+	}
+	if err := h.executor.DispatchMouseEvent(ctx, mouseDownData); err != nil {
+		return err
+	}
+
+	// Short hold for focus.
+	if err := h.executor.Sleep(ctx, h.keyHoldDuration()); err != nil {
+		return err
+	}
+
+	mouseUpData := schemas.MouseEventData{
+		Type:       schemas.MouseRelease,
+		X:          h.currentPos.X,
+		Y:          h.currentPos.Y,
+		Button:     schemas.ButtonLeft,
+		ClickCount: 1,
+		Buttons:    0,
+	}
+	return h.executor.DispatchMouseEvent(ctx, mouseUpData)
+}
+
+// typeCharacter handles the logic for typing a single character. Assumes lock is held.
 func (h *Humanoid) typeCharacter(ctx context.Context, runes []rune, i int, speedFactor float64) (advanced bool, err error) {
-	// Simulate the pause between keystrokes, adjusted by the speedFactor.
 	if err := h.keyPause(ctx, speedFactor, speedFactor, runes, i); err != nil {
 		return false, err
 	}
 
-	// Determine if a typo should occur based on fatigue and configuration.
-	h.mu.Lock()
 	cfg := h.dynamicConfig
 	shouldTypo := h.rng.Float64() < cfg.TypoRate
-	h.mu.Unlock()
 
 	if shouldTypo {
 		typoIntroduced, advanced, err := h.introduceTypo(ctx, cfg, runes, i)
 		if err != nil {
 			return false, fmt.Errorf("humanoid: error during typo simulation: %w", err)
 		}
-		// If a typo was introduced (e.g., typing and backspacing), we don't need to send the original key.
 		if typoIntroduced {
 			return advanced, nil
 		}
@@ -120,23 +147,20 @@ func (h *Humanoid) typeCharacter(ctx context.Context, runes []rune, i int, speed
 	return false, nil
 }
 
-// sendString is a unified, private helper for dispatching key events.
+// sendString is a unified, private helper for dispatching key events. Assumes lock is held.
 func (h *Humanoid) sendString(ctx context.Context, keys string) error {
 	if err := h.executor.SendKeys(ctx, keys); err != nil {
 		return err
 	}
-	// Simulate the key "dwell" time after the key press.
 	return h.executor.Sleep(ctx, h.keyHoldDuration())
 }
 
-// keyHoldDuration calculates how long a key should be held down.
+// keyHoldDuration calculates key hold time. Assumes lock is held.
 func (h *Humanoid) keyHoldDuration() time.Duration {
-	h.mu.Lock()
 	cfg := h.dynamicConfig
 	mean := cfg.KeyHoldMean
 	stdDev := cfg.KeyHoldStdDev
 	randNorm := h.rng.NormFloat64()
-	h.mu.Unlock()
 
 	delay := randNorm*stdDev + mean
 	if delay < 20.0 { // Ensure a minimum realistic hold time.
@@ -145,13 +169,11 @@ func (h *Humanoid) keyHoldDuration() time.Duration {
 	return time.Duration(delay) * time.Millisecond
 }
 
-// keyPause introduces a human-like inter-key delay (IKD).
+// keyPause introduces a human-like inter-key delay (IKD). Assumes lock is held.
 func (h *Humanoid) keyPause(ctx context.Context, meanScale, stdDevScale float64, runes []rune, index int) error {
-	h.mu.Lock()
 	cfg := h.dynamicConfig
 	randNorm := h.rng.NormFloat64()
 	fatigueLevel := h.fatigueLevel
-	h.mu.Unlock()
 
 	mean := cfg.KeyPauseMean * meanScale
 	stdDev := cfg.KeyPauseStdDev * stdDevScale
@@ -186,12 +208,10 @@ func (h *Humanoid) keyPause(ctx context.Context, meanScale, stdDevScale float64,
 	return h.executor.Sleep(ctx, duration)
 }
 
-// introduceTypo decides which kind of typo to simulate.
+// introduceTypo decides which kind of typo to simulate. Assumes lock is held.
 func (h *Humanoid) introduceTypo(ctx context.Context, cfg Config, runes []rune, i int) (introduced bool, advanced bool, err error) {
 	char := runes[i]
-	h.mu.Lock()
 	p := h.rng.Float64()
-	h.mu.Unlock()
 
 	if p < cfg.TypoNeighborRate {
 		return h.introduceNeighborTypo(ctx, char)
@@ -214,18 +234,16 @@ func (h *Humanoid) introduceTypo(ctx context.Context, cfg Config, runes []rune, 
 	return h.introduceInsertion(ctx, char)
 }
 
-// --- Typo Implementations ---
+// --- Typo Implementations (all assume lock is held) ---
 
 func (h *Humanoid) introduceNeighborTypo(ctx context.Context, char rune) (bool, bool, error) {
 	lowerChar := unicode.ToLower(char)
 	if neighbors, ok := keyboardNeighbors[lowerChar]; ok && len(neighbors) > 0 {
-		h.mu.Lock()
 		cfg := h.dynamicConfig
 		typoChar := rune(neighbors[h.rng.Intn(len(neighbors))])
 		if unicode.IsUpper(char) && h.rng.Float64() < cfg.TypoShiftCorrectionProbability {
 			typoChar = unicode.ToUpper(typoChar)
 		}
-		h.mu.Unlock()
 
 		if err := h.sendString(ctx, string(typoChar)); err != nil {
 			return true, false, err
@@ -233,11 +251,9 @@ func (h *Humanoid) introduceNeighborTypo(ctx context.Context, char rune) (bool, 
 		if err := h.keyPause(ctx, cfg.TypoCorrectionPauseMeanScale, cfg.TypoCorrectionPauseStdDevScale, nil, 0); err != nil {
 			return true, false, err
 		}
-
 		if err := h.sendString(ctx, string(KeyBackspace)); err != nil {
 			return true, false, err
 		}
-
 		if err := h.keyPause(ctx, 1.2, 0.5, nil, 0); err != nil {
 			return true, false, err
 		}
@@ -264,16 +280,13 @@ func (h *Humanoid) introduceTransposition(ctx context.Context, char, nextChar ru
 	}
 	advanced = true
 
-	h.mu.Lock()
 	cfg := h.dynamicConfig
 	shouldCorrect := h.rng.Float64() < cfg.TypoCorrectionProbability
-	h.mu.Unlock()
 
 	if shouldCorrect {
 		if err := h.keyPause(ctx, cfg.TypoCorrectionPauseMeanScale, cfg.TypoCorrectionPauseStdDevScale, nil, 0); err != nil {
 			return false, advanced, err
 		}
-
 		if err := h.sendString(ctx, string(KeyBackspace)); err != nil {
 			return false, advanced, err
 		}
@@ -283,7 +296,6 @@ func (h *Humanoid) introduceTransposition(ctx context.Context, char, nextChar ru
 		if err := h.sendString(ctx, string(KeyBackspace)); err != nil {
 			return false, advanced, err
 		}
-
 		if err := h.keyPause(ctx, 1.2, 0.5, nil, 0); err != nil {
 			return false, advanced, err
 		}
@@ -306,10 +318,8 @@ func (h *Humanoid) introduceOmission(ctx context.Context, char rune) (bool, bool
 		return false, false, nil
 	}
 
-	h.mu.Lock()
 	cfg := h.dynamicConfig
 	shouldNotice := h.rng.Float64() < cfg.TypoOmissionNoticeProbability
-	h.mu.Unlock()
 
 	if shouldNotice {
 		if err := h.keyPause(ctx, cfg.TypoCorrectionPauseMeanScale, cfg.TypoCorrectionPauseStdDevScale, nil, 0); err != nil {
@@ -327,11 +337,9 @@ func (h *Humanoid) introduceOmission(ctx context.Context, char rune) (bool, bool
 func (h *Humanoid) introduceInsertion(ctx context.Context, char rune) (bool, bool, error) {
 	lowerChar := unicode.ToLower(char)
 	if neighbors, ok := keyboardNeighbors[lowerChar]; ok && len(neighbors) > 0 {
-		h.mu.Lock()
 		cfg := h.dynamicConfig
 		insertionChar := rune(neighbors[h.rng.Intn(len(neighbors))])
 		shouldNotice := h.rng.Float64() < cfg.TypoInsertionNoticeProbability
-		h.mu.Unlock()
 
 		if err := h.sendString(ctx, string(insertionChar)); err != nil {
 			return true, false, err
@@ -341,7 +349,6 @@ func (h *Humanoid) introduceInsertion(ctx context.Context, char rune) (bool, boo
 			if err := h.keyPause(ctx, cfg.TypoCorrectionPauseMeanScale, cfg.TypoCorrectionPauseStdDevScale, nil, 0); err != nil {
 				return true, false, err
 			}
-
 			if err := h.sendString(ctx, string(KeyBackspace)); err != nil {
 				return true, false, err
 			}

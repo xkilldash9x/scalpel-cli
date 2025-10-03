@@ -1,4 +1,4 @@
-// internal/browser// internal/browser/humanoid/humanoid_integration_test.go
+// internal/browser/humanoid/humanoid_integration_test.go
 package humanoid_test
 
 import (
@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"net/http"
 	"net/http/httptest"
+	"sync"
 	"testing"
 	"time"
 
@@ -111,7 +112,6 @@ func TestContextCancellation_DuringMovement(t *testing.T) {
 
 	go func() {
 		// The humanoid will use the session's GetElementGeometry, Sleep, etc.
-		// FIX: Use valid XPath selector instead of CSS shorthand.
 		errChan <- h.MoveTo(actionCtx, "//*[@id='target']", nil)
 	}()
 
@@ -141,7 +141,6 @@ func TestContextCancellation_DuringTyping(t *testing.T) {
 	go func() {
 		// A long string ensures the typing action is in progress when we cancel it.
 		longSentence := "This is a very long sentence designed to take a significant amount of time to type, ensuring we can cancel it mid-operation."
-		// FIX: Use valid XPath selector instead of CSS shorthand.
 		errChan <- h.Type(actionCtx, "//*[@id='inputField']", longSentence, nil)
 	}()
 
@@ -157,4 +156,36 @@ func TestContextCancellation_DuringTyping(t *testing.T) {
 	}
 }
 
+// =============================================================================
+// NEW: Concurrent Safety Validation Test
+// =============================================================================
 
+// TestConcurrentActions_OnSingleSession verifies that the executor (Session)
+// can safely handle multiple concurrent actions without data races.
+// This test is specifically designed to be run with the Go race detector enabled
+// (`go test -race ./...`) to validate the concurrent-safe VM Pool architecture.
+func TestConcurrentActions_OnSingleSession(t *testing.T) {
+	ctx, sess, _ := setupSessionTestEnvironment(t)
+	h := humanoid.NewTestHumanoid(sess, 12345)
+
+	var wg sync.WaitGroup
+	actionCount := 10 // Fire 10 actions concurrently to stress the pool.
+
+	wg.Add(actionCount)
+
+	for i := 0; i < actionCount; i++ {
+		go func() {
+			defer wg.Done()
+			// Each goroutine performs an action using the SAME humanoid instance,
+			// which in turn uses the SAME session. This directly tests the
+			// concurrent safety of the underlying executor implementation.
+			err := h.MoveTo(ctx, "//*[@id='target']", nil)
+			// A nil error here confirms the action could complete.
+			// The race detector confirms it did so safely.
+			assert.NoError(t, err)
+		}()
+	}
+
+	// Wait for all concurrent move actions to complete.
+	wg.Wait()
+}

@@ -8,36 +8,48 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
-// CognitivePause simulates a pause with subtle, noisy cursor movements (idling behavior).
+// CognitivePause is the public entry point for pausing. It acquires the lock.
 func (h *Humanoid) CognitivePause(ctx context.Context, meanMs, stdDevMs float64) error {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.cognitivePause(ctx, meanMs, stdDevMs)
+}
+
+// cognitivePause is the internal, non-locking implementation. It assumes the caller holds the lock.
+func (h *Humanoid) cognitivePause(ctx context.Context, meanMs, stdDevMs float64) error {
 	fatigueFactor := 1.0 + h.fatigueLevel
 	rng := h.rng
-	h.mu.Unlock()
 
 	duration := time.Duration(fatigueFactor*(meanMs+rng.NormFloat64()*stdDevMs)) * time.Millisecond
 	if duration <= 0 {
 		return nil
 	}
+	// Call internal recoverFatigue, which does not lock.
 	h.recoverFatigue(duration)
 
 	// For longer pauses, simulate more active idling.
 	if duration > 100*time.Millisecond {
-		return h.Hesitate(ctx, duration)
+		// Call the internal, non-locking version of Hesitate.
+		return h.hesitate(ctx, duration)
 	}
 
 	return h.executor.Sleep(ctx, duration)
 }
 
-// Hesitate simulates a user pausing with continuous, subtle cursor movements.
+// Hesitate simulates a user pausing and acquires a lock.
+// This is kept for compatibility but internal calls should use hesitate().
 func (h *Humanoid) Hesitate(ctx context.Context, duration time.Duration) error {
 	h.mu.Lock()
+	defer h.mu.Unlock()
+	return h.hesitate(ctx, duration)
+}
+
+// hesitate is the internal, non-locking implementation of cursor idling.
+func (h *Humanoid) hesitate(ctx context.Context, duration time.Duration) error {
 	startPos := h.currentPos
 	rng := h.rng
 	// Get the current button state to maintain it during hesitation (e.g., for dragging).
 	currentButtons := h.calculateButtonsBitfield(h.currentButtonState)
-	h.mu.Unlock()
-
 	startTime := time.Now()
 
 	for time.Since(startTime) < duration {
@@ -45,16 +57,13 @@ func (h *Humanoid) Hesitate(ctx context.Context, duration time.Duration) error {
 			return ctx.Err()
 		}
 
-		h.mu.Lock()
 		// Calculate a small, random target nearby.
 		targetPos := startPos.Add(Vector2D{
 			X: (rng.Float64() - 0.5) * 5,
 			Y: (rng.Float64() - 0.5) * 5,
 		})
 
-		randRange := 100
-		randIntVal := rng.Intn(randRange)
-		h.mu.Unlock()
+		randIntVal := rng.Intn(100)
 
 		// Dispatch the movement event using the canonical schema type.
 		eventData := schemas.MouseEventData{
@@ -69,10 +78,7 @@ func (h *Humanoid) Hesitate(ctx context.Context, duration time.Duration) error {
 			return err
 		}
 
-		h.mu.Lock()
 		h.currentPos = targetPos
-		h.mu.Unlock()
-
 		pauseDuration := time.Duration(50+randIntVal) * time.Millisecond
 
 		// Ensure we don't overshoot the total duration.
@@ -91,10 +97,8 @@ func (h *Humanoid) Hesitate(ctx context.Context, duration time.Duration) error {
 }
 
 // applyGaussianNoise adds high-frequency "tremor" to a mouse coordinate.
+// This is an internal helper that assumes the lock is held.
 func (h *Humanoid) applyGaussianNoise(point Vector2D) Vector2D {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	strength := h.dynamicConfig.GaussianStrength * (0.5 + h.rng.Float64())
 	pX := h.rng.NormFloat64() * strength
 	pY := h.rng.NormFloat64() * strength
@@ -103,6 +107,7 @@ func (h *Humanoid) applyGaussianNoise(point Vector2D) Vector2D {
 }
 
 // applyFatigueEffects adjusts the dynamic configuration based on the current fatigue level.
+// This is an internal helper that assumes the lock is held.
 func (h *Humanoid) applyFatigueEffects() {
 	fatigueFactor := 1.0 + h.fatigueLevel
 
@@ -114,11 +119,8 @@ func (h *Humanoid) applyFatigueEffects() {
 	h.dynamicConfig.TypoRate = math.Min(0.25, h.dynamicConfig.TypoRate)
 }
 
-// updateFatigue modifies the fatigue level based on action intensity.
+// updateFatigue modifies the fatigue level. It assumes the lock is held.
 func (h *Humanoid) updateFatigue(intensity float64) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	increase := h.baseConfig.FatigueIncreaseRate * intensity
 	h.fatigueLevel += increase
 	h.fatigueLevel = math.Min(1.0, h.fatigueLevel)
@@ -126,11 +128,8 @@ func (h *Humanoid) updateFatigue(intensity float64) {
 	h.applyFatigueEffects()
 }
 
-// recoverFatigue simulates recovery from fatigue during pauses.
+// recoverFatigue simulates recovery from fatigue. It assumes the lock is held.
 func (h *Humanoid) recoverFatigue(duration time.Duration) {
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
 	recovery := h.baseConfig.FatigueRecoveryRate * duration.Seconds()
 	h.fatigueLevel -= recovery
 	h.fatigueLevel = math.Max(0.0, h.fatigueLevel)
@@ -139,6 +138,7 @@ func (h *Humanoid) recoverFatigue(duration time.Duration) {
 }
 
 // calculateButtonsBitfield converts the internal MouseButton state into the standard bitfield representation.
+// This is a stateless helper and does not require a lock.
 func (h *Humanoid) calculateButtonsBitfield(buttonState schemas.MouseButton) int64 {
 	var buttons int64
 	switch buttonState {

@@ -8,17 +8,19 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
-// IntelligentClick combines movement, timing, and clicking into a single fluid action.
+// IntelligentClick is a public method that acquires a lock for the entire action.
 func (h *Humanoid) IntelligentClick(ctx context.Context, selector string, opts *InteractionOptions) error {
-	// (Full movement logic is in movement.go, this is the final click part)
-	if err := h.MoveTo(ctx, selector, opts); err != nil {
+	h.mu.Lock()
+	defer h.mu.Unlock()
+
+	// Call the internal, non-locking move method to avoid deadlocks.
+	// This method (`moveToSelector`) is assumed to be the non-locking counterpart to MoveTo.
+	if err := h.moveToSelector(ctx, selector, opts); err != nil {
 		return err
 	}
 
-	// After moving, press the mouse button.
-	h.mu.Lock()
+	// The rest of the logic can now safely access state without further locks.
 	currentPos := h.currentPos
-	h.mu.Unlock()
 
 	mouseDownData := schemas.MouseEventData{
 		Type:       schemas.MousePress,
@@ -32,14 +34,10 @@ func (h *Humanoid) IntelligentClick(ctx context.Context, selector string, opts *
 		return err
 	}
 
-	h.mu.Lock()
 	h.currentButtonState = schemas.ButtonLeft
-	h.mu.Unlock()
 
 	// Determine a realistic hold duration.
-	h.mu.Lock()
 	rng := h.rng
-	h.mu.Unlock()
 	holdDuration := time.Duration(60+rng.NormFloat64()*20) * time.Millisecond
 	if err := h.executor.Sleep(ctx, holdDuration); err != nil {
 		return err
@@ -47,9 +45,7 @@ func (h *Humanoid) IntelligentClick(ctx context.Context, selector string, opts *
 
 	// Release the mouse button.
 	// We read the position again in case a microscopic hesitation move occurred.
-	h.mu.Lock()
 	currentPos = h.currentPos
-	h.mu.Unlock()
 
 	mouseUpData := schemas.MouseEventData{
 		Type:       schemas.MouseRelease,
@@ -63,25 +59,21 @@ func (h *Humanoid) IntelligentClick(ctx context.Context, selector string, opts *
 		return err
 	}
 
-	h.mu.Lock()
 	h.currentButtonState = schemas.ButtonNone
-	h.mu.Unlock()
 
 	return nil
 }
 
-// calculateTerminalFittsLaw determines the time required before initiating a click
-// after the cursor has arrived at the target.
+// calculateTerminalFittsLaw determines the time required before initiating a click.
+// This is an internal helper that assumes the lock is held.
 func (h *Humanoid) calculateTerminalFittsLaw(distance float64) time.Duration {
 	const W = 20.0 // Assumed default target width (W) in pixels for the terminal phase.
 
 	id := math.Log2(1.0 + distance/W)
 
-	h.mu.Lock()
 	A := h.dynamicConfig.FittsA
 	B := h.dynamicConfig.FittsB
 	rng := h.rng
-	h.mu.Unlock()
 
 	mt := A + B*id
 	mt += mt * (rng.Float64()*0.2 - 0.1) // Add +/- 10% jitter

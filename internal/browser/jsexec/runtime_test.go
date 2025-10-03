@@ -22,43 +22,50 @@ func (m *mockBrowserEnvironment) NotifyURLChange(targetURL string)              
 func (m *mockBrowserEnvironment) ExecuteFetch(ctx context.Context, req schemas.FetchRequest) (*schemas.FetchResponse, error) {
 	return nil, nil
 }
-func (m *mockBrowserEnvironment) AddCookieFromString(cookieStr string) error          { return nil }
-func (m *mockBrowserEnvironment) GetCookieString() (string, error)                    { return "", nil }
-func (m *mockBrowserEnvironment) PushHistory(state *schemas.HistoryState) error       { return nil }
-func (m *mockBrowserEnvironment) ReplaceHistory(state *schemas.HistoryState) error    { return nil }
-func (m *mockBrowserEnvironment) GetHistoryLength() int                               { return 0 }
-func (m *mockBrowserEnvironment) GetCurrentHistoryState() interface{}                 { return nil }
+func (m *mockBrowserEnvironment) AddCookieFromString(cookieStr string) error { return nil }
+func (m *mockBrowserEnvironment) GetCookieString() (string, error)           { return "", nil }
+func (m *mockBrowserEnvironment) PushHistory(state *schemas.HistoryState) error    { return nil }
+func (m *mockBrowserEnvironment) ReplaceHistory(state *schemas.HistoryState) error { return nil }
+func (m *mockBrowserEnvironment) GetHistoryLength() int                        { return 0 }
+func (m *mockBrowserEnvironment) GetCurrentHistoryState() interface{}          { return nil }
 func (m *mockBrowserEnvironment) ResolveURL(targetURL string) (*url.URL, error) {
 	return url.Parse(targetURL)
 }
 
 // newTestRuntime is a helper to set up a runtime with mock dependencies for each test.
-func newTestRuntime() *jsexec.Runtime {
+func newTestRuntime(t *testing.T) *jsexec.Runtime {
+	t.Helper() // Mark this as a test helper function.
+
 	eventLoop := eventloop.NewEventLoop()
+
+	// Use t.Cleanup to ensure the event loop is stopped after the test,
+	// preventing leaked goroutines.
+	t.Cleanup(func() {
+		eventLoop.Stop()
+	})
+
+	// Start the event loop so it can process async tasks like setTimeout and Promises.
 	eventLoop.Start()
-	// In a real scenario, you'd stop the event loop. For these simple tests, it's okay.
+
 	return jsexec.NewRuntime(zap.NewNop(), eventLoop, &mockBrowserEnvironment{})
 }
 
 func TestExecuteScript_Basic(t *testing.T) {
-	runtime := newTestRuntime()
+	runtime := newTestRuntime(t)
 	ctx := context.Background()
 
 	script := `(5 + 5) * 2`
 	result, err := runtime.ExecuteScript(ctx, script, nil)
 
 	require.NoError(t, err)
-	// Goja returns numbers as int64
 	assert.Equal(t, int64(20), result)
 }
 
 func TestExecuteScript_WithArgs(t *testing.T) {
-	runtime := newTestRuntime()
+	runtime := newTestRuntime(t)
 	ctx := context.Background()
 
-	// FIX: The script must be a function wrapper to accept arguments.
 	script := `(function(prefix, message) { return prefix + message; })`
-	// FIX: The arguments must be a slice, not a map.
 	args := []interface{}{"Log: ", "Hello World"}
 
 	result, err := runtime.ExecuteScript(ctx, script, args)
@@ -67,7 +74,7 @@ func TestExecuteScript_WithArgs(t *testing.T) {
 }
 
 func TestExecuteScript_ReturnObject(t *testing.T) {
-	runtime := newTestRuntime()
+	runtime := newTestRuntime(t)
 	ctx := context.Background()
 	script := `({status: "success", code: 200})`
 
@@ -81,7 +88,7 @@ func TestExecuteScript_ReturnObject(t *testing.T) {
 }
 
 func TestExecuteScript_Exception(t *testing.T) {
-	runtime := newTestRuntime()
+	runtime := newTestRuntime(t)
 	ctx := context.Background()
 	script := `throw new Error("Intentional Error");`
 
@@ -92,12 +99,12 @@ func TestExecuteScript_Exception(t *testing.T) {
 }
 
 func TestExecuteScript_Timeout(t *testing.T) {
-	runtime := newTestRuntime()
-	// Context with a short deadline
-	ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+	runtime := newTestRuntime(t)
+	// Context with a very short deadline.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
 	defer cancel()
 
-	// Infinite loop
+	// Infinite loop to ensure the timeout is triggered.
 	script := `while(true) {}`
 
 	startTime := time.Now()
@@ -105,35 +112,80 @@ func TestExecuteScript_Timeout(t *testing.T) {
 	duration := time.Since(startTime)
 
 	require.Error(t, err)
-	// FIX: The error message changed slightly in the implementation.
-	assert.Contains(t, err.Error(), "javascript execution interrupted by context:")
+	// The refactored error message now wraps the context's error directly.
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Contains(t, err.Error(), "javascript execution interrupted by context")
 
-	// Ensure it didn't run excessively long (allowing buffer)
-	assert.Less(t, duration, 500*time.Millisecond)
+	// Ensure it didn't run excessively long (allowing buffer).
+	assert.Less(t, duration, 200*time.Millisecond)
 }
 
 func TestExecuteScript_Cancellation(t *testing.T) {
-	runtime := newTestRuntime()
+	runtime := newTestRuntime(t)
 	ctx, cancel := context.WithCancel(context.Background())
 
 	script := `while(true) {}`
 
-	done := make(chan error)
+	errChan := make(chan error)
 	go func() {
 		_, err := runtime.ExecuteScript(ctx, script, nil)
-		done <- err
+		errChan <- err
 	}()
 
-	// Cancel shortly after starting
+	// Give the script a moment to start running.
 	time.Sleep(50 * time.Millisecond)
+	// Cancel the context to interrupt the script.
 	cancel()
 
 	select {
-	case err := <-done:
+	case err := <-errChan:
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "javascript execution interrupted by context:")
-		assert.Contains(t, err.Error(), context.Canceled.Error())
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Contains(t, err.Error(), "javascript execution interrupted by context")
 	case <-time.After(1 * time.Second):
 		t.Fatal("Execution did not stop after cancellation")
 	}
+}
+
+// -- New tests for Promise handling --
+
+func TestExecuteScript_PromiseFulfilled(t *testing.T) {
+	runtime := newTestRuntime(t)
+	ctx := context.Background()
+
+	// This script returns a promise that resolves after a short delay.
+	// `setTimeout` requires the event loop provided in `newTestRuntime`.
+	script := `new Promise(resolve => setTimeout(() => resolve('async success'), 50))`
+
+	result, err := runtime.ExecuteScript(ctx, script, nil)
+	require.NoError(t, err)
+	assert.Equal(t, "async success", result)
+}
+
+func TestExecuteScript_PromiseRejected(t *testing.T) {
+	runtime := newTestRuntime(t)
+	ctx := context.Background()
+
+	script := `new Promise((_, reject) => setTimeout(() => reject(new Error('async failure')), 50))`
+
+	_, err := runtime.ExecuteScript(ctx, script, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "promise rejected")
+	assert.Contains(t, err.Error(), "async failure")
+}
+
+func TestExecuteScript_PromiseTimeout(t *testing.T) {
+	runtime := newTestRuntime(t)
+	// Set a short timeout on the context.
+	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
+	defer cancel()
+
+	// This promise takes longer to resolve than the context's timeout.
+	script := `new Promise(resolve => setTimeout(() => resolve('this should not be seen'), 200))`
+
+	_, err := runtime.ExecuteScript(ctx, script, nil)
+	require.Error(t, err)
+	// We expect the context's deadline to be the cause of the error.
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Contains(t, err.Error(), "context done while waiting for promise")
 }

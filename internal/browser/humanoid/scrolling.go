@@ -1,4 +1,4 @@
-// internal/browser/humanoid/scrolling.go --
+// internal/browser/humanoid/scrolling.go
 package humanoid
 
 import (
@@ -7,13 +7,10 @@ import (
     "fmt"
     "time"
 
-    // "github.com/chromedp/cdproto/runtime" // Removed
-    // "github.com/chromedp/chromedp" // Removed: We use the executor.
     "go.uber.org/zap"
 )
 
 // The JavaScript logic for performing a single scroll iteration.
-// MODIFIED: Updated to return JS objects directly instead of using JSON.stringify().
 const scrollIterationJS = `
 async (selector, injectedDeltaY, injectedDeltaX, readDensityFactor) => {
     // --- Utility Functions (getScrollableParent, waitForScrollStabilization, estimateContentDensity) ---
@@ -119,7 +116,6 @@ async (selector, injectedDeltaY, injectedDeltaX, readDensityFactor) => {
     // --- Main Logic ---
     const el = document.querySelector(selector);
     if (!el) {
-        // MODIFIED: Return object directly.
         return { isIntersecting: false, isComplete: true, verticalDelta: 0, horizontalDelta: 0, contentDensity: 0, elementExists: false };
     }
     const viewportHeight = window.innerHeight;
@@ -131,7 +127,6 @@ async (selector, injectedDeltaY, injectedDeltaX, readDensityFactor) => {
     const isHorizontallyVisible = elementBounds.left >= visibilityThreshold && elementBounds.right <= viewportWidth - visibilityThreshold;
 
     if (isVerticallyVisible && isHorizontallyVisible) {
-        // MODIFIED: Return object directly.
         return { isIntersecting: true, isComplete: true, verticalDelta: 0, horizontalDelta: 0, contentDensity: 0, elementExists: true };
     }
     const contentDensity = estimateContentDensity();
@@ -243,7 +238,6 @@ async (selector, injectedDeltaY, injectedDeltaX, readDensityFactor) => {
         isComplete = true;
     }
 
-    // MODIFIED: Return object directly.
     return {
         isIntersecting: false, // We only know it's intersecting at the very start check.
         isComplete: isComplete,
@@ -264,16 +258,14 @@ type scrollResult struct {
     ElementExists   bool    `json:"elementExists"`
 }
 
-// intelligentScroll scrolls the page until the target selector is visible.
-// It executes immediately using the provided context and the Humanoid's executor.
+// intelligentScroll is an internal helper that scrolls until the target selector is visible.
+// It assumes the caller holds the lock for thread safety.
 func (h *Humanoid) intelligentScroll(ctx context.Context, selector string) error {
-    h.mu.Lock()
+    // LOCK REMOVED: Caller holds the lock, so direct access is safe.
     readDensityFactor := h.dynamicConfig.ScrollReadDensityFactor
     rng := h.rng
-    // Probability checks
     shouldOvershoot := rng.Float64() < h.dynamicConfig.ScrollOvershootProbability
     shouldRegress := rng.Float64() < h.dynamicConfig.ScrollRegressionProbability
-    h.mu.Unlock()
 
     maxIterations := 15
     iteration := 0
@@ -351,7 +343,6 @@ func (h *Humanoid) intelligentScroll(ctx context.Context, selector string) error
 
 // executeScrollJS handles the preparation and execution of the scrollIterationJS via the executor.
 func (h *Humanoid) executeScrollJS(ctx context.Context, selector string, deltaY, deltaX, readDensityFactor float64) (*scrollResult, error) {
-
     // Prepare the arguments for the JS function.
     args := []interface{}{
         selector,
@@ -361,12 +352,9 @@ func (h *Humanoid) executeScrollJS(ctx context.Context, selector string, deltaY,
     }
 
     // Execute via the agnostic executor.
-    // The implementation handles execution, awaiting the promise, and serialization.
-    // CRITICAL: Ensure this uses ExecuteScript.
     resultJSON, err := h.executor.ExecuteScript(ctx, scrollIterationJS, args)
 
     if err != nil {
-        // The adapter should return a descriptive error if the script fails or throws an exception.
         return nil, fmt.Errorf("javascript execution error during scroll: %w", err)
     }
 
@@ -375,7 +363,7 @@ func (h *Humanoid) executeScrollJS(ctx context.Context, selector string, deltaY,
         return nil, fmt.Errorf("javascript execution returned null or empty result during scroll")
     }
 
-    // Unmarshal the JSON (which represents the object returned by the JS) into the scrollResult struct.
+    // Unmarshal the JSON into the scrollResult struct.
     var result scrollResult
     if err := json.Unmarshal(resultJSON, &result); err != nil {
         h.logger.Error("Humanoid: Failed to unmarshal scroll result JSON", zap.Error(err), zap.String("json", string(resultJSON)))
@@ -385,10 +373,9 @@ func (h *Humanoid) executeScrollJS(ctx context.Context, selector string, deltaY,
     return &result, nil
 }
 
-// calculateScrollPause determines the duration of the pause between scroll actions.
+// calculateScrollPause is an internal helper. It assumes the caller holds the lock.
 func (h *Humanoid) calculateScrollPause(contentDensity float64) time.Duration {
-    h.mu.Lock()
-    defer h.mu.Unlock()
+    // LOCK REMOVED: Caller holds the lock, so direct access is safe.
     // Base pause + pause based on content density + random variation
     pauseMs := 100 + (contentDensity * 1000 * h.dynamicConfig.ScrollReadDensityFactor) + (h.rng.Float64() * 150)
     // Apply fatigue
@@ -400,11 +387,10 @@ func (h *Humanoid) calculateScrollPause(contentDensity float64) time.Duration {
     return time.Duration(pauseMs) * time.Millisecond
 }
 
-// simulateOvershoot performs a small scroll in the same direction to simulate overshooting.
+// simulateOvershoot is an internal helper. It assumes the caller holds the lock.
 func (h *Humanoid) simulateOvershoot(ctx context.Context, selector string, readDensityFactor, verticalDelta, horizontalDelta float64) error {
-    h.mu.Lock()
+    // LOCK REMOVED: Caller holds the lock, so direct access is safe.
     rng := h.rng
-    h.mu.Unlock()
 
     overshootY := verticalDelta * (0.1 + rng.Float64()*0.2)
     overshootX := horizontalDelta * (0.1 + rng.Float64()*0.2)
@@ -422,11 +408,10 @@ func (h *Humanoid) simulateOvershoot(ctx context.Context, selector string, readD
     return h.CognitivePause(ctx, 150, 50)
 }
 
-// simulateRegression performs a small scroll in the opposite direction.
+// simulateRegression is an internal helper. It assumes the caller holds the lock.
 func (h *Humanoid) simulateRegression(ctx context.Context, selector string, readDensityFactor, verticalDelta, horizontalDelta float64) error {
-    h.mu.Lock()
+    // LOCK REMOVED: Caller holds the lock, so direct access is safe.
     rng := h.rng
-    h.mu.Unlock()
 
     regressionY := -verticalDelta * (0.2 + rng.Float64()*0.3)
     regressionX := -horizontalDelta * (0.2 + rng.Float64()*0.3)

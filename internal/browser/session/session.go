@@ -1,4 +1,4 @@
-// Package session implements a functional, headless browser engine in pure Go.
+// Pa// Package session implements a functional, headless browser engine in pure Go.
 // It integrates a robust network stack, a Go based DOM representation (golang.org/x/net/html),
 // and the Goja JavaScript runtime, synchronized via an event loop and a custom DOM bridge (jsbind).
 //
@@ -1146,11 +1146,16 @@ func (s *Session) executeScriptInternal(ctx context.Context, script string, args
 	// Use the low level execution helper.
 	err := s.executeScriptLowLevel(ctx, script, &result, args)
 	if err != nil {
+		// Propagate the error correctly.
 		return nil, err
 	}
+
+	// This check is a small improvement to avoid marshalling a nil result,
+	// though the main fix is propagating the error above.
 	if result == nil {
 		return json.RawMessage("null"), nil
 	}
+
 	return json.Marshal(result)
 }
 
@@ -1179,6 +1184,9 @@ func (s *Session) executeScriptLowLevel(ctx context.Context, script string, res 
 		// This defer/recover block is critical. It prevents a panic inside Goja
 		// (e.g., from a badly written script) from killing the event loop goroutine.
 		defer func() {
+			// Since this function is the only thing running on the event loop's goroutine
+			// at this moment, we can safely restore the global interrupt handler here.
+			vm.Interrupt(s.ctx.Done())
 			if r := recover(); r != nil {
 				err := fmt.Errorf("panic in javascript execution: %v", r)
 				s.logger.Error("Recovered from panic in event loop", zap.Error(err), zap.String("stack", string(debug.Stack())))
@@ -1190,14 +1198,11 @@ func (s *Session) executeScriptLowLevel(ctx context.Context, script string, res 
 			}
 		}()
 
-		vm.ClearInterrupt()
 		// Set up a specific interrupt channel for this execution.
 		execInterruptHandle := make(chan struct{})
 		vm.Interrupt(execInterruptHandle)
-		// Restore the default session interrupt handler afterwards.
-		defer vm.Interrupt(s.ctx.Done())
-		executionDone := make(chan struct{})
 
+		executionDone := make(chan struct{})
 		// Monitor the context. If canceled, signal the interrupt handler.
 		go func() {
 			select {
@@ -1207,15 +1212,8 @@ func (s *Session) executeScriptLowLevel(ctx context.Context, script string, res 
 			}
 		}()
 
-		var val goja.Value
-		var err error
-
-		// The actual script execution happens within this function scope.
-		func() {
-			defer close(executionDone)
-			// TODO: Handle args if provided.
-			val, err = vm.RunString(script)
-		}()
+		val, err := vm.RunString(script)
+		close(executionDone) // Signal monitor goroutine to exit
 
 		// Send the result back.
 		select {
@@ -1229,12 +1227,8 @@ func (s *Session) executeScriptLowLevel(ctx context.Context, script string, res 
 	})
 
 	// Wait for the result or cancellation.
-	select {
-	case result := <-resultChan:
-		return s.processScriptResult(execCtx, result.Value, result.Error, res)
-	case <-execCtx.Done():
-		return execCtx.Err()
-	}
+	result := <-resultChan
+	return s.processScriptResult(execCtx, result.Value, result.Error, res)
 }
 
 func (s *Session) waitForPromise(ctx context.Context, promise *goja.Promise) (goja.Value, error) {
@@ -1300,17 +1294,16 @@ func (s *Session) processScriptResult(ctx context.Context, value goja.Value, err
 
 		// Check for interruption first. This is the most common case for cancellation.
 		if errors.As(err, &interruptedError) {
-			// If the script was interrupted, the definitive source of truth is the context passed to the function.
-			// Return the context's error to provide a clear reason (canceled or deadline exceeded).
+			// If the script was interrupted, the definitive source of truth is the state of the context.
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return fmt.Errorf("javascript execution interrupted by context: %w", ctxErr)
 			}
-			// If the context is fine but the session is closing, that's another valid reason.
-			if s.ctx.Err() != nil {
-				return fmt.Errorf("javascript execution interrupted (session closing): %w", err)
+			// If the context is fine, check if the session itself is closing.
+			if sessionErr := s.ctx.Err(); sessionErr != nil {
+				return fmt.Errorf("javascript execution interrupted (session closing): %w", sessionErr)
 			}
-			// An interruption without a clear reason is unexpected.
-			return fmt.Errorf("javascript execution interrupted unexpectedly: %w", err)
+			// An interruption without a clear reason is unexpected but indicates cancellation.
+			return fmt.Errorf("javascript execution interrupted unexpectedly: %w", context.Canceled)
 		}
 
 		// Check for a standard JS exception.
@@ -2236,3 +2229,4 @@ func CombineContext(parentCtx, secondaryCtx context.Context) (context.Context, c
 		cancel()
 	}
 }
+

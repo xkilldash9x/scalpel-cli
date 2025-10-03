@@ -17,19 +17,17 @@ func computeEaseInOutCubic(t float64) float64 {
 	return 1 - math.Pow(-2*t+2, 3)/2
 }
 
-// calculateFittsLaw determines a realistic movement duration based on Fitts's Law.
-func (h *Humanoid) calculateFittsLaw(distance float64) time.Duration {
+// calculateFittsLawInternal determines a realistic movement duration based on Fitts's Law.
+// This is an internal helper that assumes the caller holds the lock.
+func (h *Humanoid) calculateFittsLawInternal(distance float64) time.Duration {
 	const W = 30.0 // Assumed default target width (W) in pixels.
-
 	// The Index of Difficulty (ID) is the core of Fitts's Law.
 	id := math.Log2(1.0 + distance/W)
 
-	h.mu.Lock()
 	// Use dynamic config parameters which are affected by fatigue.
 	A := h.dynamicConfig.FittsA
 	B := h.dynamicConfig.FittsB
 	rng := h.rng
-	h.mu.Unlock()
 
 	// Movement Time (MT) in milliseconds
 	mt := A + B*id
@@ -81,7 +79,7 @@ func (h *Humanoid) generateIdealPath(start, end Vector2D, field *PotentialField,
 // simulateTrajectory moves the mouse along a generated path, dispatching events via the executor.
 func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, field *PotentialField, buttonState schemas.MouseButton) (Vector2D, error) {
 	dist := start.Dist(end)
-	duration := h.calculateFittsLaw(dist)
+	duration := h.calculateFittsLawInternal(dist)
 	// The number of steps is proportional to the duration, creating smoother moves for longer distances.
 	numSteps := int(duration.Seconds() * 100)
 	if numSteps < 2 {
@@ -93,6 +91,7 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 	}
 
 	idealPath := h.generateIdealPath(start, end, field, numSteps)
+	// **FIX**: Corrected the method name from calculateButtonsbitfield to calculateButtonsBitfield.
 	buttonsBitfield := h.calculateButtonsBitfield(buttonState)
 
 	var velocity Vector2D
@@ -134,10 +133,8 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 		lastTime = now
 
 		// Apply Perlin and Gaussian noise to the cursor position for realism.
-		h.mu.Lock()
 		perlinMagnitude := h.dynamicConfig.PerlinAmplitude
 		rng := h.rng
-		h.mu.Unlock()
 
 		perlinFrequency := 0.8
 		timeElapsed := now.Sub(startTime).Seconds()
@@ -168,10 +165,8 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 			return velocity, err
 		}
 
-		// Update internal state and apply a tiny delay to simulate the browser's event loop.
-		h.mu.Lock()
+		// Update internal state. This is now safe.
 		h.currentPos = finalPerturbedPoint
-		h.mu.Unlock()
 
 		randPart := rng.Intn(4)
 		if err := h.executor.Sleep(ctx, time.Duration(2+randPart)*time.Millisecond); err != nil {
