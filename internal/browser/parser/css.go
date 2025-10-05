@@ -1,3 +1,4 @@
+// browser/parser/css.go
 // internal/browser/parser/css.go
 package parser
 
@@ -530,6 +531,7 @@ func (p *Parser) skipAtRule() {
 	for !p.eof() {
 		ch := p.currentChar()
 		if ch == '{' {
+			p.consumeChar() // Consume '{'
 			p.skipBlock('{', '}')
 			return
 		}

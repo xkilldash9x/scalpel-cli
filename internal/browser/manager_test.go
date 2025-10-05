@@ -126,17 +126,16 @@ func TestManager_SessionLifecycleAndShutdown(t *testing.T) {
 	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
 	defer shutdownCancel()
 
-	// This call is no longer needed because setupTestManager adds a Cleanup hook.
-	// err = m.Shutdown(shutdownCtx)
-	// require.NoError(t, err, "Manager should shut down cleanly after closing remaining sessions")
-
 	// Manually trigger shutdown to verify session context cancellation.
 	err = m.Shutdown(shutdownCtx)
 	require.NoError(t, err)
 
-	// Verify all sessions contexts are cancelled after manager shutdown.
+	// REFACTOR: Verify all sessions are closed after manager shutdown by attempting an operation.
+	// We can no longer use GetContext().
 	for i, s := range sessions {
-		assert.ErrorIs(t, s.GetContext().Err(), context.Canceled, "Session %d context should be cancelled after manager shutdown", i)
+		// Attempt a simple operation. It should fail because the session's internal context is cancelled.
+		_, opErr := s.ExecuteScript(context.Background(), "1", nil)
+		assert.ErrorIs(t, opErr, context.Canceled, "Session %d should be closed (context cancelled) after manager shutdown", i)
 	}
 }
 

@@ -1,4 +1,4 @@
-// Package analyze implements the active analysis logic for detecting client-side
+// Package proto implements the active analysis logic for detecting client-side
 // prototype pollution vulnerabilities.
 package proto
 
@@ -8,7 +8,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -19,11 +18,11 @@ import (
 )
 
 const (
-	ModuleName             = "PrototypePollutionAnalyzer"
-	jsCallbackName         = "__scalpel_protopollution_proof"
-	placeholderCanary      = "{{SCALPEL_CANARY}}"
-	placeholderCallback    = "{{SCALPEL_CALLBACK}}"
-	findingChannelBuffer   = 10 // A decent buffer for handling bursts of events from the browser.
+	ModuleName           = "PrototypePollutionAnalyzer"
+	jsCallbackName       = "__scalpel_protopollution_proof"
+	placeholderCanary    = "{{SCALPEL_CANARY}}"
+	placeholderCallback  = "{{SCALPEL_CALLBACK}}"
+	findingChannelBuffer = 10 // A decent buffer for handling bursts of events from the browser.
 )
 
 //go:embed shim.js
@@ -48,14 +47,15 @@ type PollutionProofEvent struct {
 
 // analysisContext holds the state for a single, concurrent analysis task.
 // It is created for the duration of one Analyze call and then discarded.
+// REFACTOR: This context no longer manages a finding channel or waitgroup.
+// It now holds a reference to the session context to report findings directly.
 type analysisContext struct {
-	taskID      string
-	targetURL   string
-	canary      string
-	findingChan chan schemas.Finding
-	logger      *zap.Logger
-	// FIX: Added a WaitGroup to synchronize the closing of the finding channel.
-	wg sync.WaitGroup
+	ctx       context.Context // The parent context for the analysis.
+	session   schemas.SessionContext
+	taskID    string
+	targetURL string
+	canary    string
+	logger    *zap.Logger
 }
 
 // NewAnalyzer creates a new, reusable analyzer instance using the centralized application configuration.
@@ -73,32 +73,32 @@ func NewAnalyzer(logger *zap.Logger, browserManager schemas.BrowserManager, cfg 
 }
 
 // Analyze executes the prototype pollution check against a given URL.
-// It orchestrates the creation of a browser session and an analysis context to perform the check.
-func (a *Analyzer) Analyze(ctx context.Context, taskID, targetURL string) ([]schemas.Finding, error) {
-
-	// 1. Initialize an isolated context for this specific task. This makes the process thread safe.
-	aCtx := &analysisContext{
-		taskID:      taskID,
-		targetURL:   targetURL,
-		canary:      "sclp_" + uuid.New().String()[:8], // Generate a unique canary for this run.
-		findingChan: make(chan schemas.Finding, findingChannelBuffer),
-		// Create a logger with context for this specific task, which makes debugging much easier.
-		logger: a.logger.With(zap.String("taskID", taskID), zap.String("target", targetURL)),
-	}
-
-	// 2. Acquire a browser session. We don't need any special persona or taint config for this analyzer.
-	session, err := a.browser.NewAnalysisContext(ctx, nil, schemas.Persona{}, "", "", aCtx.findingChan)
+// REFACTOR: This function's signature has changed. It no longer returns a slice of findings.
+// Instead, it reports findings via the session context and returns only an error.
+func (a *Analyzer) Analyze(ctx context.Context, taskID, targetURL string) error {
+	// 1. Acquire a browser session. We pass `nil` for the findings channel as it's no longer used by this analyzer.
+	session, err := a.browser.NewAnalysisContext(ctx, nil, schemas.Persona{}, "", "", nil)
 	if err != nil {
-		return nil, fmt.Errorf("could not initialize browser analysis context: %w", err)
+		return fmt.Errorf("could not initialize browser analysis context: %w", err)
 	}
 	defer session.Close(ctx)
 
-	// 3. Instrument the browser session with our shim and callbacks.
-	if err := a.instrumentSession(ctx, session, aCtx); err != nil {
-		return nil, fmt.Errorf("failed to instrument browser session: %w", err)
+	// 2. Initialize an isolated context for this specific task.
+	aCtx := &analysisContext{
+		ctx:       ctx,
+		session:   session,
+		taskID:    taskID,
+		targetURL: targetURL,
+		canary:    "sclp_" + uuid.New().String()[:8], // Generate a unique canary for this run.
+		logger:    a.logger.With(zap.String("taskID", taskID), zap.String("target", targetURL)),
 	}
 
-	// 4. Navigate to the target and let the fun begin.
+	// 3. Instrument the browser session with our shim and callbacks.
+	if err := a.instrumentSession(ctx, session, aCtx); err != nil {
+		return fmt.Errorf("failed to instrument browser session: %w", err)
+	}
+
+	// 4. Navigate to the target.
 	aCtx.logger.Info("Navigating and monitoring.", zap.Duration("wait_duration", a.config.WaitDuration))
 	if err := session.Navigate(ctx, targetURL); err != nil {
 		// Navigation errors are often not fatal; the page might have loaded enough for our purposes.
@@ -112,35 +112,22 @@ func (a *Analyzer) Analyze(ctx context.Context, taskID, targetURL string) ([]sch
 		aCtx.logger.Info("Monitoring period finished.")
 	case <-ctx.Done():
 		if !timer.Stop() {
+			// This is necessary to safely drain the timer if it has already fired.
 			<-timer.C
 		}
 		aCtx.logger.Info("Analysis context cancelled during monitoring.")
-		err = ctx.Err()
+		return ctx.Err()
 	}
 
-	// 6. Wait for any in-flight handlers to finish before closing the channel.
-	// FIX: This wait call is the core of the data race fix.
-	aCtx.wg.Wait()
-
-	// 7. Collect any findings that our callback handler has queued up.
-	close(aCtx.findingChan)
-	var findings []schemas.Finding
-	for f := range aCtx.findingChan {
-		findings = append(findings, f)
-	}
-
-	return findings, err
+	// 6. Findings are reported by the callback handler directly. Nothing to collect here.
+	return nil
 }
 
 // instrumentSession prepares the browser session by exposing callbacks and injecting the shim.
 func (a *Analyzer) instrumentSession(ctx context.Context, session schemas.SessionContext, aCtx *analysisContext) error {
-	// FIX: This handler now uses the WaitGroup to signal when it's starting and finishing.
-	handler := func(event PollutionProofEvent) {
-		aCtx.wg.Add(1)
-		defer aCtx.wg.Done()
-		aCtx.handlePollutionProof(event)
-	}
-	if err := session.ExposeFunction(ctx, jsCallbackName, handler); err != nil {
+	// The handler is now a method on analysisContext, which closes over the necessary state.
+	// This avoids complex parameter passing for the callback.
+	if err := session.ExposeFunction(ctx, jsCallbackName, aCtx.handlePollutionProof); err != nil {
 		return fmt.Errorf("failed to expose proof function: %w", err)
 	}
 
@@ -154,7 +141,6 @@ func (a *Analyzer) instrumentSession(ctx context.Context, session schemas.Sessio
 }
 
 // handlePollutionProof is the callback triggered from the browser's JS environment.
-// It runs concurrently and operates on the specific analysisContext for the task.
 func (aCtx *analysisContext) handlePollutionProof(event PollutionProofEvent) {
 	if event.Canary != aCtx.canary {
 		aCtx.logger.Warn("Received proof with mismatched canary. Discarding.")
@@ -193,10 +179,10 @@ func (aCtx *analysisContext) handlePollutionProof(event PollutionProofEvent) {
 		CWE:            cwe,
 	}
 
-	select {
-	case aCtx.findingChan <- finding:
-	default:
-		aCtx.logger.Error("Finding channel buffer full. Dropping finding. This may indicate a system overload.")
+	// REFACTOR: Instead of writing to a channel, use the session's AddFinding method.
+	// This standardizes the finding submission process across all analyzers.
+	if err := aCtx.session.AddFinding(aCtx.ctx, finding); err != nil {
+		aCtx.logger.Error("Failed to submit finding", zap.Error(err))
 	}
 }
 
@@ -223,4 +209,3 @@ func getRecommendation(vulnerabilityName string) string {
 	}
 	return "Audit client-side JavaScript for unsafe recursive merge functions, property definition by path, and object cloning logic. Sanitize user input before it is used in these operations. As a defense-in-depth measure, consider freezing the Object prototype using `Object.freeze(Object.prototype)`."
 }
-

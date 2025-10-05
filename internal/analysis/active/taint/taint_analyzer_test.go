@@ -18,173 +18,10 @@ import (
 	"go.uber.org/zap/zaptest"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/agent"
 )
 
 // Mock Definitions
-
-// MockSessionContext mocks the SessionContext interface (must match schemas.SessionContext).
-type MockSessionContext struct {
-	mock.Mock
-	exposedFunctions map[string]interface{}
-	mutex            sync.Mutex
-}
-
-func NewMockSessionContext() *MockSessionContext {
-	return &MockSessionContext{
-		exposedFunctions: make(map[string]interface{}),
-	}
-}
-
-func (m *MockSessionContext) ID() string {
-	args := m.Called()
-	return args.String(0)
-}
-
-func (m *MockSessionContext) InjectScriptPersistently(ctx context.Context, script string) error {
-	args := m.Called(ctx, script)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) ExposeFunction(ctx context.Context, name string, function interface{}) error {
-	m.mutex.Lock()
-	defer m.mutex.Unlock()
-	args := m.Called(ctx, name, function)
-	if args.Error(0) == nil {
-		m.exposedFunctions[name] = function
-	}
-	return args.Error(0)
-}
-
-// SimulateCallback allows tests to invoke the exposed Go functions.
-func (m *MockSessionContext) SimulateCallback(t *testing.T, name string, payload interface{}) {
-	t.Helper()
-	m.mutex.Lock()
-	fn, exists := m.exposedFunctions[name]
-	m.mutex.Unlock()
-
-	if !exists {
-		t.Fatalf("function %s not exposed by analyzer", name)
-	}
-
-	switch name {
-	case JSCallbackSinkEvent:
-		callback, ok := fn.(func(SinkEvent))
-		require.True(t, ok, "SinkEvent callback signature mismatch. Got: %T", fn)
-		event, ok := payload.(SinkEvent)
-		require.True(t, ok, "SinkEvent payload type mismatch. Got: %T", payload)
-		callback(event)
-
-	case JSCallbackExecutionProof:
-		callback, ok := fn.(func(ExecutionProofEvent))
-		require.True(t, ok, "ExecutionProof callback signature mismatch. Got: %T", fn)
-		event, ok := payload.(ExecutionProofEvent)
-		require.True(t, ok, "ExecutionProof payload type mismatch. Got: %T", payload)
-		callback(event)
-
-	case JSCallbackShimError:
-		callback, ok := fn.(func(ShimErrorEvent))
-		require.True(t, ok, "ShimError callback signature mismatch. Got: %T", fn)
-		event, ok := payload.(ShimErrorEvent)
-		require.True(t, ok, "ShimError payload type mismatch. Got: %T", payload)
-		callback(event)
-	default:
-		t.Fatalf("Unknown callback name simulated: %s", name)
-	}
-}
-
-func (m *MockSessionContext) Navigate(ctx context.Context, url string) error {
-	args := m.Called(ctx, url)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Interact(ctx context.Context, config schemas.InteractionConfig) error {
-	args := m.Called(ctx, config)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Close(ctx context.Context) error {
-	args := m.Called(ctx)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Click(ctx context.Context, selector string) error {
-	args := m.Called(ctx, selector)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Type(ctx context.Context, selector string, text string) error {
-	args := m.Called(ctx, selector, text)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) Submit(ctx context.Context, selector string) error {
-	args := m.Called(ctx, selector)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) ScrollPage(ctx context.Context, direction string) error {
-	args := m.Called(ctx, direction)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) WaitForAsync(ctx context.Context, milliseconds int) error {
-	args := m.Called(ctx, milliseconds)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) GetContext() context.Context {
-	args := m.Called()
-	if args.Get(0) == nil {
-		return context.Background() // Return a non-nil context to avoid panics.
-	}
-	return args.Get(0).(context.Context)
-}
-
-func (m *MockSessionContext) AddFinding(finding schemas.Finding) error {
-	args := m.Called(finding)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) CollectArtifacts(ctx context.Context) (*schemas.Artifacts, error) {
-	args := m.Called(ctx)
-	var artifacts *schemas.Artifacts
-	if args.Get(0) != nil {
-		artifacts = args.Get(0).(*schemas.Artifacts)
-	}
-	return artifacts, args.Error(1)
-}
-
-func (m *MockSessionContext) Sleep(ctx context.Context, d time.Duration) error {
-	args := m.Called(ctx, d)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) DispatchMouseEvent(ctx context.Context, data schemas.MouseEventData) error {
-	args := m.Called(ctx, data)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) SendKeys(ctx context.Context, keys string) error {
-	args := m.Called(ctx, keys)
-	return args.Error(0)
-}
-
-func (m *MockSessionContext) GetElementGeometry(ctx context.Context, selector string) (*schemas.ElementGeometry, error) {
-	args := m.Called(ctx, selector)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
-	}
-	return args.Get(0).(*schemas.ElementGeometry), args.Error(1)
-}
-
-func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
-	callArgs := m.Called(ctx, script, args)
-	var res json.RawMessage
-	if callArgs.Get(0) != nil {
-		res = callArgs.Get(0).(json.RawMessage)
-	}
-	return res, callArgs.Error(1)
-}
 
 // MockResultsReporter mocks the ResultsReporter interface.
 type MockResultsReporter struct {
@@ -317,7 +154,7 @@ func TestGenerateShim(t *testing.T) {
 // TestInstrument_Success verifies the sequence of calls to instrument the browser session.
 func TestInstrument_Success(t *testing.T) {
 	analyzer, _, _ := setupAnalyzer(t, nil, false)
-	mockSession := NewMockSessionContext()
+	mockSession := agent.NewMockSessionContext()
 	ctx := context.Background()
 
 	mockSession.On("ExposeFunction", ctx, JSCallbackSinkEvent, mock.AnythingOfType("func(taint.SinkEvent)")).Return(nil).Once()
@@ -336,7 +173,8 @@ func TestInstrument_Success(t *testing.T) {
 // TestInstrument_Failure_ExposeFunction verifies error handling during instrumentation.
 func TestInstrument_Failure_ExposeFunction(t *testing.T) {
 	analyzer, _, _ := setupAnalyzer(t, nil, false)
-	mockSession := NewMockSessionContext()
+	// Use the agent package mock context as required by the interface definition.
+	mockSession := agent.NewMockSessionContext()
 	ctx := context.Background()
 
 	// Simulate failure on the first ExposeFunction call
@@ -460,7 +298,7 @@ func TestProbePersistentSources(t *testing.T) {
 				c.Target, _ = url.Parse(tt.targetURL)
 			}, false)
 
-			mockSession := NewMockSessionContext()
+			mockSession := agent.NewMockSessionContext()
 			ctx := context.Background()
 
 			var capturedScript string
@@ -470,7 +308,8 @@ func TestProbePersistentSources(t *testing.T) {
 
 			mockSession.On("Navigate", ctx, tt.targetURL).Return(nil).Once()
 
-			err := analyzer.probePersistentSources(ctx, mockSession, nil, nil)
+			// REFACTOR: Updated call signature (removed browserCtx)
+			err := analyzer.probePersistentSources(ctx, mockSession, nil)
 			require.NoError(t, err)
 
 			mockSession.AssertExpectations(t)
@@ -502,7 +341,7 @@ func TestProbeURLSources(t *testing.T) {
 		c.Target, _ = url.Parse("http://example.com/page?existing=1")
 	}, false)
 
-	mockSession := NewMockSessionContext()
+	mockSession := agent.NewMockSessionContext()
 	ctx := context.Background()
 
 	var queryURL, hashURL string
@@ -516,7 +355,8 @@ func TestProbeURLSources(t *testing.T) {
 		}
 	})
 
-	err := analyzer.probeURLSources(ctx, mockSession, nil, nil)
+	// REFACTOR: Updated call signature (removed browserCtx)
+	err := analyzer.probeURLSources(ctx, mockSession, nil)
 	require.NoError(t, err)
 
 	mockSession.AssertExpectations(t)
@@ -767,6 +607,40 @@ func TestPollOASTInteractions_CanaryFiltering(t *testing.T) {
 
 // Test Cases: Overall Analysis Flow (Analyze Method Integration)
 
+// Helper function to simulate a callback invocation in tests.
+// This is necessary because the mock framework (testify/mock) doesn't natively support invoking captured function arguments.
+func simulateCallback(t *testing.T, mockSession *agent.MockSessionContext, callbackName string, event interface{}) {
+	t.Helper()
+	fn, ok := mockSession.GetExposedFunction(callbackName)
+	if !ok {
+		t.Fatalf("Callback function '%s' was not exposed on the mock session.", callbackName)
+	}
+
+	// Perform type assertion based on the expected event type.
+	switch e := event.(type) {
+	case SinkEvent:
+		callback, ok := fn.(func(SinkEvent))
+		if !ok {
+			t.Fatalf("Exposed function '%s' has the wrong signature. Expected func(SinkEvent), got %T", callbackName, fn)
+		}
+		callback(e)
+	case ExecutionProofEvent:
+		callback, ok := fn.(func(ExecutionProofEvent))
+		if !ok {
+			t.Fatalf("Exposed function '%s' has the wrong signature. Expected func(ExecutionProofEvent), got %T", callbackName, fn)
+		}
+		callback(e)
+	case ShimErrorEvent:
+		callback, ok := fn.(func(ShimErrorEvent))
+		if !ok {
+			t.Fatalf("Exposed function '%s' has the wrong signature. Expected func(ShimErrorEvent), got %T", callbackName, fn)
+		}
+		callback(e)
+	default:
+		t.Fatalf("Unsupported event type (%T) passed to simulateCallback.", event)
+	}
+}
+
 func TestAnalyze_HappyPath(t *testing.T) {
 	analyzer, reporter, mockOAST := setupAnalyzer(t, func(c *Config) {
 		// Ensure an OAST probe is present.
@@ -774,11 +648,11 @@ func TestAnalyze_HappyPath(t *testing.T) {
 	}, true)
 
 	ctx := context.Background()
-	mockSession := NewMockSessionContext()
+	mockSession := agent.NewMockSessionContext()
 
 	// --- Mock Expectations (Simplified for brevity) ---
 	mockSession.On("ID").Return("mock-session-id").Maybe()
-	mockSession.On("GetContext").Return(nil).Maybe()
+	// Ensure callbacks are exposed so we can retrieve them later.
 	mockSession.On("ExposeFunction", mock.Anything, mock.Anything, mock.Anything).Return(nil).Times(3)
 	mockSession.On("InjectScriptPersistently", mock.Anything, mock.Anything).Return(nil).Once()
 	mockSession.On("Navigate", mock.Anything, mock.Anything).Return(nil).Times(4) // Initial, Refresh, Query, Hash
@@ -799,7 +673,8 @@ func TestAnalyze_HappyPath(t *testing.T) {
 		analyzer.probesMutex.RUnlock()
 		require.NotEmpty(t, activeCanary)
 
-		mockSession.SimulateCallback(t, JSCallbackSinkEvent, SinkEvent{Type: schemas.SinkFetchURL, Value: "http://oast.example.com/" + activeCanary})
+		// Use the helper to invoke the callback captured by ExposeFunction.
+		simulateCallback(t, mockSession, JSCallbackSinkEvent, SinkEvent{Type: schemas.SinkFetchURL, Value: "http://oast.example.com/" + activeCanary})
 
 		reporter.On("Report", mock.MatchedBy(func(f CorrelatedFinding) bool {
 			return f.Canary == activeCanary && f.Sink == schemas.SinkFetchURL
@@ -819,4 +694,3 @@ func TestAnalyze_HappyPath(t *testing.T) {
 	mockOAST.AssertCalled(t, "GetInteractions", mock.Anything, mock.Anything)
 	assert.Error(t, analyzer.backgroundCtx.Err())
 }
-

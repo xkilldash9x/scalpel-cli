@@ -113,7 +113,7 @@ type BrowserExecutor struct {
 	handlers        map[ActionType]ActionHandler
 }
 
-// इंश्योर BrowserExecutor implements the agent.ActionExecutor interface.
+// implements the agent.ActionExecutor interface.
 var _ ActionExecutor = (*BrowserExecutor)(nil)
 
 // NewBrowserExecutor creates a new BrowserExecutor.

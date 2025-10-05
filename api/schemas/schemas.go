@@ -141,8 +141,8 @@ const (
 	// -- Execution Sinks --
 	SinkEval                TaintSink = "EVAL"
 	SinkFunctionConstructor TaintSink = "FUNCTION_CONSTRUCTOR"
-	SinkSetTimeout          TaintSink = "SET_TIMEOUT" // When a string is passed.
-	SinkSetInterval         TaintSink = "SET_INTERVAL" // When a string is passed.
+	SinkSetTimeout          TaintSink = "SET_TIMEOUT"   // When a string is passed.
+	SinkSetInterval         TaintSink = "SET_INTERVAL"  // When a string is passed.
 	SinkEventHandler        TaintSink = "EVENT_HANDLER" // e.g., element.onload, setAttribute('onclick', ...)
 
 	// -- DOM Manipulation Sinks (XSS) --
@@ -158,8 +158,8 @@ const (
 	SinkWorkerSrc    TaintSink = "WORKER_SRC"
 	SinkEmbedSrc     TaintSink = "EMBED_SRC"
 	SinkObjectData   TaintSink = "OBJECT_DATA"
-	SinkBaseHref     TaintSink = "BASE_HREF"    // Can lead to script gadget hijacking
-	SinkNavigation   TaintSink = "NAVIGATION"   // e.g., location.href, window.open with javascript: URIs
+	SinkBaseHref     TaintSink = "BASE_HREF"  // Can lead to script gadget hijacking
+	SinkNavigation   TaintSink = "NAVIGATION" // e.g., location.href, window.open with javascript: URIs
 
 	// -- Network/Exfiltration Sinks --
 	SinkFetch             TaintSink = "FETCH_BODY"
@@ -174,13 +174,13 @@ const (
 	SinkWorkerPostMessage TaintSink = "WORKER_POST_MESSAGE"
 
 	// -- Style & CSS Sinks --
-	SinkStyleCSS        TaintSink = "STYLE_CSS" // e.g., element.style.cssText, can be used for data exfil/UI redressing
+	SinkStyleCSS        TaintSink = "STYLE_CSS"         // e.g., element.style.cssText, can be used for data exfil/UI redressing
 	SinkStyleInsertRule TaintSink = "STYLE_INSERT_RULE" // Can inject malicious CSS rules.
 
 	// -- Special Confirmation Sinks (High Confidence) --
-	SinkExecution              TaintSink = "EXECUTION_PROOF"
-	SinkOASTInteraction        TaintSink = "OAST_INTERACTION"
-	SinkPrototypePollution     TaintSink = "PROTOTYPE_POLLUTION_CONFIRMED"
+	SinkExecution          TaintSink = "EXECUTION_PROOF"
+	SinkOASTInteraction    TaintSink = "OAST_INTERACTION"
+	SinkPrototypePollution TaintSink = "PROTOTYPE_POLLUTION_CONFIRMED"
 )
 
 // ObservationType defines the category of an observation made by an agent.
@@ -436,10 +436,10 @@ const (
 
 // Cookie represents a browser cookie.
 type Cookie struct {
-	Name     string         `json:"name"`
-	Value    string         `json:"value"`
-	Domain   string         `json:"domain"`
-	Path     string         `json:"path"`
+	Name   string `json:"name"`
+	Value  string `json:"value"`
+	Domain string `json:"domain"`
+	Path   string `json:"path"`
 	// Expires is the cookie expiration date, as a Unix timestamp (float seconds).
 	Expires  float64        `json:"expires"`
 	Size     int64          `json:"size"`
@@ -524,7 +524,7 @@ type MouseEventData struct {
 	X          float64        `json:"x"`
 	Y          float64        `json:"y"`
 	Button     MouseButton    `json:"button"`
-	Buttons    int64          `json:"buttons"`    // Bitfield for currently pressed buttons.
+	Buttons    int64          `json:"buttons"` // Bitfield for currently pressed buttons.
 	ClickCount int            `json:"clickCount"`
 	DeltaX     float64        `json:"deltaX"`
 	DeltaY     float64        `json:"deltaY"`
@@ -578,9 +578,9 @@ type Entry struct {
 }
 
 type Request struct {
-	Method      string    `json:"method"`
-	URL         string    `json:"url"`
-	HTTPVersion string    `json:"httpVersion"`
+	Method      string `json:"method"`
+	URL         string `json:"url"`
+	HTTPVersion string `json:"httpVersion"`
 	// Updated to use HARCookie for HAR compliance.
 	Cookies     []HARCookie `json:"cookies"`
 	Headers     []NVPair    `json:"headers"`
@@ -591,9 +591,9 @@ type Request struct {
 }
 
 type Response struct {
-	Status      int       `json:"status"`
-	StatusText  string    `json:"statusText"`
-	HTTPVersion string    `json:"httpVersion"`
+	Status      int    `json:"status"`
+	StatusText  string `json:"statusText"`
+	HTTPVersion string `json:"httpVersion"`
 	// Updated to use HARCookie for HAR compliance.
 	Cookies     []HARCookie `json:"cookies"`
 	Headers     []NVPair    `json:"headers"`
@@ -745,8 +745,8 @@ type SessionContext interface {
 	Submit(ctx context.Context, selector string) error
 	ScrollPage(ctx context.Context, direction string) error
 	WaitForAsync(ctx context.Context, milliseconds int) error
-	// Deprecated: GetContext stores context in struct, its an anti pattern. Don't use this method.
-	GetContext() context.Context
+	// REFACTOR: Removed GetContext() as it's an anti-pattern. Context must be passed as an argument.
+
 	// ExposeFunction allows Go functions to be called from the browser's JavaScript context.
 	ExposeFunction(ctx context.Context, name string, function interface{}) error
 	// InjectScriptPersistently adds a script that will be executed on all new documents in the session.
@@ -759,8 +759,7 @@ type SessionContext interface {
 	// CollectArtifacts gathers data like HAR logs and DOM state from the session.
 	CollectArtifacts(ctx context.Context) (*Artifacts, error)
 	// AddFinding to allow analyzers to report findings directly through the session.
-	AddFinding(finding Finding) error
-
+	AddFinding(ctx context.Context, finding Finding) error
 	// Methods for human-like interaction, using canonical schema types.
 	Sleep(ctx context.Context, d time.Duration) error
 	DispatchMouseEvent(ctx context.Context, data MouseEventData) error

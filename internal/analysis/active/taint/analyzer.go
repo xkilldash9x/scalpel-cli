@@ -34,11 +34,7 @@ type HumanoidProvider interface {
 	GetHumanoid() *humanoid.Humanoid
 }
 
-// BrowserContextProvider defines an interface to retrieve the underlying browser context.
-// This is necessary for executing chromedp actions like Humanoid pauses.
-type BrowserContextProvider interface {
-	GetContext() context.Context
-}
+// REFACTOR: Removed BrowserContextProvider interface as GetContext() is deprecated and anti-pattern.
 
 // Analyzer is the central nervous system of the IAST operation. It orchestrates probe
 // injection, event collection, and vulnerability correlation.
@@ -130,21 +126,14 @@ func (a *Analyzer) Analyze(ctx context.Context, session SessionContext) error {
 
 	a.backgroundCtx, a.backgroundCancel = context.WithCancel(context.Background())
 
-	// -- Humanoid Integration: Retrieve Controller and Context --
+	// -- Humanoid Integration: Retrieve Controller --
 	var h *humanoid.Humanoid
 	if provider, ok := session.(HumanoidProvider); ok {
 		h = provider.GetHumanoid()
 	}
 
-	var browserCtx context.Context
-	if provider, ok := session.(BrowserContextProvider); ok {
-		browserCtx = provider.GetContext()
-	}
-
-	if h != nil && browserCtx == nil {
-		a.logger.Warn("Humanoid controller is available, but BrowserContext is not. Humanoid features will be disabled.")
-		h = nil // Disable humanoid if we can't execute its actions.
-	}
+	// REFACTOR: We no longer attempt to retrieve BrowserContext via GetContext().
+	// The operation context (analysisCtx) will be used for all actions including Humanoid pauses.
 	// -----------------------------------------------------------
 
 	if err := a.instrument(analysisCtx, session); err != nil {
@@ -155,8 +144,8 @@ func (a *Analyzer) Analyze(ctx context.Context, session SessionContext) error {
 	a.startBackgroundWorkers()
 
 	// Execute the attack vectors and user interactions.
-	// MODIFICATION: Pass Humanoid controller and browser context down.
-	if err := a.executeProbes(analysisCtx, session, h, browserCtx); err != nil {
+	// REFACTOR: Pass Humanoid controller. Removed browser context argument.
+	if err := a.executeProbes(analysisCtx, session, h); err != nil {
 		// Only log as error if the failure wasn't simply due to the analysis context timeout/cancellation.
 		if analysisCtx.Err() == nil {
 			a.logger.Error("Error encountered during probing phase", zap.Error(err))
@@ -313,41 +302,36 @@ func (a *Analyzer) handleShimError(event ShimErrorEvent) {
 	)
 }
 
-// executePause attempts to execute a Humanoid cognitive pause using the provided browser context.
-// If Humanoid is nil or the browser context is nil, it skips the pause silently.
-// MODIFICATION: New helper function.
-func (a *Analyzer) executePause(ctx context.Context, browserCtx context.Context, h *humanoid.Humanoid, meanMs, stdDevMs float64) error {
+// executePause attempts to execute a Humanoid cognitive pause using the provided context.
+// If Humanoid is nil, it skips the pause silently.
+// REFACTOR: Updated signature and implementation. Now relies only on the operation context (ctx).
+func (a *Analyzer) executePause(ctx context.Context, h *humanoid.Humanoid, meanMs, stdDevMs float64) error {
 	// Check if the operation context (ctx) is done.
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
 
-	if h == nil || browserCtx == nil {
+	if h == nil {
 		return nil
 	}
 
-	// Check if the browser context (browserCtx) is done.
-	if browserCtx.Err() != nil {
-		// Return the browser context error, as it indicates the session is closed.
-		return browserCtx.Err()
-	}
-
-	//  The humanoid.CognitivePause function signature was changed. It now takes a context
-	// and returns an error directly, instead of returning a chromedp.Action.
-	// We no longer need to wrap it in a chromedp.Run call.
-	if err := h.CognitivePause(browserCtx, meanMs, stdDevMs); err != nil {
-		a.logger.Debug("Error during Humanoid pause execution.", zap.Error(err))
+	// The CognitivePause function takes the operation context.
+	if err := h.CognitivePause(ctx, meanMs, stdDevMs); err != nil {
+		// Log error if it wasn't just the context being cancelled.
+		if ctx.Err() == nil {
+			a.logger.Debug("Error during Humanoid pause execution.", zap.Error(err))
+		}
 		return err
 	}
 	return nil
 }
 
 // executeProbes orchestrates the various probing strategies against the target.
-// MODIFICATION: Updated signature to accept Humanoid and BrowserContext. Integrated pauses.
-func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h *humanoid.Humanoid, browserCtx context.Context) error {
+// REFACTOR: Updated signature to remove BrowserContext. Integrated pauses using operation context.
+func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h *humanoid.Humanoid) error {
 
-	// MODIFICATION: Pause before initial navigation (Planning/Typing URL)
-	if err := a.executePause(ctx, browserCtx, h, 500, 200); err != nil {
+	// REFACTOR: Pause before initial navigation. Use operation context.
+	if err := a.executePause(ctx, h, 500, 200); err != nil {
 		return err // Return if context cancelled during pause
 	}
 
@@ -355,26 +339,26 @@ func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h 
 		a.logger.Warn("Initial navigation failed, attempting to continue probes.", zap.Error(err))
 	}
 
-	// MODIFICATION: Pause after initial navigation (Visual Scanning/Processing)
-	if err := a.executePause(ctx, browserCtx, h, 800, 300); err != nil {
+	// REFACTOR: Pause after initial navigation. Use operation context.
+	if err := a.executePause(ctx, h, 800, 300); err != nil {
 		return err
 	}
 
-	// MODIFICATION: Pass Humanoid and context down.
-	if err := a.probePersistentSources(ctx, session, h, browserCtx); err != nil {
+	// REFACTOR: Pass Humanoid and context down.
+	if err := a.probePersistentSources(ctx, session, h); err != nil {
 		// Check if the context was cancelled before logging the error.
 		if ctx.Err() == nil {
 			a.logger.Error("Error during persistent source probing", zap.Error(err))
 		}
 	}
 
-	// MODIFICATION: Pause between probing phases (Cognitive Shift)
-	if err := a.executePause(ctx, browserCtx, h, 400, 150); err != nil {
+	// REFACTOR: Pause between probing phases. Use operation context.
+	if err := a.executePause(ctx, h, 400, 150); err != nil {
 		return err
 	}
 
-	// MODIFICATION: Pass Humanoid and context down.
-	if err := a.probeURLSources(ctx, session, h, browserCtx); err != nil {
+	// REFACTOR: Pass Humanoid and context down.
+	if err := a.probeURLSources(ctx, session, h); err != nil {
 		// Check if the context was cancelled before logging the error.
 		if ctx.Err() == nil {
 			a.logger.Error("Error during URL source probing", zap.Error(err))
@@ -383,8 +367,8 @@ func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h 
 
 	a.logger.Info("Starting interactive probing phase.")
 
-	// MODIFICATION: Pause before starting interaction phase (Planning Interaction Strategy)
-	if err := a.executePause(ctx, browserCtx, h, 600, 250); err != nil {
+	// REFACTOR: Pause before starting interaction phase. Use operation context.
+	if err := a.executePause(ctx, h, 600, 250); err != nil {
 		return err
 	}
 
@@ -396,10 +380,12 @@ func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h 
 		}
 	}
 
-	// MODIFICATION: Pause after interaction phase concludes (Observing Results)
-	if err := a.executePause(ctx, browserCtx, h, 1000, 400); err != nil {
+	// REFACTOR: Pause after interaction phase concludes. Use operation context.
+	if err := a.executePause(ctx, h, 1000, 400); err != nil {
 		// We don't return error here as probing is done, we just log if the final pause failed.
-		a.logger.Debug("Final post-interaction pause interrupted.", zap.Error(err))
+		if ctx.Err() == nil {
+			a.logger.Debug("Final post-interaction pause interrupted.", zap.Error(err))
+		}
 	}
 
 	return nil
@@ -429,8 +415,8 @@ func (a *Analyzer) preparePayload(probeDef ProbeDefinition, canary string) strin
 }
 
 // probePersistentSources injects probes into Cookies, LocalStorage, and SessionStorage.
-// MODIFICATION: Updated signature to accept Humanoid and BrowserContext. Integrated pauses.
-func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionContext, h *humanoid.Humanoid, browserCtx context.Context) error {
+// REFACTOR: Updated signature to remove BrowserContext. Integrated pauses using operation context.
+func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionContext, h *humanoid.Humanoid) error {
 	a.logger.Debug("Starting persistent source probing (Storage/Cookies).")
 	storageKeyPrefix := "sc_store_"
 	cookieNamePrefix := "sc_cookie_"
@@ -517,8 +503,8 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 		return nil
 	}
 
-	// MODIFICATION: Pause before executing the injection script (Cognitive effort for injection)
-	if err := a.executePause(ctx, browserCtx, h, 300, 100); err != nil {
+	// REFACTOR: Pause before executing the injection script. Use operation context.
+	if err := a.executePause(ctx, h, 300, 100); err != nil {
 		return err
 	}
 
@@ -529,8 +515,8 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 
 	a.logger.Debug("Persistent probes injected. Refreshing page.")
 
-	// MODIFICATION: Pause before refreshing the page (Allowing time for injection to settle)
-	if err := a.executePause(ctx, browserCtx, h, 200, 80); err != nil {
+	// REFACTOR: Pause before refreshing the page. Use operation context.
+	if err := a.executePause(ctx, h, 200, 80); err != nil {
 		return err
 	}
 
@@ -539,16 +525,16 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 		// We don't return the error immediately, allowing the post-navigation pause to occur if possible.
 	}
 
-	// MODIFICATION: Pause after refresh (Visual scanning of refreshed page)
-	if err := a.executePause(ctx, browserCtx, h, 700, 300); err != nil {
+	// REFACTOR: Pause after refresh. Use operation context.
+	if err := a.executePause(ctx, h, 700, 300); err != nil {
 		return err
 	}
 	return nil
 }
 
 //  injects probes into URL query parameters and the hash fragment.
-// MODIFICATION: Updated signature to accept Humanoid and BrowserContext. Integrated pauses.
-func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, h *humanoid.Humanoid, browserCtx context.Context) error {
+// REFACTOR: Updated signature to remove BrowserContext. Integrated pauses using operation context.
+func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, h *humanoid.Humanoid) error {
 	baseURL := *a.config.Target
 	paramPrefix := "sc_test_"
 
@@ -579,8 +565,8 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, 
 		targetURL.RawQuery = q.Encode()
 		a.logger.Debug("Navigating with combined URL parameter probes", zap.Int("probe_count", probesInjected))
 
-		// MODIFICATION: Pause before navigating with query params (Planning/URL manipulation)
-		if err := a.executePause(ctx, browserCtx, h, 400, 150); err != nil {
+		// REFACTOR: Pause before navigating with query params. Use operation context.
+		if err := a.executePause(ctx, h, 400, 150); err != nil {
 			return err
 		}
 
@@ -588,8 +574,8 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, 
 			a.logger.Warn("Navigation failed during combined URL probing", zap.Error(err))
 		}
 
-		// MODIFICATION: Pause after navigation (Visual scanning)
-		if err := a.executePause(ctx, browserCtx, h, 700, 300); err != nil {
+		// REFACTOR: Pause after navigation. Use operation context.
+		if err := a.executePause(ctx, h, 700, 300); err != nil {
 			return err
 		}
 	}
@@ -621,8 +607,8 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, 
 		targetURL.Fragment = strings.Join(hashFragments, "&")
 		a.logger.Debug("Navigating with combined Hash fragment probes", zap.Int("probe_count", probesInjected))
 
-		// MODIFICATION: Pause before navigating with hash fragments (Cognitive shift)
-		if err := a.executePause(ctx, browserCtx, h, 400, 150); err != nil {
+		// REFACTOR: Pause before navigating with hash fragments. Use operation context.
+		if err := a.executePause(ctx, h, 400, 150); err != nil {
 			return err
 		}
 
@@ -630,8 +616,8 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, 
 			a.logger.Warn("Navigation failed during combined Hash probing", zap.Error(err))
 		}
 
-		// MODIFICATION: Pause after navigation (Visual scanning)
-		if err := a.executePause(ctx, browserCtx, h, 700, 300); err != nil {
+		// REFACTOR: Pause after navigation. Use operation context.
+		if err := a.executePause(ctx, h, 700, 300); err != nil {
 			return err
 		}
 	}

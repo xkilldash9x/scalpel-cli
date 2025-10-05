@@ -18,7 +18,6 @@ import (
 	"github.com/andybalholm/cascadia"
 	"github.com/antchfx/htmlquery"
 	"github.com/dop251/goja"
-	"github.com/dop251/goja_nodejs/eventloop"
 	"go.uber.org/zap"
 	"golang.org/x/net/html"
 
@@ -28,8 +27,6 @@ import (
 
 // -- Constants --
 
-// W3C DOM Node Type constants. These are required for compatibility
-// with JavaScript expectations (e.g., document.nodeType === 9).
 const (
 	w3cElementNode  = 1
 	w3cTextNode     = 3
@@ -51,7 +48,6 @@ func mapGoNodeTypeToW3C(goType html.NodeType) int {
 		return w3cDocumentNode
 	case html.DoctypeNode:
 		return w3cDoctypeNode
-	// html.ErrorNode (0) or others.
 	default:
 		return 0
 	}
@@ -63,11 +59,9 @@ func mapGoNodeTypeToW3C(goType html.NodeType) int {
 type BrowserEnvironment interface {
 	JSNavigate(targetURL string)
 	NotifyURLChange(targetURL string)
-	// ExecuteFetch handles network requests (Fetch API, XHR, Forms) using canonical schemas.
 	ExecuteFetch(ctx context.Context, req schemas.FetchRequest) (*schemas.FetchResponse, error)
 	AddCookieFromString(cookieStr string) error
 	GetCookieString() (string, error)
-	// History management using canonical schemas.
 	PushHistory(state *schemas.HistoryState) error
 	ReplaceHistory(state *schemas.HistoryState) error
 	GetHistoryLength() int
@@ -75,29 +69,18 @@ type BrowserEnvironment interface {
 	ResolveURL(targetURL string) (*url.URL, error)
 }
 
-// DOMBridge manages the synchronization between the *html.Node DOM representation and the Goja runtime.
+// DOMBridge manages the synchronization between the *html.Node DOM and the Goja runtime.
 type DOMBridge struct {
-	// mu protects the entire state, ensuring thread safety.
-	mu sync.RWMutex
-
-	document *html.Node
-	runtime  *goja.Runtime
-	logger   *zap.Logger
-
-	eventLoop *eventloop.EventLoop
-	browser   BrowserEnvironment
-	// persona holds the configuration for the simulated environment (UA, viewport, etc.).
-	persona schemas.Persona
-
-	// Stores the root of the computed layout tree for hit-testing.
-	layoutRoot *layout.LayoutBox
-
-	// Caches Goja object wrappers for html.Nodes for O(1) lookups.
-	nodeMap map[*html.Node]*goja.Object
-
-	localStorage   map[string]string
-	sessionStorage map[string]string
-
+	mu                   sync.RWMutex
+	document             *html.Node
+	runtime              *goja.Runtime
+	logger               *zap.Logger
+	browser              BrowserEnvironment
+	persona              schemas.Persona
+	layoutRoot           *layout.LayoutBox
+	nodeMap              map[*html.Node]*goja.Object
+	localStorage         map[string]string
+	sessionStorage       map[string]string
 	currentLocationState map[string]string
 	eventListeners       map[*html.Node]map[string]*listenerGroup
 }
@@ -108,7 +91,7 @@ type nativeNode struct {
 	node   *html.Node
 }
 
-// listenerGroup stores event listeners separated by phase (capturing vs. bubbling).
+// listenerGroup stores event listeners separated by phase.
 type listenerGroup struct {
 	Capturing []goja.Value
 	Bubbling  []goja.Value
@@ -116,15 +99,13 @@ type listenerGroup struct {
 
 // -- Constructor and Initialization --
 
-// NewDOMBridge creates a new DOMBridge instance, initialized with a specific Persona.
-func NewDOMBridge(logger *zap.Logger, eventLoop *eventloop.EventLoop, browserEnv BrowserEnvironment, persona schemas.Persona) *DOMBridge {
+// NewDOMBridge creates a new DOMBridge, now decoupled from the event loop.
+func NewDOMBridge(logger *zap.Logger, browserEnv BrowserEnvironment, persona schemas.Persona) *DOMBridge {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-
 	return &DOMBridge{
 		logger:               logger.Named("dom_bridge"),
-		eventLoop:            eventLoop,
 		browser:              browserEnv,
 		persona:              persona,
 		nodeMap:              make(map[*html.Node]*goja.Object),
@@ -143,10 +124,9 @@ func (b *DOMBridge) BindToRuntime(vm *goja.Runtime, initialURL string) {
 	b.runtime = vm
 	global := vm.GlobalObject()
 
-	// Clear state from any previous binding.
 	b.nodeMap = make(map[*html.Node]*goja.Object)
 	b.eventListeners = make(map[*html.Node]map[string]*listenerGroup)
-	b.layoutRoot = nil // Clear layout tree on re-bind
+	b.layoutRoot = nil
 
 	if b.document == nil {
 		doc, err := html.Parse(strings.NewReader("<html><head></head><body></body></html>"))
@@ -161,8 +141,8 @@ func (b *DOMBridge) BindToRuntime(vm *goja.Runtime, initialURL string) {
 	_ = global.Set("window", global)
 	_ = global.Set("self", global)
 
-	// Initialize Web APIs.
-	b.initTimers()
+	// Timers (setTimeout, etc.) are removed as they require a persistent event loop,
+	// which is incompatible with this synchronous model.
 	b.bindStorageAPIs()
 	b.bindScrollAPIs()
 	b.bindHistoryAPI()
@@ -171,13 +151,11 @@ func (b *DOMBridge) BindToRuntime(vm *goja.Runtime, initialURL string) {
 	b.InitializeLocation(initialURL)
 	b.bindNavigatorAPI()
 
-	// Configure viewport dimensions based on the Persona.
 	_ = global.Set("innerWidth", b.persona.Width)
 	_ = global.Set("innerHeight", b.persona.Height)
 	_ = global.Set("outerWidth", b.persona.Width)
 	_ = global.Set("outerHeight", b.persona.Height)
-	_ = global.Set("devicePixelRatio", 1.0) // Defaulting DPR.
-
+	_ = global.Set("devicePixelRatio", 1.0)
 	_ = global.Set("scrollX", 0)
 	_ = global.Set("scrollY", 0)
 }
@@ -221,6 +199,13 @@ func (b *DOMBridge) GetDocumentNode() *html.Node {
 	return b.document
 }
 
+// GetJSNode provides thread safe access to the Goja object wrapper for a given *html.Node.
+func (b *DOMBridge) GetJSNode(node *html.Node) *goja.Object {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	return b.wrapNode(node)
+}
+
 // -- Core Wrapping Logic --
 
 // wrapNode creates or retrieves the Goja object wrapper for a given *html.Node.
@@ -237,29 +222,21 @@ func (b *DOMBridge) wrapNode(node *html.Node) *goja.Object {
 	obj := b.runtime.NewObject()
 	_ = SetObjectData(b.runtime, obj, native)
 
-	// Bind Node properties and methods.
-	// Fix: Incorrect nodeType Mapping (Go vs W3C). Use the mapping function.
 	_ = obj.Set("nodeType", mapGoNodeTypeToW3C(node.Type))
 	_ = obj.Set("nodeName", strings.ToUpper(node.Data))
 
-	// Fix: Missing textContent Property
-	// Implement textContent getter and setter.
 	b.DefineProperty(obj, "textContent", func() goja.Value {
 		b.mu.RLock()
 		defer b.mu.RUnlock()
-		// Use htmlquery.InnerText to retrieve the text of an element and its descendants.
 		return b.runtime.ToValue(htmlquery.InnerText(node))
 	}, func(value goja.Value) {
-		// Setting textContent replaces all children with a single text node.
 		b.mu.Lock()
 		defer b.mu.Unlock()
-		// Remove all existing children.
 		for c := node.FirstChild; c != nil; {
 			next := c.NextSibling
 			node.RemoveChild(c)
 			c = next
 		}
-		// Add new text node if the value is not empty.
 		if value.String() != "" {
 			node.AppendChild(&html.Node{Type: html.TextNode, Data: value.String()})
 		}
@@ -269,8 +246,6 @@ func (b *DOMBridge) wrapNode(node *html.Node) *goja.Object {
 	_ = obj.Set("appendChild", b.jsAppendChild(native))
 	_ = obj.Set("removeChild", b.jsRemoveChild(native))
 	_ = obj.Set("insertBefore", b.jsInsertBefore(native))
-
-	// Bind EventTarget methods.
 	_ = obj.Set("addEventListener", b.jsAddEventListener(native))
 	_ = obj.Set("removeEventListener", b.jsRemoveEventListener(native))
 	_ = obj.Set("dispatchEvent", b.jsDispatchEvent(native))
@@ -286,17 +261,14 @@ func unwrapNode(obj goja.Value) *nativeNode {
 	if obj == nil || goja.IsUndefined(obj) || goja.IsNull(obj) {
 		return nil
 	}
-
 	gojaObj := obj.ToObject(nil)
 	if gojaObj == nil {
 		return nil
 	}
-
 	data := GetObjectData(gojaObj)
 	if data == nil {
 		return nil
 	}
-
 	v, ok := data.(*nativeNode)
 	if !ok {
 		return nil
@@ -335,14 +307,12 @@ func (b *DOMBridge) bindDocumentAndElementMethods(obj *goja.Object, node *html.N
 		b.defineValueProperty(obj, node)
 		b.defineDatasetProperty(obj, node)
 		b.defineStyleProperty(obj, node)
-		// Common attributes mapped to properties.
 		b.defineAttributeProperty(obj, node, "id", "id")
 		b.defineAttributeProperty(obj, node, "className", "class")
 		b.defineAttributeProperty(obj, node, "href", "href")
 		b.defineAttributeProperty(obj, node, "src", "src")
 		b.defineAttributeProperty(obj, node, "title", "title")
 		b.defineAttributeProperty(obj, node, "alt", "alt")
-		// Boolean attributes.
 		b.defineBooleanAttributeProperty(obj, node, "disabled", "disabled")
 		b.defineBooleanAttributeProperty(obj, node, "checked", "checked")
 		b.defineBooleanAttributeProperty(obj, node, "selected", "selected")
@@ -359,22 +329,17 @@ func (b *DOMBridge) bindDocumentAndElementMethods(obj *goja.Object, node *html.N
 // -- JS Property Definitions --
 
 func (b *DOMBridge) defineParentAndChildProperties(obj *goja.Object, node *html.Node) {
-	// Fix: Incorrect parentNode Implementation.
-	// The original implementation used obj.Set() with a function, which is incorrect.
-	// We must use DefineProperty to create a dynamic getter.
 	b.DefineProperty(obj, "parentNode", func() goja.Value {
 		b.mu.Lock()
 		defer b.mu.Unlock()
-		// node.Parent might be nil (e.g., for the Document node itself).
 		if node.Parent == nil {
 			return goja.Null()
 		}
-		// Ensure the parent node is correctly wrapped and returned.
 		if parent := b.wrapNode(node.Parent); parent != nil {
 			return parent
 		}
 		return goja.Null()
-	}, nil) // parentNode is read-only.
+	}, nil)
 
 	b.DefineProperty(obj, "childNodes", func() goja.Value {
 		b.mu.Lock()
@@ -504,7 +469,6 @@ func (b *DOMBridge) jsGetElementById() func(goja.FunctionCall) goja.Value {
 		if id == "" {
 			return goja.Null()
 		}
-		// Build a robust CSS attribute selector.
 		selector := fmt.Sprintf(`[id="%s"]`, strings.ReplaceAll(id, `"`, `\"`))
 
 		sel, err := cascadia.Compile(selector)
@@ -557,16 +521,12 @@ func (b *DOMBridge) jsDocumentWrite() func(goja.FunctionCall) goja.Value {
 	}
 }
 
-// jsQuerySelector implements querySelector, throwing a JS exception on invalid selectors.
 func (b *DOMBridge) jsQuerySelector(contextNative *nativeNode) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
 		selector := call.Argument(0).String()
-
 		sel, err := cascadia.Compile(selector)
 		if err != nil {
-			// Throw a JS SyntaxError (DOMException) if the selector is invalid.
 			b.logger.Warn("Invalid CSS selector in querySelector", zap.String("selector", selector), zap.Error(err))
-			// Panic allows Goja to catch it and turn it into a JS exception.
 			panic(b.runtime.NewGoError(fmt.Errorf("SyntaxError: '%s' is not a valid selector", selector)))
 		}
 
@@ -580,11 +540,9 @@ func (b *DOMBridge) jsQuerySelector(contextNative *nativeNode) func(goja.Functio
 	}
 }
 
-// jsQuerySelectorAll implements querySelectorAll, throwing a JS exception on invalid selectors.
 func (b *DOMBridge) jsQuerySelectorAll(contextNative *nativeNode) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
 		selector := call.Argument(0).String()
-
 		sel, err := cascadia.Compile(selector)
 		if err != nil {
 			b.logger.Warn("Invalid CSS selector in querySelectorAll", zap.String("selector", selector), zap.Error(err))
@@ -602,20 +560,15 @@ func (b *DOMBridge) jsQuerySelectorAll(contextNative *nativeNode) func(goja.Func
 	}
 }
 
-// jsClick implements element.click(), ensuring default actions respect event cancellation.
 func (b *DOMBridge) jsClick(native *nativeNode) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
-		// Dispatch the standard JS events. DispatchEventOnNode handles its own locking.
 		b.DispatchEventOnNode(native.node, "mousedown")
 		b.DispatchEventOnNode(native.node, "mouseup")
 
-		// Dispatch 'click' and capture whether it was canceled (preventDefault).
 		canceled := b.DispatchEventOnNode(native.node, "click")
 
-		// Perform the browser's default action ONLY if the event was not canceled.
 		if !canceled {
 			b.mu.Lock()
-			// PerformDefaultClickAction relies on the lock being held.
 			b.PerformDefaultClickAction(native.node)
 			b.mu.Unlock()
 		}
@@ -692,7 +645,6 @@ func (b *DOMBridge) jsAppendChild(parentNative *nativeNode) func(goja.FunctionCa
 	}
 }
 
-// jsRemoveChild implements node.removeChild(), throwing JS exceptions on failure.
 func (b *DOMBridge) jsRemoveChild(parentNative *nativeNode) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
 		childNative := unwrapNode(call.Argument(0))
@@ -704,14 +656,12 @@ func (b *DOMBridge) jsRemoveChild(parentNative *nativeNode) func(goja.FunctionCa
 		if childNative.node.Parent == parentNative.node {
 			parentNative.node.RemoveChild(childNative.node)
 		} else {
-			// Throw DOMException (NotFoundError).
 			panic(b.runtime.NewGoError(errors.New("NotFoundError: The node to be removed is not a child of this node.")))
 		}
 		return call.Argument(0)
 	}
 }
 
-// jsInsertBefore implements node.insertBefore(), throwing JS exceptions on failure.
 func (b *DOMBridge) jsInsertBefore(parentNative *nativeNode) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
 		newNative := unwrapNode(call.Argument(0))
@@ -729,13 +679,11 @@ func (b *DOMBridge) jsInsertBefore(parentNative *nativeNode) func(goja.FunctionC
 		}
 
 		if refNative == nil {
-			// If referenceNode is null, appendChild.
 			parentNative.node.AppendChild(newNative.node)
 		} else {
 			if refNative.node.Parent == parentNative.node {
 				parentNative.node.InsertBefore(newNative.node, refNative.node)
 			} else {
-				// Throw DOMException (NotFoundError).
 				panic(b.runtime.NewGoError(errors.New("NotFoundError: The reference node is not a child of this node.")))
 			}
 		}
@@ -782,7 +730,6 @@ func (b *DOMBridge) jsRemoveEventListener(native *nativeNode) func(goja.Function
 		eventType := call.Argument(0).String()
 		listenerVal := call.Argument(1)
 		if _, ok := goja.AssertFunction(listenerVal); !ok {
-			// Real browsers silently ignore attempts to remove non-function listeners.
 			return goja.Undefined()
 		}
 
@@ -879,16 +826,12 @@ func (b *DOMBridge) removeEventListener(node *html.Node, eventType string, liste
 	}
 }
 
-// DispatchEventOnNode is the public entry point for dispatching events. It manages locking.
-// Returns true if the event was canceled (defaultPrevented).
 func (b *DOMBridge) DispatchEventOnNode(targetNode *html.Node, eventType string) bool {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 	return b.dispatchEventInternal(targetNode, eventType)
 }
 
-// dispatchEventInternal implements the standard DOM event flow (Capture, Target, Bubble).
-// NOTE: Assumes the DOMBridge lock is already held.
 func (b *DOMBridge) dispatchEventInternal(targetNode *html.Node, eventType string) bool {
 	const (
 		EventPhaseNone      = 0
@@ -901,7 +844,6 @@ func (b *DOMBridge) dispatchEventInternal(targetNode *html.Node, eventType strin
 		return false
 	}
 
-	// Determine event properties.
 	bubbles := true
 	cancelable := true
 	switch eventType {
@@ -912,13 +854,11 @@ func (b *DOMBridge) dispatchEventInternal(targetNode *html.Node, eventType strin
 		cancelable = false
 	}
 
-	// 1. Build the propagation path (ancestors, root first).
 	var propagationPath []*html.Node
 	for n := targetNode.Parent; n != nil; n = n.Parent {
 		propagationPath = append([]*html.Node{n}, propagationPath...)
 	}
 
-	// 2. Initialize Event Object and State.
 	var (
 		stopPropagation        bool
 		stopImmediatePropagation bool
@@ -933,7 +873,6 @@ func (b *DOMBridge) dispatchEventInternal(targetNode *html.Node, eventType strin
 	_ = eventObj.Set("cancelable", cancelable)
 	_ = eventObj.Set("timeStamp", time.Now().UnixMilli())
 
-	// Define dynamic properties using getters.
 	b.DefineProperty(eventObj, "target", func() goja.Value { return b.wrapNode(targetNode) }, nil)
 	b.DefineProperty(eventObj, "eventPhase", func() goja.Value { return b.runtime.ToValue(currentPhase) }, nil)
 	b.DefineProperty(eventObj, "defaultPrevented", func() goja.Value { return b.runtime.ToValue(defaultPrevented) }, nil)
@@ -944,7 +883,6 @@ func (b *DOMBridge) dispatchEventInternal(targetNode *html.Node, eventType strin
 		return goja.Null()
 	}, nil)
 
-	// Define methods.
 	_ = eventObj.Set("stopPropagation", func() { stopPropagation = true })
 	_ = eventObj.Set("stopImmediatePropagation", func() {
 		stopPropagation = true
@@ -956,7 +894,6 @@ func (b *DOMBridge) dispatchEventInternal(targetNode *html.Node, eventType strin
 		}
 	})
 
-	// Helper function to invoke listeners.
 	invokeListeners := func(node *html.Node, phase uint16) {
 		currentTarget = node
 
@@ -965,14 +902,13 @@ func (b *DOMBridge) dispatchEventInternal(targetNode *html.Node, eventType strin
 			return
 		}
 		var listeners []goja.Value
-		// Copy listeners slice to allow modification during iteration.
 		if phase == EventPhaseCapturing {
 			listeners = append([]goja.Value(nil), group.Capturing...)
 		} else {
 			listeners = append([]goja.Value(nil), group.Bubbling...)
 		}
 
-		thisObj := b.wrapNode(node) // 'this' context is the currentTarget.
+		thisObj := b.wrapNode(node)
 
 		for _, listener := range listeners {
 			if fn, ok := goja.AssertFunction(listener); ok {
@@ -986,9 +922,6 @@ func (b *DOMBridge) dispatchEventInternal(targetNode *html.Node, eventType strin
 		}
 	}
 
-	// 3. Event Flow.
-
-	// Capturing Phase
 	currentPhase = EventPhaseCapturing
 	for _, node := range propagationPath {
 		invokeListeners(node, EventPhaseCapturing)
@@ -997,7 +930,6 @@ func (b *DOMBridge) dispatchEventInternal(targetNode *html.Node, eventType strin
 		}
 	}
 
-	// Target Phase
 	currentPhase = EventPhaseAtTarget
 	invokeListeners(targetNode, EventPhaseCapturing)
 	if stopPropagation {
@@ -1008,7 +940,6 @@ func (b *DOMBridge) dispatchEventInternal(targetNode *html.Node, eventType strin
 		goto DispatchEnd
 	}
 
-	// Bubbling Phase
 	if bubbles {
 		currentPhase = EventPhaseBubbling
 		for i := len(propagationPath) - 1; i >= 0; i-- {
@@ -1020,14 +951,11 @@ func (b *DOMBridge) dispatchEventInternal(targetNode *html.Node, eventType strin
 	}
 
 DispatchEnd:
-	// Reset state after dispatch.
 	currentPhase = EventPhaseNone
 	currentTarget = nil
 	return defaultPrevented
 }
 
-// PerformDefaultClickAction handles default browser behavior for clicks.
-// NOTE: Assumes a write lock is held.
 func (b *DOMBridge) PerformDefaultClickAction(node *html.Node) {
 	tagName := strings.ToLower(node.Data)
 
@@ -1083,68 +1011,7 @@ func (b *DOMBridge) PerformDefaultClickAction(node *html.Node) {
 	}
 }
 
-// -- Window APIs (Timers, Storage, Location, Network, etc.) --
-
-func (b *DOMBridge) initTimers() {
-	timerFunc := func(isInterval bool) func(goja.FunctionCall) goja.Value {
-		return func(call goja.FunctionCall) goja.Value {
-			if b.eventLoop == nil {
-				b.logger.Warn("Timer function called but no event loop is available.")
-				return goja.Undefined()
-			}
-			callback, ok := goja.AssertFunction(call.Argument(0))
-			if !ok {
-				return goja.Undefined()
-			}
-			delay := call.Argument(1).ToInteger()
-			if delay < 0 {
-				delay = 0
-			}
-			var callbackArgs []goja.Value
-			if len(call.Arguments) > 2 {
-				callbackArgs = call.Arguments[2:]
-			}
-
-			timerCallback := func(vm *goja.Runtime) {
-				if _, err := callback(goja.Undefined(), callbackArgs...); err != nil {
-					b.logger.Error("An error occurred in a timer callback", zap.Error(err))
-				}
-			}
-
-			var timer interface{}
-			duration := time.Duration(delay) * time.Millisecond
-			if isInterval {
-				timer = b.eventLoop.SetInterval(timerCallback, duration)
-			} else {
-				timer = b.eventLoop.SetTimeout(timerCallback, duration)
-			}
-			return b.runtime.ToValue(timer)
-		}
-	}
-
-	clearer := func(call goja.FunctionCall) goja.Value {
-		if b.eventLoop == nil {
-			return goja.Undefined()
-		}
-		timerID := call.Argument(0).Export()
-		if timerID == nil {
-			return goja.Undefined()
-		}
-		switch t := timerID.(type) {
-		case *eventloop.Timer:
-			b.eventLoop.ClearTimeout(t)
-		case *eventloop.Interval:
-			b.eventLoop.ClearInterval(t)
-		}
-		return goja.Undefined()
-	}
-
-	global := b.runtime.GlobalObject()
-	_ = global.Set("setTimeout", timerFunc(false))
-	_ = global.Set("setInterval", timerFunc(true))
-	_ = global.Set("clearTimeout", clearer)
-	_ = global.Set("clearInterval", clearer)
-}
+// -- Window APIs --
 
 func (b *DOMBridge) bindStorageAPIs() {
 	createStorageObject := func(storageMap map[string]string) *goja.Object {
@@ -1240,7 +1107,6 @@ func (b *DOMBridge) bindHistoryAPI() {
 	b.runtime.GlobalObject().Set("history", history)
 }
 
-// bindNavigatorAPI sets up window.navigator using the Persona data.
 func (b *DOMBridge) bindNavigatorAPI() {
 	if b.runtime == nil {
 		return
@@ -1248,14 +1114,11 @@ func (b *DOMBridge) bindNavigatorAPI() {
 	navigator := b.runtime.NewObject()
 	global := b.runtime.GlobalObject()
 
-	// Core properties derived from the Persona.
 	_ = navigator.Set("userAgent", b.persona.UserAgent)
 	_ = navigator.Set("appVersion", strings.TrimPrefix(b.persona.UserAgent, "Mozilla/"))
 	_ = navigator.Set("platform", b.persona.Platform)
 	_ = navigator.Set("language", b.persona.Locale)
 	_ = navigator.Set("languages", b.persona.Languages)
-
-	// Standard properties.
 	_ = navigator.Set("webdriver", false)
 	_ = navigator.Set("cookieEnabled", true)
 
@@ -1416,7 +1279,7 @@ func (b *DOMBridge) updateStateFromURL(u *url.URL) {
 
 // -- Network APIs (Fetch and XHR) --
 
-// bindFetchAPI injects the window.fetch function (Promise-based).
+// bindFetchAPI injects window.fetch, now implemented synchronously (blocking).
 func (b *DOMBridge) bindFetchAPI() {
 	if b.browser == nil {
 		return
@@ -1473,21 +1336,18 @@ func (b *DOMBridge) bindFetchAPI() {
 
 		promise, resolve, reject := b.runtime.NewPromise()
 
-		go func() {
-			ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			defer cancel()
+		// The operation is now blocking. The goroutine that called fetch() in JS
+		// will wait here until the network request completes.
+		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
 
-			resp, err := b.browser.ExecuteFetch(ctx, req)
-
-			b.eventLoop.RunOnLoop(func(vm *goja.Runtime) {
-				if err != nil {
-					reject(vm.NewTypeError("Network request failed: %s", err.Error()))
-					return
-				}
-				responseObj := b.createJSResponseObject(vm, resp)
-				resolve(responseObj)
-			})
-		}()
+		resp, err := b.browser.ExecuteFetch(ctx, req)
+		if err != nil {
+			reject(b.runtime.NewTypeError("Network request failed: %s", err.Error()))
+		} else {
+			responseObj := b.createJSResponseObject(b.runtime, resp)
+			resolve(responseObj)
+		}
 
 		return b.runtime.ToValue(promise)
 	}
@@ -1495,7 +1355,6 @@ func (b *DOMBridge) bindFetchAPI() {
 	b.runtime.GlobalObject().Set("fetch", fetchFunc)
 }
 
-// createJSResponseObject maps schemas.FetchResponse to a JS Response object.
 func (b *DOMBridge) createJSResponseObject(vm *goja.Runtime, resp *schemas.FetchResponse) *goja.Object {
 	obj := vm.NewObject()
 	_ = obj.Set("ok", resp.Status >= 200 && resp.Status <= 299)
@@ -1540,7 +1399,6 @@ func (b *DOMBridge) bindXHRAPI() {
 	if b.browser == nil {
 		return
 	}
-	// XHR constructor function.
 	xhrConstructor := func(call goja.ConstructorCall) *goja.Object {
 		xhr := &xmlHttpRequest{
 			bridge:       b,
@@ -1549,7 +1407,6 @@ func (b *DOMBridge) bindXHRAPI() {
 			jsObject:     call.This,
 			responseBody: []byte{},
 		}
-		// Bind methods and properties to the new JS object ('this').
 		xhr.bind()
 		return nil
 	}
@@ -1559,9 +1416,8 @@ func (b *DOMBridge) bindXHRAPI() {
 // xmlHttpRequest holds the state for a single XHR instance.
 type xmlHttpRequest struct {
 	bridge *DOMBridge
-	mu     sync.Mutex // Protects the state of this specific XHR instance
+	mu     sync.Mutex
 
-	// JS-visible state
 	readyState   int
 	status       int
 	statusText   string
@@ -1570,18 +1426,15 @@ type xmlHttpRequest struct {
 	method       string
 	url          string
 	async        bool
-
-	jsObject *goja.Object // Reference to the JS 'this' object
+	jsObject     *goja.Object
 }
 
 // bind attaches methods and properties to the XHR JS object.
 func (xhr *xmlHttpRequest) bind() {
-	// Methods
 	_ = xhr.jsObject.Set("open", xhr.open)
 	_ = xhr.jsObject.Set("send", xhr.send)
 	_ = xhr.jsObject.Set("setRequestHeader", xhr.setRequestHeader)
 
-	// Properties
 	b := xhr.bridge
 	b.DefineProperty(xhr.jsObject, "readyState", func() goja.Value {
 		xhr.mu.Lock()
@@ -1619,15 +1472,13 @@ func (xhr *xmlHttpRequest) setReadyState(state int) {
 	xhr.readyState = state
 	xhr.mu.Unlock()
 
-	// Schedule the onreadystatechange callback to run on the event loop.
-	xhr.bridge.eventLoop.RunOnLoop(func(vm *goja.Runtime) {
-		onReadyStateChange := xhr.jsObject.Get("onreadystatechange")
-		if fn, ok := goja.AssertFunction(onReadyStateChange); ok {
-			if _, err := fn(xhr.jsObject); err != nil {
-				xhr.bridge.logger.Error("Error in onreadystatechange", zap.Error(err))
-			}
+	// The callback is now executed immediately and synchronously within the current VM.
+	onReadyStateChange := xhr.jsObject.Get("onreadystatechange")
+	if fn, ok := goja.AssertFunction(onReadyStateChange); ok {
+		if _, err := fn(xhr.jsObject); err != nil {
+			xhr.bridge.logger.Error("Error in onreadystatechange", zap.Error(err))
 		}
-	})
+	}
 }
 
 func (xhr *xmlHttpRequest) open(method, url string, async goja.Value) {
@@ -1653,6 +1504,7 @@ func (xhr *xmlHttpRequest) send(body goja.Value) {
 	method := xhr.method
 	rawURL := xhr.url
 	headers := xhr.headers
+	isAsync := xhr.async
 	xhr.mu.Unlock()
 
 	b := xhr.bridge
@@ -1680,46 +1532,50 @@ func (xhr *xmlHttpRequest) send(body goja.Value) {
 		Body:    bodyBytes,
 	}
 
-	go func() {
-		ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
+	if isAsync {
+		go xhr.performRequest(req)
+	} else {
+		xhr.performRequest(req)
+	}
+}
 
-		resp, err := b.browser.ExecuteFetch(ctx, req)
-		if err != nil {
-			xhr.bridge.logger.Error("XHR execution failed", zap.Error(err))
-			xhr.setReadyState(4) // DONE
-			return
-		}
+// performRequest contains the actual blocking network call.
+func (xhr *xmlHttpRequest) performRequest(req schemas.FetchRequest) {
+	b := xhr.bridge
+	ctx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+	defer cancel()
 
-		xhr.mu.Lock()
-		xhr.status = resp.Status
-		xhr.statusText = resp.StatusText
-		xhr.responseBody = resp.Body
-		xhr.mu.Unlock()
-
-		xhr.setReadyState(2) // HEADERS_RECEIVED
-		xhr.setReadyState(3) // LOADING
+	resp, err := b.browser.ExecuteFetch(ctx, req)
+	if err != nil {
+		b.logger.Error("XHR execution failed", zap.Error(err))
 		xhr.setReadyState(4) // DONE
-	}()
+		return
+	}
+
+	xhr.mu.Lock()
+	xhr.status = resp.Status
+	xhr.statusText = resp.StatusText
+	xhr.responseBody = resp.Body
+	xhr.mu.Unlock()
+
+	xhr.setReadyState(2) // HEADERS_RECEIVED
+	xhr.setReadyState(3) // LOADING
+	xhr.setReadyState(4) // DONE
 }
 
 // -- Form Submission Logic --
 
-// submitFormInternal orchestrates the form submission process.
-// NOTE: This internal version is called when the DOMBridge lock is already held.
 func (b *DOMBridge) submitFormInternal(formNode, submitterNode *html.Node) {
 	if b.browser == nil {
 		return
 	}
 
-	// 1. Dispatch the 'submit' event.
 	canceled := b.dispatchEventInternal(formNode, "submit")
 	if canceled {
 		b.logger.Debug("Form submission canceled by 'submit' event listener")
 		return
 	}
 
-	// 2. Determine method, action, and encoding type
 	method := strings.ToUpper(htmlquery.SelectAttr(formNode, "method"))
 	if method != "POST" {
 		method = "GET"
@@ -1735,10 +1591,8 @@ func (b *DOMBridge) submitFormInternal(formNode, submitterNode *html.Node) {
 		enctype = "application/x-www-form-urlencoded"
 	}
 
-	// 3. Serialize form data
 	formData := b.serializeForm(formNode, submitterNode)
 
-	// 4. Execute the request
 	if method == "GET" {
 		resolvedURL.RawQuery = formData.Encode()
 		b.browser.JSNavigate(resolvedURL.String())
@@ -1769,18 +1623,15 @@ func (b *DOMBridge) submitFormInternal(formNode, submitterNode *html.Node) {
 			{Name: "Content-Type", Value: contentType},
 		},
 		Body:        requestBody,
-		Credentials: "same-origin", // Form submissions typically include credentials.
+		Credentials: "same-origin",
 	}
 
-	// Execute the request asynchronously to avoid blocking the JS thread.
-	go func() {
-		if _, err := b.browser.ExecuteFetch(context.Background(), req); err != nil {
-			b.logger.Error("Form POST submission failed during execution", zap.Error(err))
-		}
-	}()
+	// Execute the request synchronously.
+	if _, err := b.browser.ExecuteFetch(context.Background(), req); err != nil {
+		b.logger.Error("Form POST submission failed during execution", zap.Error(err))
+	}
 }
 
-// serializeMultipartForm encodes form values as multipart/form-data.
 func (b *DOMBridge) serializeMultipartForm(values url.Values) ([]byte, string, error) {
 	var bodyBuffer bytes.Buffer
 	multipartWriter := multipart.NewWriter(&bodyBuffer)
@@ -1829,8 +1680,6 @@ func (b *DOMBridge) serializeForm(formNode, submitterNode *html.Node) url.Values
 			case "checkbox", "radio":
 				if isChecked {
 					val, hasValue := getAttribute(el, "value")
-					// Fix: Broken Form Submission (Data serialization)
-					// HTML5 spec: If a checked checkbox/radio has no value attribute, it defaults to "on".
 					if !hasValue {
 						val = "on"
 					}
@@ -1857,7 +1706,6 @@ func (b *DOMBridge) serializeForm(formNode, submitterNode *html.Node) url.Values
 					selected = true
 				}
 			}
-			// Default selection (first option if none selected)
 			if !selected && len(options) > 0 {
 				val, _ := getAttribute(options[0], "value")
 				values.Add(name, val)
@@ -1874,7 +1722,6 @@ func (b *DOMBridge) serializeForm(formNode, submitterNode *html.Node) url.Values
 
 // -- Go-side Utilities --
 
-// FindNodeAtPoint performs a hit-test on the layout tree.
 func (b *DOMBridge) FindNodeAtPoint(x, y float64) *html.Node {
 	b.mu.RLock()
 	defer b.mu.RUnlock()
@@ -1938,7 +1785,7 @@ func (b *DOMBridge) QuerySelector(selector string) (*html.Node, error) {
 	defer b.mu.RUnlock()
 	node := htmlquery.FindOne(b.document, selector)
 	if node == nil {
-		return nil, NewElementNotFoundError(selector)
+		return nil, fmt.Errorf("element not found for selector: %s", selector)
 	}
 	return node, nil
 }

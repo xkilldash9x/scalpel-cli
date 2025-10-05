@@ -1,3 +1,4 @@
+// browser/jsexec/runtime.go
 // internal/browser/jsexec/runtime.go
 package jsexec
 
@@ -36,7 +37,8 @@ func NewRuntime(logger *zap.Logger, eventLoop *eventloop.EventLoop, browserEnv j
 	log := logger.Named("jsec")
 
 	// The DOM bridge is created once and holds the persistent state (DOM, storage).
-	bridge := jsbind.NewDOMBridge(log, eventLoop, browserEnv, persona)
+	// FIX: Removed the eventLoop argument from this function call to match the new signature.
+	bridge := jsbind.NewDOMBridge(log, browserEnv, persona)
 
 	// The VM is no longer created here.
 	return &Runtime{
@@ -241,4 +243,3 @@ func (r *Runtime) waitForPromise(ctx context.Context, vm *goja.Runtime, promiseV
 		}
 	}
 }
-

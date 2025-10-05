@@ -85,6 +85,34 @@ func (m *MockGraphStore) GetEdges(ctx context.Context, id string) ([]schemas.Edg
 // MockSessionContext implements the schemas.SessionContext interface for testing.
 type MockSessionContext struct {
 	mock.Mock
+	exposedFunctions map[string]interface{}
+	mutex            sync.Mutex
+}
+
+// NewMockSessionContext creates a new mock with initialized fields.
+func NewMockSessionContext() *MockSessionContext {
+	return &MockSessionContext{
+		exposedFunctions: make(map[string]interface{}),
+	}
+}
+
+// ExposeFunction mocks the real method and stores the callback for later retrieval.
+func (m *MockSessionContext) ExposeFunction(ctx context.Context, name string, function interface{}) error {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	args := m.Called(ctx, name, function)
+	if args.Error(0) == nil {
+		m.exposedFunctions[name] = function
+	}
+	return args.Error(0)
+}
+
+// GetExposedFunction is a test helper to retrieve a function captured by ExposeFunction.
+func (m *MockSessionContext) GetExposedFunction(name string) (interface{}, bool) {
+	m.mutex.Lock()
+	defer m.mutex.Unlock()
+	fn, ok := m.exposedFunctions[name]
+	return fn, ok
 }
 
 // -- High Level Interaction Methods --
@@ -131,13 +159,7 @@ func (m *MockSessionContext) Interact(ctx context.Context, config schemas.Intera
 
 // -- Session State & Control --
 
-func (m *MockSessionContext) GetContext() context.Context {
-	args := m.Called()
-	if args.Get(0) == nil {
-		return context.Background() // Default fallback
-	}
-	return args.Get(0).(context.Context)
-}
+// REFACTOR: Removed GetContext() implementation.
 
 func (m *MockSessionContext) Close(ctx context.Context) error {
 	args := m.Called(ctx)
@@ -145,11 +167,6 @@ func (m *MockSessionContext) Close(ctx context.Context) error {
 }
 
 // -- Scripting and Callbacks --
-
-func (m *MockSessionContext) ExposeFunction(ctx context.Context, name string, function interface{}) error {
-	args := m.Called(ctx, name, function)
-	return args.Error(0)
-}
 
 func (m *MockSessionContext) InjectScriptPersistently(ctx context.Context, script string) error {
 	args := m.Called(ctx, script)
@@ -166,8 +183,8 @@ func (m *MockSessionContext) CollectArtifacts(ctx context.Context) (*schemas.Art
 	return args.Get(0).(*schemas.Artifacts), args.Error(1)
 }
 
-func (m *MockSessionContext) AddFinding(finding schemas.Finding) error {
-	args := m.Called(finding)
+func (m *MockSessionContext) AddFinding(ctx context.Context, finding schemas.Finding) error {
+	args := m.Called(ctx, finding)
 	return args.Error(0)
 }
 

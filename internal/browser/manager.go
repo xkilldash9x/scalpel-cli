@@ -218,6 +218,7 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, targetURL string) (res
 	dummyFindingsChan := make(chan schemas.Finding, 32)
 	defer close(dummyFindingsChan)
 
+	// Pass the input 'ctx' as the sessionCtx for NewAnalysisContext.
 	sessionCtx, err := m.NewAnalysisContext(ctx, sessionCfg, schemas.DefaultPersona, "", "", dummyFindingsChan)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create temporary session: %w", err)
@@ -238,23 +239,25 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, targetURL string) (res
 		}
 	}()
 
-	// The logic is now inlined here to prevent a premature return
-	// from triggering the deferred session close and causing a race condition.
-	sCtx := sessionCtx.GetContext()
+	// REFACTOR: Use the provided 'ctx' for the operations instead of calling GetContext().
+	// This adheres to Go best practices and respects the operation's deadline/cancellation.
+	opCtx := ctx
 	m.logger.Debug("Starting link extraction.", zap.String("session_id", sessionCtx.ID()), zap.String("url", targetURL))
 
 	navStart := time.Now()
-	if err = sessionCtx.Navigate(sCtx, targetURL); err != nil {
+	// Use opCtx for Navigate.
+	if err = sessionCtx.Navigate(opCtx, targetURL); err != nil {
 		m.logger.Error("Navigation failed during link extraction.", zap.Error(err), zap.Duration("duration", time.Since(navStart)), zap.String("session_id", sessionCtx.ID()))
 		return nil, fmt.Errorf("failed to navigate to %s: %w", targetURL, err)
 	}
 	m.logger.Debug("Navigation succeeded.", zap.Duration("duration", time.Since(navStart)), zap.String("session_id", sessionCtx.ID()))
 
 	stabStart := time.Now()
-	if stabErr := sessionCtx.WaitForAsync(sCtx, 0); stabErr != nil {
+	// Use opCtx for WaitForAsync.
+	if stabErr := sessionCtx.WaitForAsync(opCtx, 0); stabErr != nil {
 		// Check if the context was cancelled before returning a generic stabilization error.
-		if sCtx.Err() != nil {
-			return nil, sCtx.Err()
+		if opCtx.Err() != nil {
+			return nil, opCtx.Err()
 		}
 		return nil, fmt.Errorf("stabilization after navigation failed: %w", stabErr)
 	}
@@ -276,15 +279,17 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, targetURL string) (res
         return links;
     })();`
 
-	resultJSON, err := sessionCtx.ExecuteScript(sCtx, script, nil)
+	// Use opCtx for ExecuteScript.
+	resultJSON, err := sessionCtx.ExecuteScript(opCtx, script, nil)
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute link extraction script: %w", err)
 	}
 	m.logger.Debug("Script execution finished.", zap.Duration("duration", time.Since(scriptStart)), zap.String("session_id", sessionCtx.ID()))
 
-	if stabErr := sessionCtx.WaitForAsync(sCtx, 0); stabErr != nil {
-		if sCtx.Err() != nil {
-			return nil, sCtx.Err()
+	// Use opCtx for WaitForAsync.
+	if stabErr := sessionCtx.WaitForAsync(opCtx, 0); stabErr != nil {
+		if opCtx.Err() != nil {
+			return nil, opCtx.Err()
 		}
 		return nil, fmt.Errorf("stabilization after script execution failed: %w", stabErr)
 	}
@@ -316,7 +321,7 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, targetURL string) (res
 			m.logger.Debug("Skipping invalid href found on page", zap.String("href", href), zap.Error(resolveErr))
 			continue
 		}
-		
+
 		// Only consider http and https schemes.
 		if u.Scheme != "http" && u.Scheme != "https" {
 			continue

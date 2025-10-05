@@ -1,4 +1,4 @@
-package session_test
+package session
 
 import (
 	"bytes"
@@ -12,8 +12,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
-
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/session"
 )
 
 // Note: The 'mockTransport' and 'delayCloseBody' helpers have been moved to 'helpers_test.go'
@@ -40,7 +38,7 @@ func TestHarvester_RoundTrip_Capture(t *testing.T) {
 		},
 	}
 
-	harvester := session.NewHarvester(transport, logger, true) // Enable body capture
+	harvester := NewHarvester(transport, logger, true) // Enable body capture
 	client := &http.Client{Transport: harvester}
 
 	// 1. Execute Request
@@ -92,7 +90,7 @@ func TestHarvester_RoundTrip_BinaryEncoding(t *testing.T) {
 		},
 	}
 
-	harvester := session.NewHarvester(transport, logger, true)
+	harvester := NewHarvester(transport, logger, true)
 	client := &http.Client{Transport: harvester}
 
 	resp, err := client.Get("http://example.com/image.png")
@@ -131,7 +129,7 @@ func TestHarvester_WaitNetworkIdle(t *testing.T) {
 		},
 	}
 
-	harvester := session.NewHarvester(transport, logger, false)
+	harvester := NewHarvester(transport, logger, false)
 	client := &http.Client{Transport: harvester}
 
 	// 1. Start the request lifecycle in a goroutine.

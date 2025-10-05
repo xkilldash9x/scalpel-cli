@@ -22,12 +22,24 @@ type MonolithicWorker struct {
 	adapterRegistry map[schemas.TaskType]core.Analyzer
 }
 
+// Option is a function that configures a MonolithicWorker.
+type Option func(*MonolithicWorker)
+
+// WithAnalyzers provides a way to inject a custom set of analyzers.
+// This is primarily used for testing to replace real adapters with mocks.
+func WithAnalyzers(analyzers map[schemas.TaskType]core.Analyzer) Option {
+	return func(w *MonolithicWorker) {
+		w.adapterRegistry = analyzers
+	}
+}
+
 // NewMonolithicWorker initializes and returns a new worker instance.
-// It sets up the internal registry of all available analysis adapters.
+// It accepts functional options to allow for custom configuration, such as injecting mock adapters for testing.
 func NewMonolithicWorker(
 	cfg *config.Config,
 	logger *zap.Logger,
 	globalCtx *core.GlobalContext,
+	opts ...Option,
 ) (*MonolithicWorker, error) {
 
 	w := &MonolithicWorker{
@@ -37,12 +49,26 @@ func NewMonolithicWorker(
 		adapterRegistry: make(map[schemas.TaskType]core.Analyzer),
 	}
 
-	// Populates the adapter registry, mapping task types to their handlers.
-	if err := w.registerAdapters(); err != nil {
-		return nil, fmt.Errorf("failed to register worker adapters: %w", err)
+	// Apply all the functional options provided.
+	for _, opt := range opts {
+		opt(w)
+	}
+
+	// If the adapter registry is still empty after applying options,
+	// it means no custom analyzers were injected, so we register the default production adapters.
+	if len(w.adapterRegistry) == 0 {
+		if err := w.registerAdapters(); err != nil {
+			return nil, fmt.Errorf("failed to register default worker adapters: %w", err)
+		}
 	}
 
 	return w, nil
+}
+
+// GlobalCtx provides safe, read-only access to the worker's global context.
+// This is essential for adapters and other components that need configuration or shared state.
+func (w *MonolithicWorker) GlobalCtx() *core.GlobalContext {
+	return w.globalCtx
 }
 
 // registerAdapters builds the map of task types to their corresponding analyzers.
@@ -50,7 +76,6 @@ func NewMonolithicWorker(
 // by simply creating a new adapter and registering it here.
 func (w *MonolithicWorker) registerAdapters() error {
 	// Initialize and register each analysis adapter.
-	// More complex adapters can receive dependencies here during instantiation.
 	w.adapterRegistry[schemas.TaskAnalyzeWebPageTaint] = adapters.NewTaintAdapter()
 	w.adapterRegistry[schemas.TaskTestAuthATO] = adapters.NewATOAdapter()
 	w.adapterRegistry[schemas.TaskTestAuthIDOR] = adapters.NewIDORAdapter()
@@ -60,7 +85,7 @@ func (w *MonolithicWorker) registerAdapters() error {
 	// The agent adapter is a stateless component.
 	w.adapterRegistry[schemas.TaskAgentMission] = adapters.NewAgentAdapter()
 
-	w.logger.Info("Analyzer adapters registered", zap.Int("count", len(w.adapterRegistry)))
+	w.logger.Info("Default analyzer adapters registered", zap.Int("count", len(w.adapterRegistry)))
 	return nil
 }
 

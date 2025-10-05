@@ -187,7 +187,7 @@ func (a *ATOAnalyzer) Analyze(ctx context.Context, analysisCtx schemas.SessionCo
 
 	for finding := range results {
 		// Handle potential error returned by AddFinding.
-		if err := analysisCtx.AddFinding(finding); err != nil {
+		if err := analysisCtx.AddFinding(ctx, finding); err != nil {
 			a.Logger.Error("Failed to report finding via SessionContext", zap.Error(err))
 		}
 	}
