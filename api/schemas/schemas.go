@@ -745,7 +745,7 @@ type SessionContext interface {
 	Submit(ctx context.Context, selector string) error
 	ScrollPage(ctx context.Context, direction string) error
 	WaitForAsync(ctx context.Context, milliseconds int) error
-	// GetContext returns the underlying context for the session.
+	// Deprecated: GetContext stores context in struct, its an anti pattern. Don't use this method.
 	GetContext() context.Context
 	// ExposeFunction allows Go functions to be called from the browser's JavaScript context.
 	ExposeFunction(ctx context.Context, name string, function interface{}) error
