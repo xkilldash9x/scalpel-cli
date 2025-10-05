@@ -17,7 +17,7 @@ import (
 // -- Constants and Configuration --
 
 const (
-    BaseFontSize      = 16.0 // Default root font size.
+    BaseFontSize    = 16.0 // Default root font size.
     DefaultLineHeight = 1.2  // Default multiplier for 'line-height: normal'.
 )
 
@@ -41,7 +41,7 @@ type Dimensions struct {
     Padding Edges
     Border  Edges
     Margin  Edges
-    // Stores the cumulative transformation matrix from the root.
+    // Stores the cumulative transformation matrix (CTM) from the local coordinate system to the viewport.
     Transform TransformMatrix
 }
 
@@ -450,7 +450,8 @@ func (e *Engine) BuildAndLayoutTree(styleRoot *style.StyledNode) *LayoutBox {
     layoutTree.Floats = NewFloatList()
 
     layoutTree.Layout(e)
-    layoutTree.applyTransforms(e, IdentityMatrix())
+    // Start the CTM calculation traversal from the root, passing nil as the parent.
+    layoutTree.applyTransforms(e, nil)
 
     return layoutTree
 }
@@ -2055,8 +2056,14 @@ func (b *LayoutBox) parseTransform(e *Engine) TransformMatrix {
     return finalMatrix
 }
 
-func (b *LayoutBox) applyTransforms(e *Engine, parentTransform TransformMatrix) {
-    localTransform := IdentityMatrix()
+// applyTransforms recursively calculates the Cumulative Transformation Matrix (CTM)
+// for each LayoutBox. The CTM maps the box's local coordinates (top-left of border box)
+// to the viewport coordinates.
+// We pass the parent LayoutBox to calculate the relative translation correctly.
+func (b *LayoutBox) applyTransforms(e *Engine, parent *LayoutBox) {
+    // 1. Calculate the local transform (Mc) due to CSS 'transform' property.
+    // Mc = T(Oc) * M * T(-Oc)
+    localCSSTransform := IdentityMatrix()
 
     if b.StyledNode != nil {
         transformProp := b.StyledNode.Lookup("transform", "none")
@@ -2066,15 +2073,43 @@ func (b *LayoutBox) applyTransforms(e *Engine, parentTransform TransformMatrix) 
             originX, originY := b.parseTransformOrigin(e)
             toOrigin := TranslateMatrix(-originX, -originY)
             fromOrigin := TranslateMatrix(originX, originY)
-            localTransform = fromOrigin.Multiply(transformsMatrix.Multiply(toOrigin))
+            localCSSTransform = fromOrigin.Multiply(transformsMatrix.Multiply(toOrigin))
         }
     }
 
-    finalTransform := parentTransform.Multiply(localTransform)
-    b.Dimensions.Transform = finalTransform
+    // 2. Determine the layout translation (T) relative to the parent in the Layout Tree.
+    // We use the pre-transform layout positions (X, Y).
+    var layoutTranslation TransformMatrix
+    myPos := b.Dimensions.BorderBox()
 
+    // Calculate translation relative to the parent in the Layout Tree.
+    if parent != nil {
+        parentPos := parent.Dimensions.BorderBox()
+        tx := myPos.X - parentPos.X
+        ty := myPos.Y - parentPos.Y
+        layoutTranslation = TranslateMatrix(tx, ty)
+    } else {
+        // Root element (or element without a parent in the traversal).
+        // Translation is its absolute position from the viewport origin.
+        layoutTranslation = TranslateMatrix(myPos.X, myPos.Y)
+    }
+
+    // 3. Calculate CTM. CTMc = CTMp * T * Mc.
+    parentCTM := IdentityMatrix()
+    if parent != nil {
+        // Use the CTM of the parent in the Layout Tree.
+        // We rely on the parent's CTM being calculated before the child's (due to traversal order).
+        parentCTM = parent.Dimensions.Transform
+    }
+
+    // Transformation from local space to parent space: T * Mc
+    transformToParentSpace := layoutTranslation.Multiply(localCSSTransform)
+    // Transformation from local space to viewport: CTMp * (T * Mc)
+    b.Dimensions.Transform = parentCTM.Multiply(transformToParentSpace)
+
+    // 4. Recurse to children.
     for _, child := range b.Children {
-        child.applyTransforms(e, b.Dimensions.Transform)
+        child.applyTransforms(e, b) // Pass 'b' as the parent for the next level
     }
 }
 
@@ -2518,16 +2553,28 @@ func (e *Engine) GetElementGeometry(layoutRoot *LayoutBox, selector string) (*sc
 }
 
 func (b *LayoutBox) ToElementGeometry() *schemas.ElementGeometry {
-    rect := b.Dimensions.BorderBox()
+    // The Dimensions.Transform is the Cumulative Transformation Matrix (CTM),
+    // which maps local coordinates (relative to the top-left of the border box)
+    // to viewport coordinates.
     transform := b.Dimensions.Transform
-    x, y, width, height := rect.X, rect.Y, rect.Width, rect.Height
 
-    tx1, ty1 := transform.Apply(x, y)
-    tx2, ty2 := transform.Apply(x+width, y)
-    tx3, ty3 := transform.Apply(x+width, y+height)
-    tx4, ty4 := transform.Apply(x, y+height)
+    // Get the dimensions of the border box. We do not use the X, Y position here
+    // because the translation is already included in the CTM.
+    rect := b.Dimensions.BorderBox()
+    width, height := rect.Width, rect.Height
+
+    // Apply the CTM to the four corners of the box in local coordinates.
+    // V1: (0, 0)
+    tx1, ty1 := transform.Apply(0, 0)
+    // V2: (width, 0)
+    tx2, ty2 := transform.Apply(width, 0)
+    // V3: (width, height)
+    tx3, ty3 := transform.Apply(width, height)
+    // V4: (0, height)
+    tx4, ty4 := transform.Apply(0, height)
 
     vertices := []float64{tx1, ty1, tx2, ty2, tx3, ty3, tx4, ty4}
+    // Calculate the Axis-Aligned Bounding Box (AABB) of the transformed vertices.
     minX := math.Min(tx1, math.Min(tx2, math.Min(tx3, tx4)))
     maxX := math.Max(tx1, math.Max(tx2, math.Max(tx3, tx4)))
     minY := math.Min(ty1, math.Min(ty2, math.Min(ty3, ty4)))

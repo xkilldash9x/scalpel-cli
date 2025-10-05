@@ -60,6 +60,133 @@ type opLockKey struct{}
 
 var operationLockKey = opLockKey{}
 
+// --- Start of Robust CombineContext implementation ---
+
+// combinedContext implements context.Context by wrapping two contexts.
+// It is designed to propagate the specific cancellation reason (e.g., DeadlineExceeded)
+// from whichever context is canceled first.
+type combinedContext struct {
+	parentCtx    context.Context
+	secondaryCtx context.Context
+	done         chan struct{}
+	err          error
+	mu           sync.Mutex
+}
+
+func (c *combinedContext) Deadline() (time.Time, bool) {
+	// Return the earliest deadline.
+	d1, ok1 := c.parentCtx.Deadline()
+	d2, ok2 := c.secondaryCtx.Deadline()
+
+	if !ok1 && !ok2 {
+		return time.Time{}, false
+	}
+	if !ok1 {
+		return d2, true
+	}
+	if !ok2 {
+		return d1, true
+	}
+
+	if d1.Before(d2) {
+		return d1, true
+	}
+	return d2, true
+}
+
+func (c *combinedContext) Done() <-chan struct{} {
+	return c.done
+}
+
+func (c *combinedContext) Err() error {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	return c.err
+}
+
+// Value prioritize secondaryCtx over parentCtx.
+func (c *combinedContext) Value(key interface{}) interface{} {
+	if val := c.secondaryCtx.Value(key); val != nil {
+		return val
+	}
+	return c.parentCtx.Value(key)
+}
+
+// CombineContext creates a new context that is canceled when either the parent or secondary context is canceled.
+// This implementation ensures the specific error (like DeadlineExceeded) is propagated.
+func CombineContext(parentCtx, secondaryCtx context.Context) (context.Context, context.CancelFunc) {
+	// Optimization: If they are the same, or if secondary is Background/TODO, use parent.
+	if parentCtx == secondaryCtx || secondaryCtx == context.Background() || secondaryCtx == context.TODO() {
+		return context.WithCancel(parentCtx)
+	}
+
+	c := &combinedContext{
+		parentCtx:    parentCtx,
+		secondaryCtx: secondaryCtx,
+		done:         make(chan struct{}),
+	}
+
+	// Check if already cancelled before starting the monitoring goroutine.
+	if err := parentCtx.Err(); err != nil {
+		c.err = err
+		close(c.done)
+		return c, func() {}
+	}
+	if err := secondaryCtx.Err(); err != nil {
+		c.err = err
+		close(c.done)
+		return c, func() {}
+	}
+
+	// Use a synchronization channel for manual cancellation.
+	// Buffered channel to prevent blocking in cancel().
+	stop := make(chan struct{}, 1)
+
+	// Monitor both contexts.
+	go func() {
+		var err error
+		select {
+		case <-parentCtx.Done():
+			err = parentCtx.Err() // Propagate parent error
+		case <-secondaryCtx.Done():
+			err = secondaryCtx.Err() // Propagate secondary error
+		case <-stop:
+			// Manually cancelled via the returned CancelFunc.
+			err = context.Canceled
+		}
+
+		c.mu.Lock()
+		// Ensure we only set the error and close the channel once.
+		if c.err == nil {
+			c.err = err
+			close(c.done)
+		}
+		c.mu.Unlock()
+
+		// Clean up the stop channel if it wasn't used (i.e., cancellation came from parent/secondary).
+		// This ensures the goroutine exits cleanly.
+		if err != context.Canceled {
+			select {
+			case <-stop:
+			default:
+			}
+		}
+	}()
+
+	cancel := func() {
+		// Signal the monitoring goroutine to stop and register the cancellation.
+		select {
+		case stop <- struct{}{}:
+		case <-c.done:
+			// Already done, no need to signal.
+		}
+	}
+
+	return c, cancel
+}
+
+// --- End of Robust CombineContext implementation ---
+
 // Session represents a single, functional browsing context, equivalent to a tab.
 // It implements schemas.SessionContext.
 // The public API is safe for concurrent use.
@@ -85,7 +212,7 @@ type Session struct {
 	// Protected by 'mu' for safe access/shutdown.
 	eventLoop *eventloop.EventLoop
 
-	// Humanoid configuration
+	// Humanoid configuration (Set only if enabled)
 	humanoidCfg *humanoid.Config
 
 	// Operation serialization lock.
@@ -153,8 +280,16 @@ func (s *Session) acquireOpLock(ctx context.Context) (context.Context, func()) {
 	}
 
 	// 5. Lock acquired successfully and session is alive.
-	lockedCtx := context.WithValue(ctx, operationLockKey, true)
-	return lockedCtx, s.opMu.Unlock
+	// We must ensure the context passed onwards respects the combined cancellation logic
+	// and is cleaned up when the lock is released to prevent goroutine leaks.
+	combinedCtx, cancelCombined := CombineContext(s.ctx, ctx)
+	lockedCtx := context.WithValue(combinedCtx, operationLockKey, true)
+
+	// The unlock function must release the mutex AND cancel the combined context scope.
+	return lockedCtx, func() {
+		cancelCombined()
+		s.opMu.Unlock()
+	}
 }
 
 type sessionConsolePrinter struct {
@@ -223,6 +358,8 @@ func NewSession(
 
 	var domHCfg dom.HumanoidConfig
 	humanoidCfg := cfg.Browser.Humanoid
+
+	// Only initialize humanoid configuration and set s.humanoidCfg if enabled.
 	if cfg.Browser.Humanoid.Enabled {
 		if humanoidCfg.Rng == nil {
 			source := rand.NewSource(time.Now().UnixNano())
@@ -237,7 +374,9 @@ func NewSession(
 			ClickHoldMaxMs: int(s.humanoidCfg.ClickHoldMaxMs),
 		}
 	}
-	// The humanoid controller uses 's' (humanoid.Executor), which implements methods using the public, locking API.
+
+	// The humanoid controller is always initialized, but its behavior depends on the config passed.
+	// It uses 's' (humanoid.Executor), which implements methods using the public, locking API.
 	s.humanoidController = humanoid.New(humanoidCfg, log.Named("humanoid"), s)
 
 	if err := s.initializeNetworkStack(log); err != nil {
@@ -466,8 +605,10 @@ func (s *Session) initializeNetworkStack(log *zap.Logger) error {
 	s.harvester = NewHarvester(compressionTransport, log.Named("harvester"), s.cfg.Network.CaptureResponseBodies)
 	s.client = &http.Client{
 		Transport: s.harvester,
-		Timeout:   netConfig.RequestTimeout,
-		Jar:       netConfig.CookieJar,
+		// Timeout is generally managed via request contexts in Navigate/executeRequest.
+		// Setting client.Timeout provides a fallback but context timeouts are preferred.
+		Timeout: netConfig.RequestTimeout,
+		Jar:     netConfig.CookieJar,
 		// Handle redirects manually in executeRequest.
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
@@ -555,7 +696,8 @@ func (s *Session) SetOnClose(fn func()) {
 
 // stabilize waits for the session to become idle (network activity ceased and JS event loop clear).
 func (s *Session) stabilize(ctx context.Context) error {
-	// Combine session context with the operation context.
+	// The context provided here should already be combined (e.g., via acquireOpLock),
+	// but we combine again defensively in case stabilize is called directly.
 	stabCtx, stabCancel := CombineContext(s.ctx, ctx)
 	defer stabCancel()
 
@@ -567,7 +709,7 @@ func (s *Session) stabilize(ctx context.Context) error {
 	// Wait for network activity to cease.
 	if s.harvester != nil {
 		if err := s.harvester.WaitNetworkIdle(stabCtx, quietPeriod); err != nil {
-			// FIX: If WaitNetworkIdle fails (due to cancellation), we must return the error immediately.
+			// If WaitNetworkIdle fails (due to cancellation), we must return the error immediately.
 			s.logger.Debug("Network stabilization interrupted.", zap.Error(err))
 			return err
 		}
@@ -585,6 +727,10 @@ func (s *Session) stabilize(ctx context.Context) error {
 
 	loop := s.getEventLoop()
 	if loop == nil {
+		// Return the session context error if closed, otherwise a generic error.
+		if s.ctx.Err() != nil {
+			return fmt.Errorf("session closed during stabilization: %w", s.ctx.Err())
+		}
 		return errors.New("session closed during stabilization")
 	}
 
@@ -610,14 +756,21 @@ func (s *Session) Navigate(ctx context.Context, targetURL string) error {
 	// Acquire the operation lock.
 	lockedCtx, unlock := s.acquireOpLock(ctx)
 	defer unlock()
+
+	// Check context immediately after acquiring lock.
+	if lockedCtx.Err() != nil {
+		return lockedCtx.Err()
+	}
+
 	return s.navigateInternal(lockedCtx, targetURL)
 }
 
 // navigateInternal performs the navigation logic.
 // Assumes s.opMu is held. Must be called with the locked context.
 func (s *Session) navigateInternal(ctx context.Context, targetURL string) error {
-	// 1. Combine session context and the operation context.
-	baseNavCtx, baseNavCancel := CombineContext(s.ctx, ctx)
+	// 1. The incoming context (ctx) should already be combined via acquireOpLock.
+	// We use this context as the base for the navigation operation.
+	baseNavCtx := ctx
 
 	// 2. Apply the specific navigation timeout for the network request.
 	// When using http.NewRequestWithContext, it's crucial to manage timeouts via the context.
@@ -627,13 +780,9 @@ func (s *Session) navigateInternal(ctx context.Context, targetURL string) error 
 	}
 
 	// Create the context specifically for the HTTP request and body reading.
+	// This context inherits cancellation from baseNavCtx but adds the specific timeout.
 	requestCtx, requestCancel := context.WithTimeout(baseNavCtx, timeout)
-
-	// Ensure all contexts are cancelled when the function returns.
-	defer func() {
-		requestCancel()
-		baseNavCancel()
-	}()
+	defer requestCancel()
 
 	resolvedURL, err := s.ResolveURL(targetURL)
 	if err != nil {
@@ -696,6 +845,7 @@ func (s *Session) executeRequest(ctx context.Context, req *http.Request) error {
 		s.logger.Debug("Executing request", zap.String("method", currentReq.Method), zap.String("url", currentReq.URL.String()))
 		resp, err := s.client.Do(currentReq)
 		if err != nil {
+			// The error returned here should correctly reflect the context error (e.g. DeadlineExceeded) if that was the cause.
 			return fmt.Errorf("request for '%s' failed: %w", currentReq.URL.String(), err)
 		}
 		if resp.StatusCode >= 300 && resp.StatusCode < 400 {
@@ -1073,14 +1223,23 @@ func (s *Session) GetDOMSnapshot(ctx context.Context) (io.Reader, error) {
 	lockedCtx, unlock := s.acquireOpLock(ctx)
 	defer unlock()
 
+	if lockedCtx.Err() != nil {
+		return nil, lockedCtx.Err()
+	}
+
 	bridge := s.getDOMBridge()
 	if bridge == nil {
+		// Return empty HTML if the session is closed or not initialized.
+		if s.ctx.Err() != nil {
+			return nil, s.ctx.Err()
+		}
 		return bytes.NewBufferString("<html></html>"), nil
 	}
 	htmlContent, err := bridge.GetOuterHTML()
 	if err != nil {
 		return nil, err
 	}
+	// Final check before returning data.
 	if lockedCtx.Err() != nil {
 		return nil, lockedCtx.Err()
 	}
@@ -1130,15 +1289,34 @@ func (s *Session) executeStepsInternal(ctx context.Context, steps []schemas.Inte
 		needsStabilization := true
 		needsRendering := true
 
+		// Determine if humanoid behavior should be used for this step.
+		useHumanoid := s.humanoidCfg != nil
+
 		switch step.Action {
 		case schemas.ActionClick:
-			if err := s.humanoidController.IntelligentClick(ctx, step.Selector, nil); err != nil {
-				return fmt.Errorf("failed to execute click on '%s': %w", step.Selector, err)
+			if useHumanoid {
+				if err := s.humanoidController.IntelligentClick(ctx, step.Selector, nil); err != nil {
+					return fmt.Errorf("failed to execute click on '%s': %w", step.Selector, err)
+				}
+			} else {
+				// Basic immediate click when humanoid is disabled.
+				if err := s.executeClickInternal(ctx, step.Selector, 0, 0); err != nil {
+					return fmt.Errorf("failed to execute click on '%s': %w", step.Selector, err)
+				}
 			}
+
 		case schemas.ActionType:
-			if err := s.humanoidController.Type(ctx, step.Selector, step.Value, nil); err != nil {
-				return fmt.Errorf("failed to execute type on '%s': %w", step.Selector, err)
+			if useHumanoid {
+				if err := s.humanoidController.Type(ctx, step.Selector, step.Value, nil); err != nil {
+					return fmt.Errorf("failed to execute type on '%s': %w", step.Selector, err)
+				}
+			} else {
+				// Basic immediate typing when humanoid is disabled.
+				if err := s.executeTypeInternal(ctx, step.Selector, step.Value, 0); err != nil {
+					return fmt.Errorf("failed to execute type on '%s': %w", step.Selector, err)
+				}
 			}
+
 		case schemas.ActionNavigate:
 			// Use navigateInternal as lock is held.
 			if err := s.navigateInternal(ctx, step.Value); err != nil {
@@ -1165,11 +1343,18 @@ func (s *Session) executeStepsInternal(ctx context.Context, steps []schemas.Inte
 				return fmt.Errorf("failed to execute select on '%s': %w", step.Selector, err)
 			}
 		case schemas.ActionSubmit:
-			// A "submit" is typically achieved via a click.
-			if err := s.humanoidController.IntelligentClick(ctx, step.Selector, nil); err != nil {
-				return fmt.Errorf("failed to execute submit (via click) on '%s': %w", step.Selector, err)
+			// A "submit" is typically achieved via a click on the submit element.
+			if useHumanoid {
+				if err := s.humanoidController.IntelligentClick(ctx, step.Selector, nil); err != nil {
+					return fmt.Errorf("failed to execute submit (via click) on '%s': %w", step.Selector, err)
+				}
+			} else {
+				if err := s.executeClickInternal(ctx, step.Selector, 0, 0); err != nil {
+					return fmt.Errorf("failed to execute submit (via click) on '%s': %w", step.Selector, err)
+				}
 			}
-			// Form submission leads to navigation (executeRequest -> processResponse).
+			// Form submission might lead to navigation (executeRequest -> processResponse).
+			// We rely on stabilization to determine if navigation occurred.
 			needsRendering = false
 			// Note: ActionScroll is missing from the schemas.InteractionAction constants provided, but handled if implemented.
 		default:
@@ -1184,6 +1369,8 @@ func (s *Session) executeStepsInternal(ctx context.Context, steps []schemas.Inte
 			}
 		}
 
+		// If stabilization finished and we determined rendering is needed (e.g., DOM modifying actions).
+		// We must also check if the URL changed (e.g., form submission) which implies navigation handled rendering.
 		if needsRendering {
 			if err := s.reRender(ctx); err != nil {
 				// Log the error but don't fail the entire interaction sequence if rendering fails.
@@ -1265,14 +1452,27 @@ func (s *Session) recursiveInteractInternal(ctx context.Context, config schemas.
 	return nil
 }
 
-// Click simulates a human like mouse click by delegating to the humanoid controller.
+// Click simulates a mouse click. It uses the humanoid controller if enabled, otherwise falls back to immediate execution.
 func (s *Session) Click(ctx context.Context, selector string) error {
 	lockedCtx, unlock := s.acquireOpLock(ctx)
 	defer unlock()
 
-	if err := s.humanoidController.IntelligentClick(lockedCtx, selector, nil); err != nil {
-		return err
+	if lockedCtx.Err() != nil {
+		return lockedCtx.Err()
 	}
+
+	// If s.humanoidCfg is nil, humanoid behavior was disabled at session creation.
+	if s.humanoidCfg != nil {
+		if err := s.humanoidController.IntelligentClick(lockedCtx, selector, nil); err != nil {
+			return err
+		}
+	} else {
+		// Fallback to basic, immediate execution when humanoid is disabled.
+		if err := s.executeClickInternal(lockedCtx, selector, 0, 0); err != nil {
+			return err
+		}
+	}
+
 	// Stabilize the session
 	if err := s.stabilize(lockedCtx); err != nil {
 		return err
@@ -1281,14 +1481,26 @@ func (s *Session) Click(ctx context.Context, selector string) error {
 	return s.reRender(lockedCtx)
 }
 
-// Type simulates human like typing by delegating to the humanoid controller.
+// Type simulates typing. It uses the humanoid controller if enabled, otherwise falls back to immediate execution.
 func (s *Session) Type(ctx context.Context, selector string, text string) error {
 	lockedCtx, unlock := s.acquireOpLock(ctx)
 	defer unlock()
 
-	if err := s.humanoidController.Type(lockedCtx, selector, text, nil); err != nil {
-		return err
+	if lockedCtx.Err() != nil {
+		return lockedCtx.Err()
 	}
+
+	if s.humanoidCfg != nil {
+		if err := s.humanoidController.Type(lockedCtx, selector, text, nil); err != nil {
+			return err
+		}
+	} else {
+		// Fallback to basic execution. Execute immediately (holdMeanMs=0).
+		if err := s.executeTypeInternal(lockedCtx, selector, text, 0); err != nil {
+			return err
+		}
+	}
+
 	// Stabilize the session
 	if err := s.stabilize(lockedCtx); err != nil {
 		return err
@@ -1308,6 +1520,10 @@ func (s *Session) Submit(ctx context.Context, selector string) error {
 func (s *Session) ScrollPage(ctx context.Context, direction string) error {
 	lockedCtx, unlock := s.acquireOpLock(ctx)
 	defer unlock()
+
+	if lockedCtx.Err() != nil {
+		return lockedCtx.Err()
+	}
 
 	scrollAmount := 500
 	var script string
@@ -1364,6 +1580,7 @@ func (s *Session) exposeFunctionInternal(ctx context.Context, name string, funct
 	// Inject into the current VM synchronously.
 	errChan := make(chan error, 1)
 	loop.RunOnLoop(func(vm *goja.Runtime) {
+		// Clear interrupt before potentially quick operations too.
 		vm.ClearInterrupt()
 		errChan <- vm.Set(name, function)
 	})
@@ -1428,14 +1645,16 @@ func (s *Session) executeScriptInternal(ctx context.Context, script string, args
 }
 
 // executeScriptLowLevel handles the low level interaction with the Goja event loop.
-// It includes robust panic recovery to prevent a misbehaving script from
-// crashing the session's entire event loop goroutine.
+// It includes robust panic recovery and a retry mechanism for spurious interruptions,
+// which can sometimes occur when running under the Go race detector.
 // Assumes s.opMu is held.
 func (s *Session) executeScriptLowLevel(ctx context.Context, script string, res interface{}, args []interface{}) error {
-	execCtx, execCancel := CombineContext(s.ctx, ctx)
-	defer execCancel()
-	if execCtx.Err() != nil {
-		return execCtx.Err()
+	const maxRetries = 3
+	var lastErr error
+
+	// Check session context once before starting the loop.
+	if s.ctx.Err() != nil {
+		return s.ctx.Err()
 	}
 
 	loop := s.getEventLoop()
@@ -1443,75 +1662,116 @@ func (s *Session) executeScriptLowLevel(ctx context.Context, script string, res 
 		return errors.New("session closed: event loop unavailable")
 	}
 
-	resultChan := make(chan struct {
-		Value goja.Value
-		Error error
-	}, 1) // Buffer of 1 to prevent the callback from blocking if the receiver is cancelled.
+	// The context (ctx) provided should already be combined if called via acquireOpLock.
+	// We rely on that combined context for the operation's lifecycle.
 
-	loop.RunOnLoop(func(vm *goja.Runtime) {
-		// This defer/recover block is critical. It runs LAST (LIFO order for defers).
-		defer func() {
-			// Since this function is the only thing running on the event loop's goroutine
-			// at this moment, we can safely restore the global interrupt handler here.
-			vm.Interrupt(s.ctx.Done())
-			if r := recover(); r != nil {
-				err := fmt.Errorf("panic in javascript execution: %v", r)
-				s.logger.Error("Recovered from panic in event loop", zap.Error(err), zap.String("stack", string(debug.Stack())))
-				// Send the panic as an error to the calling function.
-				// Use select to avoid blocking if the receiver is already gone due to context cancellation.
-				select {
-				case resultChan <- struct {
-					Value goja.Value
-					Error error
-				}{nil, err}:
-				default:
-				}
-			}
-		}()
+	for i := 0; i < maxRetries; i++ {
+		// Check the operation context before proceeding with the attempt.
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
 
-		// Set up a specific interrupt channel for this execution.
-		execInterruptHandle := make(chan struct{})
-		vm.Interrupt(execInterruptHandle)
-
-		executionDone := make(chan struct{})
-
-		// Ensure the monitoring goroutine is always signaled to stop, even on panic.
-		// This defer runs BEFORE the panic recovery defer.
-		defer close(executionDone)
-
-		// Monitor the context. If canceled, signal the interrupt handler.
-		go func() {
-			select {
-			case <-execCtx.Done():
-				// The context was canceled. Signal the interrupt handler.
-				close(execInterruptHandle)
-			case <-executionDone:
-			// The script finished (or panicked), exit the monitoring goroutine.
-			}
-		}()
-
-		val, err := vm.RunString(script)
-
-		// Send the result back.
-		// Use select to avoid blocking if the receiver is already gone due to context cancellation.
-		select {
-		case resultChan <- struct {
+		resultChan := make(chan struct {
 			Value goja.Value
 			Error error
-		}{val, err}:
-		case <-execCtx.Done():
-		// If context is done, don't block.
-		}
-	})
+		}, 1) // Buffer of 1 to prevent the callback from blocking if the receiver is cancelled.
 
-	// Wait for the result or cancellation. This prevents deadlocks if the context is cancelled.
-	select {
-	case result := <-resultChan:
-		return s.processScriptResult(execCtx, result.Value, result.Error, res)
-	case <-execCtx.Done():
-		// Context was cancelled while waiting for the event loop to process the job.
-		return fmt.Errorf("javascript execution cancelled while waiting for event loop: %w", execCtx.Err())
+		loop.RunOnLoop(func(vm *goja.Runtime) {
+			// This defer/recover block is critical. It runs LAST (LIFO order for defers).
+			defer func() {
+				// Since this function is the only thing running on the event loop's goroutine
+				// at this moment, we can safely restore the global interrupt handler here.
+				vm.Interrupt(s.ctx.Done())
+				if r := recover(); r != nil {
+					err := fmt.Errorf("panic in javascript execution: %v", r)
+					s.logger.Error("Recovered from panic in event loop", zap.Error(err), zap.String("stack", string(debug.Stack())))
+					// Send the panic as an error to the calling function.
+					// Use select to avoid blocking if the receiver is already gone due to context cancellation.
+					select {
+					case resultChan <- struct {
+						Value goja.Value
+						Error error
+					}{nil, err}:
+					default:
+					}
+				}
+			}()
+
+			// FIX: Clear any previous interrupt state. Goja interrupts are sticky.
+			vm.ClearInterrupt()
+
+			// Set up a specific interrupt channel for this execution.
+			execInterruptHandle := make(chan struct{})
+			vm.Interrupt(execInterruptHandle)
+
+			executionDone := make(chan struct{})
+
+			// Ensure the monitoring goroutine is always signaled to stop, even on panic.
+			// This defer runs BEFORE the panic recovery defer.
+			defer close(executionDone)
+
+			// Monitor the context. If canceled, signal the interrupt handler.
+			go func() {
+				select {
+				case <-ctx.Done():
+					// The context was canceled. Signal the interrupt handler.
+					close(execInterruptHandle)
+				case <-executionDone:
+					// The script finished (or panicked), exit the monitoring goroutine.
+				}
+			}()
+
+			val, err := vm.RunString(script)
+
+			// Send the result back.
+			// Use select to avoid blocking if the receiver is already gone due to context cancellation.
+			select {
+			case resultChan <- struct {
+				Value goja.Value
+				Error error
+			}{val, err}:
+			case <-ctx.Done():
+				// If context is done, don't block.
+			}
+		})
+
+		// Wait for the result or cancellation.
+		select {
+		case result := <-resultChan:
+			// Process the result using the operation context.
+			err := s.processScriptResult(ctx, result.Value, result.Error, res)
+
+			if err == nil {
+				return nil // Success
+			}
+
+			// Check if the error is the specific "unexpected interruption" error.
+			// This indicates a spurious interruption where the context was fine.
+			if strings.Contains(err.Error(), "javascript execution interrupted unexpectedly") {
+				s.logger.Warn("Spurious JavaScript interruption detected, retrying.", zap.Int("attempt", i+1), zap.Error(err))
+				lastErr = err
+
+				// Optional: Delay slightly before retry.
+				select {
+				case <-time.After(10 * time.Millisecond):
+				case <-ctx.Done():
+					return ctx.Err() // Main context cancelled during delay.
+				}
+				continue // Retry
+			}
+
+			// Other errors (JS exception, valid context cancellation, panic) are returned immediately.
+			return err
+
+		case <-ctx.Done():
+			// Context was cancelled while waiting for the event loop to process the job.
+			// CombineContext ensures ctx.Err() propagates the correct reason (e.g., DeadlineExceeded).
+			return fmt.Errorf("javascript execution cancelled while waiting for event loop: %w", ctx.Err())
+		}
 	}
+
+	// If we exit the loop, it means we exhausted retries for spurious interruptions.
+	return fmt.Errorf("javascript execution failed after %d retries due to spurious interruptions: %w", maxRetries, lastErr)
 }
 
 func (s *Session) waitForPromise(ctx context.Context, promise *goja.Promise) (goja.Value, error) {
@@ -1578,14 +1838,17 @@ func (s *Session) processScriptResult(ctx context.Context, value goja.Value, err
 		// Check for interruption first. This is the most common case for cancellation.
 		if errors.As(err, &interruptedError) {
 			// If the script was interrupted, the definitive source of truth is the state of the context.
+			// Thanks to the robust CombineContext, ctx.Err() should accurately reflect the reason (e.g., DeadlineExceeded).
 			if ctxErr := ctx.Err(); ctxErr != nil {
 				return fmt.Errorf("javascript execution interrupted by context: %w", ctxErr)
 			}
-			// If the context is fine, check if the session itself is closing.
+			// If the context is fine, check if the session itself is closing (redundant if ctx is combined correctly, but safe).
 			if sessionErr := s.ctx.Err(); sessionErr != nil {
 				return fmt.Errorf("javascript execution interrupted (session closing): %w", sessionErr)
 			}
-			// An interruption without a clear reason is unexpected but indicates cancellation.
+			// An interruption without a clear reason indicates a spurious interruption (handled by retry logic in executeScriptLowLevel).
+			// We log this specific scenario for debugging.
+			s.logger.Debug("Javascript execution interrupted unexpectedly without context error.", zap.Error(interruptedError))
 			return fmt.Errorf("javascript execution interrupted unexpectedly: %w", context.Canceled)
 		}
 
@@ -1652,8 +1915,12 @@ func (s *Session) executeClickInternal(ctx context.Context, selector string, min
 	if err != nil {
 		return err
 	}
-	if s.humanoidCfg != nil && s.humanoidCfg.Enabled {
-		// Placeholder for humanoid timing simulation.
+
+	// Simulate click timing if requested (e.g., by the humanoid controller).
+	if minMs > 0 || maxMs > 0 {
+		if err := simulateClickTiming(ctx, minMs, maxMs); err != nil {
+			return err
+		}
 	}
 
 	bridge := s.getDOMBridge()
@@ -1686,6 +1953,7 @@ func (s *Session) ExecuteType(ctx context.Context, selector string, text string,
 }
 
 // executeTypeInternal performs the typing action. Assumes s.opMu is held.
+// It now incorporates sophisticated timing simulation if holdMeanMs > 0.
 func (s *Session) executeTypeInternal(ctx context.Context, selector string, text string, holdMeanMs float64) error {
 	// Pass the context to findElementNode.
 	element, err := s.findElementNode(ctx, selector)
@@ -1723,13 +1991,31 @@ func (s *Session) executeTypeInternal(ctx context.Context, selector string, text
 		}
 	}
 
-	for _, char := range text {
-		if s.humanoidCfg != nil && s.humanoidCfg.Enabled {
-			if err := s.Sleep(ctx, 50*time.Millisecond); err != nil {
+	// Define realistic variances (as used in timing.go)
+	holdVariance := 15.0
+	interKeyMeanMs := 100.0
+	interKeyVariance := 40.0
+
+	var rng *rand.Rand
+	// Check if timing simulation is requested (holdMeanMs > 0).
+	if holdMeanMs > 0 {
+		rng = getRNG()
+		defer putRNG(rng)
+	}
+
+	for i, char := range text {
+		// 1. Simulate Key Hold time (if requested)
+		if holdMeanMs > 0 {
+			holdMs := rng.NormFloat64()*holdVariance + holdMeanMs
+			if holdMs < 20 { // Minimum physical duration.
+				holdMs = 20
+			}
+			if err := hesitate(ctx, time.Duration(holdMs)*time.Millisecond); err != nil {
 				return err
 			}
 		}
 
+		// 2. Update DOM and fire events for this character
 		currentValue += string(char)
 		escapedValue := strings.ReplaceAll(currentValue, "'", "\\'")
 		escapedValue = strings.ReplaceAll(escapedValue, `\`, `\\`)
@@ -1737,7 +2023,8 @@ func (s *Session) executeTypeInternal(ctx context.Context, selector string, text
 		scriptToSetValue := fmt.Sprintf(`document.querySelector('%s').value = '%s'`, escapedSelector, escapedValue)
 		// Use the internal script execution version.
 		if _, err := s.executeScriptInternal(ctx, scriptToSetValue, nil); err != nil {
-			s.logger.Warn("Failed to update element value via script", zap.String("selector", selector), zap.Error(err))
+			// Treat as non-fatal warning.
+			s.logger.Warn("Failed to update element value via script during typing", zap.String("selector", selector), zap.Error(err))
 		}
 
 		currentLoop := s.getEventLoop()
@@ -1752,6 +2039,17 @@ func (s *Session) executeTypeInternal(ctx context.Context, selector string, text
 				bridge.DispatchEventOnNode(element, "keyup")
 			}
 		})
+
+		// 3. Simulate Inter-Key delay (if requested and not the last character)
+		if holdMeanMs > 0 && i < len(text)-1 {
+			interKeyMs := rng.NormFloat64()*interKeyVariance + interKeyMeanMs
+			if interKeyMs < 30 { // Minimum delay between keys.
+				interKeyMs = 30
+			}
+			if err := hesitate(ctx, time.Duration(interKeyMs)*time.Millisecond); err != nil {
+				return err
+			}
+		}
 	}
 
 	finalLoop := s.getEventLoop()
@@ -2057,6 +2355,10 @@ func (s *Session) ResolveURL(targetURL string) (*url.URL, error) {
 		return currentURL.ResolveReference(parsedURL), nil
 	}
 	if !parsedURL.IsAbs() {
+		// Allow resolving empty string to nil if no current URL (used in form submission fallback)
+		if targetURL == "" {
+			return nil, nil
+		}
 		return nil, fmt.Errorf("must be an absolute URL for initial navigation: %s", targetURL)
 	}
 	return parsedURL, nil
@@ -2093,8 +2395,6 @@ func (s *Session) DispatchMouseEvent(ctx context.Context, data schemas.MouseEven
 		hitNode := bridge.FindNodeAtPoint(data.X, data.Y)
 
 		if hitNode != nil {
-			// FIX: Replaced the problematic bridge.PerformDefaultClickAction.
-
 			// 2. Handle the consequences (navigation, state change).
 			// We use the internal handler as opMu is held. This avoids the deadlock.
 			err := s.handleClickConsequenceInternal(lockedCtx, hitNode)
@@ -2122,11 +2422,15 @@ func (s *Session) DispatchMouseEvent(ctx context.Context, data schemas.MouseEven
 // SendKeys implements humanoid.Executor. Concurrency safe.
 func (s *Session) SendKeys(ctx context.Context, keys string) error {
 	// Acquire operation lock.
-	_, unlock := s.acquireOpLock(ctx)
+	lockedCtx, unlock := s.acquireOpLock(ctx)
 	defer unlock()
 
+	if lockedCtx.Err() != nil {
+		return lockedCtx.Err()
+	}
+
 	s.logger.Debug("Sending keys (TODO: implement key dispatch)", zap.String("keys", keys))
-	// TODO: Implement key event dispatch.
+	// TODO: Implement key event dispatch on the focused element.
 	return nil
 }
 
@@ -2214,11 +2518,15 @@ func (s *Session) prepareRequestHeaders(req *http.Request) {
 	req.Header.Set("Accept-Language", strings.Join(s.persona.Languages, ","))
 	req.Header.Set("Accept-Encoding", "gzip, deflate, br")
 
-	s.mu.RLock()
-	currentURL := s.currentURL
-	s.mu.RUnlock()
-	if currentURL != nil {
-		req.Header.Set("Referer", currentURL.String())
+	// Referer is typically set by the client.Do mechanism or manually during redirects/navigation.
+	// We ensure it's not overwritten if already set (e.g. during redirects).
+	if req.Header.Get("Referer") == "" {
+		s.mu.RLock()
+		currentURL := s.currentURL
+		s.mu.RUnlock()
+		if currentURL != nil {
+			req.Header.Set("Referer", currentURL.String())
+		}
 	}
 }
 
@@ -2323,6 +2631,7 @@ func (s *Session) handleClickConsequenceInternal(ctx context.Context, element *h
 					root = root.Parent
 				}
 				// Query for all radios in the same form/document with the same name.
+				// Note: This simple XPath assumes radioName does not contain single quotes.
 				radios := htmlquery.Find(root, fmt.Sprintf(`//input[@type='radio' and @name='%s']`, radioName))
 				for _, radio := range radios {
 					removeAttr(radio, "checked")
@@ -2337,8 +2646,14 @@ func (s *Session) handleClickConsequenceInternal(ctx context.Context, element *h
 
 	// 2. Handle navigation links (<a>)
 	// Must NOT hold bridge.Lock() here.
-	if tagName == "a" {
-		if href := htmlquery.SelectAttr(element, "href"); href != "" {
+	// Find the closest ancestor anchor tag (clicking a span inside a link triggers the link)
+	anchor := element
+	for anchor != nil && strings.ToLower(anchor.Data) != "a" {
+		anchor = anchor.Parent
+	}
+
+	if anchor != nil {
+		if href := htmlquery.SelectAttr(anchor, "href"); href != "" {
 			// CRITICAL: Call navigateInternal, not Navigate, as the lock (s.opMu) is already held.
 			return s.navigateInternal(ctx, href)
 		}
@@ -2350,9 +2665,14 @@ func (s *Session) handleClickConsequenceInternal(ctx context.Context, element *h
 	if form != nil {
 		// Check if the clicked element is a submit button.
 		isSubmitButton := false
-		if tagName == "button" && strings.ToLower(htmlquery.SelectAttr(element, "type")) != "reset" {
-			isSubmitButton = true
+		// Default type for button is submit if inside a form, unless type="button" or "reset".
+		if tagName == "button" {
+			btnType := strings.ToLower(htmlquery.SelectAttr(element, "type"))
+			if btnType == "submit" || btnType == "" {
+				isSubmitButton = true
+			}
 		}
+
 		if tagName == "input" && strings.ToLower(htmlquery.SelectAttr(element, "type")) == "submit" {
 			isSubmitButton = true
 		}
@@ -2412,21 +2732,43 @@ func (s *Session) submitFormInternal(ctx context.Context, form *html.Node) error
 				inputType := strings.ToLower(htmlquery.SelectAttr(input, "type"))
 				if (inputType == "checkbox" || inputType == "radio") {
 					if _, checked := getAttr(input, "checked"); checked {
-						formData.Add(name, htmlquery.SelectAttr(input, "value"))
+						// FIX: Use "on" as default value if the 'value' attribute is missing for checkboxes.
+						value, exists := getAttr(input, "value")
+						if !exists && inputType == "checkbox" {
+							value = "on"
+						} else if !exists {
+							// Radios without value might not submit anything specific if not handled.
+							continue
+						}
+						formData.Add(name, value)
 					}
 				} else if inputType != "submit" && inputType != "reset" && inputType != "button" && inputType != "image" {
+					// For text-like inputs, we rely on the 'value' attribute being updated by interactions.
 					formData.Add(name, htmlquery.SelectAttr(input, "value"))
 				}
 			case "textarea":
 				formData.Add(name, htmlquery.InnerText(input))
 			case "select":
+				// Find the option that is currently selected.
 				selectedOption := htmlquery.FindOne(input, ".//option[@selected]")
 				if selectedOption != nil {
-					formData.Add(name, htmlquery.SelectAttr(selectedOption, "value"))
+					value, exists := getAttr(selectedOption, "value")
+					if !exists {
+						// If value attribute is missing, use the text content.
+						value = htmlquery.InnerText(selectedOption)
+					}
+					formData.Add(name, value)
 				} else {
-					firstOption := htmlquery.FindOne(input, ".//option")
-					if firstOption != nil {
-						formData.Add(name, htmlquery.SelectAttr(firstOption, "value"))
+					// If nothing is explicitly selected, browsers usually take the first option (if any), unless multiple is allowed.
+					if _, multiple := getAttr(input, "multiple"); !multiple {
+						firstOption := htmlquery.FindOne(input, ".//option")
+						if firstOption != nil {
+							value, exists := getAttr(firstOption, "value")
+							if !exists {
+								value = htmlquery.InnerText(firstOption)
+							}
+							formData.Add(name, value)
+						}
 					}
 				}
 			}
@@ -2441,14 +2783,20 @@ func (s *Session) submitFormInternal(ctx context.Context, form *html.Node) error
 	}
 
 	targetURL, err := s.ResolveURL(action)
-	if err != nil {
-		return fmt.Errorf("failed to resolve form action URL: %w", err)
+	// If action attribute is missing or empty, resolve against the current URL.
+	if err != nil || targetURL == nil {
+		targetURL, _ = s.ResolveURL("") // Resolve empty string against current URL
+		if targetURL == nil {
+			// Should only happen if initial navigation hasn't occurred.
+			return fmt.Errorf("failed to resolve form action URL (%s) and no current URL available: %w", action, err)
+		}
 	}
 
 	var req *http.Request
 
 	if method == http.MethodPost {
 		if enctype != "application/x-www-form-urlencoded" {
+			// TODO: Implement multipart/form-data and text/plain if necessary.
 			s.logger.Warn("Unsupported form enctype, submitting as urlencoded", zap.String("enctype", enctype))
 		}
 		body := strings.NewReader(formData.Encode())
@@ -2458,8 +2806,18 @@ func (s *Session) submitFormInternal(ctx context.Context, form *html.Node) error
 		}
 		req.Header.Set("Content-Type", "application/x-www-form-urlencoded")
 	} else { // GET request
-		targetURL.RawQuery = formData.Encode()
-		req, err = http.NewRequestWithContext(ctx, method, targetURL.String(), nil)
+		// Create a new URL object to avoid modifying the resolved URL's query parameters in place
+		submitURL := *targetURL
+		q := submitURL.Query()
+		// Merge existing query parameters with form data
+		for key, values := range formData {
+			for _, value := range values {
+				q.Add(key, value)
+			}
+		}
+		submitURL.RawQuery = q.Encode()
+
+		req, err = http.NewRequestWithContext(ctx, method, submitURL.String(), nil)
 		if err != nil {
 			return err
 		}
@@ -2516,42 +2874,26 @@ func findParentForm(element *html.Node) *html.Node {
 	if element == nil {
 		return nil
 	}
+
+	// Check if the element itself has a 'form' attribute pointing to a form ID (HTML5 feature).
+	// This requires access to the whole document structure.
+	if formID := htmlquery.SelectAttr(element, "form"); formID != "" {
+		// Find the root of the document.
+		root := element
+		for root.Parent != nil {
+			root = root.Parent
+		}
+		// Search for the form by ID. Assumes simple ID string without quotes.
+		if form := htmlquery.FindOne(root, fmt.Sprintf("//form[@id='%s']", formID)); form != nil {
+			return form
+		}
+	}
+
+	// Fallback to finding the nearest ancestor form element.
 	for p := element.Parent; p != nil; p = p.Parent {
 		if p.Type == html.ElementNode && strings.ToLower(p.Data) == "form" {
 			return p
 		}
 	}
 	return nil
-}
-
-// CombineContext creates a new context that is canceled when either the parent or secondary context is canceled.
-// This is a robust implementation to prevent goroutine leaks.
-func CombineContext(parentCtx, secondaryCtx context.Context) (context.Context, context.CancelFunc) {
-	if secondaryCtx.Err() != nil {
-		return secondaryCtx, func() {}
-	}
-	if parentCtx.Err() != nil {
-		return parentCtx, func() {}
-	}
-
-	combinedCtx, cancel := context.WithCancel(parentCtx)
-
-	stop := make(chan struct{})
-
-	go func() {
-		select {
-		case <-secondaryCtx.Done():
-			cancel()
-		case <-combinedCtx.Done():
-		case <-stop:
-		}
-	}()
-
-	return combinedCtx, func() {
-		select {
-		case stop <- struct{}{}:
-		default:
-		}
-		cancel()
-	}
 }

@@ -47,7 +47,18 @@ func newTestRuntime(t *testing.T) *jsexec.Runtime {
 	// Start the event loop so it can process async tasks like setTimeout and Promises.
 	eventLoop.Start()
 
-	return jsexec.NewRuntime(zap.NewNop(), eventLoop, &mockBrowserEnvironment{})
+	// REFACTOR: The NewRuntime function now requires a schemas.Persona.
+	// We'll provide a default one for testing purposes.
+	testPersona := schemas.Persona{
+		Width:     1920,
+		Height:    1080,
+		UserAgent: "Scalpel-Test-Agent/1.0",
+		Platform:  "Test",
+		Locale:    "en-US",
+		Languages: []string{"en-US", "en"},
+	}
+
+	return jsexec.NewRuntime(zap.NewNop(), eventLoop, &mockBrowserEnvironment{}, testPersona)
 }
 
 func TestExecuteScript_Basic(t *testing.T) {

@@ -26,6 +26,37 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/layout"
 )
 
+// -- Constants --
+
+// W3C DOM Node Type constants. These are required for compatibility
+// with JavaScript expectations (e.g., document.nodeType === 9).
+const (
+	w3cElementNode  = 1
+	w3cTextNode     = 3
+	w3cCommentNode  = 8
+	w3cDocumentNode = 9
+	w3cDoctypeNode  = 10
+)
+
+// mapGoNodeTypeToW3C converts Go's html.NodeType to the standard W3C DOM NodeType integer.
+func mapGoNodeTypeToW3C(goType html.NodeType) int {
+	switch goType {
+	case html.ElementNode:
+		return w3cElementNode
+	case html.TextNode:
+		return w3cTextNode
+	case html.CommentNode:
+		return w3cCommentNode
+	case html.DocumentNode:
+		return w3cDocumentNode
+	case html.DoctypeNode:
+		return w3cDoctypeNode
+	// html.ErrorNode (0) or others.
+	default:
+		return 0
+	}
+}
+
 // -- Interfaces and Core Structs --
 
 // BrowserEnvironment defines the callbacks the DOMBridge needs to interact with the Session.
@@ -207,8 +238,33 @@ func (b *DOMBridge) wrapNode(node *html.Node) *goja.Object {
 	_ = SetObjectData(b.runtime, obj, native)
 
 	// Bind Node properties and methods.
-	_ = obj.Set("nodeType", node.Type)
+	// Fix: Incorrect nodeType Mapping (Go vs W3C). Use the mapping function.
+	_ = obj.Set("nodeType", mapGoNodeTypeToW3C(node.Type))
 	_ = obj.Set("nodeName", strings.ToUpper(node.Data))
+
+	// Fix: Missing textContent Property
+	// Implement textContent getter and setter.
+	b.DefineProperty(obj, "textContent", func() goja.Value {
+		b.mu.RLock()
+		defer b.mu.RUnlock()
+		// Use htmlquery.InnerText to retrieve the text of an element and its descendants.
+		return b.runtime.ToValue(htmlquery.InnerText(node))
+	}, func(value goja.Value) {
+		// Setting textContent replaces all children with a single text node.
+		b.mu.Lock()
+		defer b.mu.Unlock()
+		// Remove all existing children.
+		for c := node.FirstChild; c != nil; {
+			next := c.NextSibling
+			node.RemoveChild(c)
+			c = next
+		}
+		// Add new text node if the value is not empty.
+		if value.String() != "" {
+			node.AppendChild(&html.Node{Type: html.TextNode, Data: value.String()})
+		}
+	})
+
 	b.defineParentAndChildProperties(obj, node)
 	_ = obj.Set("appendChild", b.jsAppendChild(native))
 	_ = obj.Set("removeChild", b.jsRemoveChild(native))
@@ -303,14 +359,22 @@ func (b *DOMBridge) bindDocumentAndElementMethods(obj *goja.Object, node *html.N
 // -- JS Property Definitions --
 
 func (b *DOMBridge) defineParentAndChildProperties(obj *goja.Object, node *html.Node) {
-	_ = obj.Set("parentNode", b.runtime.ToValue(func() goja.Value {
+	// Fix: Incorrect parentNode Implementation.
+	// The original implementation used obj.Set() with a function, which is incorrect.
+	// We must use DefineProperty to create a dynamic getter.
+	b.DefineProperty(obj, "parentNode", func() goja.Value {
 		b.mu.Lock()
 		defer b.mu.Unlock()
+		// node.Parent might be nil (e.g., for the Document node itself).
+		if node.Parent == nil {
+			return goja.Null()
+		}
+		// Ensure the parent node is correctly wrapped and returned.
 		if parent := b.wrapNode(node.Parent); parent != nil {
 			return parent
 		}
 		return goja.Null()
-	}))
+	}, nil) // parentNode is read-only.
 
 	b.DefineProperty(obj, "childNodes", func() goja.Value {
 		b.mu.Lock()
@@ -1764,7 +1828,12 @@ func (b *DOMBridge) serializeForm(formNode, submitterNode *html.Node) url.Values
 			switch inputType {
 			case "checkbox", "radio":
 				if isChecked {
-					val, _ := getAttribute(el, "value")
+					val, hasValue := getAttribute(el, "value")
+					// Fix: Broken Form Submission (Data serialization)
+					// HTML5 spec: If a checked checkbox/radio has no value attribute, it defaults to "on".
+					if !hasValue {
+						val = "on"
+					}
 					values.Add(name, val)
 				}
 			case "submit", "button", "reset", "image":
@@ -1788,6 +1857,7 @@ func (b *DOMBridge) serializeForm(formNode, submitterNode *html.Node) url.Values
 					selected = true
 				}
 			}
+			// Default selection (first option if none selected)
 			if !selected && len(options) > 0 {
 				val, _ := getAttribute(options[0], "value")
 				values.Add(name, val)

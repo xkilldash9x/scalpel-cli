@@ -7,12 +7,19 @@ import (
 	"context"
 	"fmt"
 	"io"
+	"math/rand"
 	"strings"
 	"sync"
 	"testing"
 
+	"github.com/antchfx/htmlquery"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/parser"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/layout"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/style"
+	"golang.org/x/net/html"
 )
 
 // MockCorePagePrimitives implements the CorePagePrimitives interface for testing.
@@ -74,6 +81,35 @@ func mockStabilizeFn(mock *MockCorePagePrimitives) StabilizationFunc {
 	}
 }
 
+// buildMockLayoutTree is a helper to build a mock layout tree for testing.
+// It assumes all nodes are visible for simplicity.
+func buildMockLayoutTree(node *html.Node) *layout.LayoutBox {
+	if node == nil {
+		return nil
+	}
+
+	// For our tests, we can treat all nodes as block-level elements
+	// to ensure they are considered "visible" by the mock logic.
+	box := &layout.LayoutBox{
+		StyledNode: &style.StyledNode{
+			Node: node,
+			ComputedStyles: map[parser.Property]parser.Value{
+				"display": "block",
+			},
+		},
+	}
+
+	for child := node.FirstChild; child != nil; child = child.NextSibling {
+		if child.Type == html.ElementNode {
+			childBox := buildMockLayoutTree(child)
+			if childBox != nil {
+				box.Children = append(box.Children, childBox)
+			}
+		}
+	}
+	return box
+}
+
 func TestGenerateNodeFingerprintStability(t *testing.T) {
 	// Test stability against attribute order and class order
 	data1 := ElementData{
@@ -122,7 +158,7 @@ func TestIsTextInputElement(t *testing.T) {
 }
 
 func TestInteractor_DiscoveryAndFiltering(t *testing.T) {
-	html := `
+	htmlContent := `
 		<html><body>
 			<a href="/home">Visible Link</a>
 			<button disabled>Disabled Button</button>
@@ -133,13 +169,19 @@ func TestInteractor_DiscoveryAndFiltering(t *testing.T) {
 			<div role="button" aria-disabled="true">Disabled ARIA</div>
 		</body></html>
 		`
-	mockPage := &MockCorePagePrimitives{DOMSnapshot: html}
+	mockPage := &MockCorePagePrimitives{DOMSnapshot: htmlContent}
 	logger := &NopLogger{}
 	interactor := NewInteractor(logger, NewDefaultHumanoidConfig(), nil, mockPage)
 
+	// Since discoverElements now requires a layout tree, we parse the HTML
+	// and build a mock tree to pass into the function.
+	doc, err := htmlquery.Parse(strings.NewReader(htmlContent))
+	require.NoError(t, err)
+	layoutRoot := buildMockLayoutTree(doc)
+
 	interacted := make(map[string]bool)
 	// Use the internal discovery method for this unit test
-	elements, err := interactor.discoverElements(context.Background(), interacted)
+	elements, err := interactor.discoverElements(context.Background(), layoutRoot, interacted)
 	require.NoError(t, err)
 
 	// Expected: Visible Link, Active Button, username input
@@ -159,7 +201,7 @@ func TestInteractor_DiscoveryAndFiltering(t *testing.T) {
 	assert.NotContains(t, fullDesc, "Disabled ARIA")
 }
 
-func TestInteractor_RecursiveInteract_FlowAndStateChange(t *testing.T) {
+func TestInteractor_ExploreStep_FlowAndStateChange(t *testing.T) {
 	// Setup: A page where clicking a button changes the DOM state.
 	initialHTML := `<html><body><input type="text" id="input1"><button id="change-state-btn">Change</button></body></html>`
 	mockPage := &MockCorePagePrimitives{DOMSnapshot: initialHTML}
@@ -167,23 +209,51 @@ func TestInteractor_RecursiveInteract_FlowAndStateChange(t *testing.T) {
 	hConfig := HumanoidConfig{Enabled: false} // Disable delays
 	interactor := NewInteractor(logger, hConfig, mockStabilizeFn(mockPage), mockPage)
 
-	config := InteractionConfig{
-		MaxDepth:                3,
-		MaxInteractionsPerDepth: 1,
-	}
+	// Use a seeded RNG to make the test deterministic
+	interactor.rng = rand.New(rand.NewSource(1))
 
+	config := schemas.InteractionConfig{} // Use defaults, delays are off anyway
+	interactedElements := make(map[string]bool)
 	ctx := context.Background()
-	err := interactor.RecursiveInteract(ctx, config)
+
+	// -- First interaction step --
+	doc1, err := htmlquery.Parse(strings.NewReader(mockPage.DOMSnapshot))
 	require.NoError(t, err)
+	layoutRoot1 := buildMockLayoutTree(doc1)
 
-	// Verify: We expect 2 interactions (one on the initial state, one on the changed state).
-	// The exact interactions depend on randomized order (shuffling).
-	assert.GreaterOrEqual(t, len(mockPage.Interactions), 2)
+	step1Interacted, err := interactor.ExploreStep(ctx, config, layoutRoot1, interactedElements)
+	require.NoError(t, err)
+	assert.True(t, step1Interacted, "Expected an interaction in the first step")
+	assert.Equal(t, 1, mockPage.StabilizeCount)
+	assert.Len(t, mockPage.Interactions, 1)
 
-	// Verify: Stabilization should have occurred after each interaction.
-	assert.Equal(t, len(mockPage.Interactions), mockPage.StabilizeCount)
+	// -- Second interaction step --
+	// The DOM state might have changed inside the mock after the first interaction.
+	mockPage.mu.Lock()
+	stateAfterStep1 := mockPage.DOMSnapshot
+	mockPage.mu.Unlock()
 
-	// Verify the state changed at some point (mockPage.ExecuteClick handles this)
+	doc2, err := htmlquery.Parse(strings.NewReader(stateAfterStep1))
+	require.NoError(t, err)
+	layoutRoot2 := buildMockLayoutTree(doc2)
+
+	step2Interacted, err := interactor.ExploreStep(ctx, config, layoutRoot2, interactedElements)
+	require.NoError(t, err)
+	assert.True(t, step2Interacted, "Expected an interaction in the second step")
+	assert.Equal(t, 2, mockPage.StabilizeCount)
+	assert.Len(t, mockPage.Interactions, 2)
+
+	// -- Verification --
+	// The button that changes state must have been clicked at some point.
+	var buttonClicked bool
+	for _, interaction := range mockPage.Interactions {
+		if strings.Contains(interaction, "id='change-state-btn'") {
+			buttonClicked = true
+		}
+	}
+	assert.True(t, buttonClicked, "The button to change state should have been clicked")
+
+	// Verify the final DOM state reflects the change.
 	mockPage.mu.Lock()
 	finalDOM := mockPage.DOMSnapshot
 	mockPage.mu.Unlock()

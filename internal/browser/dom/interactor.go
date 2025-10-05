@@ -176,7 +176,9 @@ func (i *Interactor) interact(
 		}
 
 		// Interaction successful.
-
+		if err := i.stabilizeFn(ctx); err != nil {
+			return true, fmt.Errorf("stabilization failed after interaction: %w", err)
+		}
 		// Delay immediately after interaction.
 		if config.InteractionDelayMs > 0 && i.humanoidCfg.Enabled {
 			if err := i.hesitate(ctx, time.Duration(config.InteractionDelayMs)*time.Millisecond); err != nil {
@@ -204,46 +206,60 @@ const interactiveXPath = `
     //*[normalize-space(@contenteditable)='true' or normalize-space(@contenteditable)=''] |
     //*[(@role='button' or @role='link' or @role='tab' or @role='menuitem' or @role='checkbox' or @role='radio')]
 `
+// findLayoutBoxForNode recursively searches the layout tree for the box corresponding to a given html.Node.
+func findLayoutBoxForNode(root *layout.LayoutBox, target *html.Node) *layout.LayoutBox {
+	if root == nil || root.StyledNode == nil {
+		return nil
+	}
+	if root.StyledNode.Node == target {
+		return root
+	}
+	for _, child := range root.Children {
+		if found := findLayoutBoxForNode(child, target); found != nil {
+			return found
+		}
+	}
+	return nil
+}
 
 // discoverElements finds, analyzes, and fingerprints interactive elements from the layout tree.
 func (i *Interactor) discoverElements(ctx context.Context, layoutRoot *layout.LayoutBox, interacted map[string]bool) ([]interactiveElement, error) {
-	var results []discoveryResult
-	var findInteractable func(*layout.LayoutBox)
+	if layoutRoot == nil || layoutRoot.StyledNode == nil || layoutRoot.StyledNode.Node == nil {
+		return nil, nil // Nothing to discover in an empty layout.
+	}
 
-	// Traverse the layout tree to find visible nodes.
-	findInteractable = func(box *layout.LayoutBox) {
-		// Check context at the start of the recursive function to fail fast.
+	// 1. Find all candidate nodes using a broad XPath query.
+	candidateNodes := htmlquery.Find(layoutRoot.StyledNode.Node, interactiveXPath)
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+
+	var results []discoveryResult
+	// 2. For each candidate, find its layout box to check for visibility.
+	for _, node := range candidateNodes {
 		if ctx.Err() != nil {
-			return
+			return nil, ctx.Err()
 		}
-		if box == nil || box.StyledNode == nil || box.StyledNode.Node == nil {
-			return
-		}
-		// The core improvement: check visibility based on computed styles from the layout engine.
-		if box.StyledNode.IsVisible() {
-			data := extractElementData(box.StyledNode.Node)
+
+		// This is inefficient (O(N*M)), but for a unit test and given DOM sizes, it's acceptable.
+		// A map from *html.Node to *LayoutBox could optimize this if needed.
+		box := findLayoutBoxForNode(layoutRoot, node)
+
+		// We need the layout box to confirm the element is actually visible.
+		if box != nil && box.StyledNode != nil && box.StyledNode.IsVisible() {
+			data := extractElementData(node)
 			results = append(results, discoveryResult{
-				Node: box.StyledNode.Node,
+				Node: node,
 				Box:  box,
 				Data: data,
 			})
 		}
-		for _, child := range box.Children {
-			// Check context before each recursive call.
-			if ctx.Err() != nil {
-				return
-			}
-			findInteractable(child)
-		}
 	}
 
-	findInteractable(layoutRoot)
-	// Final check after the traversal is complete.
-	if ctx.Err() != nil {
-		return nil, ctx.Err()
-	}
+	// 3. Filter out disabled/interacted elements and generate stable fingerprints.
 	return i.filterAndFingerprint(results, interacted), nil
 }
+
 
 // extractElementData pulls relevant information from an html.Node.
 func extractElementData(node *html.Node) ElementData {
@@ -345,7 +361,7 @@ func (i *Interactor) filterAndFingerprint(results []discoveryResult, interacted 
 			continue
 		}
 
-		// Check if already interacted.
+		// Check if already.
 		if !interacted[fingerprint] {
 			// Generate the unique XPath selector for targeting later.
 			selector := GenerateUniqueXPath(result.Node)

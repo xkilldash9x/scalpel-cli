@@ -1,5 +1,5 @@
 // internal/browser/layout/layout_test.go
-package layout_test
+package layout
 
 import (
 	"strings"

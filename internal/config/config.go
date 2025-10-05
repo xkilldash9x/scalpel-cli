@@ -298,7 +298,7 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("browser.disable_cache", true)
 	v.SetDefault("browser.ignore_tls_errors", false)
 	v.SetDefault("browser.concurrency", 4)
-	v.SetDefault("browser.debug", false)
+	v.SetDefault("browser.debug", true)
 
 	// -- Network --
 	v.SetDefault("network.timeout", "30s")
@@ -331,9 +331,9 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("discovery.passive_concurrency", 10)
 
 	// -- Agent --
-	v.SetDefault("agent.llm.default_fast_model", "gemini-1.5-flash")
-	v.SetDefault("agent.llm.default_powerful_model", "gemini-1.5-pro")
-	v.SetDefault("agent.knowledge_graph.type", "memory") // 'memory' or 'neo4j'
+	v.SetDefault("agent.llm.default_fast_model", "gemini-2.5-flash")
+	v.SetDefault("agent.llm.default_powerful_model", "gemini-2.5-pro")
+	v.SetDefault("agent.knowledge_graph.type", "postgres") // 'memory' or 'postgres'
 }
 
 // Validate checks the configuration for required fields and sane values.

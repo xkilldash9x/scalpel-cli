@@ -6,46 +6,40 @@ import (
 	"fmt"
 	"strings"
 	"sync"
-	"time"
 
 	"github.com/dop251/goja"
 	"github.com/dop251/goja_nodejs/eventloop"
 	"go.uber.org/zap"
 
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/jsbind"
 )
 
 // Runtime provides a persistent environment for executing JavaScript using Goja,
 // integrated with the browser's DOM via the DOMBridge.
 type Runtime struct {
-	vm        *goja.Runtime
+	// REFACTOR: The goja.Runtime (vm) has been removed from the struct.
+	// A new, clean VM is now created for every ExecuteScript call to guarantee
+	// execution isolation and prevent state poisoning from interrupted scripts.
 	bridge    *jsbind.DOMBridge
 	logger    *zap.Logger
 	eventLoop *eventloop.EventLoop
-	execMutex sync.Mutex // -- Added to serialize script execution --
+	execMutex sync.Mutex
 }
-
-// DefaultTimeout is the fallback execution timeout if the context has no deadline.
-const DefaultTimeout = 30 * time.Second
 
 // NewRuntime creates a new, initialized JavaScript runtime and its associated DOM bridge.
 // This is called once per session.
-func NewRuntime(logger *zap.Logger, eventLoop *eventloop.EventLoop, browserEnv jsbind.BrowserEnvironment) *Runtime {
+func NewRuntime(logger *zap.Logger, eventLoop *eventloop.EventLoop, browserEnv jsbind.BrowserEnvironment, persona schemas.Persona) *Runtime {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
-	log := logger.Named("jsexec")
+	log := logger.Named("jsec")
 
-	// 1. Initialize the Goja VM.
-	vm := goja.New()
+	// The DOM bridge is created once and holds the persistent state (DOM, storage).
+	bridge := jsbind.NewDOMBridge(log, eventLoop, browserEnv, persona)
 
-	// 2. Initialize the DOM Bridge. This configures the VM with DOM bindings
-	// (e.g., window, document, console, setTimeout). The bridge needs access to the
-	// event loop to provide asynchronous browser APIs.
-	bridge := jsbind.NewDOMBridge(log, eventLoop, browserEnv)
-
+	// The VM is no longer created here.
 	return &Runtime{
-		vm:        vm,
 		bridge:    bridge,
 		logger:    log,
 		eventLoop: eventLoop,
@@ -57,49 +51,55 @@ func (r *Runtime) GetBridge() *jsbind.DOMBridge {
 	return r.bridge
 }
 
-// ExecuteScript runs a JavaScript snippet within the persistent VM environment.
+// ExecuteScript runs a JavaScript snippet within a clean, ephemeral VM environment.
 // It handles context based cancellation, timeouts, and asynchronous Promises.
-// Args can be passed if the script is structured as a function wrapper.
 func (r *Runtime) ExecuteScript(ctx context.Context, script string, args []interface{}) (interface{}, error) {
-	// -- This lock ensures that only one script can execute at a time, preventing
-	// race conditions on the VM's interrupt channel.
+	// This lock protects access to the shared DOM bridge.
 	r.execMutex.Lock()
 	defer r.execMutex.Unlock()
 
-	// If the parent context has no deadline, create a child context with a default timeout.
-	// This is a safeguard to prevent scripts from running indefinitely.
-	if _, hasDeadline := ctx.Deadline(); !hasDeadline {
-		var cancel context.CancelFunc
-		ctx, cancel = context.WithTimeout(ctx, DefaultTimeout)
-		defer cancel()
-	}
+	// -- VM Isolation --
+	// Create a new Goja VM for this specific execution. This is the core of the
+	// change to prevent state poisoning. It ensures that no variables, prototypes,
+	// or other state from a previous (potentially failed or interrupted) script
+	// can affect this one.
+	vm := goja.New()
 
-	// Set up interruption handling. Goja can be interrupted by closing the channel
-	// passed to SetInterrupt. By passing ctx.Done(), Goja will automatically
-	// interrupt execution when the context is canceled or its deadline is exceeded.
-	r.vm.SetInterrupt(ctx.Done())
-	// It is critical to clear the interrupt handler after execution to prevent
-	// it from affecting the next script run.
-	defer r.vm.ClearInterrupt()
+	// Bind the persistent DOM bridge to the new, ephemeral VM.
+	// This injects the current state of the DOM, window, setTimeout, etc.,
+	// into our clean JavaScript environment.
+	r.bridge.BindToRuntime(vm, "about:blank")
 
-	// Execute the script or function wrapper.
+	stopInterruptListener := make(chan struct{})
+	defer close(stopInterruptListener)
+
+	go func() {
+		select {
+		case <-ctx.Done():
+			// The context was canceled or timed out.
+			// Interrupt the Goja VM with the context's error.
+			vm.Interrupt(ctx.Err())
+		case <-stopInterruptListener:
+			// The script finished normally, so we can stop listening.
+			return
+		}
+	}()
+
 	var result goja.Value
 	var err error
 
 	if r.isFunctionWrapper(script) {
-		result, err = r.executeFunctionWrapper(script, args)
+		result, err = r.executeFunctionWrapper(vm, script, args)
 	} else {
 		if len(args) > 0 {
 			r.logger.Debug("Arguments provided to ExecuteScript in snippet mode are ignored.")
 		}
-		result, err = r.vm.RunString(script)
+		result, err = vm.RunString(script)
 	}
 
-	// Handle any errors that occurred during execution.
 	if err != nil {
-		// Check if the error was due to context interruption.
+		// If the script was interrupted, wrap the context's error for clarity.
 		if _, ok := err.(*goja.InterruptedError); ok {
-			// If so, return the context's error for a clearer message (canceled vs. deadline exceeded).
 			return nil, fmt.Errorf("javascript execution interrupted by context: %w", ctx.Err())
 		}
 		if jsErr, ok := err.(*goja.Exception); ok {
@@ -108,12 +108,10 @@ func (r *Runtime) ExecuteScript(ctx context.Context, script string, args []inter
 		return nil, fmt.Errorf("javascript error: %w", err)
 	}
 
-	// If the script returns a Promise, we must wait for it to settle.
-	if promise, ok := result.Export().(*goja.Promise); ok {
-		return r.waitForPromise(ctx, promise)
+	if _, ok := result.Export().(*goja.Promise); ok {
+		return r.waitForPromise(ctx, vm, result)
 	}
 
-	// For synchronous results, export the value from the VM back to a Go type.
 	return result.Export(), nil
 }
 
@@ -130,13 +128,14 @@ func (r *Runtime) isFunctionWrapper(script string) bool {
 }
 
 // executeFunctionWrapper attempts to evaluate the script and call it as a function.
-func (r *Runtime) executeFunctionWrapper(script string, args []interface{}) (goja.Value, error) {
+// It now requires the vm instance to be passed in.
+func (r *Runtime) executeFunctionWrapper(vm *goja.Runtime, script string, args []interface{}) (goja.Value, error) {
 	prog, err := goja.Compile("", script, false)
 	if err != nil {
 		return nil, fmt.Errorf("failed to compile function wrapper script: %w", err)
 	}
 
-	val, err := r.vm.RunProgram(prog)
+	val, err := vm.RunProgram(prog)
 	if err != nil {
 		return nil, err
 	}
@@ -148,49 +147,98 @@ func (r *Runtime) executeFunctionWrapper(script string, args []interface{}) (goj
 
 	gojaArgs := make([]goja.Value, len(args))
 	for i, arg := range args {
-		gojaArgs[i] = r.vm.ToValue(arg)
+		gojaArgs[i] = vm.ToValue(arg)
 	}
 
-	return fn(r.vm.GlobalObject(), gojaArgs...)
+	return fn(vm.GlobalObject(), gojaArgs...)
 }
 
 // waitForPromise waits for a Goja promise to resolve or reject, respecting the context.
-// It leverages the event loop to handle the asynchronous nature of Promises.
-func (r *Runtime) waitForPromise(ctx context.Context, promise *goja.Promise) (interface{}, error) {
-	// A quick check for already settled promises to avoid the overhead of the event loop.
+// It now requires the specific vm instance that the promise belongs to.
+func (r *Runtime) waitForPromise(ctx context.Context, vm *goja.Runtime, promiseVal goja.Value) (interface{}, error) {
+	promise, ok := promiseVal.Export().(*goja.Promise)
+	if !ok {
+		return nil, fmt.Errorf("internal error: waitForPromise called with non-promise")
+	}
+
 	switch promise.State() {
 	case goja.PromiseStateFulfilled:
 		return promise.Result().Export(), nil
 	case goja.PromiseStateRejected:
-		rejectionReason := promise.Result().Export()
-		return nil, fmt.Errorf("javascript promise rejected: %v", rejectionReason)
+		rejectionReason := promise.Result()
+		var errMsg string
+		if obj := rejectionReason.ToObject(vm); obj != nil {
+			if stack := obj.Get("stack"); stack != nil && !goja.IsUndefined(stack) && stack.String() != "" {
+				errMsg = stack.String()
+			} else {
+				errMsg = rejectionReason.String()
+			}
+		} else {
+			errMsg = rejectionReason.String()
+		}
+		return nil, fmt.Errorf("javascript promise rejected: %s", errMsg)
 	}
 
 	resultChan := make(chan interface{}, 1)
 	errChan := make(chan error, 1)
 
-	// We must schedule the .Then() call on the event loop's goroutine
-	// to ensure thread safe access to the VM.
-	r.eventLoop.RunOnLoop(func() {
-		onFulfilled := func(v goja.Value) {
-			resultChan <- v.Export()
-		}
-		onRejected := func(v goja.Value) {
-			errChan <- fmt.Errorf("promise rejected: %v", v.Export())
+	// This must run on the shared event loop, but it operates on the specific vm.
+	r.eventLoop.RunOnLoop(func(loopVm *goja.Runtime) {
+		// NOTE: loopVm is the event loop's internal VM, we must use our ephemeral `vm`.
+		onFulfilled := func(call goja.FunctionCall) goja.Value {
+			resolvedValue := call.Argument(0)
+			resultChan <- resolvedValue.Export()
+			return goja.Undefined()
 		}
 
-		// Attach the handlers to the promise.
-		promise.Then(r.vm.ToValue(onFulfilled), r.vm.ToValue(onRejected))
+		onRejected := func(call goja.FunctionCall) goja.Value {
+			rejectedValue := call.Argument(0)
+			var errMsg string
+			if obj := rejectedValue.ToObject(vm); obj != nil {
+				if stack := obj.Get("stack"); stack != nil && !goja.IsUndefined(stack) && stack.String() != "" {
+					errMsg = stack.String()
+				} else {
+					errMsg = rejectedValue.String()
+				}
+			} else {
+				errMsg = rejectedValue.String()
+			}
+
+			errChan <- fmt.Errorf("promise rejected: %s", errMsg)
+			return goja.Undefined()
+		}
+
+		promiseObject := promiseVal.ToObject(vm)
+		if promiseObject == nil {
+			errChan <- fmt.Errorf("internal error: promise value is not an object")
+			return
+		}
+
+		then, ok := goja.AssertFunction(promiseObject.Get("then"))
+		if !ok {
+			errChan <- fmt.Errorf("internal error: promise object is missing .then method")
+			return
+		}
+
+		if _, err := then(promiseObject, vm.ToValue(onFulfilled), vm.ToValue(onRejected)); err != nil {
+			errChan <- fmt.Errorf("error calling promise.then: %w", err)
+		}
 	})
 
-	// Wait for the result, an error, or the context to be done.
 	select {
 	case result := <-resultChan:
 		return result, nil
 	case err := <-errChan:
 		return nil, err
 	case <-ctx.Done():
-		return nil, fmt.Errorf("context done while waiting for promise: %w", ctx.Err())
+		select {
+		case result := <-resultChan:
+			return result, nil
+		case err := <-errChan:
+			return nil, err
+		default:
+			return nil, fmt.Errorf("context done while waiting for promise: %w", ctx.Err())
+		}
 	}
 }
 

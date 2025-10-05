@@ -18,6 +18,16 @@ import (
 	"go.uber.org/zap"
 )
 
+// This var block holds the strategy execution functions. By making them variables,
+// we can replace them in our tests to mock their behavior without actually
+// executing them. This is key to fixing the "cannot assign to" error.
+var (
+	executeH1Concurrent	= ExecuteH1Concurrent
+	executeH1SingleByteSend = ExecuteH1SingleByteSend
+	executeH2Multiplexing	= ExecuteH2Multiplexing
+	executeGraphQLAsync	= ExecuteGraphQLAsync
+)
+
 // Analyzer orchestrates the TimeSlip module, managing strategy execution and result analysis.
 type Analyzer struct {
 	ScanID   uuid.UUID
@@ -98,15 +108,16 @@ func (a *Analyzer) Analyze(ctx context.Context, candidate *RaceCandidate) error 
 		var execErr error
 
 		// Execute the selected strategy, passing the configuration and the oracle.
+		// These now call the package-level variables, enabling mocks.
 		switch strategy {
 		case H1Concurrent:
-			result, execErr = ExecuteH1Concurrent(ctx, candidate, a.config, oracle)
+			result, execErr = executeH1Concurrent(ctx, candidate, a.config, oracle)
 		case H1SingleByteSend:
-			result, execErr = ExecuteH1SingleByteSend(ctx, candidate, a.config, oracle)
+			result, execErr = executeH1SingleByteSend(ctx, candidate, a.config, oracle)
 		case H2Multiplexing:
-			result, execErr = ExecuteH2Multiplexing(ctx, candidate, a.config, oracle)
+			result, execErr = executeH2Multiplexing(ctx, candidate, a.config, oracle)
 		case AsyncGraphQL:
-			result, execErr = ExecuteGraphQLAsync(ctx, candidate, a.config, oracle)
+			result, execErr = executeGraphQLAsync(ctx, candidate, a.config, oracle)
 		}
 
 		if execErr != nil {
@@ -381,8 +392,9 @@ func (a *Analyzer) calculateStatistics(responses []*RaceResponse) ResponseStatis
 	durationsMs := make([]int64, 0, len(responses))
 
 	for _, resp := range responses {
-		if resp.ParsedResponse != nil && resp.Duration > 0 {
-			durationsMs = append(durationsMs, resp.Duration.Milliseconds())
+		// **FIXED**: Accessing Duration from the correct nested struct.
+		if resp.ParsedResponse != nil && resp.ParsedResponse.Duration > 0 {
+			durationsMs = append(durationsMs, resp.ParsedResponse.Duration.Milliseconds())
 		}
 	}
 
@@ -426,6 +438,8 @@ func (a *Analyzer) calculateStatistics(responses []*RaceResponse) ResponseStatis
 // analysisHeuristic defines a function that checks for a specific indicator of a race condition.
 type analysisHeuristic func(result *RaceResult, config *Config, analysis *AnalysisResult) bool
 
+// The order and logic of the pipeline is crucial for correct analysis.
+// We check for the strongest signals (TOCTOU) first and weakest (timing) last.
 var heuristicsPipeline = []analysisHeuristic{
 	checkTOCTOU,
 	checkDifferentialState,
@@ -433,7 +447,7 @@ var heuristicsPipeline = []analysisHeuristic{
 	checkTimingAnomalies,
 }
 
-// --- Heuristics ---
+// -- Heuristics --
 
 func checkTOCTOU(result *RaceResult, config *Config, analysis *AnalysisResult) bool {
 	expectedSuccesses := 1
@@ -466,6 +480,13 @@ func checkDifferentialState(result *RaceResult, config *Config, analysis *Analys
 
 func checkStateFlutter(result *RaceResult, config *Config, analysis *AnalysisResult) bool {
 	if len(analysis.UniqueResponses) > 1 && analysis.SuccessCount == 0 {
+		// This is a key change. If there's a significant timing delta,
+		// we should not classify this as a "State Flutter". Instead, we should fall through
+		// to the timing anomaly heuristic, which is a better fit for that scenario.
+		if config.ThresholdMs > 0 && analysis.Stats.TimingDeltaMs > int64(config.ThresholdMs) {
+			return false // Defer to the timing anomaly heuristic.
+		}
+
 		analysis.Vulnerable = true
 		analysis.Confidence = 0.6
 		analysis.Details = fmt.Sprintf("VULNERABLE: State flutter detected. %d unique failure responses observed. Indicates unstable state under concurrency.", len(analysis.UniqueResponses))
@@ -475,6 +496,7 @@ func checkStateFlutter(result *RaceResult, config *Config, analysis *AnalysisRes
 }
 
 func checkTimingAnomalies(result *RaceResult, config *Config, analysis *AnalysisResult) bool {
+	// Timing anomalies are not a reliable indicator for async GraphQL, as batching can create artificial deltas.
 	if result.Strategy == AsyncGraphQL {
 		return false
 	}
@@ -487,4 +509,3 @@ func checkTimingAnomalies(result *RaceResult, config *Config, analysis *Analysis
 	}
 	return false
 }
-
