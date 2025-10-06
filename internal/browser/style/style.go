@@ -1251,49 +1251,61 @@ func ParseLengthWithUnits(value string, parentFontSize, rootFontSize, referenceD
 		return 0.0
 	}
 
+	// Helper to parse the numeric part of the value.
+	parseNumeric := func(s, suffix string) (float64, bool) {
+		numStr := strings.TrimSuffix(s, suffix)
+		if val, err := parseFloat(numStr); err == nil {
+			return val, true
+		}
+		return 0.0, false
+	}
+
 	if strings.HasSuffix(value, "%") {
-		if percent, err := parseFloat(strings.TrimSuffix(value, "%")); err == nil {
+		if percent, ok := parseNumeric(value, "%"); ok {
 			return referenceDimension * (percent / 100.0)
 		}
 	}
 	if strings.HasSuffix(value, "px") {
-		if px, err := parseFloat(strings.TrimSuffix(value, "px")); err == nil {
+		if px, ok := parseNumeric(value, "px"); ok {
 			return px
 		}
 	}
-	if strings.HasSuffix(value, "em") {
-		if val, err := parseFloat(strings.TrimSuffix(value, "em")); err == nil {
-			return val * parentFontSize
-		}
-	}
+	// -- FIX: Check for "rem" before "em" --
 	if strings.HasSuffix(value, "rem") {
-		if val, err := parseFloat(strings.TrimSuffix(value, "rem")); err == nil {
+		if val, ok := parseNumeric(value, "rem"); ok {
 			return val * rootFontSize
 		}
 	}
+	if strings.HasSuffix(value, "em") {
+		if val, ok := parseNumeric(value, "em"); ok {
+			return val * parentFontSize
+		}
+	}
 	if strings.HasSuffix(value, "vw") {
-		if val, err := parseFloat(strings.TrimSuffix(value, "vw")); err == nil {
+		if val, ok := parseNumeric(value, "vw"); ok {
 			return viewportWidth * (val / 100.0)
 		}
 	}
 	if strings.HasSuffix(value, "vh") {
-		if val, err := parseFloat(strings.TrimSuffix(value, "vh")); err == nil {
+		if val, ok := parseNumeric(value, "vh"); ok {
 			return viewportHeight * (val / 100.0)
 		}
 	}
 	if strings.HasSuffix(value, "vmin") {
-		if val, err := parseFloat(strings.TrimSuffix(value, "vmin")); err == nil {
+		if val, ok := parseNumeric(value, "vmin"); ok {
 			return min(viewportWidth, viewportHeight) * (val / 100.0)
 		}
 	}
 	if strings.HasSuffix(value, "vmax") {
-		if val, err := parseFloat(strings.TrimSuffix(value, "vmax")); err == nil {
+		if val, ok := parseNumeric(value, "vmax"); ok {
 			return max(viewportWidth, viewportHeight) * (val / 100.0)
 		}
 	}
+	// Fallback for unitless values (should be treated as px).
 	if val, err := parseFloat(value); err == nil {
 		return val
 	}
+
 	return 0.0
 }
 

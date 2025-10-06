@@ -1,4 +1,5 @@
-// browser/parser/css_test.go
+// internal/browser/parser/css_test.go
+
 package parser
 
 import (
@@ -50,8 +51,8 @@ func TestParseSimpleSelectorsAndAttributes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			p := NewParser(tt.input + " { }")
-			// Use the internal parseSelectorGroups for direct testing
-			selectorGroups := p.parseSelectorGroups()
+			// Use the internal ParseSelectorGroups for direct testing
+			selectorGroups := p.ParseSelectorGroups() // <-- FIX 1
 			if len(selectorGroups) == 0 || len(selectorGroups[0]) == 0 || len(selectorGroups[0][0].Selectors) == 0 {
 				t.Fatalf("Failed to parse selector group for input: %s", tt.input)
 			}
@@ -60,7 +61,6 @@ func TestParseSimpleSelectorsAndAttributes(t *testing.T) {
 		})
 	}
 }
-
 func TestParseCombinators(t *testing.T) {
 	input := `
 		div p,
@@ -71,7 +71,7 @@ func TestParseCombinators(t *testing.T) {
 		{}
 	`
 	p := NewParser(input)
-	selectorGroups := p.parseSelectorGroups()
+	selectorGroups := p.ParseSelectorGroups() // <-- FIX 2
 
 	if len(selectorGroups) == 0 || len(selectorGroups[0]) != 5 {
 		t.Fatalf("Expected 5 complex selectors, got %d", len(selectorGroups[0]))
@@ -107,8 +107,8 @@ func TestParseDeclarations(t *testing.T) {
 		font-size: 16px !important;
 		margin: 10px 20px;
 		border: none;
-        /* Comment between declarations */
-        padding: 0;
+		/* Comment between declarations */
+		padding: 0;
 	}
 	`
 	p := NewParser(input)
@@ -147,7 +147,7 @@ func TestCalculateSpecificity(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.input, func(t *testing.T) {
 			p := NewParser(tt.input + " {}")
-			selectorGroups := p.parseSelectorGroups()
+			selectorGroups := p.ParseSelectorGroups() // <-- FIX 3
 			complexSelector := selectorGroups[0][0]
 			a, b, c := complexSelector.CalculateSpecificity()
 			assert.Equal(t, tt.a, a)
