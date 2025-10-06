@@ -47,8 +47,7 @@ func newTestRuntime(t *testing.T) *jsexec.Runtime {
 	// Start the event loop so it can process async tasks like setTimeout and Promises.
 	eventLoop.Start()
 
-	// REFACTOR: The NewRuntime function now requires a schemas.Persona.
-	// We'll provide a default one for testing purposes.
+	// The NewRuntime function requires a schemas.Persona.
 	testPersona := schemas.Persona{
 		Width:     1920,
 		Height:    1080,
@@ -158,14 +157,14 @@ func TestExecuteScript_Cancellation(t *testing.T) {
 	}
 }
 
-// -- New tests for Promise handling --
+// -- Tests for Promise handling and setTimeout Polyfill --
 
 func TestExecuteScript_PromiseFulfilled(t *testing.T) {
 	runtime := newTestRuntime(t)
 	ctx := context.Background()
 
 	// This script returns a promise that resolves after a short delay.
-	// `setTimeout` requires the event loop provided in `newTestRuntime`.
+	// `setTimeout` relies on the injected polyfill connected to the event loop.
 	script := `new Promise(resolve => setTimeout(() => resolve('async success'), 50))`
 
 	result, err := runtime.ExecuteScript(ctx, script, nil)
@@ -199,4 +198,68 @@ func TestExecuteScript_PromiseTimeout(t *testing.T) {
 	// We expect the context's deadline to be the cause of the error.
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Contains(t, err.Error(), "context done while waiting for promise")
+}
+
+func TestSetTimeoutWithArguments(t *testing.T) {
+	runtime := newTestRuntime(t)
+	ctx := context.Background()
+
+	// Test passing arguments to the setTimeout callback
+	script := `new Promise(resolve => {
+        setTimeout((a, b) => resolve(a + b), 50, 10, 20);
+    })`
+
+	result, err := runtime.ExecuteScript(ctx, script, nil)
+	require.NoError(t, err)
+	assert.Equal(t, int64(30), result)
+}
+
+func TestClearTimeout(t *testing.T) {
+	runtime := newTestRuntime(t)
+	ctx := context.Background()
+
+	// Schedule a timeout and immediately clear it. The promise should not resolve quickly.
+	script := `
+    (function() {
+        let resolved = false;
+        const timer = setTimeout(() => { resolved = true; }, 50);
+        clearTimeout(timer);
+        
+        // Return a promise that checks the state after a delay longer than the original timeout.
+        return new Promise(resolve => {
+            setTimeout(() => resolve(resolved), 100);
+        });
+    })()
+    `
+
+	result, err := runtime.ExecuteScript(ctx, script, nil)
+	require.NoError(t, err)
+	assert.Equal(t, false, result, "Timeout callback should not have executed")
+}
+
+func TestSetIntervalAndClearInterval(t *testing.T) {
+	runtime := newTestRuntime(t)
+	ctx := context.Background()
+
+	// Set an interval, let it run a few times, then clear it.
+	script := `
+    (function() {
+        let count = 0;
+        return new Promise(resolve => {
+            const interval = setInterval(() => {
+                count++;
+                if (count >= 3) {
+                    clearInterval(interval);
+                    // Wait a bit more to ensure it stopped, then resolve.
+                    setTimeout(() => resolve(count), 60);
+                }
+            }, 20);
+        });
+    })()
+    `
+
+	result, err := runtime.ExecuteScript(ctx, script, nil)
+	require.NoError(t, err)
+	// It should stop exactly at 3.
+	assert.Equal(t, int64(3), result)
 }

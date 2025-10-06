@@ -1,4 +1,3 @@
-// internal/worker/adapters/taint_adapter.go
 package adapters
 
 import (
@@ -9,7 +8,6 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/active/taint"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	// Removed unused import for "stealth" as DefaultPersona is now in the schemas package.
 	"go.uber.org/zap"
 )
 
@@ -56,19 +54,15 @@ func (a *TaintAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 		return fmt.Errorf("failed to initialize taint analyzer: %w", err)
 	}
 
-	// -- Start of Fix --
-	// The NewAnalysisContext signature has changed.
-	// 1. Pass the specific Task object instead of the entire global Config.
-	// 2. Add the global FindingsChan as the final argument.
+	// The NewAnalysisContext function expects the task object to configure the session.
 	session, err := analysisCtx.Global.BrowserManager.NewAnalysisContext(
 		ctx,
-		analysisCtx.Task, // Argument 2 changed
+		analysisCtx.Task, // Correctly pass the task object
 		schemas.DefaultPersona,
 		"",
 		"",
-		analysisCtx.Global.FindingsChan, // Argument 6 added
+		analysisCtx.Global.FindingsChan,
 	)
-	// -- End of Fix --
 	if err != nil {
 		return fmt.Errorf("failed to create browser session for taint analysis: %w", err)
 	}
@@ -87,4 +81,3 @@ func (a *TaintAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 	logger.Info("Taint analysis execution completed")
 	return nil
 }
-

@@ -106,24 +106,33 @@ func (r *Runtime) ExecuteScript(ctx context.Context, script string, args []inter
 // injectTimers manually creates and sets timer functions (setTimeout, etc.)
 // on a given VM instance, connecting them to the runtime's event loop.
 func (r *Runtime) injectTimers(vm *goja.Runtime) {
-	// setTimeout(callback, delay)
+	// setTimeout(callback, delay, ...args)
 	vm.Set("setTimeout", func(call goja.FunctionCall) goja.Value {
 		if len(call.Arguments) < 1 {
 			return goja.Undefined()
 		}
 		callback, ok := goja.AssertFunction(call.Argument(0))
 		if !ok {
-			// Browsers do nothing if the callback isn't a function.
+			// Browsers often allow strings (eval), but we restrict to functions for safety.
 			return goja.Undefined()
 		}
 
-		delay := call.Argument(1).ToInteger()
+		delay := int64(0)
+		if len(call.Arguments) > 1 {
+			delay = call.Argument(1).ToInteger()
+		}
 
-		// The callback must accept a *goja.Runtime argument.
+		var args []goja.Value
+		if len(call.Arguments) > 2 {
+			args = call.Arguments[2:]
+		}
+
+		// The callback provided to SetTimeout must accept a *goja.Runtime argument.
 		timer := r.eventLoop.SetTimeout(func(_ *goja.Runtime) {
 			// This func() is what the event loop executes after the delay.
 			// It calls the original JavaScript callback function.
-			callback(goja.Undefined()) // 'this' will be the global object
+			// 'this' will be the global object (Undefined in strict mode, which Goja defaults to)
+			callback(goja.Undefined(), args...)
 		}, time.Duration(delay)*time.Millisecond)
 
 		// Return the timer object so JavaScript can pass it to clearTimeout.
@@ -135,13 +144,14 @@ func (r *Runtime) injectTimers(vm *goja.Runtime) {
 		if len(call.Arguments) < 1 {
 			return goja.Undefined()
 		}
+		// Export the argument and check if it's the correct timer type from the eventloop package.
 		if timer, ok := call.Argument(0).Export().(*eventloop.Timer); ok {
 			r.eventLoop.ClearTimeout(timer)
 		}
 		return goja.Undefined()
 	})
 
-	// setInterval(callback, delay)
+	// setInterval(callback, delay, ...args)
 	vm.Set("setInterval", func(call goja.FunctionCall) goja.Value {
 		if len(call.Arguments) < 1 {
 			return goja.Undefined()
@@ -151,11 +161,19 @@ func (r *Runtime) injectTimers(vm *goja.Runtime) {
 			return goja.Undefined()
 		}
 
-		delay := call.Argument(1).ToInteger()
+		delay := int64(0)
+		if len(call.Arguments) > 1 {
+			delay = call.Argument(1).ToInteger()
+		}
+
+		var args []goja.Value
+		if len(call.Arguments) > 2 {
+			args = call.Arguments[2:]
+		}
 
 		// The callback must also accept a *goja.Runtime argument.
 		timer := r.eventLoop.SetInterval(func(_ *goja.Runtime) {
-			callback(goja.Undefined())
+			callback(goja.Undefined(), args...)
 		}, time.Duration(delay)*time.Millisecond)
 
 		return vm.ToValue(timer)
@@ -178,6 +196,11 @@ func (r *Runtime) injectTimers(vm *goja.Runtime) {
 func (r *Runtime) isFunctionWrapper(script string) bool {
 	s := strings.TrimSpace(script)
 	if len(s) < 5 {
+		return false
+	}
+
+	// Exclude IIFEs (Immediately Invoked Function Expressions)
+	if (strings.HasPrefix(s, "(") && strings.HasSuffix(s, ")()")) || (strings.HasPrefix(s, "(async") && strings.HasSuffix(s, ")()")) {
 		return false
 	}
 
