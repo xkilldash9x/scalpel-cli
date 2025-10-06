@@ -209,6 +209,7 @@ type DiscoveryConfig struct {
 	Concurrency        int           `mapstructure:"concurrency" yaml:"concurrency"`
 	Timeout            time.Duration `mapstructure:"timeout" yaml:"timeout"`
 	PassiveEnabled     *bool         `mapstructure:"passive_enabled" yaml:"passive_enabled"`
+	IncludeSubdomains  bool          `mapstructure:"include_subdomains" yaml:"include_subdomains"`
 	CrtShRateLimit     float64       `mapstructure:"crtsh_rate_limit" yaml:"crtsh_rate_limit"`
 	CacheDir           string        `mapstructure:"cache_dir" yaml:"cache_dir"`
 	PassiveConcurrency int           `mapstructure:"passive_concurrency" yaml:"passive_concurrency"`
@@ -327,6 +328,7 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("discovery.concurrency", 20)
 	v.SetDefault("discovery.timeout", "15m")
 	v.SetDefault("discovery.passive_enabled", true)
+	v.SetDefault("discovery.include_subdomains", true) // Default for subdomain discovery
 	v.SetDefault("discovery.crtsh_rate_limit", 2.0) // 1 request every 0.5 seconds
 	v.SetDefault("discovery.passive_concurrency", 10)
 
