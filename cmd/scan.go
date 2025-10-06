@@ -1,10 +1,10 @@
-// File: cmd/scan.go
 package cmd
 
 import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
@@ -30,60 +30,91 @@ import (
 
 // newScanCmd creates and configures the `scan` command.
 func newScanCmd() *cobra.Command {
-	// Local struct to capture output flags specifically.
-	var outputFlags struct {
-		Output string
-		Format string
-	}
-
 	scanCmd := &cobra.Command{
 		Use:   "scan [targets...]",
 		Short: "Starts a new security scan against the specified targets",
 		Args:  cobra.MinimumNArgs(1),
+		// The PreRunE function is a good place to handle configuration finalization
+		// before the main execution logic in RunE.
+		PreRunE: func(cmd *cobra.Command, args []string) error {
+			// Bind flags to their corresponding Viper keys. This is the idiomatic way
+			// to ensure that command-line flags correctly override values from
+			// the config file and environment variables.
+			if err := viper.BindPFlag("discovery.max_depth", cmd.Flags().Lookup("depth")); err != nil {
+				return err
+			}
+			if err := viper.BindPFlag("engine.worker_concurrency", cmd.Flags().Lookup("concurrency")); err != nil {
+				return err
+			}
+			// Bind all other flags that don't have a direct mapping.
+			return viper.BindPFlags(cmd.Flags())
+		},
 		RunE: func(cmd *cobra.Command, args []string) error {
 			// Use the context passed from main.go (signal-aware).
 			ctx := cmd.Context()
 			logger := observability.GetLogger()
 
 			// 1. Configuration Finalization
-			// Bind flags to viper. This allows flags defined below to override config file/env vars.
-			if err := viper.BindPFlags(cmd.Flags()); err != nil {
-				return fmt.Errorf("failed to bind command flags: %w", err)
-			}
-
 			cfg := config.Get()
 
-			// Re-unmarshal the config to apply any flag overrides (e.g., --depth, --concurrency).
+			// Re-unmarshal the config. Now that flags are properly bound in PreRunE,
+			// Viper will correctly apply the overrides with the right precedence.
 			if err := viper.Unmarshal(cfg); err != nil {
 				return fmt.Errorf("failed to re-unmarshal config with flag overrides: %w", err)
 			}
 
+			// Populate the ScanConfig from command line arguments and final config values.
+			// This struct centralizes all runtime settings for the current scan.
+			cfg.Scan.Targets = args
+			cfg.Scan.Output = viper.GetString("output")
+			cfg.Scan.Format = viper.GetString("format")
+			cfg.Scan.Scope = viper.GetString("scope")
+			// Use the final, resolved values from the main config.
+			cfg.Scan.Concurrency = cfg.Engine.WorkerConcurrency
+			cfg.Scan.Depth = cfg.Discovery.MaxDepth
+
+			// Map the 'scope' flag to the appropriate discovery setting.
+			switch strings.ToLower(cfg.Scan.Scope) {
+			case "subdomain":
+				cfg.Discovery.IncludeSubdomains = true
+			case "strict":
+				cfg.Discovery.IncludeSubdomains = false
+			default:
+				// If an unsupported scope value is given, log a warning and default to the safest option.
+				logger.Warn("Invalid scope value provided, defaulting to 'strict'", zap.String("scope", cfg.Scan.Scope))
+				cfg.Discovery.IncludeSubdomains = false
+			}
+
 			scanID := uuid.New().String()
-			targets := args
+			targets := cfg.Scan.Targets
+
+			// Ensure the primary target has a scheme for the scope manager.
+			if len(targets) > 0 {
+				if !strings.HasPrefix(targets[0], "http://") && !strings.HasPrefix(targets[0], "https://") {
+					targets[0] = "https://" + targets[0]
+				}
+			}
 
 			logger.Info("Starting new scan",
 				zap.String("scanID", scanID),
 				zap.Strings("targets", targets),
-				// Logging the effective configuration values
 				zap.Int("discovery_depth", cfg.Discovery.MaxDepth),
 				zap.Int("engine_concurrency", cfg.Engine.WorkerConcurrency),
+				zap.String("scope", cfg.Scan.Scope),
 			)
 
 			// 2. Initialize Core Components
 			components, err := initializeScanComponents(ctx, cfg, targets, logger)
 			if err != nil {
-				// Ensure components initialized so far are closed before returning
 				if components != nil {
 					components.Shutdown(ctx)
 				}
 				return fmt.Errorf("failed to initialize scan components: %w", err)
 			}
-			// Ensure components are shut down when the function returns.
 			defer components.Shutdown(ctx)
 
 			// 3. Execute Scan Orchestration
 			if err := components.Orchestrator.StartScan(ctx, targets, scanID); err != nil {
-				// Check if the error was due to context cancellation (graceful shutdown)
 				if errors.Is(err, context.Canceled) {
 					logger.Warn("Scan aborted gracefully", zap.String("scanID", scanID))
 					return fmt.Errorf("scan aborted by user signal")
@@ -95,15 +126,15 @@ func newScanCmd() *cobra.Command {
 			logger.Info("Scan execution completed successfully", zap.String("scanID", scanID))
 
 			// 4. Reporting
-			if outputFlags.Output != "" {
-				if err := generateReport(ctx, components.Store, scanID, outputFlags.Format, outputFlags.Output, logger); err != nil {
+			if cfg.Scan.Output != "" {
+				if err := generateReport(ctx, components.Store, scanID, cfg.Scan.Format, cfg.Scan.Output, logger); err != nil {
 					return err
 				}
 			}
 
 			// 5. Final Output
 			fmt.Printf("\nScan Complete. Scan ID: %s\n", scanID)
-			if outputFlags.Output == "" {
+			if cfg.Scan.Output == "" {
 				fmt.Printf("To generate a report, run: scalpel-cli report --scan-id %s\n", scanID)
 			}
 
@@ -112,36 +143,30 @@ func newScanCmd() *cobra.Command {
 	}
 
 	// Reporting flags
-	scanCmd.Flags().StringVarP(&outputFlags.Output, "output", "o", "", "Output file path for the report. If unset, no report is generated.")
-	scanCmd.Flags().StringVarP(&outputFlags.Format, "format", "f", "sarif", "Format for the output report (e.g., 'sarif', 'json').")
+	scanCmd.Flags().StringP("output", "o", "", "Output file path for the report. If unset, no report is generated.")
+	scanCmd.Flags().StringP("format", "f", "sarif", "Format for the output report (e.g., 'sarif', 'json').")
 
-	// Scan configuration override flags. We bind these directly to Viper config keys.
-	// Setting the default to 0 allows Viper to use the config/env value if the flag is omitted.
+	// Scan configuration override flags.
 	scanCmd.Flags().IntP("depth", "d", 0, "Maximum crawl depth. (Overrides config/env)")
-	viper.BindPFlag("discovery.max_depth", scanCmd.Flags().Lookup("depth"))
-
-	// Using -j (jobs) as -c is used for --config
 	scanCmd.Flags().IntP("concurrency", "j", 0, "Number of concurrent engine workers. (Overrides config/env)")
-	// Bind the "concurrency" flag to the "engine.worker_concurrency" config key
-	viper.BindPFlag("engine.worker_concurrency", scanCmd.Flags().Lookup("concurrency"))
+	scanCmd.Flags().String("scope", "strict", "Scan scope strategy (e.g., 'strict', 'subdomain'). (Overrides config/env)")
 
 	return scanCmd
 }
 
 // scanComponents holds initialized services.
 type scanComponents struct {
-	Store          *store.Store
-	BrowserManager schemas.BrowserManager
-	KnowledgeGraph schemas.KnowledgeGraphClient
-	TaskEngine     schemas.TaskEngine
+	Store           *store.Store
+	BrowserManager  schemas.BrowserManager
+	KnowledgeGraph  schemas.KnowledgeGraphClient
+	TaskEngine      schemas.TaskEngine
 	DiscoveryEngine schemas.DiscoveryEngine
-	Orchestrator   *orchestrator.Orchestrator
-	DBPool         *pgxpool.Pool
+	Orchestrator    *orchestrator.Orchestrator
+	DBPool          *pgxpool.Pool
 }
 
 // Shutdown gracefully closes all components.
 func (sc *scanComponents) Shutdown(ctx context.Context) {
-	// Use a background context with timeout for shutdown procedures.
 	shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 	defer cancel()
 
@@ -162,7 +187,6 @@ func (sc *scanComponents) Shutdown(ctx context.Context) {
 }
 
 // initializeScanComponents handles dependency injection.
-// Note: This implementation assumes the structure of internal/config/config.go matches the usage (e.g., cfg.Discovery, cfg.Engine).
 func initializeScanComponents(ctx context.Context, cfg *config.Config, targets []string, logger *zap.Logger) (*scanComponents, error) {
 	components := &scanComponents{}
 
@@ -196,7 +220,7 @@ func initializeScanComponents(ctx context.Context, cfg *config.Config, targets [
 	}
 	components.KnowledgeGraph = kg
 
-	// 4. Task Engine (This uses the configuration which includes the Gemini API Key if provided)
+	// 4. Task Engine
 	taskEngine, err := engine.New(cfg, logger, dbStore, browserManager, kg)
 	if err != nil {
 		return components, fmt.Errorf("failed to initialize task engine: %w", err)
@@ -212,7 +236,6 @@ func initializeScanComponents(ctx context.Context, cfg *config.Config, targets [
 	httpClient := network.NewClient(nil)
 	httpAdapter := discovery.NewHTTPClientAdapter(httpClient)
 
-	// Manually construct the discovery.Config struct from the main config values.
 	discoveryCfg := discovery.Config{
 		MaxDepth:           cfg.Discovery.MaxDepth,
 		Concurrency:        cfg.Discovery.Concurrency,
@@ -270,3 +293,4 @@ func generateReport(ctx context.Context, dbStore *store.Store, scanID, format, o
 	logger.Info("Report generated successfully.", zap.String("path", outputPath))
 	return nil
 }
+

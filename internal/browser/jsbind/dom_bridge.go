@@ -73,15 +73,18 @@ type BrowserEnvironment interface {
 type DOMBridge struct {
 	mu                   sync.RWMutex
 	document             *html.Node
-	runtime              *goja.Runtime
+	runtime              *goja.Runtime // The runtime currently bound (ephemeral)
 	logger               *zap.Logger
 	browser              BrowserEnvironment
 	persona              schemas.Persona
 	layoutRoot           *layout.LayoutBox
+	// nodeMap stores the mapping between Go *html.Node and Goja JS objects for the currently bound runtime.
 	nodeMap              map[*html.Node]*goja.Object
 	localStorage         map[string]string
 	sessionStorage       map[string]string
 	currentLocationState map[string]string
+	// eventListeners stores listeners attached via JS. This persists across BindToRuntime calls
+	// but the Goja Values (the listeners themselves) are specific to the runtime they were created in.
 	eventListeners       map[*html.Node]map[string]*listenerGroup
 }
 
@@ -99,7 +102,7 @@ type listenerGroup struct {
 
 // -- Constructor and Initialization --
 
-// NewDOMBridge creates a new DOMBridge, now decoupled from the event loop.
+// NewDOMBridge creates a new DOMBridge, decoupled from the event loop.
 func NewDOMBridge(logger *zap.Logger, browserEnv BrowserEnvironment, persona schemas.Persona) *DOMBridge {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -117,6 +120,7 @@ func NewDOMBridge(logger *zap.Logger, browserEnv BrowserEnvironment, persona sch
 }
 
 // BindToRuntime injects the DOM APIs and environment configuration into the Goja runtime.
+// This is called for every new JS execution (ephemeral VM).
 func (b *DOMBridge) BindToRuntime(vm *goja.Runtime, initialURL string) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -124,11 +128,14 @@ func (b *DOMBridge) BindToRuntime(vm *goja.Runtime, initialURL string) {
 	b.runtime = vm
 	global := vm.GlobalObject()
 
+	// Reset the node map and event listeners for the new runtime instance.
+	// This prevents memory leaks and ensures isolation between executions.
 	b.nodeMap = make(map[*html.Node]*goja.Object)
 	b.eventListeners = make(map[*html.Node]map[string]*listenerGroup)
-	b.layoutRoot = nil
+	b.layoutRoot = nil // Layout tree is specific to a snapshot, reset it here.
 
 	if b.document == nil {
+		// Initialize with a default empty document if none exists.
 		doc, err := html.Parse(strings.NewReader("<html><head></head><body></body></html>"))
 		if err != nil {
 			panic("failed to parse fallback empty document: " + err.Error())
@@ -136,13 +143,14 @@ func (b *DOMBridge) BindToRuntime(vm *goja.Runtime, initialURL string) {
 		b.document = doc
 	}
 
+	// Wrap the root document node and set global objects.
 	documentObj := b.wrapNode(b.document)
 	_ = global.Set("document", documentObj)
 	_ = global.Set("window", global)
 	_ = global.Set("self", global)
 
-	// Timers (setTimeout, etc.) are removed as they require a persistent event loop,
-	// which is incompatible with this synchronous model.
+	// Bind various Web APIs
+	// Note: Timers (setTimeout, etc.) are injected by jsexec/runtime.go, not here.
 	b.bindStorageAPIs()
 	b.bindScrollAPIs()
 	b.bindHistoryAPI()
@@ -151,6 +159,7 @@ func (b *DOMBridge) BindToRuntime(vm *goja.Runtime, initialURL string) {
 	b.InitializeLocation(initialURL)
 	b.bindNavigatorAPI()
 
+	// Set environment properties based on the persona.
 	_ = global.Set("innerWidth", b.persona.Width)
 	_ = global.Set("innerHeight", b.persona.Height)
 	_ = global.Set("outerWidth", b.persona.Width)
@@ -199,7 +208,8 @@ func (b *DOMBridge) GetDocumentNode() *html.Node {
 	return b.document
 }
 
-// GetJSNode provides thread safe access to the Goja object wrapper for a given *html.Node.
+// GetJSNode provides thread safe access to the Goja object wrapper for a given *html.Node
+// within the context of the currently bound runtime.
 func (b *DOMBridge) GetJSNode(node *html.Node) *goja.Object {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -209,22 +219,28 @@ func (b *DOMBridge) GetJSNode(node *html.Node) *goja.Object {
 // -- Core Wrapping Logic --
 
 // wrapNode creates or retrieves the Goja object wrapper for a given *html.Node.
+// Must be called within a lock (b.mu).
 func (b *DOMBridge) wrapNode(node *html.Node) *goja.Object {
 	if node == nil {
 		return nil
 	}
+	// Check if the node is already wrapped in the current runtime context.
 	if obj, exists := b.nodeMap[node]; exists {
 		return obj
 	}
 
+	// Create the native Go struct linkage.
 	native := &nativeNode{bridge: b, node: node}
 
+	// Create the JavaScript object wrapper.
 	obj := b.runtime.NewObject()
 	_ = SetObjectData(b.runtime, obj, native)
 
+	// Set basic Node properties.
 	_ = obj.Set("nodeType", mapGoNodeTypeToW3C(node.Type))
 	_ = obj.Set("nodeName", strings.ToUpper(node.Data))
 
+	// Define textContent property with getter/setter.
 	b.DefineProperty(obj, "textContent", func() goja.Value {
 		b.mu.RLock()
 		defer b.mu.RUnlock()
@@ -232,16 +248,19 @@ func (b *DOMBridge) wrapNode(node *html.Node) *goja.Object {
 	}, func(value goja.Value) {
 		b.mu.Lock()
 		defer b.mu.Unlock()
+		// Remove all children
 		for c := node.FirstChild; c != nil; {
 			next := c.NextSibling
 			node.RemoveChild(c)
 			c = next
 		}
+		// Add new text node if the value is not empty
 		if value.String() != "" {
 			node.AppendChild(&html.Node{Type: html.TextNode, Data: value.String()})
 		}
 	})
 
+	// Bind relationship properties and core manipulation methods.
 	b.defineParentAndChildProperties(obj, node)
 	_ = obj.Set("appendChild", b.jsAppendChild(native))
 	_ = obj.Set("removeChild", b.jsRemoveChild(native))
@@ -250,8 +269,10 @@ func (b *DOMBridge) wrapNode(node *html.Node) *goja.Object {
 	_ = obj.Set("removeEventListener", b.jsRemoveEventListener(native))
 	_ = obj.Set("dispatchEvent", b.jsDispatchEvent(native))
 
+	// Bind specific methods based on Document or Element type.
 	b.bindDocumentAndElementMethods(obj, node)
 
+	// Cache the wrapper in the current runtime's map.
 	b.nodeMap[node] = obj
 	return obj
 }
@@ -283,15 +304,19 @@ func (b *DOMBridge) bindDocumentAndElementMethods(obj *goja.Object, node *html.N
 		return
 	}
 
+	// Methods common to both Document and Element (e.g., for selection)
 	_ = obj.Set("querySelector", b.jsQuerySelector(native))
 	_ = obj.Set("querySelectorAll", b.jsQuerySelectorAll(native))
 	_ = obj.Set("cloneNode", b.jsCloneNode(native))
 
 	if node.Type == html.DocumentNode {
+		// Document specific methods
 		_ = obj.Set("getElementById", b.jsGetElementById())
 		_ = obj.Set("createElement", b.jsCreateElement())
 		_ = obj.Set("write", b.jsDocumentWrite())
 		b.defineCookieProperty(obj)
+
+		// Document properties pointing to key elements
 		if docElem := htmlquery.FindOne(node, "/html"); docElem != nil {
 			_ = obj.Set("documentElement", b.wrapNode(docElem))
 		}
@@ -302,24 +327,32 @@ func (b *DOMBridge) bindDocumentAndElementMethods(obj *goja.Object, node *html.N
 			_ = obj.Set("head", b.wrapNode(head))
 		}
 	} else if node.Type == html.ElementNode {
+		// Element specific properties and methods
 		_ = obj.Set("tagName", strings.ToUpper(node.Data))
 		b.defineHTMLProperties(obj, node)
 		b.defineValueProperty(obj, node)
 		b.defineDatasetProperty(obj, node)
 		b.defineStyleProperty(obj, node)
+
+		// Common attributes exposed as properties
 		b.defineAttributeProperty(obj, node, "id", "id")
 		b.defineAttributeProperty(obj, node, "className", "class")
 		b.defineAttributeProperty(obj, node, "href", "href")
 		b.defineAttributeProperty(obj, node, "src", "src")
 		b.defineAttributeProperty(obj, node, "title", "title")
 		b.defineAttributeProperty(obj, node, "alt", "alt")
+
+		// Boolean attributes
 		b.defineBooleanAttributeProperty(obj, node, "disabled", "disabled")
 		b.defineBooleanAttributeProperty(obj, node, "checked", "checked")
 		b.defineBooleanAttributeProperty(obj, node, "selected", "selected")
 		b.defineBooleanAttributeProperty(obj, node, "readOnly", "readonly")
 		b.defineBooleanAttributeProperty(obj, node, "required", "required")
 
+		// Attribute manipulation methods
 		b.bindAttributeMethods(obj, node)
+
+		// Interaction methods
 		_ = obj.Set("click", b.jsClick(native))
 		_ = obj.Set("focus", b.jsFocus(native))
 		_ = obj.Set("blur", b.jsBlur(native))
@@ -355,6 +388,7 @@ func (b *DOMBridge) defineParentAndChildProperties(obj *goja.Object, node *html.
 }
 
 func (b *DOMBridge) defineHTMLProperties(obj *goja.Object, node *html.Node) {
+	// innerHTML getter
 	getter := func() goja.Value {
 		b.mu.RLock()
 		defer b.mu.RUnlock()
@@ -364,7 +398,9 @@ func (b *DOMBridge) defineHTMLProperties(obj *goja.Object, node *html.Node) {
 		}
 		return b.runtime.ToValue(buf.String())
 	}
+	// innerHTML setter
 	setter := func(value goja.Value) {
+		// Parse the HTML fragment in the context of the current node.
 		nodes, err := html.ParseFragment(strings.NewReader(value.String()), node)
 		if err != nil {
 			b.logger.Warn("Failed to parse innerHTML", zap.Error(err))
@@ -372,11 +408,13 @@ func (b *DOMBridge) defineHTMLProperties(obj *goja.Object, node *html.Node) {
 		}
 		b.mu.Lock()
 		defer b.mu.Unlock()
+		// Remove existing children
 		for c := node.FirstChild; c != nil; {
 			next := c.NextSibling
 			node.RemoveChild(c)
 			c = next
 		}
+		// Append new nodes
 		for _, newNode := range nodes {
 			node.AppendChild(newNode)
 		}
@@ -391,6 +429,7 @@ func (b *DOMBridge) defineValueProperty(obj *goja.Object, node *html.Node) {
 		if strings.ToLower(node.Data) == "textarea" {
 			return b.runtime.ToValue(htmlquery.InnerText(node))
 		}
+		// For input elements, the value property reflects the "value" attribute.
 		return b.runtime.ToValue(htmlquery.SelectAttr(node, "value"))
 	}
 	setter := func(value goja.Value) {
@@ -398,6 +437,7 @@ func (b *DOMBridge) defineValueProperty(obj *goja.Object, node *html.Node) {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 		if strings.ToLower(node.Data) == "textarea" {
+			// For textarea, the value is the text content.
 			for c := node.FirstChild; c != nil; {
 				next := c.NextSibling
 				node.RemoveChild(c)
@@ -405,6 +445,7 @@ func (b *DOMBridge) defineValueProperty(obj *goja.Object, node *html.Node) {
 			}
 			node.AppendChild(&html.Node{Type: html.TextNode, Data: valStr})
 		} else {
+			// For input elements, set the "value" attribute.
 			setAttr(node, "value", valStr)
 		}
 	}
@@ -412,10 +453,12 @@ func (b *DOMBridge) defineValueProperty(obj *goja.Object, node *html.Node) {
 }
 
 func (b *DOMBridge) defineDatasetProperty(obj *goja.Object, elementNode *html.Node) {
+	// dataset provides a Proxy object for accessing data-* attributes.
 	getter := func() goja.Value {
 		target := b.runtime.NewObject()
 		trapConfig := &goja.ProxyTrapConfig{
 			Get: func(t *goja.Object, p string, r goja.Value) goja.Value {
+				// Convert JS camelCase property name to kebab-case attribute name.
 				attrName := "data-" + camelToKebab(p)
 				b.mu.RLock()
 				defer b.mu.RUnlock()
@@ -431,7 +474,7 @@ func (b *DOMBridge) defineDatasetProperty(obj *goja.Object, elementNode *html.No
 				b.mu.Lock()
 				defer b.mu.Unlock()
 				setAttr(elementNode, attrName, v.String())
-				return true
+				return true // Indicate success
 			},
 		}
 		return b.runtime.ToValue(b.runtime.NewProxy(target, trapConfig))
@@ -461,7 +504,7 @@ func (b *DOMBridge) defineCookieProperty(docObj *goja.Object) {
 	b.DefineProperty(docObj, "cookie", getter, setter)
 }
 
-// -- JS Method Implementations --
+// -- JS Method Implementations (Core DOM Manipulation and Selection) --
 
 func (b *DOMBridge) jsGetElementById() func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
@@ -469,6 +512,7 @@ func (b *DOMBridge) jsGetElementById() func(goja.FunctionCall) goja.Value {
 		if id == "" {
 			return goja.Null()
 		}
+		// Construct CSS selector for ID. Needs basic escaping for safety.
 		selector := fmt.Sprintf(`[id="%s"]`, strings.ReplaceAll(id, `"`, `\"`))
 
 		sel, err := cascadia.Compile(selector)
@@ -480,6 +524,7 @@ func (b *DOMBridge) jsGetElementById() func(goja.FunctionCall) goja.Value {
 		b.mu.Lock()
 		defer b.mu.Unlock()
 
+		// Use cascadia to find the element within the document.
 		node := cascadia.Query(b.document, sel)
 		if node == nil {
 			return goja.Null()
@@ -493,10 +538,12 @@ func (b *DOMBridge) jsCreateElement() func(goja.FunctionCall) goja.Value {
 		tagName := call.Argument(0).String()
 		b.mu.Lock()
 		defer b.mu.Unlock()
+		// Create a new Go html.Node
 		node := &html.Node{
 			Type: html.ElementNode,
 			Data: strings.ToLower(tagName),
 		}
+		// Wrap it for use in the JS runtime
 		return b.wrapNode(node)
 	}
 }
@@ -506,12 +553,17 @@ func (b *DOMBridge) jsDocumentWrite() func(goja.FunctionCall) goja.Value {
 		content := call.Argument(0).String()
 		b.mu.Lock()
 		defer b.mu.Unlock()
+
+		// In a basic implementation, document.write often appends to the body.
 		body := htmlquery.FindOne(b.document, "//body")
 		if body == nil {
+			// If there's no body, we can't easily determine where to write.
 			return goja.Undefined()
 		}
+		// Parse the content and append it.
 		nodes, err := html.ParseFragment(strings.NewReader(content), body)
 		if err != nil {
+			b.logger.Warn("Error parsing content for document.write", zap.Error(err))
 			return goja.Undefined()
 		}
 		for _, node := range nodes {
@@ -524,14 +576,17 @@ func (b *DOMBridge) jsDocumentWrite() func(goja.FunctionCall) goja.Value {
 func (b *DOMBridge) jsQuerySelector(contextNative *nativeNode) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
 		selector := call.Argument(0).String()
+		// Compile the CSS selector.
 		sel, err := cascadia.Compile(selector)
 		if err != nil {
 			b.logger.Warn("Invalid CSS selector in querySelector", zap.String("selector", selector), zap.Error(err))
+			// Throw a DOMException (SyntaxError) as required by the spec.
 			panic(b.runtime.NewGoError(fmt.Errorf("SyntaxError: '%s' is not a valid selector", selector)))
 		}
 
 		b.mu.Lock()
 		defer b.mu.Unlock()
+		// Query starting from the context node.
 		node := cascadia.Query(contextNative.node, sel)
 		if node == nil {
 			return goja.Null()
@@ -556,6 +611,7 @@ func (b *DOMBridge) jsQuerySelectorAll(contextNative *nativeNode) func(goja.Func
 		for i, node := range nodes {
 			results[i] = b.wrapNode(node)
 		}
+		// Return a JS array (NodeList representation).
 		return b.runtime.ToValue(results)
 	}
 }
@@ -637,11 +693,12 @@ func (b *DOMBridge) jsAppendChild(parentNative *nativeNode) func(goja.FunctionCa
 		}
 		b.mu.Lock()
 		defer b.mu.Unlock()
+		// Standard DOM behavior: if the child is already in the tree, it is first removed.
 		if childNative.node.Parent != nil {
 			childNative.node.Parent.RemoveChild(childNative.node)
 		}
 		parentNative.node.AppendChild(childNative.node)
-		return call.Argument(0)
+		return call.Argument(0) // Returns the appended child
 	}
 }
 
@@ -653,19 +710,20 @@ func (b *DOMBridge) jsRemoveChild(parentNative *nativeNode) func(goja.FunctionCa
 		}
 		b.mu.Lock()
 		defer b.mu.Unlock()
+		// Check if the node is actually a child of the parent.
 		if childNative.node.Parent == parentNative.node {
 			parentNative.node.RemoveChild(childNative.node)
 		} else {
 			panic(b.runtime.NewGoError(errors.New("NotFoundError: The node to be removed is not a child of this node.")))
 		}
-		return call.Argument(0)
+		return call.Argument(0) // Returns the removed child
 	}
 }
 
 func (b *DOMBridge) jsInsertBefore(parentNative *nativeNode) func(goja.FunctionCall) goja.Value {
 	return func(call goja.FunctionCall) goja.Value {
 		newNative := unwrapNode(call.Argument(0))
-		refNative := unwrapNode(call.Argument(1))
+		refNative := unwrapNode(call.Argument(1)) // Reference node can be null
 
 		if newNative == nil {
 			panic(b.runtime.NewTypeError("Argument 1 is not a Node."))
@@ -674,13 +732,16 @@ func (b *DOMBridge) jsInsertBefore(parentNative *nativeNode) func(goja.FunctionC
 		b.mu.Lock()
 		defer b.mu.Unlock()
 
+		// Remove the new node from its existing parent first.
 		if newNative.node.Parent != nil {
 			newNative.node.Parent.RemoveChild(newNative.node)
 		}
 
 		if refNative == nil {
+			// If reference node is null, insertBefore acts like appendChild.
 			parentNative.node.AppendChild(newNative.node)
 		} else {
+			// Check if the reference node is a child of the parent.
 			if refNative.node.Parent == parentNative.node {
 				parentNative.node.InsertBefore(newNative.node, refNative.node)
 			} else {
@@ -688,7 +749,7 @@ func (b *DOMBridge) jsInsertBefore(parentNative *nativeNode) func(goja.FunctionC
 			}
 		}
 
-		return call.Argument(0)
+		return call.Argument(0) // Returns the inserted node
 	}
 }
 
