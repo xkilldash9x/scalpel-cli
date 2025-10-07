@@ -1,3 +1,4 @@
+// internal/agent/agent.go
 package agent
 
 import (
@@ -9,16 +10,18 @@ import (
 	"sync"
 	"time"
 
-	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
+	"[github.com/google/uuid](https://github.com/google/uuid)"
+	"[github.com/jackc/pgx/v5/pgxpool](https://github.com/jackc/pgx/v5/pgxpool)"
 	"go.uber.org/zap"
 
-	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
-	"github.com/xkilldash9x/scalpel-cli/internal/config"
-	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
-	"github.com/xkilldash9x/scalpel-cli/internal/llmclient"
+	"[github.com/xkilldash9x/scalpel-cli/api/schemas](https://github.com/xkilldash9x/scalpel-cli/api/schemas)"
+	"[github.com/xkilldash9x/scalpel-cli/internal/analysis/core](https://github.com/xkilldash9x/scalpel-cli/internal/analysis/core)"
+	// Import autofix implicitly as it's used by the orchestrator.
+	// _ "[github.com/xkilldash9x/scalpel-cli/internal/autofix](https://github.com/xkilldash9x/scalpel-cli/internal/autofix)" 
+	"[github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid](https://github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid)"
+	"[github.com/xkilldash9x/scalpel-cli/internal/config](https://github.com/xkilldash9x/scalpel-cli/internal/config)"
+	"[github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph](https://github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph)"
+	"[github.com/xkilldash9x/scalpel-cli/internal/llmclient](https://github.com/xkilldash9x/scalpel-cli/internal/llmclient)"
 )
 
 // Agent orchestrates the components of an autonomous security mission.
@@ -36,6 +39,9 @@ type Agent struct {
 	humanoid   humanoid.Controller
 	kg         GraphStore
 	llmClient  schemas.LLMClient
+
+	// Manages the self-healing subsystem.
+	selfHeal *SelfHealOrchestrator
 }
 
 // Acts as a factory to create the appropriate GraphStore.
@@ -52,8 +58,7 @@ func NewGraphStoreFromConfig(
 		}
 		return knowledgegraph.NewPostgresKG(pool), nil
 	case "in-memory":
-		// -- FIX APPLIED --
-		// Corrected based on the compiler error stating NewInMemoryKG returns two values.
+		// Corrected initialization based on the prompt's context.
 		return knowledgegraph.NewInMemoryKG(logger)
 	default:
 		return nil, fmt.Errorf("unknown knowledge_graph type specified: %s", cfg.Type)
@@ -65,6 +70,7 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 	agentID := uuid.New().String()[:8]
 	logger := globalCtx.Logger.With(zap.String("agent_id", agentID), zap.String("mission_id", mission.ID))
 
+	// 1. Core Components (Bus, KG, LLM)
 	bus := NewCognitiveBus(logger, 100)
 
 	kg, err := NewGraphStoreFromConfig(ctx, globalCtx.Config.Agent.KnowledgeGraph, globalCtx.DBPool, logger)
@@ -77,15 +83,27 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 		return nil, fmt.Errorf("failed to create LLM router for agent: %w", err)
 	}
 
+	// 2. Mind
 	mind := NewLLMMind(logger, llmRouter, globalCtx.Config.Agent, kg, bus)
 
-	projectRoot, _ := os.Getwd()
+	// 3. Executors and Humanoid
+	projectRoot, _ := os.Getwd() 
 	executors := NewExecutorRegistry(logger, projectRoot)
 	executors.UpdateSessionProvider(func() schemas.SessionContext {
 		return session
 	})
 
 	h := humanoid.New(humanoid.DefaultConfig(), logger.Named("humanoid"), session)
+
+	// 4. Initialize Self-Healing (Autofix) System.
+	// This initializes the system but does not start monitoring yet.
+	selfHeal, err := NewSelfHealOrchestrator(logger, globalCtx.Config, llmRouter)
+	if err != nil {
+		// If initialization fails (e.g., missing log file config), log the error 
+		// but allow the agent to continue without self-healing.
+		logger.Error("Failed to initialize Self-Healing system. Proceeding without it.", zap.Error(err))
+		selfHeal = nil 
+	}
 
 	agent := &Agent{
 		mission:    mission,
@@ -98,6 +116,7 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 		humanoid:   h,
 		kg:         kg,
 		llmClient:  llmRouter,
+		selfHeal:   selfHeal,
 	}
 	return agent, nil
 }
@@ -106,8 +125,15 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 	a.logger.Info("Agent is commencing mission.", zap.String("objective", a.mission.Objective))
 	missionCtx, cancelMission := context.WithCancel(ctx)
-	defer cancelMission()
+	defer cancelMission() // Ensures all subsystems (including selfHeal) are stopped when mission ends.
 
+	// Start the Self-Healing system if initialized.
+	if a.selfHeal != nil {
+		// The self-healing system runs concurrently for the duration of the mission context.
+		go a.selfHeal.Start(missionCtx)
+	}
+
+	// Start the Mind's cognitive loop.
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
@@ -118,21 +144,31 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 		}
 	}()
 
+	// Start the Action execution loop.
 	a.wg.Add(1)
 	go a.actionLoop(missionCtx)
 
+	// Kick off the mission.
 	a.mind.SetMission(a.mission)
 
+	// Wait for completion or cancellation.
 	select {
 	case result := <-a.resultChan:
 		a.logger.Info("Mission finished. Returning results.")
+		// Ensure the self-heal system shuts down gracefully.
+		if a.selfHeal != nil {
+			// cancelMission() stops the loop; WaitForShutdown waits for completion.
+			a.selfHeal.WaitForShutdown()
+		}
 		return &result, nil
 	case <-missionCtx.Done():
 		a.logger.Warn("Mission context cancelled.", zap.Error(missionCtx.Err()))
+		if a.selfHeal != nil {
+			a.selfHeal.WaitForShutdown()
+		}
 		return a.concludeMission(missionCtx)
 	}
 }
-
 func (a *Agent) actionLoop(ctx context.Context) {
 	defer a.wg.Done()
 	actionChan, unsubscribe := a.bus.Subscribe(MessageTypeAction)
