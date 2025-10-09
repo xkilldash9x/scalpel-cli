@@ -5,33 +5,33 @@ import (
 	"context"
 	"fmt"
 	"os"
+	"strings"
 
 	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"go.uber.org/zap"
 )
 
 var (
 	cfgFile     string
 	validateFix bool // Flag for validation runs during self-healing
+	// osExit allows mocking os.Exit in tests.
+	osExit = os.Exit
 )
 
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
-	Use:               "scalpel-cli",
-	Short:             "Scalpel is an AI-native security scanner.",
-	Version:           Version,
+	Use:     "scalpel-cli",
+	Short:   "Scalpel is an AI-native security scanner.",
+	Version: Version,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// ... (PersistentPreRunE logic remains the same) ...
-		return nil
-	},
-}
-
 		// 1. Initialize configuration loading (Viper)
-		if err := initializeConfig(); err != nil {
+		if err := initializeConfig(cmd); err != nil {
 			// Initialize a basic logger if config loading fails early.
 			basicLogger, _ := zap.NewDevelopment()
+			defer basicLogger.Sync()
 			basicLogger.Error("Failed to initialize configuration", zap.Error(err))
 			return fmt.Errorf("failed to initialize configuration: %w", err)
 		}
@@ -39,12 +39,14 @@ var rootCmd = &cobra.Command{
 		// 2. Unmarshal the configuration
 		var cfg config.Config
 		if err := viper.Unmarshal(&cfg); err != nil {
+			// Initialize with default logger settings if config is unreadable.
 			observability.InitializeLogger(config.LoggerConfig{Level: "info", Format: "console", ServiceName: "scalpel-cli"})
 			return fmt.Errorf("failed to unmarshal config: %w", err)
 		}
 
 		// 3. Validate the configuration
 		if err := cfg.Validate(); err != nil {
+			// Initialize logger with what we have to report the validation error.
 			observability.InitializeLogger(cfg.Logger)
 			return fmt.Errorf("invalid configuration: %w", err)
 		}
@@ -56,6 +58,14 @@ var rootCmd = &cobra.Command{
 		observability.InitializeLogger(cfg.Logger)
 		logger := observability.GetLogger()
 		logger.Info("Starting Scalpel-CLI", zap.String("version", Version))
+
+		// Handle the validation run flag
+		if validateFix {
+			logger.Info("===[ VALIDATION RUN: CONFIGURATION OK ]===")
+			// A successful validation run should exit cleanly without executing the command.
+			cmd.Println("===[ VALIDATION RUN PASSED ]===")
+			osExit(0) // Use the mockable exit function
+		}
 
 		return nil
 	},
@@ -89,58 +99,47 @@ func Execute(ctx context.Context) error {
 }
 
 func init() {
-	cobra.OnInitialize(initializeConfig)
-
 	rootCmd.PersistentFlags().StringVarP(&cfgFile, "config", "c", "", "config file (default is ./config.yaml)")
 	rootCmd.PersistentFlags().BoolVar(&validateFix, "validate-fix", false, "Internal flag for self-healing validation.")
-	rootCmd.PersistentFlags().MarkHidden("validate-fix") // Hide from users
-
-	// CORRECTED: Add the command variables directly instead of calling constructor functions.
-	rootCmd.AddCommand(selfHealCmd)
-	rootCmd.AddCommand(evolveCmd)
-	rootCmd.AddCommand(scanCmd)
-	rootCmd.AddCommand(versionCmd)
-	rootCmd.AddCommand(reportCmd)
+	_ = rootCmd.PersistentFlags().MarkHidden("validate-fix")
 }
 
-
 // initializeConfig reads in config file and ENV variables if set.
-func initializeConfig() error {
-	// Set default values so the app can run with a minimal config.
-	config.SetDefaults(viper.GetViper())
+func initializeConfig(cmd *cobra.Command) error {
+	v := viper.GetViper()
 
-	// 1. Set up config file search paths
-	if cfgFile != "" {
-		viper.SetConfigFile(cfgFile)
-	} else {
-		viper.AddConfigPath(".")
-		viper.SetConfigName("config")
-		viper.SetConfigType("yaml")
-	}
+	// 1. Set default values. This is crucial for Viper to know about all possible keys.
+	config.SetDefaults(v)
 
-	// 2. Environment Variable Configuration
-	viper.SetEnvPrefix("SCALPEL")
-	viper.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	viper.AutomaticEnv()
+	// 2. Set up environment variable handling.
+	v.SetEnvPrefix("SCALPEL")
+	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+	v.AutomaticEnv() // This allows Viper to see all env vars that match the prefix.
 
-	// Explicitly bind critical environment variables.
-	// This ensures they are picked up correctly.
-
-	// Database connection string
-	_ = viper.BindEnv("database.url", "SCALPEL_DATABASE_URL")
-
-	// Gemini API Key.
-	// We bind both a convenient short name and the structured name.
-	_ = viper.BindEnv("agent.llm.gemini_api_key", "SCALPEL_GEMINI_API_KEY", "SCALPEL_AGENT_LLM_GEMINI_API_KEY")
-
-	// 3. Read the configuration file
-	if err := viper.ReadInConfig(); err != nil {
-		// It's okay if the config file is not found, but report other errors
-		// like parsing issues.
-		if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
-			return fmt.Errorf("error reading config file: %w", err)
+	// Bind flags to Viper
+	if cmd != nil {
+		if err := v.BindPFlags(cmd.Flags()); err != nil {
+			return fmt.Errorf("failed to bind command flags: %w", err)
 		}
-		// Config file not found, proceed with defaults and environment variables.
+		// Also bind persistent flags from the root
+		if err := v.BindPFlags(cmd.PersistentFlags()); err != nil {
+			return fmt.Errorf("failed to bind persistent command flags: %w", err)
+		}
 	}
+
+	// 3. Read the configuration file if specified.
+	// Values from the file will override the defaults.
+	if cfgFile != "" {
+		v.SetConfigFile(cfgFile)
+		if err := v.ReadInConfig(); err != nil {
+			if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+				return fmt.Errorf("error reading config file: %w", err)
+			}
+		}
+	}
+	// At this point, viper has loaded defaults and the config file.
+	// Environment variables found by AutomaticEnv() will have overridden them.
+	// We are now certain the configuration is loaded correctly.
+
 	return nil
 }

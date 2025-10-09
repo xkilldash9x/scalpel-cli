@@ -72,7 +72,13 @@ func (m *LLMMind) Start(ctx context.Context) error {
 	m.wg.Add(1)
 	go m.runObserverLoop(ctx)
 
-	if m.currentState == StateInitializing {
+	// -- FIX APPLIED HERE --
+	// Lock is added to protect the read of currentState, preventing the race condition.
+	m.mu.RLock()
+	initialState := m.currentState
+	m.mu.RUnlock()
+
+	if initialState == StateInitializing {
 		m.updateState(StateObserving)
 	}
 
@@ -198,8 +204,8 @@ func (m *LLMMind) executeDecisionCycle(ctx context.Context) {
 	if err := m.bus.Post(ctx, CognitiveMessage{Type: MessageTypeAction, Payload: action}); err != nil {
 		m.logger.Error("Failed to post action to CognitiveBus", zap.Error(err))
 		busErrorResult := ExecutionResult{
-			Status:    "failed",
-			ErrorCode: "BUS_POST_FAILURE",
+			Status:       "failed",
+			ErrorCode:    "BUS_POST_FAILURE",
 			ErrorDetails: map[string]interface{}{"message": err.Error()},
 		}
 		if updateErr := m.updateActionStatus(ctx, action.ID, schemas.StatusError, busErrorResult); updateErr != nil {

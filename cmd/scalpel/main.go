@@ -137,11 +137,10 @@ func triggerMetalyst() error {
 
 	// Use injected variable.
 	cmd := execCommandContext(ctx, executable, args...)
-	// Inherit stdio, environment, and working directory.
+	// Inherit stdio, and working directory. The environment is inherited automatically.
 	cmd.Stdout = os.Stdout
 	cmd.Stderr = os.Stderr
 	cmd.Stdin = os.Stdin
-	cmd.Env = os.Environ()
 
 	if err := cmd.Run(); err != nil {
 		// This captures failures in the self-heal process itself.

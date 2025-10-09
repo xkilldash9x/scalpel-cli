@@ -43,4 +43,5 @@ Thumbs.db
 # Archives
 *.zip
 *.tar.gz
-*.rar.envrc
+*.rar
+.envrc

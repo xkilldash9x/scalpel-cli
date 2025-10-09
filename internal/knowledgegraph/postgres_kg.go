@@ -1,3 +1,4 @@
+// File: internal/knowledgegraph/postgres_kg.go
 package knowledgegraph
 
 import (
@@ -36,6 +37,12 @@ var _ schemas.KnowledgeGraphClient = (*PostgresKG)(nil)
 
 // NewPostgresKG initializes a new connection wrapper for the PostgreSQL database.
 func NewPostgresKG(pool DBPool, logger *zap.Logger) *PostgresKG {
+	// This check ensures that in a production environment, we are using the real pgxpool.Pool.
+	// During testing, a mock will be used, and this warning will be logged, which is expected.
+	if _, ok := pool.(*pgxpool.Pool); !ok {
+		logger.Warn("PostgresKG initialized with a non-production DBPool implementation. This is expected for tests.")
+	}
+
 	return &PostgresKG{
 		pool: pool,
 		// naming the logger gives us more context in the logs
@@ -78,14 +85,12 @@ func (p *PostgresKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 		props = json.RawMessage("{}")
 	}
 
-	// ON CONFLICT on the natural key (from_node, to_node, type) prevents duplicate logical edges.
+	// CORRECTED: ON CONFLICT on the natural key (from_node, to_node, type) prevents duplicate logical edges.
+	// This assumes a UNIQUE constraint exists on these three columns in the 'edges' table.
 	_, err := p.pool.Exec(ctx, `
         INSERT INTO edges (id, from_node, to_node, type, label, properties, created_at, last_seen)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        ON CONFLICT (id) DO UPDATE SET
-            from_node = EXCLUDED.from_node,
-            to_node = EXCLUDED.to_node,
-            type = EXCLUDED.type,
+        ON CONFLICT (from_node, to_node, type) DO UPDATE SET
             label = EXCLUDED.label,
             properties = EXCLUDED.properties,
             last_seen = EXCLUDED.last_seen;
@@ -96,7 +101,6 @@ func (p *PostgresKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 			"Failed to add or update edge",
 			zap.String("from_node", edge.From),
 			zap.String("to_node", edge.To),
-			// Explicitly cast edge.Type to a string
 			zap.String("edge_type", string(edge.Type)),
 			zap.Error(err),
 		)
@@ -107,7 +111,6 @@ func (p *PostgresKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 		"Edge added or updated successfully",
 		zap.String("from_node", edge.From),
 		zap.String("to_node", edge.To),
-		// Explicitly cast edge.Type to a string here too
 		zap.String("edge_type", string(edge.Type)),
 	)
 	return nil
