@@ -1,3 +1,4 @@
+// internal/agent/executors_test.go
 package agent
 
 import (
@@ -172,17 +173,17 @@ func TestParseBrowserError(t *testing.T) {
 
 	// Test Timeout Error
 	err = errors.New("context deadline exceeded: waiting for element timed out")
-	code, details = ParseBrowserError(err, action)
+	code, _ = ParseBrowserError(err, action)
 	assert.Equal(t, ErrCodeTimeoutError, code)
 
 	// Test Navigation Error
 	err = errors.New("could not navigate: net::ERR_CONNECTION_REFUSED")
-	code, details = ParseBrowserError(err, action)
+	code, _ = ParseBrowserError(err, action)
 	assert.Equal(t, ErrCodeNavigationError, code)
 
 	// Test Geometry Error
 	err = errors.New("element is not interactable (zero size)")
-	code, details = ParseBrowserError(err, action)
+	code, _ = ParseBrowserError(err, action)
 	assert.Equal(t, ErrCodeHumanoidGeometryInvalid, code)
 
 	// Test Generic Failure

@@ -46,16 +46,9 @@ var colorMap = map[string]string{
 	"white":   colorWhite,
 }
 
-// InitializeLogger sets up the global Zap logger based on the configuration.
-// This function is thread-safe and idempotent. It defaults console output to Stdout.
-func InitializeLogger(cfg config.LoggerConfig) {
-	// FIX: Pass a locked Stdout to the internal initializer.
-	initializeLogger(cfg, zapcore.Lock(os.Stdout))
-}
-
-// initializeLogger is the internal implementation that accepts a WriteSyncer for console output.
-// This allows redirecting output during tests.
-func initializeLogger(cfg config.LoggerConfig, consoleWriter zapcore.WriteSyncer) {
+// Initialize sets up the global Zap logger based on configuration and a specified output writer.
+// This is the core, flexible initializer.
+func Initialize(cfg config.LoggerConfig, consoleWriter zapcore.WriteSyncer) {
 	// Ensures initialization logic runs only once.
 	once.Do(func() {
 		level := zap.NewAtomicLevel()
@@ -64,7 +57,6 @@ func initializeLogger(cfg config.LoggerConfig, consoleWriter zapcore.WriteSyncer
 		}
 
 		consoleEncoder := getEncoder(cfg)
-		// FIX: Use the provided consoleWriter instead of hardcoding os.Stdout.
 		consoleCore := zapcore.NewCore(consoleEncoder, consoleWriter, level)
 		cores := []zapcore.Core{consoleCore}
 
@@ -96,6 +88,19 @@ func initializeLogger(cfg config.LoggerConfig, consoleWriter zapcore.WriteSyncer
 		zap.ReplaceGlobals(logger)
 		zap.RedirectStdLog(logger)
 	})
+}
+
+// InitializeLogger is a convenience wrapper around Initialize for production use.
+// It defaults console output to a locked Stdout.
+func InitializeLogger(cfg config.LoggerConfig) {
+	Initialize(cfg, zapcore.Lock(os.Stdout))
+}
+
+// ResetForTest resets the sync.Once and clears the global logger.
+// This function should ONLY be used in tests to ensure isolation.
+func ResetForTest() {
+	globalLogger.Store(nil)
+	once = sync.Once{}
 }
 
 // newColorizedLevelEncoder creates a zapcore.LevelEncoder that colorizes the log level.
