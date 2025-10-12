@@ -39,12 +39,13 @@ func (m *mockWorker) ProcessTask(ctx context.Context, analysisCtx *core.Analysis
 // TestTaskEngine_StartStop verifies the engine's core lifecycle: starting, processing tasks, and stopping gracefully.
 func TestTaskEngine_StartStop(t *testing.T) {
 	// -- Setup --
-	cfg := &config.Config{
-		Engine: config.EngineConfig{
-			WorkerConcurrency:  2,
-			DefaultTaskTimeout: 5 * time.Second,
-		},
+	mockCfg := new(mocks.MockConfig)
+	engineCfg := config.EngineConfig{
+		WorkerConcurrency:  2,
+		DefaultTaskTimeout: 5 * time.Second,
 	}
+	mockCfg.On("Engine").Return(engineCfg)
+
 	logger := zap.NewNop()
 	store := new(mocks.MockStore)
 
@@ -56,11 +57,22 @@ func TestTaskEngine_StartStop(t *testing.T) {
 		},
 	}
 
-	engine, err := New(cfg, logger, store, new(mocks.MockBrowserManager), new(mocks.MockKGClient))
-	require.NoError(t, err)
+	// As core.GlobalContext has not been updated to use the config.Interface,
+	// we provide a concrete config for it to satisfy the type checker. The
+	// engine itself receives the mock directly, and the mockWorker for this
+	// test doesn't depend on the config within the context.
+	concreteCfgForContext := &config.Config{}
 
-	// We need to replace the real worker with our mock.
-	engine.worker = worker
+	// Create a global context for the engine.
+	globalCtx := &core.GlobalContext{
+		Config: concreteCfgForContext,
+		Logger: logger,
+	}
+
+	// The engine now receives the worker via dependency injection, making the
+	// setup cleaner and removing the need to replace struct fields post-creation.
+	engine, err := New(mockCfg, logger, store, worker, globalCtx)
+	require.NoError(t, err)
 
 	// -- Execution --
 	taskChan := make(chan schemas.Task, 10)
@@ -86,7 +98,10 @@ func TestTaskEngine_StartStop(t *testing.T) {
 // TestTaskEngine_WorkerError verifies that if a worker returns an error, the result is not persisted.
 func TestTaskEngine_WorkerError(t *testing.T) {
 	// -- Setup --
-	cfg := &config.Config{Engine: config.EngineConfig{WorkerConcurrency: 1}}
+	mockCfg := new(mocks.MockConfig)
+	engineCfg := config.EngineConfig{WorkerConcurrency: 1}
+	mockCfg.On("Engine").Return(engineCfg)
+
 	logger := zap.NewNop()
 	store := new(mocks.MockStore)
 	worker := &mockWorker{
@@ -95,10 +110,11 @@ func TestTaskEngine_WorkerError(t *testing.T) {
 			return errors.New("worker failed spectacularly")
 		},
 	}
+	concreteCfgForContext := &config.Config{}
+	globalCtx := &core.GlobalContext{Config: concreteCfgForContext, Logger: logger}
 
-	engine, err := New(cfg, logger, store, new(mocks.MockBrowserManager), new(mocks.MockKGClient))
+	engine, err := New(mockCfg, logger, store, worker, globalCtx)
 	require.NoError(t, err)
-	engine.worker = worker
 
 	// -- Execution --
 	taskChan := make(chan schemas.Task, 1)
@@ -115,16 +131,20 @@ func TestTaskEngine_WorkerError(t *testing.T) {
 // TestTaskEngine_NoResults verifies that no data is persisted if a task yields no findings or KG updates.
 func TestTaskEngine_NoResults(t *testing.T) {
 	// -- Setup --
-	cfg := &config.Config{Engine: config.EngineConfig{WorkerConcurrency: 1}}
+	mockCfg := new(mocks.MockConfig)
+	engineCfg := config.EngineConfig{WorkerConcurrency: 1}
+	mockCfg.On("Engine").Return(engineCfg)
+
 	logger := zap.NewNop()
 	store := new(mocks.MockStore)
 	worker := &mockWorker{
 		// Default processFunc returns success with no findings.
 	}
+	concreteCfgForContext := &config.Config{}
+	globalCtx := &core.GlobalContext{Config: concreteCfgForContext, Logger: logger}
 
-	engine, err := New(cfg, logger, store, new(mocks.MockBrowserManager), new(mocks.MockKGClient))
+	engine, err := New(mockCfg, logger, store, worker, globalCtx)
 	require.NoError(t, err)
-	engine.worker = worker
 
 	// -- Execution --
 	taskChan := make(chan schemas.Task, 1)
@@ -141,7 +161,10 @@ func TestTaskEngine_NoResults(t *testing.T) {
 // TestTaskEngine_ContextCancellation ensures workers shut down when the main context is cancelled.
 func TestTaskEngine_ContextCancellation(t *testing.T) {
 	// -- Setup --
-	cfg := &config.Config{Engine: config.EngineConfig{WorkerConcurrency: 2}}
+	mockCfg := new(mocks.MockConfig)
+	engineCfg := config.EngineConfig{WorkerConcurrency: 2}
+	mockCfg.On("Engine").Return(engineCfg)
+
 	logger := zap.NewNop()
 	store := new(mocks.MockStore)
 
@@ -152,10 +175,11 @@ func TestTaskEngine_ContextCancellation(t *testing.T) {
 			return ctx.Err()
 		},
 	}
+	concreteCfgForContext := &config.Config{}
+	globalCtx := &core.GlobalContext{Config: concreteCfgForContext, Logger: logger}
 
-	engine, err := New(cfg, logger, store, new(mocks.MockBrowserManager), new(mocks.MockKGClient))
+	engine, err := New(mockCfg, logger, store, worker, globalCtx)
 	require.NoError(t, err)
-	engine.worker = worker
 
 	// -- Execution --
 	ctx, cancel := context.WithCancel(context.Background())

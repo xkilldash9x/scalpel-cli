@@ -1,4 +1,4 @@
-// internal/browser/humanoid/humanoid_integration_test.go
+// File: internal/browser/humanoid/humanoid_integration_test.go
 package humanoid_test
 
 import (
@@ -38,20 +38,16 @@ func assertContextCancellation(t *testing.T, err error) {
 func setupSessionTestEnvironment(t *testing.T) (context.Context, *session.Session, *httptest.Server) {
 	t.Helper()
 
-	// -- Create a minimal configuration for the test --
-	cfg := &config.Config{
-		Browser: config.BrowserConfig{
-			Humanoid: humanoid.DefaultConfig(),
-		},
-		Network: config.NetworkConfig{},
-		IAST:    config.IASTConfig{},
-	}
-	cfg.Browser.Humanoid.Enabled = true // Ensure humanoid is active
-	// Speed up tests by reducing delays
-	cfg.Browser.Humanoid.KeyHoldMeanMs = 5.0
-	cfg.Browser.Humanoid.ClickHoldMinMs = 5
-	cfg.Browser.Humanoid.ClickHoldMaxMs = 15
-	cfg.Network.PostLoadWait = 50 * time.Millisecond
+	// -- Create a default configuration and modify it for the test --
+	cfg := config.NewDefaultConfig()
+
+	// Ensure humanoid is active and speed up tests by reducing delays.
+	cfg.SetBrowserHumanoidEnabled(true)
+	// Use the standardized setter name for the new Ex-Gaussian model.
+	cfg.SetBrowserHumanoidKeyHoldMu(5.0)
+	cfg.SetBrowserHumanoidClickHoldMinMs(5)
+	cfg.SetBrowserHumanoidClickHoldMaxMs(15)
+	cfg.SetNetworkPostLoadWait(50 * time.Millisecond)
 
 	logger := zap.NewNop()
 	findingsChan := make(chan schemas.Finding, 10)
@@ -65,21 +61,21 @@ func setupSessionTestEnvironment(t *testing.T) (context.Context, *session.Sessio
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		// This simple HTML provides the targets for our interaction tests.
 		fmt.Fprintln(w, `
-			<html>
-				<head>
-					<style>
-						/* Basic styles to ensure elements have dimensions */
-						#target { width: 100px; height: 100px; background: blue; margin-top: 50px; }
-						#inputField { width: 200px; height: 20px; margin-top: 20px; display: inline-block; }
-					</style>
-				</head>
-				<body>
-					<h1>Humanoid Integration Test</h1>
-					<div id='target'>Target Box</div>
-					<input id="inputField" type="text" />
-				</body>
-			</html>
-		`)
+		            <html>
+		                <head>
+		                    <style>
+		                        /* Basic styles to ensure elements have dimensions */
+		                        #target { width: 100px; height: 100px; background: blue; margin-top: 50px; }
+		                        #inputField { width: 200px; height: 20px; margin-top: 20px; display: inline-block; }
+		                    </style>
+		                </head>
+		                <body>
+		                    <h1>Humanoid Integration Test</h1>
+		                    <div id='target'>Target Box</div>
+		                    <input id="inputField" type="text" />
+		                </body>
+		            </html>
+		        `)
 	}))
 
 	// -- Navigate the session to the test server --
@@ -147,7 +143,6 @@ func TestContextCancellation_DuringTyping(t *testing.T) {
 	// Allow the typing to get started.
 	time.Sleep(200 * time.Millisecond)
 	actionCancel() // Cancel the operation.
-
 	select {
 	case err := <-errChan:
 		assertContextCancellation(t, err)
@@ -170,7 +165,6 @@ func TestConcurrentActions_OnSingleSession(t *testing.T) {
 
 	var wg sync.WaitGroup
 	actionCount := 10 // Fire 10 actions concurrently to stress the pool.
-
 	wg.Add(actionCount)
 
 	for i := 0; i < actionCount; i++ {

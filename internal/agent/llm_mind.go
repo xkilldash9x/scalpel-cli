@@ -61,7 +61,7 @@ func NewLLMMind(
 		contextLookbackSteps: contextLookbackSteps,
 	}
 
-	m.logger.Info("LLMMind initialized", zap.String("default_model", cfg.LLM.DefaultPowerfulModel), zap.Int("context_lookback", m.contextLookbackSteps))
+	m.logger.Info("LLMMind initialized", zap.String("default_model", cfg.LLM.DefaultPowerfulModel), zap.Int("context_lookback", m.contextLookbackSteps), zap.Bool("evolution_enabled", cfg.Evolution.Enabled))
 	return m
 }
 
@@ -322,43 +322,62 @@ func (m *LLMMind) decideNextAction(ctx context.Context, contextSnapshot *schemas
 // -- REFACTORING NOTE --
 // The system prompt is the core instruction set for the agent's brain.
 // This version is updated with the new HUMANOID_DRAG_AND_DROP action and,
-// most importantly, explicit instructions for error handling strategies.
-// This teaches the agent how to recover from common failures.
+// explicit instructions for error handling strategies, and conditional inclusion
+// of the EVOLVE_CODEBASE capability.
 func (m *LLMMind) generateSystemPrompt() string {
-	return `You are the Mind of 'scalpel-cli', an advanced, autonomous security analysis agent. Your goal is to achieve the Mission Objective by exploring a web application, analyzing its components, and identifying vulnerabilities.
-You operate in a continuous OODA loop. You receive the state as a JSON Knowledge Graph snapshot and must respond with a single JSON object for the next action.
+	basePrompt := `You are the Mind of 'scalpel-cli', an advanced, autonomous security analysis agent. Your goal is to achieve the Mission Objective by exploring a web application, analyzing its components, and identifying vulnerabilities.
+	You operate in a continuous OODA loop. You receive the state as a JSON Knowledge Graph snapshot and must respond with a single JSON object for the next action.
 
-Available Action Types:
+	Available Action Types:
 
-1. Basic Browser Interaction (Executed realistically via Humanoid):
-- NAVIGATE: Go to a specific URL. (Params: value)
-- CLICK: Click on an element. (Params: selector)
-- INPUT_TEXT: Type text into a field. (Params: selector, value)
-- SUBMIT_FORM: Submit a form. (Params: selector)
-- SCROLL: Scroll the page. (Params: value="up" or "down")
-- WAIT_FOR_ASYNC: Pause execution. (Params: metadata={"duration_ms": 1500})
+	1. Basic Browser Interaction (Executed realistically via Humanoid):
+	- NAVIGATE: Go to a specific URL. (Params: value)
+	- CLICK: Click on an element. (Params: selector)
+	- INPUT_TEXT: Type text into a field. (Params: selector, value)
+	- SUBMIT_FORM: Submit a form. (Params: selector)
+	- SCROLL: Scroll the page. (Params: value="up" or "down")
+	- WAIT_FOR_ASYNC: Pause execution. (Params: metadata={"duration_ms": 1500})
 
-2. Advanced/Complex Interaction:
-- HUMANOID_DRAG_AND_DROP: Move an element from one location to another.
-  Use 'selector' for the element to drag, and 'metadata.target_selector' for the drop target.
-  Example: {"type": "HUMANOID_DRAG_AND_DROP", "selector": "#item-1", "metadata": {"target_selector": "#cart"}, "rationale": "Testing cart functionality."}
-- PERFORM_COMPLEX_TASK: Instruct the agent to perform a high level action (e.g., 'LOGIN'). Use sparingly.
+	2. Advanced/Complex Interaction:
+	- HUMANOID_DRAG_AND_DROP: Move an element from one location to another.
+	  Use 'selector' for the element to drag, and 'metadata.target_selector' for the drop target.
+	  Example: {"type": "HUMANOID_DRAG_AND_DROP", "selector": "#item-1", "metadata": {"target_selector": "#cart"}, "rationale": "Testing cart functionality."}
+	- PERFORM_COMPLEX_TASK: Instruct the agent to perform a high level action (e.g., 'LOGIN'). Use sparingly.
 
-3. Analysis & System:
-- GATHER_CODEBASE_CONTEXT: Read source code for a module. (Params: value="module_path")
-- CONCLUDE: Finish the mission.
+	3. Analysis & System:
+	- GATHER_CODEBASE_CONTEXT: Read source code for a module. (Params: metadata={"module_path": "..."})
+	- CONCLUDE: Finish the mission.
+`
 
-**Crucial Error Handling Instructions**:
-Analyze the "error_code" (in the KG node properties) if a previous action failed (status="ERROR").
+	// Conditionally include the evolution prompt if enabled in the configuration.
+	evolutionPrompt := ""
+	if m.cfg.Evolution.Enabled {
+		evolutionPrompt = `
+	4. Proactive Self-Improvement (Evolution):
+	- EVOLVE_CODEBASE: Initiate an autonomous OODA loop to improve the agent's own source code.
+	  **WHEN TO USE:** Only when you identify a limitation, bug, or inefficiency in the agent's capabilities that prevents achieving the mission objective, AND you have context about the relevant code (e.g., from GATHER_CODEBASE_CONTEXT).
+	  **PARAMETERS:**
+	    - value: The objective of the improvement (Required, String).
+	    - metadata.target_files: List of relevant file paths (Optional, Array[string]).
+	  Example: {"type": "EVOLVE_CODEBASE", "value": "Improve error handling for timeouts in BrowserExecutor", "metadata": {"target_files": ["internal/agent/executors.go"]}, "rationale": "Repeated timeouts require better handling."}
+`
+	}
 
-- ELEMENT_NOT_FOUND: The selector was incorrect or the element does not exist. Strategy: Try a different selector or navigate elsewhere.
-- HUMANOID_GEOMETRY_INVALID: The element exists but has zero size or invalid structure. Strategy: Try interacting with a parent element or skip this target.
-- HUMANOID_TARGET_NOT_VISIBLE: The element exists but is obscured or off-screen.
-  -> Strategy: You MUST use SCROLL or interact with other UI elements (like closing a modal) to make it visible BEFORE retrying the interaction.
-- TIMEOUT_ERROR: The operation took too long. Strategy: Consider using WAIT_FOR_ASYNC before retrying.
-- NAVIGATION_ERROR: The URL could not be reached. Strategy: Verify the URL or navigate back.
+	errorHandlingPrompt := `
+	**Crucial Error Handling Instructions**:
+	Analyze the "error_code" (in the KG node properties) if a previous action failed (status="ERROR").
+	- ELEMENT_NOT_FOUND: The selector was incorrect or the element does not exist. Strategy: Try a different selector or navigate elsewhere.
+	- HUMANOID_GEOMETRY_INVALID: The element exists but has zero size or invalid structure. Strategy: Try interacting with a parent element or skip this target.
+	- HUMANOID_TARGET_NOT_VISIBLE: The element exists but is obscured or off-screen.
+	  -> Strategy: You MUST use SCROLL or interact with other UI elements (like closing a modal) to make it visible BEFORE retrying the interaction.
+	- TIMEOUT_ERROR: The operation took too long. Strategy: Consider using WAIT_FOR_ASYNC before retrying. If EVOLVE_CODEBASE timed out, the objective was likely too complex.
+	- NAVIGATION_ERROR: The URL could not be reached. Strategy: Verify the URL or navigate back.
+	- EVOLUTION_FAILURE: The self-improvement cycle failed. Strategy: Analyze the failure details (error_details), and either retry with a refined objective or abandon the evolution attempt.
+	- FEATURE_DISABLED: You attempted to use a feature (like EVOLVE_CODEBASE) that is disabled. Strategy: Find an alternative approach; do not retry the action.
+	- EXECUTION_FAILURE: If details suggest an internal bug. Strategy: If Evolution is enabled, consider using EVOLVE_CODEBASE to fix the bug after gathering context.
 
-Analyze the provided state and objective, then decide your next move. Your response must be only the JSON for your chosen action.`
+	Analyze the provided state and objective, then decide your next move. Your response must be only the JSON for your chosen action.`
+	return basePrompt + evolutionPrompt + errorHandlingPrompt
 }
 
 // Constructs the user facing part of the prompt, including the mission and KG state.
@@ -374,12 +393,12 @@ func (m *LLMMind) generateUserPrompt(contextSnapshot *schemas.Subgraph) (string,
 	m.mu.RUnlock()
 
 	return fmt.Sprintf(`Mission Objective: %s
-Target: %s
+	Target: %s
 
-Current Localized State (Knowledge Graph JSON):
-%s
+	Current Localized State (Knowledge Graph JSON):
+	%s
 
-Determine the next Action. Respond with a single JSON object.`, objective, targetURL, string(contextJSON)), nil
+	Determine the next Action. Respond with a single JSON object.`, objective, targetURL, string(contextJSON)), nil
 }
 
 // A regex to robustly extract a JSON object from a markdown code block.

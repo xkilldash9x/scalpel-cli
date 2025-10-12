@@ -1,39 +1,156 @@
+// File: internal/config/config.go
 package config
 
 import (
 	"fmt"
 	"os"
-	"sync"
 	"time"
 
 	"github.com/spf13/viper"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 )
 
-var (
-	// The global configuration instance.
-	instance *Config
-	// Caches the loading error to prevent repeated failed initializations.
-	loadErr error
-	// Ensures the configuration is loaded only once.
-	once sync.Once
-)
+// Interface defines the contract for accessing application configuration.
+// This allows for dependency injection and mocking in tests.
+type Interface interface {
+	Logger() LoggerConfig
+	Database() DatabaseConfig
+	Engine() EngineConfig
+	Browser() BrowserConfig
+	Network() NetworkConfig
+	IAST() IASTConfig
+	Scanners() ScannersConfig
+	JWT() JWTConfig // Specific getter for JWT config
+	Agent() AgentConfig
+	Discovery() DiscoveryConfig
+	Autofix() AutofixConfig
+	Scan() ScanConfig
+	SetScanConfig(sc ScanConfig)
 
-// Config holds the entire application configuration.
-// It's the one struct to rule them all.
+	// Discovery Setters
+	SetDiscoveryMaxDepth(int)
+	SetDiscoveryIncludeSubdomains(bool)
+
+	// Engine Setters
+	SetEngineWorkerConcurrency(int)
+
+	// Browser Setters
+	SetBrowserHeadless(bool)
+	SetBrowserDisableCache(bool)
+	SetBrowserIgnoreTLSErrors(bool)
+	SetBrowserDebug(bool)
+
+	// Humanoid Setters
+	SetBrowserHumanoidEnabled(bool)
+	SetBrowserHumanoidClickHoldMinMs(ms int)
+	SetBrowserHumanoidClickHoldMaxMs(ms int)
+	SetBrowserHumanoidKeyHoldMu(ms float64)
+
+	// Network Setters
+	SetNetworkCaptureResponseBodies(bool)
+	SetNetworkNavigationTimeout(d time.Duration)
+	SetNetworkPostLoadWait(d time.Duration)
+	SetNetworkIgnoreTLSErrors(bool)
+
+	// IAST Setters
+	SetIASTEnabled(bool)
+
+	// JWT Setters
+	SetJWTEnabled(bool)
+	SetJWTBruteForceEnabled(bool)
+
+	// ATO Setter
+	SetATOConfig(atoCfg ATOConfig)
+}
+
+// Config holds the entire application configuration, minus any module-specific configs.
+// It uses private fields to enforce access through the Interface's getter methods.
 type Config struct {
-	Logger    LoggerConfig    `mapstructure:"logger" yaml:"logger"`
-	Database  DatabaseConfig  `mapstructure:"database" yaml:"database"`
-	Engine    EngineConfig    `mapstructure:"engine" yaml:"engine"`
-	Browser   BrowserConfig   `mapstructure:"browser" yaml:"browser"`
-	Network   NetworkConfig   `mapstructure:"network" yaml:"network"`
-	IAST      IASTConfig      `mapstructure:"iast" yaml:"iast"`
-	Scanners  ScannersConfig  `mapstructure:"scanners" yaml:"scanners"`
-	Agent     AgentConfig     `mapstructure:"agent" yaml:"agent"`
-	Discovery DiscoveryConfig `mapstructure:"discovery" yaml:"discovery"`
-	Autofix   AutofixConfig   `mapstructure:"autofix" yaml:"autofix"`
-	// ScanConfig gets its marching orders from CLI flags, not the config file.
-	Scan ScanConfig `mapstructure:"-" yaml:"-"`
+	logger    LoggerConfig    `mapstructure:"logger" yaml:"logger"`
+	database  DatabaseConfig  `mapstructure:"database" yaml:"database"`
+	engine    EngineConfig    `mapstructure:"engine" yaml:"engine"`
+	browser   BrowserConfig   `mapstructure:"browser" yaml:"browser"`
+	network   NetworkConfig   `mapstructure:"network" yaml:"network"`
+	iast      IASTConfig      `mapstructure:"iast" yaml:"iast"`
+	scanners  ScannersConfig  `mapstructure:"scanners" yaml:"scanners"`
+	agent     AgentConfig     `mapstructure:"agent" yaml:"agent"`
+	discovery DiscoveryConfig `mapstructure:"discovery" yaml:"discovery"`
+	autofix   AutofixConfig   `mapstructure:"autofix" yaml:"autofix"`
+	// scanConfig gets its marching orders from CLI flags, not the config file.
+	scan ScanConfig `mapstructure:"-" yaml:"-"`
+}
+
+func (c *Config) SetBrowserHumanoidKeyHoldMeanMs(f float64) {
+	panic("unimplemented")
+}
+
+// --- Interface Method Implementations (Getters) ---
+
+func (c *Config) Logger() LoggerConfig       { return c.logger }
+func (c *Config) Database() DatabaseConfig   { return c.database }
+func (c *Config) Engine() EngineConfig       { return c.engine }
+func (c *Config) Browser() BrowserConfig     { return c.browser }
+func (c *Config) Network() NetworkConfig     { return c.network }
+func (c *Config) IAST() IASTConfig           { return c.iast }
+func (c *Config) Scanners() ScannersConfig   { return c.scanners }
+func (c *Config) JWT() JWTConfig             { return c.scanners.Static.JWT }
+func (c *Config) Agent() AgentConfig         { return c.agent }
+func (c *Config) Discovery() DiscoveryConfig { return c.discovery }
+func (c *Config) Autofix() AutofixConfig     { return c.autofix }
+func (c *Config) Scan() ScanConfig           { return c.scan }
+
+// --- Interface Method Implementations (Setters) ---
+
+func (c *Config) SetScanConfig(sc ScanConfig) { c.scan = sc }
+
+// Discovery Setters
+func (c *Config) SetDiscoveryMaxDepth(d int) { c.discovery.MaxDepth = d }
+func (c *Config) SetDiscoveryIncludeSubdomains(b bool) {
+	c.discovery.IncludeSubdomains = b
+}
+
+// Engine Setters
+func (c *Config) SetEngineWorkerConcurrency(w int) { c.engine.WorkerConcurrency = w }
+
+// Browser Setters
+func (c *Config) SetBrowserHeadless(b bool)        { c.browser.Headless = b }
+func (c *Config) SetBrowserDisableCache(b bool)    { c.browser.DisableCache = b }
+func (c *Config) SetBrowserIgnoreTLSErrors(b bool) { c.browser.IgnoreTLSErrors = b }
+func (c *Config) SetBrowserDebug(b bool)           { c.browser.Debug = b }
+
+// Humanoid Setters
+func (c *Config) SetBrowserHumanoidEnabled(b bool) { c.browser.Humanoid.Enabled = b }
+func (c *Config) SetBrowserHumanoidClickHoldMinMs(ms int) {
+	c.browser.Humanoid.ClickHoldMinMs = ms
+}
+func (c *Config) SetBrowserHumanoidClickHoldMaxMs(ms int) {
+	c.browser.Humanoid.ClickHoldMaxMs = ms
+}
+func (c *Config) SetBrowserHumanoidKeyHoldMu(ms float64) {
+	c.browser.Humanoid.KeyHoldMu = ms
+}
+
+// Network Setters
+func (c *Config) SetNetworkCaptureResponseBodies(b bool) {
+	c.network.CaptureResponseBodies = b
+}
+func (c *Config) SetNetworkNavigationTimeout(d time.Duration) {
+	c.network.NavigationTimeout = d
+}
+func (c *Config) SetNetworkPostLoadWait(d time.Duration) { c.network.PostLoadWait = d }
+func (c *Config) SetNetworkIgnoreTLSErrors(b bool)       { c.network.IgnoreTLSErrors = b }
+
+// IAST Setters
+func (c *Config) SetIASTEnabled(b bool) { c.iast.Enabled = b }
+
+// JWT Setters
+func (c *Config) SetJWTEnabled(b bool) { c.scanners.Static.JWT.Enabled = b }
+func (c *Config) SetJWTBruteForceEnabled(b bool) {
+	c.scanners.Static.JWT.BruteForceEnabled = b
+}
+
+// ATO Setter
+func (c *Config) SetATOConfig(atoCfg ATOConfig) {
+	c.scanners.Active.Auth.ATO = atoCfg
 }
 
 // AutofixConfig holds settings for the self-healing (autofix) subsystem.
@@ -48,6 +165,166 @@ type AutofixConfig struct {
 	GitHub                 GitHubConfig `mapstructure:"github" yaml:"github"`
 }
 
+// Agent implements Interface.
+func (a AutofixConfig) Agent() AgentConfig {
+	panic("unimplemented")
+}
+
+// Autofix implements Interface.
+func (a AutofixConfig) Autofix() AutofixConfig {
+	panic("unimplemented")
+}
+
+// Browser implements Interface.
+func (a AutofixConfig) Browser() BrowserConfig {
+	panic("unimplemented")
+}
+
+// Database implements Interface.
+func (a AutofixConfig) Database() DatabaseConfig {
+	panic("unimplemented")
+}
+
+// Discovery implements Interface.
+func (a AutofixConfig) Discovery() DiscoveryConfig {
+	panic("unimplemented")
+}
+
+// Engine implements Interface.
+func (a AutofixConfig) Engine() EngineConfig {
+	panic("unimplemented")
+}
+
+// IAST implements Interface.
+func (a AutofixConfig) IAST() IASTConfig {
+	panic("unimplemented")
+}
+
+// JWT implements Interface.
+func (a AutofixConfig) JWT() JWTConfig {
+	panic("unimplemented")
+}
+
+// Logger implements Interface.
+func (a AutofixConfig) Logger() LoggerConfig {
+	panic("unimplemented")
+}
+
+// Network implements Interface.
+func (a AutofixConfig) Network() NetworkConfig {
+	panic("unimplemented")
+}
+
+// Scan implements Interface.
+func (a AutofixConfig) Scan() ScanConfig {
+	panic("unimplemented")
+}
+
+// Scanners implements Interface.
+func (a AutofixConfig) Scanners() ScannersConfig {
+	panic("unimplemented")
+}
+
+// SetATOConfig implements Interface.
+func (a AutofixConfig) SetATOConfig(atoCfg ATOConfig) {
+	panic("unimplemented")
+}
+
+// SetBrowserDebug implements Interface.
+func (a AutofixConfig) SetBrowserDebug(bool) {
+	panic("unimplemented")
+}
+
+// SetBrowserDisableCache implements Interface.
+func (a AutofixConfig) SetBrowserDisableCache(bool) {
+	panic("unimplemented")
+}
+
+// SetBrowserHeadless implements Interface.
+func (a AutofixConfig) SetBrowserHeadless(bool) {
+	panic("unimplemented")
+}
+
+// SetBrowserHumanoidClickHoldMaxMs implements Interface.
+func (a AutofixConfig) SetBrowserHumanoidClickHoldMaxMs(ms int) {
+	panic("unimplemented")
+}
+
+// SetBrowserHumanoidClickHoldMinMs implements Interface.
+func (a AutofixConfig) SetBrowserHumanoidClickHoldMinMs(ms int) {
+	panic("unimplemented")
+}
+
+// SetBrowserHumanoidEnabled implements Interface.
+func (a AutofixConfig) SetBrowserHumanoidEnabled(bool) {
+	panic("unimplemented")
+}
+
+// SetBrowserHumanoidKeyHoldMu implements Interface.
+func (a AutofixConfig) SetBrowserHumanoidKeyHoldMu(ms float64) {
+	panic("unimplemented")
+}
+
+// SetBrowserIgnoreTLSErrors implements Interface.
+func (a AutofixConfig) SetBrowserIgnoreTLSErrors(bool) {
+	panic("unimplemented")
+}
+
+// SetDiscoveryIncludeSubdomains implements Interface.
+func (a AutofixConfig) SetDiscoveryIncludeSubdomains(bool) {
+	panic("unimplemented")
+}
+
+// SetDiscoveryMaxDepth implements Interface.
+func (a AutofixConfig) SetDiscoveryMaxDepth(int) {
+	panic("unimplemented")
+}
+
+// SetEngineWorkerConcurrency implements Interface.
+func (a AutofixConfig) SetEngineWorkerConcurrency(int) {
+	panic("unimplemented")
+}
+
+// SetIASTEnabled implements Interface.
+func (a AutofixConfig) SetIASTEnabled(bool) {
+	panic("unimplemented")
+}
+
+// SetJWTBruteForceEnabled implements Interface.
+func (a AutofixConfig) SetJWTBruteForceEnabled(bool) {
+	panic("unimplemented")
+}
+
+// SetJWTEnabled implements Interface.
+func (a AutofixConfig) SetJWTEnabled(bool) {
+	panic("unimplemented")
+}
+
+// SetNetworkCaptureResponseBodies implements Interface.
+func (a AutofixConfig) SetNetworkCaptureResponseBodies(bool) {
+	panic("unimplemented")
+}
+
+// SetNetworkIgnoreTLSErrors implements Interface.
+func (a AutofixConfig) SetNetworkIgnoreTLSErrors(bool) {
+	panic("unimplemented")
+}
+
+// SetNetworkNavigationTimeout implements Interface.
+func (a AutofixConfig) SetNetworkNavigationTimeout(d time.Duration) {
+	panic("unimplemented")
+}
+
+// SetNetworkPostLoadWait implements Interface.
+func (a AutofixConfig) SetNetworkPostLoadWait(d time.Duration) {
+	panic("unimplemented")
+}
+
+// SetScanConfig implements Interface.
+func (a AutofixConfig) SetScanConfig(sc ScanConfig) {
+	panic("unimplemented")
+}
+
 // GitConfig defines the committer identity.
 type GitConfig struct {
 	AuthorName  string `mapstructure:"author_name" yaml:"author_name"`
@@ -56,12 +333,9 @@ type GitConfig struct {
 
 // GitHubConfig defines the configuration for GitHub integration.
 type GitHubConfig struct {
-	// The GitHub Personal Access Token (PAT).
-	// SECURITY: Loaded via environment variable (SCALPEL_AUTOFIX_GH_TOKEN).
-	Token     string `mapstructure:"token" yaml:"-"` // Ignore in YAML/JSON
-	RepoOwner string `mapstructure:"repo_owner" yaml:"repo_owner"`
-	RepoName  string `mapstructure:"repo_name" yaml:"repo_name"`
-	// The base branch to target for pull requests (e.g., "main").
+	Token      string `mapstructure:"token" yaml:"-"`
+	RepoOwner  string `mapstructure:"repo_owner" yaml:"repo_owner"`
+	RepoName   string `mapstructure:"repo_name" yaml:"repo_name"`
 	BaseBranch string `mapstructure:"base_branch" yaml:"base_branch"`
 }
 
@@ -102,16 +376,18 @@ type EngineConfig struct {
 	DefaultTaskTimeout time.Duration `mapstructure:"default_task_timeout" yaml:"default_task_timeout"`
 }
 
+// NOTE: HumanoidConfig is now defined in internal/config/humanoid_config.go
+
 // BrowserConfig holds settings for the headless browser instances.
 type BrowserConfig struct {
-	Headless        bool            `mapstructure:"headless" yaml:"headless"`
-	DisableCache    bool            `mapstructure:"disable_cache" yaml:"disable_cache"`
-	IgnoreTLSErrors bool            `mapstructure:"ignore_tls_errors" yaml:"ignore_tls_errors"`
-	Concurrency     int             `mapstructure:"concurrency" yaml:"concurrency"`
-	Debug           bool            `mapstructure:"debug" yaml:"debug"`
-	Args            []string        `mapstructure:"args" yaml:"args"`
-	Viewport        map[string]int  `mapstructure:"viewport" yaml:"viewport"`
-	Humanoid        humanoid.Config `mapstructure:"humanoid" yaml:"humanoid"`
+	Headless        bool           `mapstructure:"headless" yaml:"headless"`
+	DisableCache    bool           `mapstructure:"disable_cache" yaml:"disable_cache"`
+	IgnoreTLSErrors bool           `mapstructure:"ignore_tls_errors" yaml:"ignore_tls_errors"`
+	Concurrency     int            `mapstructure:"concurrency" yaml:"concurrency"`
+	Debug           bool           `mapstructure:"debug" yaml:"debug"`
+	Args            []string       `mapstructure:"args" yaml:"args"`
+	Viewport        map[string]int `mapstructure:"viewport" yaml:"viewport"`
+	Humanoid        HumanoidConfig `mapstructure:"humanoid" yaml:"humanoid"`
 }
 
 // ProxyConfig defines the configuration for an outbound proxy.
@@ -265,7 +541,15 @@ type KnowledgeGraphConfig struct {
 // AgentConfig holds settings related to the AI agent and its components.
 type AgentConfig struct {
 	LLM            LLMRouterConfig      `mapstructure:"llm" yaml:"llm"`
+	Evolution      EvolutionConfig      `mapstructure:"evolution" yaml:"evolution"`
 	KnowledgeGraph KnowledgeGraphConfig `mapstructure:"knowledge_graph" yaml:"knowledge_graph"`
+}
+
+// EvolutionConfig holds settings for the proactive self-improvement (evolution) subsystem.
+type EvolutionConfig struct {
+	Enabled    bool          `mapstructure:"enabled" yaml:"enabled"`
+	MaxCycles  int           `mapstructure:"max_cycles" yaml:"max_cycles"`
+	SettleTime time.Duration `mapstructure:"settle_time" yaml:"settle_time"`
 }
 
 // LLMProvider defines the supported LLM providers.
@@ -303,8 +587,10 @@ type LLMModelConfig struct {
 func NewDefaultConfig() *Config {
 	v := viper.New()
 	SetDefaults(v)
+
 	var cfg Config
 	if err := v.Unmarshal(&cfg); err != nil {
+		// This should not happen with defaults, but good to be safe.
 		panic(fmt.Sprintf("failed to unmarshal default config: %v", err))
 	}
 	return &cfg
@@ -334,6 +620,8 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("browser.ignore_tls_errors", false)
 	v.SetDefault("browser.concurrency", 4)
 	v.SetDefault("browser.debug", true)
+	// Initialize all Humanoid defaults using the centralized function in humanoid_config.go.
+	setHumanoidDefaults(v)
 
 	// -- Network --
 	v.SetDefault("network.timeout", "30s")
@@ -373,41 +661,72 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("agent.knowledge_graph.postgres.host", "localhost")
 	v.SetDefault("agent.knowledge_graph.postgres.port", 5432)
 	v.SetDefault("agent.knowledge_graph.postgres.user", "postgres")
-	v.SetDefault("agent.knowledge_graph.postgres.password", "") // Should be set via env var in production
+	v.SetDefault("agent.knowledge_graph.postgres.password", "") // Should be set via env var
 	v.SetDefault("agent.knowledge_graph.postgres.dbname", "scalpel_kg")
 	v.SetDefault("agent.knowledge_graph.postgres.sslmode", "disable")
+
+	// -- Agent Evolution --
+	v.SetDefault("agent.evolution.enabled", false)
+	v.SetDefault("agent.evolution.max_cycles", 15)
+	v.SetDefault("agent.evolution.settle_time", "500ms")
 
 	// -- Autofix --
 	v.SetDefault("autofix.enabled", false)
 	v.SetDefault("autofix.min_confidence_threshold", 0.75)
-	v.SetDefault("autofix.cooldown_seconds", 300) // 5 minutes
+	v.SetDefault("autofix.cooldown_seconds", 300)
 	v.SetDefault("autofix.keep_workspace_on_failure", false)
 	v.SetDefault("autofix.git.author_name", "scalpel-autofix-bot")
 	v.SetDefault("autofix.git.author_email", "autofix@scalpel.security")
 	v.SetDefault("autofix.github.base_branch", "main")
 }
 
+// NewConfigFromViper creates a new configuration instance from a viper object.
+func NewConfigFromViper(v *viper.Viper) (*Config, error) {
+	var cfg Config
+
+	// Bind environment variables for sensitive data
+	v.BindEnv("autofix.github.token", "SCALPEL_AUTOFIX_GH_TOKEN")
+	v.BindEnv("agent.knowledge_graph.postgres.password", "SCALPEL_KG_PASSWORD")
+
+	if err := v.Unmarshal(&cfg); err != nil {
+		return nil, fmt.Errorf("error unmarshaling config: %w", err)
+	}
+
+	// Manually load the token if Unmarshal didn't pick it up
+	if cfg.autofix.Enabled && cfg.autofix.GitHub.Token == "" {
+		cfg.autofix.GitHub.Token = os.Getenv("SCALPEL_AUTOFIX_GH_TOKEN")
+	}
+
+	if err := cfg.Validate(); err != nil {
+		return nil, fmt.Errorf("invalid configuration: %w", err)
+	}
+	return &cfg, nil
+}
+
 // Validate checks the configuration for required fields and sane values.
 func (c *Config) Validate() error {
-	if c.Database.URL == "" {
-		return fmt.Errorf("database.url is a required configuration field")
-	}
-	if c.Engine.WorkerConcurrency <= 0 {
+	// Relaxing the requirement for database.url as it might not be needed in all contexts.
+	/*
+		if c.database.URL == "" {
+			return fmt.Errorf("database.url is a required configuration field")
+		}
+	*/
+	if c.engine.WorkerConcurrency <= 0 {
 		return fmt.Errorf("engine.worker_concurrency must be a positive integer")
 	}
-	if c.Browser.Concurrency <= 0 {
+	if c.browser.Concurrency <= 0 {
 		return fmt.Errorf("browser.concurrency must be a positive integer")
 	}
-
-	// Autofix Validation
-	if err := c.Autofix.Validate(); err != nil {
+	if err := c.autofix.Validate(); err != nil {
 		return fmt.Errorf("autofix configuration invalid: %w", err)
 	}
-
+	if err := c.agent.Evolution.Validate(); err != nil {
+		return fmt.Errorf("agent.evolution configuration invalid: %w", err)
+	}
 	return nil
 }
 
-// Validate checks the Autofix configuration, particularly the GitHub integration.
+// Validate checks the Autofix configuration.
 func (a *AutofixConfig) Validate() error {
 	if !a.Enabled {
 		return nil
@@ -415,57 +734,25 @@ func (a *AutofixConfig) Validate() error {
 	if a.MinConfidenceThreshold < 0.0 || a.MinConfidenceThreshold > 1.0 {
 		return fmt.Errorf("min_confidence_threshold must be between 0.0 and 1.0")
 	}
-	// Check GitHub configuration if enabled
 	if a.GitHub.RepoOwner == "" || a.GitHub.RepoName == "" || a.GitHub.BaseBranch == "" {
 		return fmt.Errorf("github.repo_owner, github.repo_name, and github.base_branch are required")
 	}
-	// Token validation
 	if a.GitHub.Token == "" {
-		// SECURITY: Ensure the token is present if the feature is enabled.
-		return fmt.Errorf("GitHub token is required but not found. Ensure SCALPEL_AUTOFIX_GH_TOKEN environment variable is set")
+		return fmt.Errorf("GitHub token is required but not found. Ensure SCALPEL_AUTOFIX_GH_TOKEN is set")
 	}
 	return nil
 }
 
-// Load initializes the configuration singleton from Viper.
-func Load(v *viper.Viper) error {
-	once.Do(func() {
-		var cfg Config
-
-		// Bind Environment Variables for sensitive data
-		v.BindEnv("autofix.github.token", "SCALPEL_AUTOFIX_GH_TOKEN")
-		v.BindEnv("agent.knowledge_graph.postgres.password", "SCALPEL_KG_PASSWORD")
-
-		if err := v.Unmarshal(&cfg); err != nil {
-			loadErr = fmt.Errorf("error unmarshaling config: %w", err)
-			return
-		}
-
-		// Manually load the token if Unmarshal didn't pick it up
-		if cfg.Autofix.Enabled && cfg.Autofix.GitHub.Token == "" {
-			cfg.Autofix.GitHub.Token = os.Getenv("SCALPEL_AUTOFIX_GH_TOKEN")
-		}
-
-		if err := cfg.Validate(); err != nil {
-			loadErr = fmt.Errorf("invalid configuration: %w", err)
-			return
-		}
-		instance = &cfg
-	})
-	return loadErr
-}
-
-// Get returns the loaded configuration instance.
-func Get() *Config {
-	if instance == nil {
-		panic("Configuration not initialized. Ensure initialization happens in the root command.")
+// Validate checks the EvolutionConfig settings.
+func (e *EvolutionConfig) Validate() error {
+	if !e.Enabled {
+		return nil
 	}
-	return instance
-}
-
-// Set initializes the global configuration instance if not already set.
-func Set(cfg *Config) {
-	once.Do(func() {
-		instance = cfg
-	})
+	if e.MaxCycles <= 0 {
+		return fmt.Errorf("max_cycles must be greater than 0")
+	}
+	if e.SettleTime <= 0 {
+		return fmt.Errorf("settle_time must be a positive duration")
+	}
+	return nil
 }

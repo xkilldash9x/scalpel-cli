@@ -10,11 +10,9 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
 // Helper to run the PersistentPreRunE logic for a test.
-// It assumes that the test has already called resetForTest and set up its environment.
 func runPreRun(t *testing.T, cmd *cobra.Command) error {
 	t.Helper()
 	return cmd.PersistentPreRunE(cmd, []string{})
@@ -23,7 +21,6 @@ func runPreRun(t *testing.T, cmd *cobra.Command) error {
 func TestInitializeConfig(t *testing.T) {
 
 	t.Run("FromFile", func(t *testing.T) {
-		// Reset state, then set up the specific conditions for this test.
 		resetForTest(t)
 		t.Cleanup(func() { resetForTest(t) })
 
@@ -33,36 +30,38 @@ func TestInitializeConfig(t *testing.T) {
 logger:
   level: debug
 database:
-  url: 'file-db-url'`
+  url: 'file-db-url'` // This URL will satisfy the validation
 		err := os.WriteFile(configPath, []byte(configContent), 0600)
 		require.NoError(t, err)
-		// Set the global cfgFile which will be read by initializeConfig.
-		cfgFile = configPath
+		cfgFile = configPath // Set the global flag variable used by initializeConfig
 
-		// Run the PreRun hook from the now-configured global rootCmd.
+		// Execute the PreRun hook which loads and validates the config
 		err = runPreRun(t, rootCmd)
-		require.NoError(t, err)
+		require.NoError(t, err, "PreRun should succeed with a valid config file")
 
-		cfg := config.Get()
+		// Retrieve the config from the command's context, not a global singleton.
+		cfg, err := getConfigFromContext(rootCmd.Context())
+		require.NoError(t, err)
 		require.NotNil(t, cfg)
-		assert.Equal(t, "debug", cfg.Logger.Level)
+		assert.Equal(t, "debug", cfg.Logger().Level)
+		assert.Equal(t, "file-db-url", cfg.Database().URL)
 	})
 
 	t.Run("EnvironmentVariables", func(t *testing.T) {
 		resetForTest(t)
 		t.Cleanup(func() { resetForTest(t) })
 
-		// Set env vars which will be read by initializeConfig.
 		t.Setenv("SCALPEL_LOGGER_LEVEL", "error")
-		t.Setenv("SCALPEL_DATABASE_URL", "env_db_url")
+		t.Setenv("SCALPEL_DATABASE_URL", "env_db_url") // This satisfies the validation
 
 		err := runPreRun(t, rootCmd)
 		require.NoError(t, err)
 
-		cfg := config.Get()
+		cfg, err := getConfigFromContext(rootCmd.Context())
+		require.NoError(t, err)
 		require.NotNil(t, cfg)
-		assert.Equal(t, "error", cfg.Logger.Level)
-		assert.Equal(t, "env_db_url", cfg.Database.URL)
+		assert.Equal(t, "error", cfg.Logger().Level)
+		assert.Equal(t, "env_db_url", cfg.Database().URL)
 	})
 }
 
@@ -78,9 +77,10 @@ func TestRootCmd_PersistentPreRunE(t *testing.T) {
 		err := runPreRun(t, rootCmd)
 		require.NoError(t, err)
 
-		cfg := config.Get()
+		cfg, err := getConfigFromContext(rootCmd.Context())
+		require.NoError(t, err)
 		require.NotNil(t, cfg)
-		assert.Equal(t, "warn", cfg.Logger.Level)
+		assert.Equal(t, "warn", cfg.Logger().Level)
 	})
 
 	t.Run("ValidateFixFlag", func(t *testing.T) {
@@ -94,7 +94,6 @@ func TestRootCmd_PersistentPreRunE(t *testing.T) {
 		defer func() { osExit = os.Exit }()
 
 		t.Setenv("SCALPEL_DATABASE_URL", "dummy-url-for-validation")
-		// Set the global validateFix which is checked by the PreRun hook.
 		validateFix = true
 
 		buf := new(bytes.Buffer)

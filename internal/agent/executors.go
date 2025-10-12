@@ -90,7 +90,7 @@ func (r *ExecutorRegistry) Execute(ctx context.Context, action Action) (*Executi
 		// This switch provides a more helpful error if an action that should be
 		// handled by the Agent's main actionLoop accidentally gets dispatched here.
 		switch action.Type {
-		case ActionConclude, ActionPerformComplexTask, ActionClick, ActionInputText, ActionHumanoidDragAndDrop:
+		case ActionConclude, ActionPerformComplexTask, ActionClick, ActionInputText, ActionHumanoidDragAndDrop, ActionEvolveCodebase:
 			return nil, fmt.Errorf("%s should be handled by the Agent, not dispatched to ExecutorRegistry", action.Type)
 		default:
 			return nil, fmt.Errorf("no executor registered for action type: %s", action.Type)
@@ -157,8 +157,9 @@ func ParseBrowserError(err error, action Action) (ErrorCode, map[string]interfac
 		details["selector"] = action.Selector
 		return ErrCodeHumanoidGeometryInvalid, details
 	}
-if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "context deadline exceeded") {
-    return ErrCodeTimeoutError, details	}
+	if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "context deadline exceeded") {
+		return ErrCodeTimeoutError, details
+	}
 	if strings.Contains(errStr, "net::ERR") {
 		return ErrCodeNavigationError, details
 	}
@@ -191,10 +192,11 @@ func (e *BrowserExecutor) Execute(ctx context.Context, action Action) (*Executio
 		errorCode, errorDetails := ParseBrowserError(err, action)
 		result.ErrorCode = errorCode
 		result.ErrorDetails = errorDetails
-e.logger.Warn("Browser action execution failed",
-    zap.String("action", string(action.Type)),
-    zap.String("error_code", string(errorCode)), // <-- Corrected
-    zap.Error(err))	}
+		e.logger.Warn("Browser action execution failed",
+			zap.String("action", string(action.Type)),
+			zap.String("error_code", string(errorCode)), // <-- Corrected
+			zap.Error(err))
+	}
 
 	return result, nil
 }

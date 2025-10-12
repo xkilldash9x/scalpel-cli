@@ -1,10 +1,9 @@
-//internal/engine/task_engine.go
+// internal/engine/task_engine.go
 package engine
 
 import (
 	"context"
 	"errors"
-	"fmt"
 	"net/url"
 	"sync"
 	"time"
@@ -14,7 +13,6 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
-	"github.com/xkilldash9x/scalpel-cli/internal/worker"
 )
 
 // -- Interfaces for Dependency Inversion --
@@ -33,7 +31,7 @@ type Store interface {
 
 // TaskEngine manages the in-process distribution of tasks to a pool of workers.
 type TaskEngine struct {
-	cfg          *config.Config
+	cfg          config.Interface
 	logger       *zap.Logger
 	storeService Store
 	worker       Worker
@@ -42,32 +40,30 @@ type TaskEngine struct {
 }
 
 // New creates a new TaskEngine.
-// The function now accepts interfaces for its dependencies, making it much more testable.
+// By accepting its dependencies (like the Worker) as interfaces, this function
+// adheres to the Dependency Inversion Principle. The responsibility of creating
+// concrete instances is moved to the application's composition root, making the
+// engine more modular, decoupled, and easier to test.
 func New(
-	cfg *config.Config,
+	cfg config.Interface,
 	logger *zap.Logger,
 	storeService Store,
-	browserManager schemas.BrowserManager,
-	kg schemas.KnowledgeGraphClient,
+	worker Worker,
+	globalCtx *core.GlobalContext,
 ) (*TaskEngine, error) {
 
-	globalCtx := &core.GlobalContext{
-		Config:         cfg,
-		Logger:         logger,
-		BrowserManager: browserManager,
-		KGClient:       kg,
+	if worker == nil {
+		return nil, errors.New("worker cannot be nil")
 	}
-
-	monoWorker, err := worker.NewMonolithicWorker(cfg, logger, globalCtx)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create monolithic worker: %w", err)
+	if globalCtx == nil {
+		return nil, errors.New("global context cannot be nil")
 	}
 
 	return &TaskEngine{
 		cfg:          cfg,
 		logger:       logger.With(zap.String("component", "task_engine")),
 		storeService: storeService,
-		worker:       monoWorker,
+		worker:       worker,
 		globalCtx:    globalCtx,
 	}, nil
 }
@@ -75,7 +71,7 @@ func New(
 // Start launches the worker pool and begins consuming tasks from the provided channel.
 // This method now correctly implements the schemas.TaskEngine interface.
 func (e *TaskEngine) Start(ctx context.Context, taskChan <-chan schemas.Task) {
-	concurrency := e.cfg.Engine.WorkerConcurrency
+	concurrency := e.cfg.Engine().WorkerConcurrency
 	if concurrency <= 0 {
 		concurrency = 4 // A sensible default.
 	}
@@ -150,7 +146,7 @@ func (e *TaskEngine) process(ctx context.Context, task schemas.Task, logger *zap
 		KGUpdates: &schemas.KnowledgeGraphUpdate{NodesToAdd: []schemas.NodeInput{}, EdgesToAdd: []schemas.EdgeInput{}},
 	}
 
-	taskTimeout := e.cfg.Engine.DefaultTaskTimeout
+	taskTimeout := e.cfg.Engine().DefaultTaskTimeout
 	if taskTimeout <= 0 {
 		taskTimeout = 15 * time.Minute // Sensible default if config is invalid.
 	}

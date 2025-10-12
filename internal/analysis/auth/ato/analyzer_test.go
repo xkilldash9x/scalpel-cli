@@ -18,59 +18,36 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 )
 
-// -- Mock Implementations --
-
-// MockSessionWithHumanoid embeds the central mock and adds the GetHumanoid method
-// to satisfy the HumanoidProvider interface check within the analyzer.
-type MockSessionWithHumanoid struct {
-	*mocks.MockSessionContext
-	humanoidInstance *humanoid.Humanoid
-}
-
-// GetHumanoid implements the HumanoidProvider interface for testing.
-func (m *MockSessionWithHumanoid) GetHumanoid() *humanoid.Humanoid {
-	return m.humanoidInstance
-}
-
-// newMockSession creates a new mock session for ATO tests.
-func newMockSession() *MockSessionWithHumanoid {
-	return &MockSessionWithHumanoid{
-		MockSessionContext: mocks.NewMockSessionContext(),
-	}
-}
-
 // Helper function to create a new analyzer instance for testing.
-func newTestAnalyzer(t *testing.T, cfg *config.Config) *ATOAnalyzer {
+// It now uses the centralized default config constructor.
+func newTestAnalyzer(t *testing.T, cfg config.Interface) *ATOAnalyzer {
 	t.Helper()
 	logger := zaptest.NewLogger(t)
 	if cfg == nil {
-		// Default configuration for testing
-		cfg = &config.Config{
-			Scanners: config.ScannersConfig{
-				Active: config.ActiveScannersConfig{
-					Auth: config.AuthConfig{
-						ATO: config.ATOConfig{
-							Enabled:                true,
-							Concurrency:            2,
-							MinRequestDelayMs:      0,
-							RequestDelayJitterMs:   0,
-							SuccessKeywords:        []string{"\"success\":true", "welcome"},
-							LockoutKeywords:        []string{"locked", "too many"},
-							PassFailureKeywords:    []string{"invalid password", "incorrect password"},
-							UserFailureKeywords:    []string{"user not found"},
-							GenericFailureKeywords: []string{"login failed"},
-						},
-					},
-				},
-			},
-		}
+		// Use the centralized default config constructor.
+		// This makes tests more robust to future changes in default values.
+		cfg = config.NewDefaultConfig()
+
+		// Get the specific ATO config struct to modify it.
+		atoCfg := cfg.Scanners().Active.Auth.ATO
+		atoCfg.Enabled = true
+		atoCfg.Concurrency = 2
+		// Set default keywords needed for various tests.
+		atoCfg.SuccessKeywords = []string{"\"success\":true", "welcome"}
+		atoCfg.LockoutKeywords = []string{"locked", "too many"}
+		atoCfg.PassFailureKeywords = []string{"invalid password", "incorrect password"}
+		atoCfg.UserFailureKeywords = []string{"user not found"}
+		atoCfg.GenericFailureKeywords = []string{"login failed"}
+
+		// Use the interface's setter to apply the changes.
+		cfg.SetATOConfig(atoCfg)
 	}
 
+	// Assuming NewATOAnalyzer now accepts the config.Interface.
 	analyzer, err := NewATOAnalyzer(cfg, logger)
 	require.NoError(t, err)
 	return analyzer
@@ -80,15 +57,12 @@ func newTestAnalyzer(t *testing.T, cfg *config.Config) *ATOAnalyzer {
 
 func TestNewATOAnalyzer_Initialization(t *testing.T) {
 	t.Parallel()
-	cfg := &config.Config{
-		Scanners: config.ScannersConfig{
-			Active: config.ActiveScannersConfig{
-				Auth: config.AuthConfig{
-					ATO: config.ATOConfig{Enabled: true},
-				},
-			},
-		},
-	}
+	// Create a default config and modify it using the interface setters.
+	// This decouples the test from the concrete config struct implementation.
+	cfg := config.NewDefaultConfig()
+	atoCfg := cfg.Scanners().Active.Auth.ATO
+	atoCfg.Enabled = true
+	cfg.SetATOConfig(atoCfg)
 
 	analyzer := newTestAnalyzer(t, cfg)
 
@@ -288,7 +262,7 @@ func TestAnalyzeLoginResponse(t *testing.T) {
 func TestExecuteLoginAttempt_JSON(t *testing.T) {
 	t.Parallel()
 	a := newTestAnalyzer(t, nil)
-	mockCtx := newMockSession()
+	mockCtx := mocks.NewMockSessionContext()
 	ctx := context.Background()
 
 	attempt := &loginAttempt{
@@ -303,6 +277,7 @@ func TestExecuteLoginAttempt_JSON(t *testing.T) {
 	expectedResponse := fetchResponse{Body: `{"success": true}`, Status: http.StatusOK}
 	responseJSON, _ := json.Marshal(expectedResponse)
 
+	mockCtx.On("GetHumanoid").Return(nil).Maybe()
 	mockCtx.On("ExecuteScript", ctx, mock.AnythingOfType("string"), mock.Anything).
 		Return(json.RawMessage(responseJSON), nil).
 		Run(func(args mock.Arguments) {
@@ -333,7 +308,7 @@ func TestExecuteLoginAttempt_JSON(t *testing.T) {
 func TestExecuteLoginAttempt_FormURLEncoded(t *testing.T) {
 	t.Parallel()
 	a := newTestAnalyzer(t, nil)
-	mockCtx := newMockSession()
+	mockCtx := mocks.NewMockSessionContext()
 	ctx := context.Background()
 
 	attempt := &loginAttempt{
@@ -347,6 +322,7 @@ func TestExecuteLoginAttempt_FormURLEncoded(t *testing.T) {
 
 	responseJSON, _ := json.Marshal(fetchResponse{Status: http.StatusFound})
 
+	mockCtx.On("GetHumanoid").Return(nil).Maybe()
 	mockCtx.On("ExecuteScript", ctx, mock.Anything, mock.Anything).
 		Return(json.RawMessage(responseJSON), nil).
 		Run(func(args mock.Arguments) {
@@ -364,8 +340,7 @@ func TestExecuteLoginAttempt_FormURLEncoded(t *testing.T) {
 func TestGetFreshCSRFToken_Success(t *testing.T) {
 	t.Parallel()
 	a := newTestAnalyzer(t, nil)
-	mockCtx := newMockSession()
-	mockCtx.humanoidInstance = nil
+	mockCtx := mocks.NewMockSessionContext()
 
 	ctx := context.Background()
 	pageURL := "https://example.com/login"
@@ -373,6 +348,7 @@ func TestGetFreshCSRFToken_Success(t *testing.T) {
 	expectedToken := csrfToken{Name: "_csrf", Value: "secure_value"}
 	tokenJSON, _ := json.Marshal(expectedToken)
 
+	mockCtx.On("GetHumanoid").Return(nil).Maybe()
 	mockCtx.On("Navigate", ctx, pageURL).Return(nil).Once()
 	mockCtx.On("WaitForAsync", ctx, 0).Return(nil).Once()
 	mockCtx.On("ExecuteScript", ctx, mock.AnythingOfType("string"), mock.MatchedBy(func(args []interface{}) bool {
@@ -387,48 +363,59 @@ func TestGetFreshCSRFToken_Success(t *testing.T) {
 	mockCtx.AssertExpectations(t)
 }
 
-func TestLegacyPause_TimingAndCancellation(t *testing.T) {
+func TestExecutePause_TimingAndCancellation(t *testing.T) {
 	t.Parallel()
-	cfg := &config.Config{
-		Scanners: config.ScannersConfig{
-			Active: config.ActiveScannersConfig{
-				Auth: config.AuthConfig{
-					ATO: config.ATOConfig{
-						Enabled:              true,
-						MinRequestDelayMs:    50,
-						RequestDelayJitterMs: 10,
-					},
-				},
-			},
-		},
-	}
-	a := newTestAnalyzer(t, cfg)
 
-	start := time.Now()
-	err := a.executePause(context.Background(), nil)
-	duration := time.Since(start)
+	t.Run("NormalDelay", func(t *testing.T) {
+		t.Parallel()
+		// Create a specific config for this test case.
+		cfg := config.NewDefaultConfig()
+		atoCfg := cfg.Scanners().Active.Auth.ATO
+		atoCfg.MinRequestDelayMs = 50
+		atoCfg.RequestDelayJitterMs = 10
+		cfg.SetATOConfig(atoCfg)
+		a := newTestAnalyzer(t, cfg)
 
-	assert.NoError(t, err)
-	assert.GreaterOrEqual(t, duration.Milliseconds(), int64(50))
-	assert.LessOrEqual(t, duration.Milliseconds(), int64(100))
+		start := time.Now()
+		// FIX: Pass nil for the humanoid argument.
+		err := a.executePause(context.Background(), nil)
+		duration := time.Since(start)
 
-	a.cfg.MinRequestDelayMs = 5000
-	ctx, cancel := context.WithCancel(context.Background())
+		assert.NoError(t, err)
+		assert.GreaterOrEqual(t, duration.Milliseconds(), int64(50))
+		assert.LessOrEqual(t, duration.Milliseconds(), int64(60)+int64(10)) // Base + Jitter
+	})
 
-	start = time.Now()
-	go func() {
-		time.Sleep(10 * time.Millisecond)
-		cancel()
-	}()
-	err = a.executePause(ctx, nil)
-	duration = time.Since(start)
+	t.Run("Cancellation", func(t *testing.T) {
+		t.Parallel()
+		// Create a new analyzer with a longer delay to test cancellation.
+		// This avoids mutating state within a test and keeps test cases isolated.
+		cfgWithLongDelay := config.NewDefaultConfig()
+		atoCfg := cfgWithLongDelay.Scanners().Active.Auth.ATO
+		atoCfg.MinRequestDelayMs = 5000 // A long delay that will surely be interrupted.
+		cfgWithLongDelay.SetATOConfig(atoCfg)
+		a := newTestAnalyzer(t, cfgWithLongDelay)
 
-	assert.Less(t, duration.Milliseconds(), int64(500))
+		ctx, cancel := context.WithCancel(context.Background())
+
+		start := time.Now()
+		go func() {
+			time.Sleep(20 * time.Millisecond)
+			cancel()
+		}()
+
+		// FIX: Pass nil for the humanoid argument.
+		err := a.executePause(ctx, nil)
+		duration := time.Since(start)
+
+		// We expect the pause to be interrupted, returning a context error.
+		assert.ErrorIs(t, err, context.Canceled)
+		assert.Less(t, duration.Milliseconds(), int64(500), "Pause should be canceled quickly")
+	})
 }
-
 func TestAnalyze_Integration(t *testing.T) {
 	a := newTestAnalyzer(t, nil)
-	mockCtx := newMockSession()
+	mockCtx := mocks.NewMockSessionContext()
 	ctx := context.Background()
 
 	// -- Setup HAR and Artifacts --
@@ -447,6 +434,7 @@ func TestAnalyze_Integration(t *testing.T) {
 	rawHAR := json.RawMessage(harJSON)
 	artifacts := &schemas.Artifacts{HAR: &rawHAR}
 	mockCtx.On("CollectArtifacts", ctx).Return(artifacts, nil).Once()
+	mockCtx.On("GetHumanoid").Return(nil).Maybe()
 
 	// -- Setup Finding Collector --
 	var findings []schemas.Finding

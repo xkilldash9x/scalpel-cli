@@ -3,115 +3,146 @@ package humanoid
 
 import (
 	"context"
+	"math"
 	"math/rand"
 	"sync"
 	"time"
 
-	"github.com/aquilax/go-perlin"
+	// Removed "github.com/aquilax/go-perlin"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"go.uber.org/zap"
 )
 
-// maxVelocity defines the maximum speed the cursor can move (pixels per second).
-const maxVelocity = 6000.0
+// humanoidTestConfig is an unexported mock that satisfies the config.Interface
+// for the limited purpose of testing the Humanoid constructor.
+type humanoidTestConfig struct {
+	config.Interface
+	BrowserCfg config.BrowserConfig
+}
+
+// Browser returns the test browser configuration.
+func (m *humanoidTestConfig) Browser() config.BrowserConfig {
+	return m.BrowserCfg
+}
 
 // Humanoid defines the state and capabilities for simulating human like interactions.
 type Humanoid struct {
 	// mu protects all fields within the Humanoid struct from concurrent access.
-	// Any method that reads or writes humanoid state (rng, currentPos, fatigueLevel, etc.)
-	// must acquire this lock.
-	mu                 sync.Mutex
-	baseConfig         Config
-	dynamicConfig      Config
-	logger             *zap.Logger
-	executor           Executor
+	mu sync.Mutex
+	// baseConfig holds the initial configuration for the session persona.
+	baseConfig config.HumanoidConfig
+	// dynamicConfig holds the current configuration, which changes based on fatigue and habituation.
+	dynamicConfig config.HumanoidConfig
+	logger        *zap.Logger
+	executor      Executor
+
+	// State variables
 	currentPos         Vector2D
 	currentButtonState schemas.MouseButton
-	fatigueLevel       float64
-	lastActionTime     time.Time
-	lastMovementDistance float64
-	noiseTime          float64
-	rng                *rand.Rand
-	noiseX             *perlin.Perlin
-	noiseY             *perlin.Perlin
+	// Behavioral state
+	fatigueLevel     float64
+	habituationLevel float64
+	// SkillFactor (0.5 to 1.5) determines the baseline efficiency of the persona.
+	skillFactor float64
+	// lastActionType used for calculating task switching delays.
+	lastActionType ActionType
+
+	// Timing and Noise generation
+	rng *rand.Rand
+	// noiseX and noiseY use Pink Noise (1/f) for realistic physiological drift.
+	noiseX *PinkNoiseGenerator
+	noiseY *PinkNoiseGenerator
 }
 
 // New creates and initializes a new Humanoid instance.
-func New(config Config, logger *zap.Logger, executor Executor) *Humanoid {
+func New(cfg config.Interface, logger *zap.Logger, executor Executor) *Humanoid {
+	humanoidCfg := cfg.Browser().Humanoid
+
 	h := &Humanoid{
 		logger:   logger,
 		executor: executor,
 	}
 
-	// Lock immediately and defer unlock to protect all subsequent state changes.
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	var seed int64
-	var rng *rand.Rand
-	if config.Rng == nil {
-		seed = time.Now().UnixNano()
-		source := rand.NewSource(seed)
-		rng = rand.New(source)
-	} else {
-		// Even if a specific rng is provided, we seed the perlin noise
-		// with a unique value to ensure it's not the same across all instances.
-		seed = time.Now().UnixNano()
-		rng = config.Rng
-	}
+	seed := time.Now().UnixNano()
+	source := rand.NewSource(seed)
+	rng := rand.New(source)
 
-	config.NormalizeTypoRates()
-	config.FinalizeSessionPersona(rng)
+	// Calculate the SkillFactor first as it influences the persona finalization.
+	// Skill is normally distributed around 1.0, clamped between 0.5 and 1.5.
+	skillJitter := humanoidCfg.PersonaJitterSkill
+	h.skillFactor = 1.0 + rng.NormFloat64()*skillJitter
+	h.skillFactor = math.Max(0.5, math.Min(1.5, h.skillFactor))
 
-	// Standard Perlin noise parameters.
-	alpha, beta, n := 2.0, 2.0, int32(3)
+	normalizeTypoRates(&humanoidCfg)
+	// Randomize the configuration slightly to create a unique session persona.
+	finalizeSessionPersona(&humanoidCfg, rng, h.skillFactor)
+
+	// Pink noise parameters (12 oscillators is standard).
+	nOscillators := 12
 
 	// Assign all values within the locked context.
-	h.baseConfig = config
-	h.dynamicConfig = config
+	h.baseConfig = humanoidCfg
+	h.dynamicConfig = humanoidCfg
 	h.rng = rng
-	h.lastActionTime = time.Now()
 	h.currentButtonState = schemas.ButtonNone
-	h.noiseX = perlin.NewPerlin(alpha, beta, n, seed)
-	h.noiseY = perlin.NewPerlin(alpha, beta, n, seed+1)
+	h.lastActionType = ActionTypeNone
+	// Initialize Pink Noise generators with separate seeds.
+	h.noiseX = NewPinkNoiseGenerator(rand.New(rand.NewSource(seed)), nOscillators)
+	h.noiseY = NewPinkNoiseGenerator(rand.New(rand.NewSource(seed+1)), nOscillators)
 
 	return h
 }
 
 // NewTestHumanoid creates a Humanoid instance with deterministic dependencies for testing.
 func NewTestHumanoid(executor Executor, seed int64) *Humanoid {
-	config := DefaultConfig()
-	source := rand.NewSource(seed)
-	rng := rand.New(source)
+	// Create a default configuration and then override specific values for testing.
+	defaultCfg := config.NewDefaultConfig()
+	humanoidCfg := defaultCfg.Browser().Humanoid
 
-	// Set the pre-seeded RNG in the config before calling New.
-	config.Rng = rng
+	// Set specific values for predictable test behavior.
+	humanoidCfg.FittsA = 100.0
+	humanoidCfg.FittsB = 150.0
+	humanoidCfg.Omega = 30.0
+	humanoidCfg.Zeta = 0.8
+	// Updated noise model configuration
+	humanoidCfg.PinkNoiseAmplitude = 2.0
+	humanoidCfg.GaussianStrength = 0.5
+	humanoidCfg.SDNFactor = 0.001
+	humanoidCfg.TypoRate = 0.0
+	humanoidCfg.TypoHomoglyphRate = 0.0
+	humanoidCfg.ClickNoise = 1.0
+	humanoidCfg.FatigueIncreaseRate = 0.01
+	humanoidCfg.FatigueRecoveryRate = 0.01
+	humanoidCfg.HabituationRate = 0.005
 
-	h := New(config, zap.NewNop(), executor)
+	testBrowserCfg := config.BrowserConfig{Humanoid: humanoidCfg}
+	mockCfg := &humanoidTestConfig{BrowserCfg: testBrowserCfg}
 
-	// Lock again to safely modify state for testing purposes.
+	h := New(mockCfg, zap.NewNop(), executor)
+
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// The RNG from config is already set by New, but we can re-assign
-	// noise generators for absolute test determinism.
-	h.noiseX = perlin.NewPerlin(2, 2, 3, seed)
-	h.noiseY = perlin.NewPerlin(2, 2, 3, seed+1)
+	// Overwrite the non-deterministic RNG and noise with deterministic ones.
+	source := rand.NewSource(seed)
+	h.rng = rand.New(source)
+	// Use deterministic seeds for Pink Noise in tests.
+	h.noiseX = NewPinkNoiseGenerator(rand.New(rand.NewSource(seed)), 12)
+	h.noiseY = NewPinkNoiseGenerator(rand.New(rand.NewSource(seed+1)), 12)
 
-	// Set specific dynamic config values for predictable test behavior.
-	h.dynamicConfig.FittsA = 100.0
-	h.dynamicConfig.FittsB = 150.0
-	h.dynamicConfig.Omega = 30.0
-	h.dynamicConfig.Zeta = 0.8
-	h.dynamicConfig.PerlinAmplitude = 2.0
-	h.dynamicConfig.GaussianStrength = 0.5
+	// Ensure dynamic config matches the base config after New() potentially modified it.
+	h.dynamicConfig = h.baseConfig
+	// Force skill factor for testing if needed (New sets it randomly otherwise).
+	h.skillFactor = 1.0
 
 	return h
 }
 
 // ensureVisible is a private helper that checks options and performs scrolling if needed.
-// NOTE: This is an internal method and should NOT lock the mutex, as it's
-// called by public methods that already hold the lock.
 func (h *Humanoid) ensureVisible(ctx context.Context, selector string, opts *InteractionOptions) error {
 	// Determine if visibility should be ensured. Defaults to true.
 	shouldEnsure := true
@@ -129,8 +160,6 @@ func (h *Humanoid) ensureVisible(ctx context.Context, selector string, opts *Int
 }
 
 // releaseMouse is an internal helper that ensures the mouse button (currently only left) is released.
-// It is used for robust cleanup during complex actions like DragAndDrop or IntelligentClick.
-// It assumes the caller holds the lock.
 func (h *Humanoid) releaseMouse(ctx context.Context) error {
 	currentPos := h.currentPos
 	// Currently, we only track the primary (left) button state for dragging/clicking.
@@ -162,3 +191,70 @@ func (h *Humanoid) releaseMouse(ctx context.Context) error {
 	return err
 }
 
+// --- Unexported Helper Functions ---
+
+// normalizeTypoRates ensures the typo rates are clamped within the valid [0.0, 1.0] range.
+func normalizeTypoRates(c *config.HumanoidConfig) {
+	if c.TypoRate < 0.0 {
+		c.TypoRate = 0.0
+	}
+	if c.TypoRate > 1.0 {
+		c.TypoRate = 1.0
+	}
+
+	// Ensure individual typo type rates (which are proportions of the total typo rate) don't exceed 1.0.
+	if c.TypoHomoglyphRate > 1.0 {
+		c.TypoHomoglyphRate = 1.0
+	}
+	if c.TypoNeighborRate > 1.0 {
+		c.TypoNeighborRate = 1.0
+	}
+	if c.TypoTransposeRate > 1.0 {
+		c.TypoTransposeRate = 1.0
+	}
+	if c.TypoOmissionRate > 1.0 {
+		c.TypoOmissionRate = 1.0
+	}
+}
+
+// finalizeSessionPersona slightly randomizes the configuration parameters
+// and applies the correlated SkillFactor to simulate a unique user persona.
+func finalizeSessionPersona(c *config.HumanoidConfig, rng *rand.Rand, skillFactor float64) {
+	// 1. Apply Random Jitter (Independent variation)
+	movementJitter := c.PersonaJitterMovement
+	// Calculate randomization factor: (rng.Float64()-0.5) gives range [-0.5, 0.5].
+	// Multiplying by (jitter*2) gives the desired range (e.g., +/- 0.15).
+	c.FittsA *= 1.0 + (rng.Float64()-0.5)*(movementJitter*2)
+	c.FittsB *= 1.0 + (rng.Float64()-0.5)*(movementJitter*2)
+	c.Omega *= 1.0 + (rng.Float64()-0.5)*(movementJitter*2)
+
+	dampingJitter := c.PersonaJitterDamping
+	c.Zeta *= 1.0 + (rng.Float64()-0.5)*(dampingJitter*2)
+
+	// 2. Apply Skill Factor (Correlated variation)
+	// Higher skill (skillFactor > 1.0) means faster movement (lower Fitts A/B, higher Omega)
+	// and fewer errors (lower TypoRate, higher CorrectionProbability).
+	inverseSkill := 1.0 / skillFactor
+
+	// Movement speed correlates strongly with skill.
+	c.FittsA *= inverseSkill
+	c.FittsB *= inverseSkill
+	c.Omega *= skillFactor
+
+	// Reaction times (Ex-Gaussian Mu/Sigma) correlate with skill.
+	c.ExGaussianMu *= inverseSkill
+	c.ExGaussianSigma *= inverseSkill
+	// The exponential component (Tau) is less affected by skill, more by cognitive load/distraction.
+
+	// Error rates correlate strongly with skill.
+	c.TypoRate *= inverseSkill
+	// Skilled users correct errors more often.
+	c.TypoCorrectionProbability *= skillFactor
+	// Clamp probabilities to [0, 1].
+	c.TypoCorrectionProbability = math.Min(1.0, c.TypoCorrectionProbability)
+
+	// Motor noise is slightly reduced in skilled users.
+	c.GaussianStrength *= (1.0 + (inverseSkill-1.0)*0.5)
+	c.PinkNoiseAmplitude *= (1.0 + (inverseSkill-1.0)*0.5)
+	c.SDNFactor *= (1.0 + (inverseSkill-1.0)*0.5)
+}

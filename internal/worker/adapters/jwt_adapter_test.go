@@ -13,6 +13,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 	"github.com/xkilldash9x/scalpel-cli/internal/worker/adapters"
 )
 
@@ -21,25 +22,19 @@ func TestNewJWTAdapter(t *testing.T) {
 	assert.Equal(t, "JWT Adapter", adapter.Name())
 }
 
-// Helper to create a JWT AnalysisContext with specific configuration
-func setupJWTContext(harData []byte, bruteForceEnabled bool) *core.AnalysisContext {
-	// Setup GlobalContext with configuration
+// Helper to create a JWT AnalysisContext with a mock configuration.
+// This now uses the mock to avoid initializing a concrete config struct with private fields.
+func setupJWTContext(t *testing.T, harData []byte, jwtConf config.JWTConfig) *core.AnalysisContext {
+	mockConfig := new(mocks.MockConfig)
+
+	// Set up the expectation: when the adapter calls Config.JWT(), return our test config.
+	mockConfig.On("JWT").Return(jwtConf)
+
 	globalCtx := &core.GlobalContext{
-		Config: &config.Config{
-			Scanners: config.ScannersConfig{
-				Static: config.StaticScannersConfig{
-					JWT: config.JWTConfig{
-						BruteForceEnabled: bruteForceEnabled,
-					},
-				},
-			},
-		},
+		Config: mockConfig,
 	}
 
-	// This is the correct way to create a json.RawMessage and get a valid pointer to it,
-	// preventing the dangling pointer bug we found.
 	rawHarData := json.RawMessage(harData)
-
 	return &core.AnalysisContext{
 		Task:   schemas.Task{Type: schemas.TaskAnalyzeJWT},
 		Logger: zap.NewNop(),
@@ -62,7 +57,9 @@ func TestJWTAdapter_Analyze_ConfigPassing(t *testing.T) {
 	harData := []byte(fmt.Sprintf(`{"log": {"entries": [{"request": {"headers": [{"name": "Authorization", "value": "Bearer %s"}]}}]}}`, weakJWT))
 
 	t.Run("BruteForceEnabled", func(t *testing.T) {
-		analysisCtx := setupJWTContext(harData, true) // Enable Brute Force
+		// Enable Brute Force via the mock config. The adapter must also see Enabled=true.
+		jwtConf := config.JWTConfig{Enabled: true, BruteForceEnabled: true}
+		analysisCtx := setupJWTContext(t, harData, jwtConf)
 
 		err := adapter.Analyze(context.Background(), analysisCtx)
 		assert.NoError(t, err)
@@ -113,7 +110,9 @@ func TestJWTAdapter_Analyze_ConfigPassing(t *testing.T) {
 	})
 
 	t.Run("BruteForceDisabled", func(t *testing.T) {
-		analysisCtx := setupJWTContext(harData, false) // Disable Brute Force
+		// Disable Brute Force via the mock config.
+		jwtConf := config.JWTConfig{Enabled: true, BruteForceEnabled: false}
+		analysisCtx := setupJWTContext(t, harData, jwtConf)
 
 		err := adapter.Analyze(context.Background(), analysisCtx)
 		assert.NoError(t, err)
@@ -132,7 +131,9 @@ func TestJWTAdapter_Analyze_NoneAlgorithm(t *testing.T) {
 	noneJWT := "eyJhbGciOiJub25lIiwidHlwIjoiSldUIn0.eyJzdWIiOiIxMjMifQ."
 	harData := []byte(fmt.Sprintf(`{"log": {"entries": [{"request": {"headers": [{"name": "Cookie", "value": "token=%s"}]}}]}}`, noneJWT))
 
-	analysisCtx := setupJWTContext(harData, false) // Config doesn't matter here
+	// Config doesn't matter for 'none' algo, but the scanner still needs to be enabled.
+	jwtConf := config.JWTConfig{Enabled: true}
+	analysisCtx := setupJWTContext(t, harData, jwtConf)
 
 	err := adapter.Analyze(context.Background(), analysisCtx)
 	assert.NoError(t, err)

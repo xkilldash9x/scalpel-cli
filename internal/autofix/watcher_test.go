@@ -17,6 +17,121 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
+// --- Mock Config for Testing ---
+
+// mockConfig is a mock implementation of the config.Interface for testing purposes.
+type mockConfig struct {
+	loggerCfg  config.LoggerConfig
+	autofixCfg config.AutofixConfig
+	// Add other config structs here if needed by other tests
+}
+
+// SetBrowserHumanoidKeyHoldMu implements config.Interface.
+func (m *mockConfig) SetBrowserHumanoidKeyHoldMu(ms float64) {
+	panic("unimplemented")
+}
+
+// SetATOConfig implements config.Interface.
+func (m *mockConfig) SetATOConfig(atoCfg config.ATOConfig) {
+	panic("unimplemented")
+}
+
+// JWT implements config.Interface.
+func (m *mockConfig) JWT() config.JWTConfig {
+	panic("unimplemented")
+}
+
+// SetBrowserHumanoidKeyHoldMean implements config.Interface.
+func (m *mockConfig) SetBrowserHumanoidKeyHoldMean(ms float64) {
+	panic("unimplemented")
+}
+
+// SetJWTBruteForceEnabled implements config.Interface.
+func (m *mockConfig) SetJWTBruteForceEnabled(bool) {
+	panic("unimplemented")
+}
+
+// SetJWTEnabled implements config.Interface.
+func (m *mockConfig) SetJWTEnabled(bool) {
+	panic("unimplemented")
+}
+
+// SetBrowserDebug implements config.Interface.
+func (m *mockConfig) SetBrowserDebug(bool) {
+	panic("unimplemented")
+}
+
+// SetBrowserDisableCache implements config.Interface.
+func (m *mockConfig) SetBrowserDisableCache(bool) {
+	panic("unimplemented")
+}
+
+// SetBrowserHeadless implements config.Interface.
+func (m *mockConfig) SetBrowserHeadless(bool) {
+	panic("unimplemented")
+}
+
+// SetBrowserHumanoidClickHoldMaxMs implements config.Interface.
+func (m *mockConfig) SetBrowserHumanoidClickHoldMaxMs(int) {
+	panic("unimplemented")
+}
+
+// SetBrowserHumanoidClickHoldMinMs implements config.Interface.
+func (m *mockConfig) SetBrowserHumanoidClickHoldMinMs(int) {
+	panic("unimplemented")
+}
+
+// SetBrowserHumanoidKeyHoldMeanMs implements config.Interface.
+func (m *mockConfig) SetBrowserHumanoidKeyHoldMeanMs(float64) {
+	panic("unimplemented")
+}
+
+// SetBrowserIgnoreTLSErrors implements config.Interface.
+func (m *mockConfig) SetBrowserIgnoreTLSErrors(bool) {
+	panic("unimplemented")
+}
+
+// SetIASTEnabled implements config.Interface.
+func (m *mockConfig) SetIASTEnabled(bool) {
+	panic("unimplemented")
+}
+
+// SetNetworkCaptureResponseBodies implements config.Interface.
+func (m *mockConfig) SetNetworkCaptureResponseBodies(bool) {
+	panic("unimplemented")
+}
+
+// SetNetworkIgnoreTLSErrors implements config.Interface.
+func (m *mockConfig) SetNetworkIgnoreTLSErrors(bool) {
+	panic("unimplemented")
+}
+
+// SetNetworkNavigationTimeout implements config.Interface.
+func (m *mockConfig) SetNetworkNavigationTimeout(time.Duration) {
+	panic("unimplemented")
+}
+
+// Ensure mockConfig satisfies the interface.
+var _ config.Interface = (*mockConfig)(nil)
+
+func (m *mockConfig) Logger() config.LoggerConfig          { return m.loggerCfg }
+func (m *mockConfig) Autofix() config.AutofixConfig        { return m.autofixCfg }
+func (m *mockConfig) Database() config.DatabaseConfig      { return config.DatabaseConfig{} }
+func (m *mockConfig) Engine() config.EngineConfig          { return config.EngineConfig{} }
+func (m *mockConfig) Browser() config.BrowserConfig        { return config.BrowserConfig{} }
+func (m *mockConfig) Network() config.NetworkConfig        { return config.NetworkConfig{} }
+func (m *mockConfig) IAST() config.IASTConfig              { return config.IASTConfig{} }
+func (m *mockConfig) Scanners() config.ScannersConfig      { return config.ScannersConfig{} }
+func (m *mockConfig) Agent() config.AgentConfig            { return config.AgentConfig{} }
+func (m *mockConfig) Discovery() config.DiscoveryConfig    { return config.DiscoveryConfig{} }
+func (m *mockConfig) Scan() config.ScanConfig              { return config.ScanConfig{} }
+func (m *mockConfig) SetScanConfig(sc config.ScanConfig)   {}
+func (m *mockConfig) SetDiscoveryMaxDepth(int)             {}
+func (m *mockConfig) SetEngineWorkerConcurrency(int)       {}
+func (m *mockConfig) SetDiscoveryIncludeSubdomains(bool)   {}
+func (m *mockConfig) SetBrowserHumanoidEnabled(bool)       {}
+func (m *mockConfig) SetNetworkPostLoadWait(time.Duration) {}
+
 // --- Unit Tests (Parsing) ---
 
 func TestParsePanicLocation(t *testing.T) {
@@ -73,11 +188,11 @@ func TestParsePanicLocation(t *testing.T) {
 
 // Helper to setup Watcher for integration tests.
 type testHarness struct {
-	Watcher    *Watcher
-	LogFile    string
-	ReportChan chan PostMortem
+	Watcher     *Watcher
+	LogFile     string
+	ReportChan  chan PostMortem
 	ProjectRoot string
-	logMutex   sync.Mutex // FIX: Add a mutex to serialize writes to the log file.
+	logMutex    sync.Mutex // FIX: Add a mutex to serialize writes to the log file.
 }
 
 func setupWatcherIntegration(t *testing.T) *testHarness {
@@ -91,8 +206,11 @@ func setupWatcherIntegration(t *testing.T) *testHarness {
 	require.NoError(t, err)
 	f.Close()
 
-	cfg := &config.Config{
-		Logger: config.LoggerConfig{LogFile: logFile},
+	// Corrected: Use the mockConfig that implements the interface.
+	cfg := &mockConfig{
+		loggerCfg: config.LoggerConfig{LogFile: logFile},
+		// DASTLogPath is intentionally left empty to test the debug log path.
+		autofixCfg: config.AutofixConfig{},
 	}
 	reportChan := make(chan PostMortem, 10) // Buffered for concurrency tests
 
@@ -100,9 +218,9 @@ func setupWatcherIntegration(t *testing.T) *testHarness {
 	require.NoError(t, err)
 
 	return &testHarness{
-		Watcher:    watcher,
-		LogFile:    logFile,
-		ReportChan: reportChan,
+		Watcher:     watcher,
+		LogFile:     logFile,
+		ReportChan:  reportChan,
 		ProjectRoot: projectRoot,
 	}
 }

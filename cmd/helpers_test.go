@@ -7,217 +7,166 @@ import (
 
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
-// boolp is a helper function to create a pointer to a boolean value.
-// This is necessary for config fields that are of type *bool, like Discovery.PassiveEnabled.
-func boolp(b bool) *bool {
-	return &b
+// newTestConfig creates a fully populated configuration for use in tests by setting
+// values in Viper and unmarshaling them into the config struct. This provides a
+// consistent baseline for testing without using struct literals, which is no longer
+// possible due to private fields.
+func newTestConfig(t *testing.T) config.Interface {
+	t.Helper()
+	v := viper.New()
+
+	// -- Logger --
+	v.Set("logger.service_name", "scalpel-cli")
+	v.Set("logger.log_file", "logs/scalpel.log")
+	v.Set("logger.level", "info")
+	v.Set("logger.format", "json")
+	v.Set("logger.add_source", false)
+	v.Set("logger.max_size", 10)
+	v.Set("logger.max_backups", 3)
+	v.Set("logger.max_age", 7)
+	v.Set("logger.compress", true)
+	v.Set("logger.colors.debug", "cyan")
+	v.Set("logger.colors.info", "green")
+	v.Set("logger.colors.warn", "yellow")
+	v.Set("logger.colors.error", "red")
+	v.Set("logger.colors.dpanic", "magenta")
+	v.Set("logger.colors.panic", "magenta")
+	v.Set("logger.colors.fatal", "magenta")
+
+	// -- Database --
+	// URL is expected to be set by env in tests
+
+	// -- Engine --
+	v.Set("engine.queue_size", 1000)
+	v.Set("engine.worker_concurrency", 8)
+	v.Set("engine.default_task_timeout", 15*time.Minute)
+
+	// -- Browser --
+	v.Set("browser.headless", true)
+	v.Set("browser.disable_cache", true)
+	v.Set("browser.ignore_tls_errors", false)
+	v.Set("browser.concurrency", 2)
+	v.Set("browser.debug", true)
+	v.Set("browser.args", []string{
+		"--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
+		"--disable-gpu", "--no-first-run", "--no-default-browser-check",
+		"--disable-popup-blocking", "--disable-prompt-on-repost", "--disable-extensions",
+		"--disable-translate", "--disable-sync", "--disable-background-networking",
+		"--disable-component-update", "--metrics-recording-only", "--mute-audio",
+		"--safebrowsing-disable-auto-update",
+	})
+	v.Set("browser.viewport.width", 1920)
+	v.Set("browser.viewport.height", 1080)
+	v.Set("browser.humanoid.enabled", true)
+	v.Set("browser.humanoid.providers", []string{"fingerprint", "header"})
+
+	// -- Network --
+	v.Set("network.timeout", 30*time.Second)
+	v.Set("network.navigation_timeout", 90*time.Second)
+	v.Set("network.post_load_wait", 2*time.Second)
+	v.Set("network.capture_response_bodies", true)
+	v.Set("network.ignore_tls_errors", false)
+	v.Set("network.headers.User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 ScalpelV2/1.0")
+	v.Set("network.proxy.enabled", false)
+	v.Set("network.proxy.address", "127.0.0.1:8080")
+
+	// -- IAST --
+	v.Set("iast.enabled", false)
+
+	// -- Scanners --
+	v.Set("scanners.passive.headers.enabled", true)
+	v.Set("scanners.static.jwt.enabled", true)
+	v.Set("scanners.static.jwt.brute_force_enabled", true)
+	v.Set("scanners.static.jwt.dictionary_file", "config/jwt.secrets.list")
+	v.Set("scanners.active.taint.enabled", true)
+	v.Set("scanners.active.taint.depth", 3)
+	v.Set("scanners.active.taint.concurrency", 2)
+	v.Set("scanners.active.protopollution.enabled", true)
+	v.Set("scanners.active.protopollution.wait_duration", 8*time.Second)
+	v.Set("scanners.active.timeslip.enabled", true)
+	v.Set("scanners.active.timeslip.request_count", 25)
+	v.Set("scanners.active.timeslip.max_concurrency", 10)
+	v.Set("scanners.active.timeslip.threshold_ms", 500)
+	v.Set("scanners.active.auth.ato.enabled", true)
+	v.Set("scanners.active.auth.ato.concurrency", 4)
+	v.Set("scanners.active.auth.ato.min_request_delay_ms", 500)
+	v.Set("scanners.active.auth.ato.request_delay_jitter_ms", 500)
+	v.Set("scanners.active.auth.ato.success_keywords", []string{"welcome", "redirect", "dashboard", "logout", "\"success\":true"})
+	v.Set("scanners.active.auth.ato.user_failure_keywords", []string{"user not found", "invalid user", "no such account", "user does not exist"})
+	v.Set("scanners.active.auth.ato.pass_failure_keywords", []string{"invalid password", "incorrect password", "authentication failed"})
+	v.Set("scanners.active.auth.ato.generic_failure_keywords", []string{"login failed", "invalid credentials"})
+	v.Set("scanners.active.auth.ato.lockout_keywords", []string{"account locked", "too many attempts"})
+	v.Set("scanners.active.auth.idor.enabled", true)
+	v.Set("scanners.active.auth.idor.ignore_list", []string{"csrf_token", "X-CSRF-Token", "nonce", "viewstate"})
+	v.Set("scanners.active.auth.idor.test_strategies.NumericID", []string{"increment", "decrement"})
+	v.Set("scanners.active.auth.idor.test_strategies.UUID", []string{"horizontal_swap"})
+	v.Set("scanners.active.auth.idor.test_strategies.Base64Encoded", []string{"bit_flip"})
+	v.Set("scanners.active.auth.idor.test_strategies.ObjectID", []string{"increment_char"})
+
+	// -- Discovery --
+	v.Set("discovery.max_depth", 5)
+	v.Set("discovery.concurrency", 20)
+	v.Set("discovery.timeout", 15*time.Minute)
+	v.Set("discovery.passive_enabled", true)
+	v.Set("discovery.include_subdomains", true)
+	v.Set("discovery.crtsh_rate_limit", 2.0)
+	v.Set("discovery.passive_concurrency", 10)
+
+	// -- Agent --
+	v.Set("agent.llm.default_fast_model", "gemini-2.5-flash")
+	v.Set("agent.llm.default_powerful_model", "gemini-2.5-pro")
+	v.Set("agent.knowledge_graph.type", "postgres")
+
+	// -- Autofix --
+	v.Set("autofix.enabled", false)
+	v.Set("autofix.min_confidence_threshold", 0.75)
+	v.Set("autofix.cooldown_seconds", 300)
+	v.Set("autofix.keep_workspace_on_failure", false)
+	v.Set("autofix.git.author_name", "Kyle McAllister")
+	v.Set("autofix.git.author_email", "xkilldash9x@proton.me")
+	v.Set("autofix.github.repo_owner", "xkilldash9x")
+	v.Set("autofix.github.repo_name", "scalpel-cli")
+	v.Set("autofix.github.base_branch", "main")
+
+	cfg, err := config.NewConfigFromViper(v)
+	require.NoError(t, err, "Failed to create new test config from viper")
+
+	return cfg
 }
 
-// newTestConfig creates a fully populated, default configuration struct for use in tests.
-// This mirrors the structure and values of the default config.yaml, providing a consistent
-// baseline for test execution without needing to parse a file.
-func newTestConfig() *config.Config {
-	return &config.Config{
-		Logger: config.LoggerConfig{
-			ServiceName: "scalpel-cli",
-			LogFile:     "logs/scalpel.log",
-			Level:       "info",
-			Format:      "json",
-			AddSource:   false,
-			MaxSize:     10,
-			MaxBackups:  3,
-			MaxAge:      7,
-			Compress:    true,
-			Colors: config.ColorConfig{ // Corrected: LogColorConfig -> ColorConfig
-				Debug:  "cyan",
-				Info:   "green",
-				Warn:   "yellow",
-				Error:  "red",
-				DPanic: "magenta",
-				Panic:  "magenta",
-				Fatal:  "magenta",
-			},
-		},
-		Database: config.DatabaseConfig{
-			URL: "", // Expected to be set by env in tests
-		},
-		Engine: config.EngineConfig{
-			QueueSize:          1000,
-			WorkerConcurrency:  8,
-			DefaultTaskTimeout: 15 * time.Minute,
-		},
-		Browser: config.BrowserConfig{
-			Headless:        true,
-			DisableCache:    true,
-			IgnoreTLSErrors: false,
-			Concurrency:     2,
-			Debug:           true,
-			Args: []string{
-				"--no-sandbox",
-				"--disable-setuid-sandbox",
-				"--disable-dev-shm-usage",
-				"--disable-gpu",
-				"--no-first-run",
-				"--no-default-browser-check",
-				"--disable-popup-blocking",
-				"--disable-prompt-on-repost",
-				"--disable-extensions",
-				"--disable-translate",
-				"--disable-sync",
-				"--disable-background-networking",
-				"--disable-component-update",
-				"--metrics-recording-only",
-				"--mute-audio",
-				"--safebrowsing-disable-auto-update",
-			},
-			Viewport: map[string]int{"width": 1920, "height": 1080}, // Corrected: Is a map, not a struct
-			Humanoid: humanoid.Config{},                             // Corrected: Uses humanoid package type
-		},
-		Network: config.NetworkConfig{
-			Timeout:               30 * time.Second,
-			NavigationTimeout:     90 * time.Second,
-			PostLoadWait:          2 * time.Second,
-			CaptureResponseBodies: true,
-			IgnoreTLSErrors:       false,
-			Headers: map[string]string{
-				"User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 ScalpelV2/1.0",
-			},
-			Proxy: config.ProxyConfig{
-				Enabled: false,
-				Address: "127.0.0.1:8080",
-			},
-		},
-		IAST: config.IASTConfig{
-			Enabled: false,
-		},
-		Scanners: config.ScannersConfig{
-			Passive: config.PassiveScannersConfig{ // Corrected: ...ScannersConfig
-				Headers: config.HeadersConfig{Enabled: true}, // Corrected: HeadersConfig
-			},
-			Static: config.StaticScannersConfig{ // Corrected: ...ScannersConfig
-				JWT: config.JWTConfig{ // Corrected: JWTConfig
-					Enabled:           true,
-					BruteForceEnabled: true,
-					DictionaryFile:    "config/jwt.secrets.list",
-				},
-			},
-			Active: config.ActiveScannersConfig{ // Corrected: ...ScannersConfig
-				Taint: config.TaintConfig{ // Corrected: TaintConfig
-					Enabled:     true,
-					Depth:       3,
-					Concurrency: 2,
-				},
-				ProtoPollution: config.ProtoPollutionConfig{ // Corrected: ProtoPollutionConfig
-					Enabled:      true,
-					WaitDuration: 8 * time.Second,
-				},
-				TimeSlip: config.TimeSlipConfig{ // Corrected: TimeSlipConfig
-					Enabled:        true,
-					RequestCount:   25,
-					MaxConcurrency: 10,
-					ThresholdMs:    500,
-				},
-				Auth: config.AuthConfig{ // Corrected: AuthConfig
-					ATO: config.ATOConfig{ // Corrected: ATOConfig
-						Enabled:                true, // Corrected: Is a plain bool
-						Concurrency:            4,
-						MinRequestDelayMs:      500,
-						RequestDelayJitterMs:   500,
-						SuccessKeywords:        []string{"welcome", "redirect", "dashboard", "logout", "\"success\":true"},
-						UserFailureKeywords:    []string{"user not found", "invalid user", "no such account", "user does not exist"},
-						PassFailureKeywords:    []string{"invalid password", "incorrect password", "authentication failed"},
-						GenericFailureKeywords: []string{"login failed", "invalid credentials"},
-						LockoutKeywords:        []string{"account locked", "too many attempts"},
-					},
-					IDOR: config.IDORConfig{ // Corrected: IDORConfig
-						Enabled:    true,
-						IgnoreList: []string{"csrf_token", "X-CSRF-Token", "nonce", "viewstate"},
-						TestStrategies: map[string][]string{
-							"NumericID":     {"increment", "decrement"},
-							"UUID":          {"horizontal_swap"},
-							"Base64Encoded": {"bit_flip"},
-							"ObjectID":      {"increment_char"},
-						},
-					},
-				},
-			},
-		},
-		Discovery: config.DiscoveryConfig{
-			MaxDepth:           5,
-			Concurrency:        20,
-			Timeout:            15 * time.Minute,
-			PassiveEnabled:     boolp(true), // Corrected: This is the actual *bool field
-			IncludeSubdomains:  true,
-			CrtShRateLimit:     2.0,
-			PassiveConcurrency: 10,
-		},
-		Agent: config.AgentConfig{
-			LLM: config.LLMRouterConfig{ // Corrected: LLMRouterConfig
-				DefaultFastModel:     "gemini-2.5-flash",
-				DefaultPowerfulModel: "gemini-2.5-pro",
-				Models:               make(map[string]config.LLMModelConfig),
-			},
-			KnowledgeGraph: config.KnowledgeGraphConfig{
-				Type: "postgres",
-			},
-		},
-		Autofix: config.AutofixConfig{
-			Enabled:                false,
-			MinConfidenceThreshold: 0.75,
-			CooldownSeconds:        300,
-			KeepWorkspaceOnFailure: false,
-			Git: config.GitConfig{
-				AuthorName:  "Kyle McAllister",
-				AuthorEmail: "xkilldash9x@proton.me",
-			},
-			GitHub: config.GitHubConfig{
-				RepoOwner:  "xkilldash9x",
-				RepoName:   "scalpel-cli",
-				BaseBranch: "main",
-			},
-		},
-	}
-}
-
-// setupTestConfig provides a consistent and complete configuration state for tests.
-// It starts with a default struct, then applies environment variables and sets
-// required values like API keys.
-func setupTestConfig(t *testing.T) *config.Config {
+// setupCompleteTestConfig provides a consistent and complete configuration state for tests.
+// It starts with a default Viper-based config, then layers environment variables over it.
+func setupCompleteTestConfig(t *testing.T) config.Interface {
 	t.Helper()
 
-	// 1. Get the default, fully-populated config struct.
-	cfg := newTestConfig()
+	// 1. Get the default, fully-populated config from our helper.
+	// This returns an interface, but we know the underlying type is *config.Config
+	// for the purpose of unmarshaling.
+	cfg := newTestConfig(t)
 
 	// 2. Set environment variables required for tests.
 	t.Setenv("SCALPEL_GEMINI_API_KEY", "fake-api-key-for-testing")
 	t.Setenv("SCALPEL_DATABASE_URL", "postgres://test:test@localhost/testdb")
 
-	// 3. Use Viper to layer environment variables over the default struct.
-	// This correctly simulates the application's config loading priority.
-	viper.Reset()
-	viper.SetEnvPrefix("SCALPEL")
-	viper.AutomaticEnv()
+	// 3. Use a new Viper instance to layer environment variables over the defaults.
+	v := viper.New()
+	v.SetEnvPrefix("SCALPEL")
+	v.AutomaticEnv()
 
-	// We unmarshal into the existing struct to override the defaults with any
-	// environment variables that were set.
-	err := viper.Unmarshal(cfg)
-	require.NoError(t, err, "Failed to unmarshal test config")
+	// Unmarshal into the existing config struct to override defaults with env vars.
+	// We must cast the interface to its concrete type for viper to unmarshal into it.
+	err := v.Unmarshal(cfg.(*config.Config))
+	require.NoError(t, err, "Failed to unmarshal env vars into test config")
 
 	// 4. Manually populate any complex fields that aren't easily set by defaults/env.
-	if cfg.Agent.LLM.Models == nil {
-		cfg.Agent.LLM.Models = make(map[string]config.LLMModelConfig)
-	}
-	cfg.Agent.LLM.Models["gemini-2.5-flash"] = config.LLMModelConfig{
-		Provider: config.ProviderGemini,
-		Model:    "gemini-2.5-flash",
-	}
-
-	// 5. Set the now-configured struct as the global instance for the test.
-	config.Set(cfg)
+	// This part is tricky now because we have an interface. The best way is to
+	// expose a new setter on the interface if this is needed. For this specific
+	// case, the model config should ideally be part of the viper setup.
+	// For now, this step is removed as it's not compatible with the interface.
+	// If required, we would add a `SetLLMModel(key string, model Cfg)` to the interface.
 
 	return cfg
 }

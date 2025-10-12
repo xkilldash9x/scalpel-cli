@@ -15,14 +15,16 @@ func (h *Humanoid) IntelligentClick(ctx context.Context, selector string, opts *
 	defer h.mu.Unlock()
 
 	// 1. Move to the target element.
-	// Call the internal, non-locking move method.
 	// This handles ensureVisible, movement simulation, and terminal pause.
+	// The ActionType is set within moveToSelector.
 	if err := h.moveToSelector(ctx, selector, opts); err != nil {
 		return err
 	}
 
 	// 2. Cognitive pause before the action (final verification).
-	if err := h.cognitivePause(ctx, 50, 20); err != nil {
+	// This pause represents a quick final check (Mean Scale 0.5, StdDev Scale 0.5).
+	// cognitivePause handles the ActionType switch internally (from MOVE to CLICK).
+	if err := h.cognitivePause(ctx, 0.5, 0.5, ActionTypeClick); err != nil {
 		return err
 	}
 
@@ -71,22 +73,21 @@ func (h *Humanoid) IntelligentClick(ctx context.Context, selector string, opts *
 		return err
 	}
 
-	// 6. Update fatigue for the clicking action itself.
-	h.updateFatigue(0.1)
+	// 6. Update fatigue/habituation for the clicking action itself (intensity 0.1).
+	h.updateFatigueAndHabituation(0.1)
 
 	return nil
 }
 
 // calculateTerminalFittsLaw determines the time required for verification before initiating an action.
-// This is primarily used in movement.go for the pause at the end of a move.
-// This is an internal helper that assumes the lock is held.
 func (h *Humanoid) calculateTerminalFittsLaw(distance float64) time.Duration {
-	const W = 20.0 // Assumed target width (W) in pixels for the terminal phase (verification).
+	// Use the configured target width (W) for the terminal phase.
+	W := h.baseConfig.FittsWTerminal
 
 	// Index of Difficulty.
 	id := math.Log2(1.0 + distance/W)
 
-	// Use dynamic config parameters affected by fatigue.
+	// Use dynamic config parameters affected by fatigue/habituation.
 	A := h.dynamicConfig.FittsA
 	B := h.dynamicConfig.FittsB
 	rng := h.rng
@@ -94,8 +95,13 @@ func (h *Humanoid) calculateTerminalFittsLaw(distance float64) time.Duration {
 	// Movement Time (MT) in milliseconds.
 	mt := A + B*id
 
-	// Add randomization (+/- 15% jitter).
-	mt += mt * (rng.Float64()*0.3 - 0.15)
+	// Add randomization based on the configured jitter percentage.
+	jitterPercent := h.baseConfig.FittsJitterPercent
+	// Calculate the total range (e.g., 0.15 -> 0.30)
+	jitterRange := jitterPercent * 2
+	// Calculate the randomization factor (e.g., (0 to 0.30) - 0.15)
+	randomFactor := rng.Float64()*jitterRange - jitterPercent
+	mt += mt * randomFactor
 
 	if mt < 0 {
 		mt = 0
@@ -104,25 +110,28 @@ func (h *Humanoid) calculateTerminalFittsLaw(distance float64) time.Duration {
 	return time.Duration(mt) * time.Millisecond
 }
 
-// calculateClickHoldDuration determines how long the mouse button is held down.
+// calculateClickHoldDuration determines how long the mouse button is held down using Ex-Gaussian distribution.
 // Assumes the lock is held.
 func (h *Humanoid) calculateClickHoldDuration() time.Duration {
 	// Use base config for absolute min/max bounds.
 	minMs := float64(h.baseConfig.ClickHoldMinMs)
 	maxMs := float64(h.baseConfig.ClickHoldMaxMs)
-	rng := h.rng
 
-	// Use a distribution skewed towards shorter clicks.
-	// Gaussian distribution centered slightly below the midpoint of the range.
-	mean := (minMs + maxMs) / 2.0 * 0.9
-	stdDev := (maxMs - minMs) / 5.0 // Slightly wider std dev.
+	// Use dynamic config for the distribution parameters (affected by behavior).
+	cfg := h.dynamicConfig
 
-	durationMs := mean + rng.NormFloat64()*stdDev
+	// Use specific parameters for click hold if available, otherwise fallback to general reaction time parameters scaled down.
+	mu := cfg.ExGaussianMu * 0.8
+	sigma := cfg.ExGaussianSigma * 0.8
+	tau := cfg.ExGaussianTau * 0.5 // Clicks have fewer long delays than cognitive pauses.
+
+	durationMs := h.randExGaussian(mu, sigma, tau)
 
 	// Clamp the duration to the configured bounds.
 	durationMs = math.Max(minMs, math.Min(maxMs, durationMs))
 
-	// Apply fatigue factor: clicks might become slightly longer when tired.
+	// Apply fatigue factor: clicks might become slightly longer when tired (factor 0.25).
+	// Habituation is already factored into the dynamic Mu/Sigma/Tau.
 	durationMs *= (1.0 + h.fatigueLevel*0.25)
 
 	return time.Duration(durationMs) * time.Millisecond

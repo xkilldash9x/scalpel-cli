@@ -14,7 +14,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/session"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
@@ -33,7 +32,7 @@ type TestFixture struct {
 	Ctx          context.Context
 	Cancel       context.CancelFunc
 	Session      *session.Session
-	Config       *config.Config
+	Config       config.Interface
 	Manager      *Manager
 	Logger       *zap.Logger
 	FindingsChan chan schemas.Finding
@@ -43,35 +42,31 @@ type TestFixture struct {
 
 // FixtureConfigurator allows for customizing the test configuration on a
 // per fixture basis.
-type FixtureConfigurator func(*config.Config)
+type FixtureConfigurator func(config.Interface)
 
 // NewTestFixture is the central function for creating a test environment.
 func NewTestFixture(t *testing.T, configurators ...FixtureConfigurator) *TestFixture {
 	t.Helper()
 
 	// -- Configuration and Logger Setup --
-	humanoidCfg := humanoid.DefaultConfig()
-	humanoidCfg.ClickHoldMinMs = 5
-	humanoidCfg.ClickHoldMaxMs = 15
-	humanoidCfg.KeyHoldMeanMs = 10.0
+	// Note: We are casting the concrete *config.Config to the config.Interface
+	// for the fixture, but we use the concrete type here to call the setters.
+	cfg := config.NewDefaultConfig()
 
-	cfg := &config.Config{
-		Browser: config.BrowserConfig{
-			Headless:        true,
-			DisableCache:    true,
-			IgnoreTLSErrors: true,
-			Humanoid:        humanoidCfg,
-			Debug:           true,
-		},
-		Network: config.NetworkConfig{
-			CaptureResponseBodies: true,
-			NavigationTimeout:     45 * time.Second,
-			PostLoadWait:          50 * time.Millisecond,
-			IgnoreTLSErrors:       true,
-		},
-		IAST: config.IASTConfig{Enabled: false},
-	}
-	cfg.Browser.Humanoid.Enabled = true
+	// Use setters to modify the default configuration for this test fixture.
+	cfg.SetBrowserHumanoidEnabled(true)
+	cfg.SetBrowserHumanoidClickHoldMinMs(5)
+	cfg.SetBrowserHumanoidClickHoldMaxMs(15)
+	cfg.SetBrowserHumanoidKeyHoldMeanMs(10.0)
+	cfg.SetBrowserHeadless(true)
+	cfg.SetBrowserDisableCache(true)
+	cfg.SetBrowserIgnoreTLSErrors(true)
+	cfg.SetBrowserDebug(true)
+	cfg.SetNetworkCaptureResponseBodies(true)
+	cfg.SetNetworkNavigationTimeout(45 * time.Second)
+	cfg.SetNetworkPostLoadWait(50 * time.Millisecond)
+	cfg.SetNetworkIgnoreTLSErrors(true)
+	cfg.SetIASTEnabled(false)
 
 	for _, configurator := range configurators {
 		configurator(cfg)

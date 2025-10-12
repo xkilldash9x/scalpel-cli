@@ -82,8 +82,9 @@ func (m *mockTaskEngine) Stop() {
 // -- Test Fixture Setup --
 
 type orchestratorTestFixture struct {
-	Logger          *zap.Logger
-	Config          *config.Config
+	Logger *zap.Logger
+	// REFACTOR: The fixture now holds the interface type.
+	Config          config.Interface
 	DiscoveryEngine *mockDiscoveryEngine
 	TaskEngine      *mockTaskEngine
 }
@@ -92,8 +93,9 @@ type orchestratorTestFixture struct {
 func setupTest(t *testing.T) *orchestratorTestFixture {
 	t.Helper()
 	return &orchestratorTestFixture{
-		Logger:          zap.NewNop(), // Use Nop logger for clean test output
-		Config:          &config.Config{},
+		Logger: zap.NewNop(), // Use Nop logger for clean test output
+		// REFACTOR: Use the default constructor for a properly initialized config.
+		Config:          config.NewDefaultConfig(),
 		DiscoveryEngine: &mockDiscoveryEngine{},
 		TaskEngine:      &mockTaskEngine{},
 	}

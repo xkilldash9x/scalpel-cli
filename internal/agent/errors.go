@@ -9,15 +9,16 @@ type ErrorCode string
 // Define specific error codes for Humanoid and general execution failures.
 const (
 	// -- General Execution Errors --
-	ErrCodeExecutionFailure    ErrorCode = "EXECUTION_FAILURE"
-	ErrCodeNotImplemented      ErrorCode = "NOT_IMPLEMENTED"
-	ErrCodeInvalidParameters   ErrorCode = "INVALID_PARAMETERS"
-	ErrCodeJSONMarshalFailed   ErrorCode = "JSON_MARSHAL_FAILED" // From a previous step
-    ErrCodeUnknownAction 	   ErrorCode = "UNKNOWN_ACTION_TYPE"
+	ErrCodeExecutionFailure  ErrorCode = "EXECUTION_FAILURE"
+	ErrCodeNotImplemented    ErrorCode = "NOT_IMPLEMENTED"
+	ErrCodeInvalidParameters ErrorCode = "INVALID_PARAMETERS"
+	ErrCodeJSONMarshalFailed ErrorCode = "JSON_MARSHAL_FAILED" // From a previous step
+	ErrCodeUnknownAction     ErrorCode = "UNKNOWN_ACTION_TYPE"
+	ErrCodeFeatureDisabled   ErrorCode = "FEATURE_DISABLED"
 	// -- Browser/DOM Errors (used by both ExecutorRegistry and Agent/Humanoid) --
-	ErrCodeElementNotFound     ErrorCode = "ELEMENT_NOT_FOUND"
-	ErrCodeTimeoutError        ErrorCode = "TIMEOUT_ERROR"
-	ErrCodeNavigationError     ErrorCode = "NAVIGATION_ERROR"
+	ErrCodeElementNotFound ErrorCode = "ELEMENT_NOT_FOUND"
+	ErrCodeTimeoutError    ErrorCode = "TIMEOUT_ERROR"
+	ErrCodeNavigationError ErrorCode = "NAVIGATION_ERROR"
 
 	// -- Humanoid-specific errors --
 	// ErrCodeHumanoidTargetNotVisible indicates the element exists but cannot be
@@ -29,5 +30,8 @@ const (
 	ErrCodeHumanoidGeometryInvalid ErrorCode = "HUMANOID_GEOMETRY_INVALID"
 	// ErrCodeHumanoidInteractionFailed is a generic failure during the
 	// interaction process.
-	ErrCodeHumanoidInteractionFailed ErrorCode = "HUMANO-ID_INTERACTION_FAILED"
+	ErrCodeHumanoidInteractionFailed ErrorCode = "HUMANOID_INTERACTION_FAILED"
+
+	// -- Evolution-specific errors --
+	ErrCodeEvolutionFailure ErrorCode = "EVOLUTION_FAILURE"
 )

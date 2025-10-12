@@ -13,7 +13,6 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"github.com/xkilldash9x/scalpel-cli/internal/reporting"
 	"github.com/xkilldash9x/scalpel-cli/internal/results"
@@ -34,12 +33,18 @@ func newReportCmd() *cobra.Command {
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			logger := observability.GetLogger()
-			cfg := config.Get()
+
+			// Get the config from the context, not a global singleton.
+			cfg, err := getConfigFromContext(ctx)
+			if err != nil {
+				return err
+			}
 
 			logger.Info("Starting report generation", zap.String("scan_id", scanID))
 
 			// Initialize Database Connection
-			pool, err := connectToDatabase(ctx, cfg.Database.URL)
+			// CORRECTED: Called cfg.Database() as a method to access its URL field.
+			pool, err := connectToDatabase(ctx, cfg.Database().URL)
 			if err != nil {
 				return err
 			}

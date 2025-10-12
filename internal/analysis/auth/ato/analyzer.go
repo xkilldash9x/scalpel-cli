@@ -14,14 +14,13 @@ import (
 	"sync"
 	"time"
 
-	// Removed chromedp dependencies
 	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
 // loginResult represents the semantic outcome of a single login attempt.
@@ -30,9 +29,9 @@ type loginResult int
 const (
 	loginUnknown loginResult = iota
 	loginSuccess
-	loginFailureUser         // Indicates the username was likely invalid (via keyword).
-	loginFailurePass         // Indicates the username was valid, but the password was not (via keyword).
-	loginFailureGeneric      // A generic failure message that doesn't leak information.
+	loginFailureUser    // Indicates the username was likely invalid (via keyword).
+	loginFailurePass    // Indicates the username was valid, but the password was not (via keyword).
+	loginFailureGeneric // A generic failure message that doesn't leak information.
 	loginFailureLockout
 	loginFailureDifferential // A failure response that differs from the baseline, indicating enumeration.
 )
@@ -96,8 +95,9 @@ type ATOAnalyzer struct {
 }
 
 // NewATOAnalyzer creates a new, production-ready instance of the ATO analyzer.
-func NewATOAnalyzer(cfg *config.Config, logger *zap.Logger) (*ATOAnalyzer, error) {
-	atoCfg := cfg.Scanners.Active.Auth.ATO
+func NewATOAnalyzer(cfg config.Interface, logger *zap.Logger) (*ATOAnalyzer, error) {
+	// Use the public Scanners() getter method instead of direct field access.
+	atoCfg := cfg.Scanners().Active.Auth.ATO
 	creds, err := loadCredentialSet(atoCfg.CredentialFile, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to initialize ATO analyzer: %w", err)

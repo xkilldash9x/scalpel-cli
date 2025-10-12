@@ -26,11 +26,11 @@ type AnalystRunner interface {
 
 // analystInitializer is a function type that handles the creation of an
 // AnalystRunner. This allows the initialization logic to be injected.
-type analystInitializer func(logger *zap.Logger, cfg *config.Config, llmClient schemas.LLMClient, kgClient schemas.KnowledgeGraphClient) (AnalystRunner, error)
+type analystInitializer func(logger *zap.Logger, cfg config.Interface, llmClient schemas.LLMClient, kgClient schemas.KnowledgeGraphClient) (AnalystRunner, error)
 
 // initializeAnalyst provides the default, concrete implementation for creating
 // a new ImprovementAnalyst instance.
-func initializeAnalyst(logger *zap.Logger, cfg *config.Config, llmClient schemas.LLMClient, kgClient schemas.KnowledgeGraphClient) (AnalystRunner, error) {
+func initializeAnalyst(logger *zap.Logger, cfg config.Interface, llmClient schemas.LLMClient, kgClient schemas.KnowledgeGraphClient) (AnalystRunner, error) {
 	return analyst.NewImprovementAnalyst(logger, cfg, llmClient, kgClient)
 }
 
@@ -53,10 +53,13 @@ WARNING: This process modifies the local codebase. Ensure your working directory
 		RunE: func(cmd *cobra.Command, args []string) error {
 			ctx := cmd.Context()
 			logger := observability.GetLogger()
-			cfg := config.Get()
+			cfg, err := getConfigFromContext(ctx)
+			if err != nil {
+				return err // Error is already descriptive
+			}
 
 			// Initialize the dependencies here, in the "real" entrypoint.
-			llmClient, err := llmclient.NewClient(cfg.Agent, logger)
+			llmClient, err := llmclient.NewClient(cfg.Agent(), logger)
 			if err != nil {
 				logger.Error("Failed to initialize LLM client. Evolution requires a configured LLM.", zap.Error(err))
 				return fmt.Errorf("failed to initialize LLM client: %w", err)
@@ -79,7 +82,7 @@ WARNING: This process modifies the local codebase. Ensure your working directory
 // It is decoupled from cobra and accepts all dependencies as arguments.
 func runEvolve(
 	ctx context.Context,
-	cfg *config.Config,
+	cfg config.Interface,
 	logger *zap.Logger,
 	objective string,
 	files []string,
@@ -92,7 +95,7 @@ func runEvolve(
 	}
 
 	// 1. Initialize the Knowledge Graph Client (Memory).
-	kgClient, cleanup, err := initializeKGClient(ctx, cfg.Agent.KnowledgeGraph, logger, useInMemoryKG)
+	kgClient, cleanup, err := initializeKGClient(ctx, cfg.Agent().KnowledgeGraph, logger, useInMemoryKG)
 	if err != nil {
 		logger.Error("Failed to initialize Knowledge Graph client.", zap.Error(err))
 		return fmt.Errorf("failed to initialize KG client: %w", err)

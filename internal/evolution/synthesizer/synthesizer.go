@@ -11,6 +11,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/evolution/bus"
 	"github.com/xkilldash9x/scalpel-cli/internal/evolution/models"
 	"go.uber.org/zap"
@@ -41,10 +42,16 @@ type Synthesizer struct {
 }
 
 // NewSynthesizer initializes the Synthesizer and subscribes to the bus.
-func NewSynthesizer(logger *zap.Logger, bus *bus.EvolutionBus, llmClient schemas.LLMClient, kg schemas.KnowledgeGraphClient) *Synthesizer {
+func NewSynthesizer(logger *zap.Logger, bus *bus.EvolutionBus, llmClient schemas.LLMClient, kg schemas.KnowledgeGraphClient, evoConfig config.EvolutionConfig) *Synthesizer {
 	// Subscribe immediately upon creation.
 	// Fix for Shutdown Deadlock: Ignore the unsubscribe function.
 	msgChan, _ := bus.Subscribe(models.TypeGoal, models.TypeObservation)
+
+	// Determine settle time from config, with a fallback.
+	settleTime := evoConfig.SettleTime
+	if settleTime <= 0 {
+		settleTime = 500 * time.Millisecond
+	}
 
 	return &Synthesizer{
 		logger:     logger.Named("synthesizer"),
@@ -54,7 +61,7 @@ func NewSynthesizer(logger *zap.Logger, bus *bus.EvolutionBus, llmClient schemas
 		msgChan:    msgChan,
 		buffer:     make(map[string][]models.Observation),
 		timers:     make(map[string]*time.Timer),
-		settleTime: 500 * time.Millisecond, // Time to wait after the last observation arrives.
+		settleTime: settleTime,
 		goals:      make(map[string]models.Goal),
 	}
 }
@@ -288,28 +295,28 @@ func (s *Synthesizer) queryHistory(ctx context.Context, objective string) ([]sch
 
 func (s *Synthesizer) getSystemPrompt() string {
 	return `You are the 'Synthesizer', the strategic mind of an autonomous code improvement system (Scalpel-CLI).
-    Your role is Step 2 (ORIENT) in the OODA loop.
-    You receive a GOAL, OBSERVATIONS about the codebase, and HISTORICAL DATA about past attempts.
-    Your task is NOT to write code, but to analyze the context holistically and propose distinct strategies.
-    **Input Analysis Requirements:**
-    1. Analyze the Goal: What is the desired outcome?
-    2. Analyze the Current State: Review build/test status. Are we stable or recovering from a failure (see Previous Action Result)?
-    3. Analyze the Code Context: Review source code, tests, dependencies, and static analysis.
-    4. **[CRITICAL] Analyze the History:** Review the HISTORICAL ATTEMPTS section. Identify strategies that previously failed and understand *why* (the OutcomeOutput).
-    **Output Requirements (Strict JSON Format):**
-    Generate an array of 1 to 3 distinct strategies. Respond ONLY with the JSON array.
-    Example: [{"description": "...", "rationale": "...", "complexity": 0.5, "impact": 0.2, "rank": 1}, ...]
+	    Your role is Step 2 (ORIENT) in the OODA loop.
+	    You receive a GOAL, OBSERVATIONS about the codebase, and HISTORICAL DATA about past attempts.
+	    Your task is NOT to write code, but to analyze the context holistically and propose distinct strategies.
+	    **Input Analysis Requirements:**
+	    1. Analyze the Goal: What is the desired outcome?
+	    2. Analyze the Current State: Review build/test status. Are we stable or recovering from a failure (see Previous Action Result)?
+	    3. Analyze the Code Context: Review source code, tests, dependencies, and static analysis.
+	    4. **[CRITICAL] Analyze the History:** Review the HISTORICAL ATTEMPTS section. Identify strategies that previously failed and understand *why* (the OutcomeOutput).
+	    **Output Requirements (Strict JSON Format):**
+	    Generate an array of 1 to 3 distinct strategies. Respond ONLY with the JSON array.
+	    Example: [{"description": "...", "rationale": "...", "complexity": 0.5, "impact": 0.2, "rank": 1}, ...]
 
-    Each strategy must include:
-    - description: A clear explanation of the approach.
-    - rationale: Why this approach is viable, addresses the context, AND how it avoids past failures if applicable.
-    - complexity: A score from 0.0 (trivial change) to 1.0 (major architectural refactor).
-    - impact: A score from 0.0 (isolated change) to 1.0 (high risk of breaking changes).
-    - rank: Your assessment of the best strategy (1 being the best/lowest risk).
-    **Strategic Guidelines:**
-    - Prefer iterative, small changes.
-    - If the previous action failed, prioritize strategies that address the failure.
-    - **DO NOT repeat strategies that recently failed for the same reason.** If a past attempt shows a dependency conflict when adding library X, your new strategy must explicitly address or avoid that conflict.`
+	    Each strategy must include:
+	    - description: A clear explanation of the approach.
+	    - rationale: Why this approach is viable, addresses the context, AND how it avoids past failures if applicable.
+	    - complexity: A score from 0.0 (trivial change) to 1.0 (major architectural refactor).
+	    - impact: A score from 0.0 (isolated change) to 1.0 (high risk of breaking changes).
+	    - rank: Your assessment of the best strategy (1 being the best/lowest risk).
+	    **Strategic Guidelines:**
+	    - Prefer iterative, small changes.
+	    - If the previous action failed, prioritize strategies that address the failure.
+	    - **DO NOT repeat strategies that recently failed for the same reason.** If a past attempt shows a dependency conflict when adding library X, your new strategy must explicitly address or avoid that conflict.`
 }
 
 // constructPrompt builds the comprehensive context prompt, now including history.
