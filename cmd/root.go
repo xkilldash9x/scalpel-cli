@@ -21,50 +21,51 @@ var (
 	osExit = os.Exit
 )
 
+// Define a custom context key to avoid collisions.
+type configKeyType struct{}
+
+var configKey = configKeyType{}
+
 // rootCmd represents the base command when called without any subcommands
 var rootCmd = &cobra.Command{
 	Use:     "scalpel-cli",
 	Short:   "Scalpel is an AI-native security scanner.",
 	Version: Version,
 	PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-		// 1. Initialize configuration loading (Viper)
-		if err := initializeConfig(cmd); err != nil {
-			// Initialize a basic logger if config loading fails early.
+		// Create a new, local viper instance for this execution.
+		v := viper.New()
+
+		// 1. Initialize configuration loading into our local viper instance.
+		if err := initializeConfig(cmd, v); err != nil {
 			basicLogger, _ := zap.NewDevelopment()
 			defer basicLogger.Sync()
 			basicLogger.Error("Failed to initialize configuration", zap.Error(err))
 			return fmt.Errorf("failed to initialize configuration: %w", err)
 		}
 
-		// 2. Unmarshal the configuration
-		var cfg config.Config
-		if err := viper.Unmarshal(&cfg); err != nil {
+		// 2. Create the config object from viper; this also validates it.
+		cfg, err := config.NewConfigFromViper(v)
+		if err != nil {
 			// Initialize with default logger settings if config is unreadable.
 			observability.InitializeLogger(config.LoggerConfig{Level: "info", Format: "console", ServiceName: "scalpel-cli"})
-			return fmt.Errorf("failed to unmarshal config: %w", err)
+			return fmt.Errorf("failed to load or validate config: %w", err)
 		}
 
-		// 3. Validate the configuration
-		if err := cfg.Validate(); err != nil {
-			// Initialize logger with what we have to report the validation error.
-			observability.InitializeLogger(cfg.Logger)
-			return fmt.Errorf("invalid configuration: %w", err)
-		}
-
-		// 4. Store the configuration globally
-		config.Set(&cfg)
-
-		// 5. Initialize the logger
-		observability.InitializeLogger(cfg.Logger)
+		// 3. Initialize the logger using the validated config.
+		// CORRECTED: Called cfg.Logger() as a method.
+		observability.InitializeLogger(cfg.Logger())
 		logger := observability.GetLogger()
 		logger.Info("Starting Scalpel-CLI", zap.String("version", Version))
+
+		// 4. Store the validated config in the command's context for subcommands.
+		ctx := context.WithValue(cmd.Context(), configKey, cfg)
+		cmd.SetContext(ctx)
 
 		// Handle the validation run flag
 		if validateFix {
 			logger.Info("===[ VALIDATION RUN: CONFIGURATION OK ]===")
-			// A successful validation run should exit cleanly without executing the command.
 			cmd.Println("===[ VALIDATION RUN PASSED ]===")
-			osExit(0) // Use the mockable exit function
+			osExit(0)
 		}
 
 		return nil
@@ -72,25 +73,18 @@ var rootCmd = &cobra.Command{
 }
 
 // Execute adds all child commands to the root command and sets flags appropriately.
-// It accepts a context passed from main.go for graceful shutdown.
 func Execute(ctx context.Context) error {
-	// Add subcommands
 	rootCmd.AddCommand(newScanCmd())
 	rootCmd.AddCommand(newReportCmd())
-	rootCmd.AddCommand(newSelfHealCmd()) // Register the self-heal command
-	rootCmd.AddCommand(newEvolveCmd())   // Register the evolve command
+	rootCmd.AddCommand(newSelfHealCmd())
+	rootCmd.AddCommand(newEvolveCmd())
 
-	// Execute the root command with the provided context
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
-		// Handle execution errors gracefully.
 		if logger := observability.GetLogger(); logger != nil && logger != zap.NewNop() {
-			// Avoid logging context.Canceled errors as failures, as they are expected
-			// during graceful shutdown.
 			if ctx.Err() == nil {
 				logger.Error("Command execution failed", zap.Error(err))
 			}
 		} else {
-			// Fallback if logger isn't initialized yet.
 			fmt.Fprintln(os.Stderr, "Error:", err)
 		}
 		return err
@@ -104,31 +98,27 @@ func init() {
 	_ = rootCmd.PersistentFlags().MarkHidden("validate-fix")
 }
 
-// initializeConfig reads in config file and ENV variables if set.
-func initializeConfig(cmd *cobra.Command) error {
-	v := viper.GetViper()
-
-	// 1. Set default values. This is crucial for Viper to know about all possible keys.
+// initializeConfig sets up and loads configuration into the provided viper instance.
+func initializeConfig(cmd *cobra.Command, v *viper.Viper) error {
+	// 1. Set default values.
 	config.SetDefaults(v)
 
 	// 2. Set up environment variable handling.
 	v.SetEnvPrefix("SCALPEL")
 	v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
-	v.AutomaticEnv() // This allows Viper to see all env vars that match the prefix.
+	v.AutomaticEnv()
 
-	// Bind flags to Viper
+	// 3. Bind cobra flags to Viper.
 	if cmd != nil {
 		if err := v.BindPFlags(cmd.Flags()); err != nil {
 			return fmt.Errorf("failed to bind command flags: %w", err)
 		}
-		// Also bind persistent flags from the root
 		if err := v.BindPFlags(cmd.PersistentFlags()); err != nil {
 			return fmt.Errorf("failed to bind persistent command flags: %w", err)
 		}
 	}
 
-	// 3. Read the configuration file if specified.
-	// Values from the file will override the defaults.
+	// 4. Read the configuration file if specified.
 	if cfgFile != "" {
 		v.SetConfigFile(cfgFile)
 		if err := v.ReadInConfig(); err != nil {
@@ -137,9 +127,15 @@ func initializeConfig(cmd *cobra.Command) error {
 			}
 		}
 	}
-	// At this point, viper has loaded defaults and the config file.
-	// Environment variables found by AutomaticEnv() will have overridden them.
-	// We are now certain the configuration is loaded correctly.
 
 	return nil
+}
+
+// getConfigFromContext is a helper function for subcommands to retrieve the config.
+func getConfigFromContext(ctx context.Context) (config.Interface, error) {
+	cfg, ok := ctx.Value(configKey).(config.Interface)
+	if !ok || cfg == nil {
+		return nil, fmt.Errorf("configuration not found in context")
+	}
+	return cfg, nil
 }

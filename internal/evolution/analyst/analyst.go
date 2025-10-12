@@ -26,7 +26,7 @@ import (
 // ImprovementAnalyst orchestrates the OODA loop for proactive self-improvement.
 type ImprovementAnalyst struct {
 	logger      *zap.Logger
-	cfg         *config.Config
+	cfg         config.Interface
 	bus         *bus.EvolutionBus
 	projectRoot string
 
@@ -50,7 +50,15 @@ type ImprovementAnalyst struct {
 }
 
 // NewImprovementAnalyst initializes the Analyst and all OODA components.
-func NewImprovementAnalyst(logger *zap.Logger, cfg *config.Config, llmClient schemas.LLMClient, kgClient schemas.KnowledgeGraphClient) (*ImprovementAnalyst, error) {
+func NewImprovementAnalyst(logger *zap.Logger, cfg config.Interface, llmClient schemas.LLMClient, kgClient schemas.KnowledgeGraphClient) (*ImprovementAnalyst, error) {
+
+	// Check the configuration specific to the Agent's evolution capability.
+	evoConfig := cfg.Agent().Evolution
+	if !evoConfig.Enabled {
+		logger.Info("Evolution (Proactive Self-Improvement) is disabled by agent configuration.")
+		return nil, nil
+	}
+
 	projectRoot, err := determineProjectRoot()
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine project root: %w", err)
@@ -63,12 +71,18 @@ func NewImprovementAnalyst(logger *zap.Logger, cfg *config.Config, llmClient sch
 
 	// Initialize OODA components. They now subscribe in their constructors (Fix for Startup Race).
 	obs := observer.NewObserver(logger, evoBus, projectRoot)
-	synth := synthesizer.NewSynthesizer(logger, evoBus, llmClient, kgClient)
+	// Pass the specific evolution configuration to the Synthesizer.
+	synth := synthesizer.NewSynthesizer(logger, evoBus, llmClient, kgClient, evoConfig)
 	dec := decider.NewDecider(logger, evoBus, llmClient)
 	exec := executor.NewExecutor(logger, evoBus, projectRoot)
 
 	// Initialize the Chronicler (Step 5: Remember). Assumes it also subscribes in constructor.
 	chron := chronicler.NewChronicler(logger, evoBus, kgClient)
+
+	maxCycles := evoConfig.MaxCycles
+	if maxCycles <= 0 {
+		maxCycles = 15 // Safety fallback if validation somehow failed earlier
+	}
 
 	return &ImprovementAnalyst{
 		logger:       logger.Named("improvement_analyst"),
@@ -81,12 +95,17 @@ func NewImprovementAnalyst(logger *zap.Logger, cfg *config.Config, llmClient sch
 		executor:     exec,
 		chronicler:   chron,
 		currentState: "Initialized",
-		maxCycles:    15, // Limit OODA cycles to prevent infinite loops.
+		maxCycles:    maxCycles,
 	}, nil
 }
 
 // Run starts the analyst and initiates the OODA loop for a specific goal.
 func (a *ImprovementAnalyst) Run(ctx context.Context, objective string, targetFiles []string) error {
+	// Robustness check: Handle the case where NewImprovementAnalyst returned nil because the feature was disabled.
+	if a == nil {
+		return fmt.Errorf("ImprovementAnalyst is not initialized (likely disabled by config)")
+	}
+
 	a.mu.Lock()
 	if a.currentState != "Initialized" {
 		a.mu.Unlock()

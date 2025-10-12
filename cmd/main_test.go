@@ -2,6 +2,7 @@
 package cmd
 
 import (
+	"context"
 	"fmt"
 	"os"
 	"testing"
@@ -14,7 +15,6 @@ import (
 )
 
 // resetForTest provides the single source of truth for resetting test state.
-// It is the most robust version, combining all cleanup logic.
 func resetForTest(t *testing.T) {
 	t.Helper()
 
@@ -27,29 +27,31 @@ func resetForTest(t *testing.T) {
 	validateFix = false
 	osExit = os.Exit
 
-	// 3. Reset the global config singleton
-	config.Set(&config.Config{})
-
-	// 4. Reset the logger to a silent state
+	// 3. Reset the logger to a silent state
+	// NOTE: The global config singleton is gone, so no need to reset it.
 	observability.InitializeLogger(config.LoggerConfig{Level: "fatal", Format: "console", ServiceName: "test"})
 
-	// 5. Re-initialize the root command to its pristine state
-	// This is the crucial step that prevents state leakage within Cobra itself.
-	rootCmd = newRootCmd()
+	// 4. Re-initialize the root command to its pristine state
+	// This prevents state leakage within Cobra itself.
+	rootCmd = newPristineRootCmd()
 }
 
-// newRootCmd is a helper to get a pristine version of the root command.
-func newRootCmd() *cobra.Command {
+// newPristineRootCmd is a helper to get a pristine version of the root command for integration tests.
+// RENAMED from newRootCmd to avoid collision with the helper in cmd_test.go
+func newPristineRootCmd() *cobra.Command {
 	// This function body is a copy of the `rootCmd` var initialization in `root.go`
 	cmd := &cobra.Command{
 		Use:     "scalpel-cli",
 		Short:   "Scalpel is an AI-native security scanner.",
 		Version: Version,
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
-			// Synchronize logic exactly with cmd/root.go PersistentPreRunE.
+			// This logic should mirror the new, non-singleton approach in cmd/root.go
 
-			// 1. Initialize configuration loading (Viper)
-			if err := initializeConfig(cmd); err != nil {
+			v := viper.New()
+			config.SetDefaults(v)
+
+			// 1. Initialize configuration loading
+			if err := initializeConfig(cmd, v); err != nil {
 				// Initialize a basic logger if config loading fails early.
 				basicLogger, _ := zap.NewDevelopment()
 				defer basicLogger.Sync()
@@ -57,33 +59,27 @@ func newRootCmd() *cobra.Command {
 				return fmt.Errorf("failed to initialize configuration: %w", err)
 			}
 
-			// 2. Unmarshal the configuration
-			var cfg config.Config
-			if err := viper.Unmarshal(&cfg); err != nil {
-				// Initialize with default logger settings if config is unreadable.
+			// 2. Create the configuration object from viper.
+			// The config object is now self-contained and not stored in a global singleton.
+			cfg, err := config.NewConfigFromViper(v)
+			if err != nil {
 				observability.InitializeLogger(config.LoggerConfig{Level: "info", Format: "console", ServiceName: "scalpel-cli"})
-				return fmt.Errorf("failed to unmarshal config: %w", err)
+				return fmt.Errorf("failed to load or validate config: %w", err)
 			}
 
-			// 3. Validate the configuration
-			if err := cfg.Validate(); err != nil {
-				// Initialize logger with what we have to report the validation error.
-				observability.InitializeLogger(cfg.Logger)
-				return fmt.Errorf("invalid configuration: %w", err)
-			}
+			// 3. Initialize the logger with the loaded config.
+			// CORRECTED: Called cfg.Logger() as a method.
+			observability.InitializeLogger(cfg.Logger())
+			logger := observability.GetLogger()
+			logger.Info("Starting Scalpel-CLI", zap.String("version", Version))
 
-			// 4. Store the configuration globally
-			config.Set(&cfg)
-
-			// 5. Initialize the logger
-			observability.InitializeLogger(cfg.Logger)
-			// logger := observability.GetLogger()
-			// logger.Info("Starting Scalpel-CLI", zap.String("version", Version)) // Omitted in tests usually
+			// 4. Store the validated config in the command's context for subcommands.
+			// ADDED: This is crucial for tests of subcommands to work correctly.
+			ctx := context.WithValue(cmd.Context(), configKey, cfg)
+			cmd.SetContext(ctx)
 
 			// Handle the validation run flag
 			if validateFix {
-				// logger.Info("===[ VALIDATION RUN: CONFIGURATION OK ]===")
-				// Use cmd.Println() to match root.go and enable test capture.
 				cmd.Println("===[ VALIDATION RUN PASSED ]===")
 				osExit(0)
 			}

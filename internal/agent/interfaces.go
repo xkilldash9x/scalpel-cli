@@ -6,6 +6,13 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
+// EvolutionEngine defines the interface for the proactive self-improvement system.
+type EvolutionEngine interface {
+	// Run initiates the OODA loop for a specific improvement goal.
+	// It blocks until the goal is achieved, fails, or times out.
+	Run(ctx context.Context, objective string, targetFiles []string) error
+}
+
 // GraphStore defines the interface the agent's mind uses to interact with the knowledge graph.
 type GraphStore interface {
 	AddNode(ctx context.Context, node schemas.Node) error

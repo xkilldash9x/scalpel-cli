@@ -28,10 +28,10 @@ func setupTaintAdapterTest(t *testing.T) (*adapters.TaintAdapter, *core.Analysis
 	mockOAST := new(mocks.MockOASTProvider)
 	findingsChan := make(chan schemas.Finding, 10)
 
-	cfg := &config.Config{
-		Engine:   config.EngineConfig{DefaultTaskTimeout: 5 * time.Minute},
-		Scanners: config.ScannersConfig{Active: config.ActiveScannersConfig{Taint: config.TaintConfig{Depth: 2}}},
-	}
+	// Use the mock config and set up expectations for the methods called by the adapter.
+	mockCfg := new(mocks.MockConfig)
+	mockCfg.On("Engine").Return(config.EngineConfig{DefaultTaskTimeout: 5 * time.Minute})
+	mockCfg.On("Scanners").Return(config.ScannersConfig{Active: config.ActiveScannersConfig{Taint: config.TaintConfig{Depth: 2}}})
 
 	targetURL, _ := url.Parse("http://example.com")
 	task := schemas.Task{
@@ -46,7 +46,7 @@ func setupTaintAdapterTest(t *testing.T) (*adapters.TaintAdapter, *core.Analysis
 		Global: &core.GlobalContext{
 			BrowserManager: mockBM,
 			OASTProvider:   mockOAST,
-			Config:         cfg,
+			Config:         mockCfg, // This will work once Global.Config is an interface
 			FindingsChan:   findingsChan,
 		},
 	}
@@ -66,7 +66,8 @@ func TestTaintAdapter_Analyze_SuccessOrchestration(t *testing.T) {
 	// The analyzer calls Navigate multiple times with different URLs (containing probes).
 	mockSession.On("Navigate", mock.Anything, mock.AnythingOfType("string")).Return(nil)
 
-	expectedInteractionConfig := schemas.InteractionConfig{MaxDepth: 2}
+	// This now correctly reads the 'Depth' from the mocked Scanners() config
+	expectedInteractionConfig := schemas.InteractionConfig{MaxDepth: ctx.Global.Config.Scanners().Active.Taint.Depth}
 	mockSession.On("Interact", mock.Anything, expectedInteractionConfig).Return(nil)
 	mockSession.On("Close", mock.Anything).Return(nil)
 

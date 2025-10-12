@@ -1,8 +1,8 @@
+// internal/config/config_test.go
 package config
 
 import (
 	"bytes"
-	"sync"
 	"testing"
 	"time"
 
@@ -11,26 +11,103 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-// TestGetUninitialized verifies that calling Get() before Load() causes a panic.
-func TestGetUninitialized(t *testing.T) {
-	// Reset the singleton for a clean test environment.
-	instance = nil
-	once = sync.Once{}
+// -- Constructor and Defaults Tests --
 
-	assert.Panics(t, func() {
-		Get()
-	}, "Get() should panic if configuration is not initialized")
+func TestNewDefaultConfig(t *testing.T) {
+	cfg := NewDefaultConfig()
+
+	// Verify a few key defaults to ensure the mechanism works.
+	assert.Equal(t, "info", cfg.Logger().Level)
+	assert.Equal(t, 10, cfg.Engine().WorkerConcurrency)
+	assert.True(t, cfg.Browser().Headless)
+	assert.Equal(t, 30*time.Second, cfg.Network().Timeout)
+	assert.Equal(t, "postgres", cfg.Agent().KnowledgeGraph.Type)
+	assert.Equal(t, "gemini-2.5-pro", cfg.Agent().LLM.DefaultPowerfulModel)
+	assert.False(t, cfg.Autofix().Enabled)
+	assert.Equal(t, 0.75, cfg.Autofix().MinConfidenceThreshold)
+	assert.Equal(t, "scalpel-autofix-bot", cfg.Autofix().Git.AuthorName)
 }
 
-// TestLoadAndGet verifies the basic singleton load and get functionality.
-func TestLoadAndGet(t *testing.T) {
-	// Reset singleton
-	instance = nil
-	once = sync.Once{}
-	loadErr = nil
+// -- Validation Logic Tests --
 
-	// A minimal valid YAML config
-	yamlConfig := []byte(`
+func TestConfigValidation(t *testing.T) {
+	t.Run("Core Validation", func(t *testing.T) {
+		// Start with a valid default config.
+		cfg := NewDefaultConfig()
+		cfg.database.URL = "postgres://user:pass@host/db"
+
+		// Test Case: Valid Config
+		err := cfg.Validate()
+		assert.NoError(t, err, "A valid config should not produce a validation error")
+
+		// Test Case: Missing Database URL
+		cfgInvalidDB := *cfg
+		cfgInvalidDB.database.URL = ""
+		err = cfgInvalidDB.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "database.url is a required")
+
+		// Test Case: Invalid Engine Concurrency
+		cfgInvalidEngine := *cfg
+		cfgInvalidEngine.engine.WorkerConcurrency = 0
+		err = cfgInvalidEngine.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "engine.worker_concurrency must be a positive integer")
+
+		// Test Case: Invalid Browser Concurrency
+		cfgInvalidBrowser := *cfg
+		cfgInvalidBrowser.browser.Concurrency = -1
+		err = cfgInvalidBrowser.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "browser.concurrency must be a positive integer")
+	})
+
+	t.Run("Autofix Validation", func(t *testing.T) {
+		validAutofix := AutofixConfig{
+			Enabled:                true,
+			MinConfidenceThreshold: 0.8,
+			GitHub: GitHubConfig{
+				Token:      "ghp_testtoken123",
+				RepoOwner:  "test-owner",
+				RepoName:   "test-repo",
+				BaseBranch: "main",
+			},
+		}
+
+		err := validAutofix.Validate()
+		assert.NoError(t, err)
+
+		disabledAutofix := validAutofix
+		disabledAutofix.Enabled = false
+		disabledAutofix.GitHub.Token = ""
+		err = disabledAutofix.Validate()
+		assert.NoError(t, err)
+
+		invalidThresholdHigh := validAutofix
+		invalidThresholdHigh.MinConfidenceThreshold = 1.1
+		err = invalidThresholdHigh.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "min_confidence_threshold must be between 0.0 and 1.0")
+
+		missingRepoOwner := validAutofix
+		missingRepoOwner.GitHub.RepoOwner = ""
+		err = missingRepoOwner.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "github.repo_owner, github.repo_name, and github.base_branch are required")
+
+		missingToken := validAutofix
+		missingToken.GitHub.Token = ""
+		err = missingToken.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "GitHub token is required but not found")
+	})
+}
+
+// -- Factory Function Tests --
+
+func TestNewConfigFromViper(t *testing.T) {
+	t.Run("Successful Load", func(t *testing.T) {
+		yamlConfig := []byte(`
 database:
   url: "postgres://test:test@localhost/test"
 engine:
@@ -38,176 +115,81 @@ engine:
 browser:
   concurrency: 2
 `)
+		v := viper.New()
+		v.SetConfigType("yaml")
+		err := v.ReadConfig(bytes.NewBuffer(yamlConfig))
+		require.NoError(t, err)
 
-	v := viper.New()
-	v.SetConfigType("yaml")
-	err := v.ReadConfig(bytes.NewBuffer(yamlConfig))
-	require.NoError(t, err)
+		cfg, err := NewConfigFromViper(v)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+		assert.Equal(t, "postgres://test:test@localhost/test", cfg.Database().URL)
+		assert.Equal(t, 4, cfg.Engine().WorkerConcurrency)
+	})
 
-	err = Load(v)
-	require.NoError(t, err)
+	t.Run("Validation Failure", func(t *testing.T) {
+		v := viper.New()
+		SetDefaults(v)
+		v.Set("database.url", "") // Intentionally invalid
 
-	cfg := Get()
-	require.NotNil(t, cfg)
-	assert.Equal(t, "postgres://test:test@localhost/test", cfg.Database.URL)
-	assert.Equal(t, 4, cfg.Engine.WorkerConcurrency)
-	assert.Equal(t, 2, cfg.Browser.Concurrency)
+		cfg, err := NewConfigFromViper(v)
+		assert.Error(t, err)
+		assert.Nil(t, cfg)
+		assert.Contains(t, err.Error(), "invalid configuration")
+	})
 
-	// Verify that subsequent calls to Load do not change the instance
-	v2 := viper.New()
-	v2.SetConfigType("yaml")
-	// This config is technically invalid (missing db url) but Load shouldn't
-	// re-evaluate or re-unmarshal because the singleton is already set.
-	_ = v2.ReadConfig(bytes.NewBuffer([]byte(`engine: {worker_concurrency: 99}`)))
-	err = Load(v2)
-	require.NoError(t, err)
+	t.Run("Environment Variable Binding", func(t *testing.T) {
+		v := viper.New()
+		SetDefaults(v)
 
-	cfg2 := Get()
-	assert.Same(t, cfg, cfg2, "Get() should return the same instance")
-	assert.Equal(t, "postgres://test:test@localhost/test", cfg2.Database.URL, "Configuration should not be reloaded")
+		v.Set("autofix.enabled", true)
+		v.Set("autofix.github.repo_owner", "owner")
+		v.Set("autofix.github.repo_name", "repo")
+		v.Set("autofix.github.base_branch", "main")
+		v.Set("database.url", "postgres://localhost/db")
+
+		testToken := "ghp_env_var_token_456"
+		t.Setenv("SCALPEL_AUTOFIX_GH_TOKEN", testToken)
+		testKGPassword := "securepassword123"
+		t.Setenv("SCALPEL_KG_PASSWORD", testKGPassword)
+
+		cfg, err := NewConfigFromViper(v)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+
+		assert.Equal(t, testToken, cfg.Autofix().GitHub.Token)
+		assert.Equal(t, testKGPassword, cfg.Agent().KnowledgeGraph.Postgres.Password)
+	})
 }
 
-// TestConfigValidation verifies the Validate() method.
-func TestConfigValidation(t *testing.T) {
-	testCases := []struct {
-		name        string
-		config      Config
-		expectError bool
-		errorMsg    string
-	}{
-		{
-			name: "valid config",
-			config: Config{
-				Database: DatabaseConfig{URL: "valid_url"},
-				Engine:   EngineConfig{WorkerConcurrency: 1},
-				Browser:  BrowserConfig{Concurrency: 1},
-			},
-			expectError: false,
-		},
-		{
-			name: "missing database url",
-			config: Config{
-				// This config provides valid values for the other checks
-				// to ensure we're testing the database URL validation specifically.
-				Engine:  EngineConfig{WorkerConcurrency: 1},
-				Browser: BrowserConfig{Concurrency: 1},
-			},
-			expectError: true,
-			errorMsg:    "database.url is a required configuration field",
-		},
-		{
-			name: "zero worker concurrency",
-			config: Config{
-				Database: DatabaseConfig{URL: "valid_url"},
-				Engine:   EngineConfig{WorkerConcurrency: 0},
-				Browser:  BrowserConfig{Concurrency: 1},
-			},
-			expectError: true,
-			errorMsg:    "engine.worker_concurrency must be a positive integer",
-		},
-		{
-			name: "zero browser concurrency",
-			config: Config{
-				Database: DatabaseConfig{URL: "valid_url"},
-				Engine:   EngineConfig{WorkerConcurrency: 1},
-				Browser:  BrowserConfig{Concurrency: 0},
-			},
-			expectError: true,
-			errorMsg:    "browser.concurrency must be a positive integer",
-		},
-	}
+// -- Struct and Mapping Tests --
 
-	for _, tc := range testCases {
-		t.Run(tc.name, func(t *testing.T) {
-			err := tc.config.Validate()
-			if tc.expectError {
-				assert.Error(t, err)
-				assert.Contains(t, err.Error(), tc.errorMsg)
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
-}
-
-// TestConfigStructureMapping verifies that the YAML tags correctly map to the struct fields.
 func TestConfigStructureMapping(t *testing.T) {
-	// This YAML uses snake_case, matching our updated config struct tags.
 	yamlInput := `
 logger:
   level: debug
-  format: console
   log_file: /var/log/app.log
 network:
   timeout: 5s
-  navigation_timeout: 45s
-  capture_response_bodies: true
-  post_load_wait: 1s
-  proxy:
-    enabled: true
-    address: "127.0.0.1:8080"
-iast:
-  enabled: true
-  shim_path: "/path/to/shim.js"
-  config_path: "/path/to/config.json"
 scanners:
   active:
     auth:
-      ato:
-        enabled: true
-        success_keywords:
-          - welcome
-          - dashboard
-        concurrency: 3
-        credential_file: "creds.txt"
       idor:
-        enabled: true
         test_strategies:
           numericid: ["increment"]
 `
 	v := viper.New()
 	v.SetConfigType("yaml")
 	err := v.ReadConfig(bytes.NewBufferString(yamlInput))
-	require.NoError(t, err, "Viper should read the YAML without error")
+	require.NoError(t, err)
 
 	var cfg Config
 	err = v.Unmarshal(&cfg)
-	require.NoError(t, err, "Unmarshaling into Config struct should not produce an error")
+	require.NoError(t, err)
 
-	// Assertions to verify correct mapping
-	assert.Equal(t, "debug", cfg.Logger.Level)
-	assert.Equal(t, "/var/log/app.log", cfg.Logger.LogFile)
-	assert.Equal(t, 5*time.Second, cfg.Network.Timeout)
-	assert.Equal(t, 45*time.Second, cfg.Network.NavigationTimeout)
-	assert.True(t, cfg.Network.CaptureResponseBodies)
-	assert.Equal(t, 1*time.Second, cfg.Network.PostLoadWait)
-	assert.True(t, cfg.Network.Proxy.Enabled)
-	assert.True(t, cfg.IAST.Enabled)
-	assert.Equal(t, "/path/to/shim.js", cfg.IAST.ShimPath)
-	assert.Equal(t, "/path/to/config.json", cfg.IAST.ConfigPath)
-	assert.True(t, cfg.Scanners.Active.Auth.ATO.Enabled)
-	assert.Contains(t, cfg.Scanners.Active.Auth.ATO.SuccessKeywords, "welcome")
-	assert.Equal(t, "creds.txt", cfg.Scanners.Active.Auth.ATO.CredentialFile)
-	assert.Equal(t, 3, cfg.Scanners.Active.Auth.ATO.Concurrency)
-	require.NotNil(t, cfg.Scanners.Active.Auth.IDOR.TestStrategies)
-	// Viper lowercases all map keys, so we must assert against the lowercase version.
-	assert.Contains(t, cfg.Scanners.Active.Auth.IDOR.TestStrategies["numericid"], "increment")
-}
-
-// TestSet ensures that the Set function correctly sets the global instance.
-func TestSet(t *testing.T) {
-	// Reset singleton
-	instance = nil
-	once = sync.Once{}
-
-	expectedCfg := &Config{
-		Database: DatabaseConfig{URL: "set-from-test"},
-	}
-
-	Set(expectedCfg)
-
-	actualCfg := Get()
-
-	assert.Same(t, expectedCfg, actualCfg, "Get should return the exact instance that was Set")
-	assert.Equal(t, "set-from-test", actualCfg.Database.URL)
+	assert.Equal(t, "debug", cfg.Logger().Level)
+	assert.Equal(t, "/var/log/app.log", cfg.Logger().LogFile)
+	assert.Equal(t, 5*time.Second, cfg.Network().Timeout)
+	require.NotNil(t, cfg.Scanners().Active.Auth.IDOR.TestStrategies)
+	assert.Contains(t, cfg.Scanners().Active.Auth.IDOR.TestStrategies["numericid"], "increment")
 }

@@ -1,3 +1,4 @@
+// internal/worker/adapters/taint_adapter.go
 package adapters
 
 import (
@@ -32,13 +33,13 @@ func (a *TaintAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 	oastProvider := analysisCtx.Global.OASTProvider
 	reporter := NewContextReporter(analysisCtx)
 
-	cfg := analysisCtx.Global.Config.Scanners.Active.Taint
+	cfg := analysisCtx.Global.Config.Scanners().Active.Taint
 	taintConfig := taint.Config{
 		TaskID:                  analysisCtx.Task.TaskID,
 		Target:                  analysisCtx.TargetURL,
 		Probes:                  taint.DefaultProbes(),
 		Sinks:                   taint.DefaultSinks(),
-		AnalysisTimeout:         analysisCtx.Global.Config.Engine.DefaultTaskTimeout,
+		AnalysisTimeout:         analysisCtx.Global.Config.Engine().DefaultTaskTimeout,
 		EventChannelBuffer:      500,
 		FinalizationGracePeriod: 5 * time.Second,
 		ProbeExpirationDuration: 5 * time.Minute,

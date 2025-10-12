@@ -1,4 +1,4 @@
-// internal/results/pipeline.go
+// File: internal/results/pipeline.go
 package results
 
 import (
@@ -8,25 +8,18 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/results/providers"
-	"github.com/xkilldash9x/scalpel-cli/internal/store"
 	"go.uber.org/zap"
 )
 
-// Repository defines the interface for accessing stored scan data.
-// Implemented by store.Store.
-type Repository interface {
-	GetFindingsByScanID(ctx context.Context, scanID string) ([]schemas.Finding, error)
-}
-
 // Pipeline manages the processing of raw findings into a final report.
 type Pipeline struct {
-	store    Repository
+	store    schemas.Store
 	enricher *Enricher
 	logger   *zap.Logger
 }
 
 // NewPipeline creates a new results processing pipeline.
-func NewPipeline(store *store.Store, logger *zap.Logger) *Pipeline {
+func NewPipeline(store schemas.Store, logger *zap.Logger) *Pipeline { // CORRECTED: Accepts the interface.
 	// Initialize providers for enrichment
 	cweProvider := providers.NewInMemoryCWEProvider()
 	enricher := NewEnricher(cweProvider, logger)
@@ -50,7 +43,6 @@ func (r *Report) ToJSON() ([]byte, error) {
 	return json.MarshalIndent(r, "", "  ")
 }
 
-
 // ProcessScanResults retrieves, normalizes, enriches, and prioritizes findings for a scan.
 func (p *Pipeline) ProcessScanResults(ctx context.Context, scanID string) (*Report, error) {
 	p.logger.Info("Starting results processing", zap.String("scan_id", scanID))
@@ -66,7 +58,6 @@ func (p *Pipeline) ProcessScanResults(ctx context.Context, scanID string) (*Repo
 
 	// 3. Enrichment
 	for i := range findings {
-		// Corrected: Call EnrichFinding method on the enricher instance.
 		p.enricher.EnrichFinding(&findings[i])
 	}
 
@@ -89,18 +80,22 @@ func (p *Pipeline) ProcessScanResults(ctx context.Context, scanID string) (*Repo
 func (p *Pipeline) prioritize(findings []schemas.Finding) {
 	// Sort findings by severity (Critical first)
 	severityOrder := map[schemas.Severity]int{
-		schemas.SeverityCritical:    1,
-		schemas.SeverityHigh:        2,
-		schemas.SeverityMedium:      3,
-		schemas.SeverityLow:         4,
+		schemas.SeverityCritical:      1,
+		schemas.SeverityHigh:          2,
+		schemas.SeverityMedium:        3,
+		schemas.SeverityLow:           4,
 		schemas.SeverityInformational: 5,
 	}
 
 	sort.Slice(findings, func(i, j int) bool {
 		orderI, okI := severityOrder[findings[i].Severity]
-		if !okI { orderI = 99 }
+		if !okI {
+			orderI = 99
+		}
 		orderJ, okJ := severityOrder[findings[j].Severity]
-		if !okJ { orderJ = 99 }
+		if !okJ {
+			orderJ = 99
+		}
 
 		if orderI != orderJ {
 			return orderI < orderJ

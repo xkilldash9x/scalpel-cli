@@ -1,4 +1,3 @@
-
 package agent
 
 import (
@@ -14,14 +13,14 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-    "github.com/xkilldash9x/scalpel-cli/internal/autofix"
-    "github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/autofix"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
 // SelfHealOrchestrator manages the entire autofix lifecycle.
 type SelfHealOrchestrator struct {
 	logger        *zap.Logger
-	cfg           *config.Config
+	cfg           config.Interface
 	autofixCfg    *config.AutofixConfig
 	watcher       *autofix.Watcher
 	analyzer      *autofix.Analyzer
@@ -35,21 +34,23 @@ type SelfHealOrchestrator struct {
 // NewSelfHealOrchestrator creates and wires together the components.
 func NewSelfHealOrchestrator(
 	logger *zap.Logger,
-	cfg *config.Config,
+	cfg config.Interface,
 	llmClient schemas.LLMClient,
 ) (*SelfHealOrchestrator, error) {
 
-	if !cfg.Autofix.Enabled {
+	autofixCfg := cfg.Autofix()
+
+	if !autofixCfg.Enabled {
 		logger.Info("Self-healing (Autofix) is disabled by configuration.")
 		return nil, nil
 	}
 
-	if err := cfg.Autofix.Validate(); err != nil {
+	if err := autofixCfg.Validate(); err != nil {
 		logger.Error("Autofix configuration is invalid. Disabling self-healing.", zap.Error(err))
 		return nil, nil
 	}
 
-	sourceProjectRoot, err := determineSourceProjectRoot(cfg.Autofix.ProjectRoot)
+	sourceProjectRoot, err := determineSourceProjectRoot(autofixCfg.ProjectRoot)
 	if err != nil {
 		return nil, fmt.Errorf("failed to determine source project root: %w", err)
 	}
@@ -64,7 +65,7 @@ func NewSelfHealOrchestrator(
 
 	analyzer := autofix.NewAnalyzer(logger, llmClient, sourceProjectRoot)
 
-	developer, err := autofix.NewDeveloper(logger, llmClient, &cfg.Autofix, sourceProjectRoot)
+	developer, err := autofix.NewDeveloper(logger, llmClient, &autofixCfg, sourceProjectRoot)
 	if err != nil {
 		logger.Error("Failed to initialize autofix developer. Disabling self-healing.", zap.Error(err))
 		return nil, nil
@@ -73,7 +74,7 @@ func NewSelfHealOrchestrator(
 	orchestrator := &SelfHealOrchestrator{
 		logger:        logger.Named("self-heal-orch"),
 		cfg:           cfg,
-		autofixCfg:    &cfg.Autofix,
+		autofixCfg:    &autofixCfg,
 		watcher:       watcher,
 		analyzer:      analyzer,
 		developer:     developer,

@@ -8,6 +8,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/evolution/bus"
 	"github.com/xkilldash9x/scalpel-cli/internal/evolution/models"
 	"github.com/xkilldash9x/scalpel-cli/internal/evolution/synthesizer"
@@ -27,7 +28,7 @@ func TestSynthesizer_GoroutineLeakDetection(t *testing.T) {
 	mockKG := new(mocks.MockKGClient)
 
 	// Initialize the synthesizer (relies on default 500ms settle time).
-	s := synthesizer.NewSynthesizer(logger, eb, mockLLM, mockKG)
+	s := synthesizer.NewSynthesizer(logger, eb, mockLLM, mockKG, config.EvolutionConfig{Enabled: true, SettleTime: 10 * time.Millisecond})
 
 	// Setup mocks to return quickly once synthesis starts.
 	mockKG.On("AddNode", mock.Anything, mock.Anything).Return(nil).Maybe()
@@ -88,7 +89,7 @@ func TestSynthesizer_CancellationCorrectness(t *testing.T) {
 
 	mockLLM := new(mocks.MockLLMClient)
 	mockKG := new(mocks.MockKGClient)
-	s := synthesizer.NewSynthesizer(logger, eb, mockLLM, mockKG)
+	s := synthesizer.NewSynthesizer(logger, eb, mockLLM, mockKG, config.EvolutionConfig{Enabled: true, SettleTime: 10 * time.Millisecond})
 
 	// Create a context to cancel during the operation.
 	testCtx, cancelTest := context.WithCancel(context.Background())

@@ -1,3 +1,4 @@
+// internal/session/session_test.go
 package session
 
 import (
@@ -25,12 +26,13 @@ import (
 )
 
 // A helper to create a new test session, aligned with the current NewSession API.
-func setupTestSession(t *testing.T) (*Session, *config.Config, chan schemas.Finding) {
+func setupTestSession(t *testing.T) (*Session, config.Interface, chan schemas.Finding) {
 	cfg := config.NewDefaultConfig()
-	// Disable humanoid delays for faster, deterministic testing.
-	cfg.Browser.Humanoid.Enabled = false
-	cfg.Network.PostLoadWait = 10 * time.Millisecond // Short stabilization time.
-	cfg.Network.CaptureResponseBodies = true         // Enable body capture for HAR tests.
+
+	// Use setters to modify config, adhering to the interface contract.
+	cfg.SetBrowserHumanoidEnabled(false)
+	cfg.SetNetworkPostLoadWait(10 * time.Millisecond) // Short stabilization time.
+	cfg.SetNetworkCaptureResponseBodies(true)         // Enable body capture for HAR tests.
 
 	// Use Nop logger for cleaner test output. Use zap.NewDevelopment() for debugging.
 	logger := zap.NewNop()
@@ -159,8 +161,8 @@ func TestSession_NavigationTimeout(t *testing.T) {
 	t.Parallel()
 	timeoutDuration := 200 * time.Millisecond
 	cfg := config.NewDefaultConfig()
-	cfg.Network.NavigationTimeout = timeoutDuration
-	cfg.Network.PostLoadWait = 0
+	cfg.SetNetworkNavigationTimeout(timeoutDuration)
+	cfg.SetNetworkPostLoadWait(0)
 
 	logger := zap.NewNop()
 	s, err := NewSession(context.Background(), cfg, schemas.DefaultPersona, logger, nil)

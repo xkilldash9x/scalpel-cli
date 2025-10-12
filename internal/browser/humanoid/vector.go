@@ -23,6 +23,11 @@ func (v Vector2D) Mul(scalar float64) Vector2D {
 	return Vector2D{X: v.X * scalar, Y: v.Y * scalar}
 }
 
+// Dot calculates the dot product of v and other.
+func (v Vector2D) Dot(other Vector2D) float64 {
+	return v.X*other.X + v.Y*other.Y
+}
+
 // MagSq calculates the squared magnitude (length) of the vector.
 func (v Vector2D) MagSq() float64 {
 	return v.X*v.X + v.Y*v.Y

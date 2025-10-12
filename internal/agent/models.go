@@ -35,11 +35,11 @@ type ActionType string
 
 const (
 	// Environmental Interaction (Basic)
-	ActionNavigate   ActionType = "NAVIGATE"
-	ActionClick      ActionType = "CLICK"
-	ActionInputText  ActionType = "INPUT_TEXT"
-	ActionSubmitForm ActionType = "SUBMIT_FORM"
-	ActionScroll     ActionType = "SCROLL"
+	ActionNavigate     ActionType = "NAVIGATE"
+	ActionClick        ActionType = "CLICK"
+	ActionInputText    ActionType = "INPUT_TEXT"
+	ActionSubmitForm   ActionType = "SUBMIT_FORM"
+	ActionScroll       ActionType = "SCROLL"
 	ActionWaitForAsync ActionType = "WAIT_FOR_ASYNC"
 
 	// High-Level Humanoid Actions (Complex, multi-step interactions)
@@ -52,6 +52,9 @@ const (
 	// Codebase Interaction
 	ActionGatherCodebaseContext ActionType = "GATHER_CODEBASE_CONTEXT"
 
+	// Proactive Self-Improvement
+	ActionEvolveCodebase ActionType = "EVOLVE_CODEBASE"
+
 	// High-Level, Complex Actions (Orchestrated by the Agent directly)
 	ActionPerformComplexTask ActionType = "PERFORM_COMPLEX_TASK"
 
@@ -61,12 +64,12 @@ const (
 
 // Action represents a specific step decided by the Mind.
 type Action struct {
-	ID        string                 `json:"id"`
-	MissionID string                 `json:"mission_id"`
-	Type      ActionType             `json:"type"`
-	Selector  string                 `json:"selector,omitempty"` // Primary selector
-	Value     string                 `json:"value,omitempty"`
-	// Metadata holds secondary parameters (e.g., 'target_selector' for DragAndDrop, 'duration_ms' for Wait)
+	ID        string     `json:"id"`
+	MissionID string     `json:"mission_id"`
+	Type      ActionType `json:"type"`
+	Selector  string     `json:"selector,omitempty"` // Primary selector
+	Value     string     `json:"value,omitempty"`
+	// Metadata holds secondary parameters (e.g., 'target_selector' for DragAndDrop, 'duration_ms' for Wait, 'target_files' for Evolve)
 	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 	Rationale string                 `json:"rationale"`
 	Timestamp time.Time              `json:"timestamp"`
@@ -81,6 +84,7 @@ const (
 	ObservedConsoleMessage  ObservationType = "CONSOLE_MESSAGE"
 	ObservedTaintFlow       ObservationType = "TAINT_FLOW"
 	ObservedCodebaseContext ObservationType = "CODEBASE_CONTEXT"
+	ObservedEvolutionResult ObservationType = "EVOLUTION_RESULT"
 	ObservedVulnerability   ObservationType = "VULNERABILITY"
 	ObservedSystemState     ObservationType = "SYSTEM_STATE"
 )
@@ -97,7 +101,6 @@ type Observation struct {
 }
 
 // ExecutionResult is a structured return type for ActionExecutors.
-
 // Added ErrorCode and ErrorDetails to provide structured feedback to the Mind.
 type ExecutionResult struct {
 	Status          string                 `json:"status"` // "success" or "failed"
@@ -106,7 +109,6 @@ type ExecutionResult struct {
 	ErrorCode       ErrorCode              `json:"error_code,omitempty"`
 	ErrorDetails    map[string]interface{} `json:"error_details,omitempty"`
 }
-
 
 // CognitiveMessageType defines the message types used on the CognitiveBus.
 type CognitiveMessageType string

@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/session"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
@@ -23,11 +24,16 @@ type Manager struct {
 	ctx    context.Context
 	cancel context.CancelFunc
 	logger *zap.Logger
-	cfg    *config.Config // Manager-level default configuration.
+	cfg    config.Interface // Manager-level default configuration.
 
 	sessions    map[string]*session.Session
 	sessionsMux sync.Mutex
 	wg          sync.WaitGroup
+}
+
+// ProcessTask implements engine.Worker.
+func (m *Manager) ProcessTask(ctx context.Context, analysisCtx *core.AnalysisContext) error {
+	panic("unimplemented")
 }
 
 // Ensure Manager implements the required interfaces from the schemas package.
@@ -36,7 +42,7 @@ var _ schemas.BrowserInteractor = (*Manager)(nil)
 
 // NewManager creates and initializes a new browser session manager.
 // It now accepts a default config to be used by convenience methods.
-func NewManager(ctx context.Context, logger *zap.Logger, cfg *config.Config) (*Manager, error) {
+func NewManager(ctx context.Context, logger *zap.Logger, cfg config.Interface) (*Manager, error) {
 	log := logger.Named("browser_manager_purego")
 	log.Info("Browser manager created (Pure Go implementation).")
 
@@ -73,9 +79,9 @@ func (m *Manager) NewAnalysisContext(
 	taintConfig string,
 	findingsChan chan<- schemas.Finding,
 ) (schemas.SessionContext, error) {
-	appConfig, ok := cfg.(*config.Config)
+	appConfig, ok := cfg.(config.Interface)
 	if !ok {
-		return nil, fmt.Errorf("invalid config type provided: expected *config.Config")
+		return nil, fmt.Errorf("invalid config type provided: expected config.Interface")
 	}
 
 	if taintTemplate != "" || taintConfig != "" {
@@ -207,11 +213,9 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, targetURL string) (res
 	sessionCfg := m.cfg
 	if sessionCfg == nil {
 		// Fallback to a minimal config if the manager has none.
-		sessionCfg = &config.Config{
-			Network: config.NetworkConfig{
-				PostLoadWait: 200 * time.Millisecond,
-			},
-		}
+		// Use NewDefaultConfig to ensure all fields are populated.
+		sessionCfg = config.NewDefaultConfig()
+		sessionCfg.SetNetworkPostLoadWait(200 * time.Millisecond)
 	}
 
 	// Findings for this temporary session can be discarded.

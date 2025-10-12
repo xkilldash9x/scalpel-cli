@@ -15,11 +15,6 @@ import (
 	"go.uber.org/zap"
 )
 
-var (
-	panicLog     string
-	originalArgs []string
-)
-
 // newSelfHealCmd creates and returns the self-heal command.
 func newSelfHealCmd() *cobra.Command {
 	cmd := &cobra.Command{
@@ -27,30 +22,42 @@ func newSelfHealCmd() *cobra.Command {
 		Short:  "Internal command to orchestrate the self-healing process after a panic.",
 		Hidden: true, // This is not a user-facing command
 		RunE: func(cmd *cobra.Command, args []string) error {
-			// This is the application's REAL entrypoint. It creates the REAL dependencies.
-			cfg := config.Get()
+			ctx := cmd.Context()
 			logger := observability.GetLogger()
 
-			// Corrected to use NewClient and pass the agent config.
-			llmClient, err := llmclient.NewClient(cfg.Agent, logger)
+			// Get the config from the context.
+			cfg, err := getConfigFromContext(ctx)
+			if err != nil {
+				return err
+			}
+
+			panicLog, _ := cmd.Flags().GetString("panic-log")
+			originalArgs, _ := cmd.Flags().GetStringSlice("original-args")
+
+			llmClient, err := llmclient.NewClient(cfg.Agent(), logger)
 			if err != nil {
 				logger.Error("Failed to initialize LLM client. Self-healing requires a configured LLM.", zap.Error(err))
 				return fmt.Errorf("failed to initialize LLM client: %w", err)
 			}
 
 			// The initializer for the real Metalyst runner.
-			metalystInitFn := func(cfg *config.Config, llm schemas.LLMClient) (MetalystRunner, error) {
-				// Corrected to remove the logger argument as per the error signature.
-				return metalyst.NewMetalyst(cfg, llm)
+			metalystInitFn := func(cfg config.Interface, llm schemas.LLMClient) (MetalystRunner, error) {
+				// Safely perform the type assertion.
+				concreteCfg, ok := cfg.(*config.Config)
+				if !ok {
+					return nil, errors.New("metalyst runner requires a concrete *config.Config implementation")
+				}
+				return metalyst.NewMetalyst(concreteCfg, llm)
 			}
 
-			return runSelfHeal(cmd.Context(), cfg, logger, panicLog, originalArgs, llmClient, metalystInitFn)
+			return runSelfHeal(ctx, cfg, logger, panicLog, originalArgs, llmClient, metalystInitFn)
 		},
 	}
 
-	cmd.Flags().StringVar(&panicLog, "panic-log", "", "Path to the panic log file.")
-	cmd.Flags().StringSliceVar(&originalArgs, "original-args", []string{}, "The original arguments to the command that panicked.")
-	_ = cmd.MarkFlagRequired("panic-log")
+	cmd.Flags().String("panic-log", "", "Path to the panic log file.")
+	cmd.Flags().StringSlice("original-args", []string{}, "The original arguments to the command that panicked.")
+
+	_ = cmd.Flags().MarkFlagRequired("panic-log")
 
 	return cmd
 }
@@ -61,18 +68,17 @@ type MetalystRunner interface {
 }
 
 // MetalystInitializer is a function type for creating a MetalystRunner.
-type MetalystInitializer func(*config.Config, schemas.LLMClient) (MetalystRunner, error)
+type MetalystInitializer func(config.Interface, schemas.LLMClient) (MetalystRunner, error)
 
 // runSelfHeal contains the testable business logic for the command.
-// It now accepts its dependencies as arguments.
 func runSelfHeal(
 	ctx context.Context,
-	cfg *config.Config,
+	cfg config.Interface,
 	logger *zap.Logger,
 	panicLogPath string,
 	args []string,
-	llmClient schemas.LLMClient, // Dependency
-	initFn MetalystInitializer, // Dependency
+	llmClient schemas.LLMClient,
+	initFn MetalystInitializer,
 ) error {
 	if panicLogPath == "" {
 		return errors.New("--panic-log is required")

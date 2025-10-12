@@ -1,11 +1,12 @@
+// File: internal/browser/humanoid/drag.go
 package humanoid
 
 import (
 	"context"
 	"fmt"
 
-	"go.uber.org/zap"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"go.uber.org/zap"
 )
 
 // DragAndDrop is a public method that acquires a lock for the entire action.
@@ -13,19 +14,21 @@ func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector s
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Preparation: Increase fatigue for a complex action.
-	h.updateFatigue(1.5)
+	// Preparation: Increase fatigue/habituation for a complex action.
+	h.updateFatigueAndHabituation(1.5)
 
 	// 1. Move to the starting element.
 	// moveToSelector handles visibility, movement, and targeting internally.
+	// ActionType is set within moveToSelector.
 	if err := h.moveToSelector(ctx, startSelector, opts); err != nil {
 		return fmt.Errorf("dragdrop: failed to move to start: %w", err)
 	}
 	// Record the position where we ended up before the grab for potential field calculations.
 	startPos := h.currentPos
 
-	// 2. Pause before grabbing.
-	if err := h.cognitivePause(ctx, 80, 30); err != nil {
+	// 2. Pause before grabbing. (Mean Scale 0.8, StdDev Scale 0.8)
+	// cognitivePause handles the ActionType switch internally (from MOVE to DRAG).
+	if err := h.cognitivePause(ctx, 0.8, 0.8, ActionTypeDrag); err != nil {
 		return err
 	}
 
@@ -47,8 +50,9 @@ func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector s
 	h.currentPos = grabPos
 	h.currentButtonState = schemas.ButtonLeft
 
-	// 4. Pause briefly after pressing down (simulating grip adjustment).
-	if err := h.cognitivePause(ctx, 100, 40); err != nil {
+	// 4. Pause briefly after pressing down (simulating grip adjustment). (Mean Scale 1.0, StdDev Scale 1.0)
+	// ActionType remains DRAG.
+	if err := h.cognitivePause(ctx, 1.0, 1.0, ActionTypeDrag); err != nil {
 		h.releaseMouse(context.Background()) // Attempt cleanup if pause fails.
 		return err
 	}
@@ -92,15 +96,16 @@ func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector s
 	disableVisible := false
 	moveOpts := &InteractionOptions{Field: field, EnsureVisible: &disableVisible}
 
-	// Move to the calculated end target.
-	if err := h.moveToVector(ctx, endTarget, moveOpts); err != nil {
+	// Move to the calculated end target. ActionType remains DRAG.
+	if err := h.moveToVector(ctx, endTarget, moveOpts, ActionTypeDrag); err != nil {
 		h.logger.Warn("Humanoid: Drag movement failed, attempting cleanup (mouse release)", zap.Error(err))
 		h.releaseMouse(context.Background())
 		return err
 	}
 
-	// 8. Short pause before releasing (confirming drop location).
-	if err := h.cognitivePause(ctx, 70, 30); err != nil {
+	// 8. Short pause before releasing (confirming drop location). (Mean Scale 0.7, StdDev Scale 0.7)
+	// ActionType remains DRAG.
+	if err := h.cognitivePause(ctx, 0.7, 0.7, ActionTypeDrag); err != nil {
 		h.releaseMouse(context.Background())
 		return err
 	}

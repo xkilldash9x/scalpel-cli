@@ -21,10 +21,15 @@ import (
 // setupTestEnvironment prepares the basic components needed for worker tests.
 func setupTestEnvironment(t *testing.T) (*config.Config, *zap.Logger, *core.GlobalContext) {
 	t.Helper()
-	cfg := &config.Config{}
-	cfg.Scanners.Static.JWT.BruteForceEnabled = false
+
+	// Initialize config with default values.
+	cfg := config.NewDefaultConfig()
+
 	logger := zap.NewNop()
+	// As the refactor progresses, other components like GlobalContext might
+	// still expect the concrete *config.Config type.
 	globalCtx := &core.GlobalContext{Config: cfg}
+
 	return cfg, logger, globalCtx
 }
 
@@ -126,4 +131,3 @@ func TestMonolithicWorker_ProcessTask_AdapterFailurePropagation(t *testing.T) {
 	// Verify that all the mock's expectations were met.
 	mockAnalyzer.AssertExpectations(t)
 }
-

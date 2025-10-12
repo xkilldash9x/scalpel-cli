@@ -4,13 +4,180 @@ package mocks
 import (
 	"context"
 	"encoding/json"
+	"net/http"
 	"sync"
 	"time"
 
 	"github.com/stretchr/testify/mock"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
+
+// -- Config Mock --
+
+// MockConfig mocks the config.Interface.
+type MockConfig struct {
+	mock.Mock
+}
+
+// SetBrowserHumanoidKeyHoldMu implements config.Interface.
+func (m *MockConfig) SetBrowserHumanoidKeyHoldMu(ms float64) {
+	panic("unimplemented")
+}
+
+// SetATOConfig implements config.Interface.
+func (m *MockConfig) SetATOConfig(atoCfg config.ATOConfig) {
+	panic("unimplemented")
+}
+
+// --- Getters ---
+
+func (m *MockConfig) Logger() config.LoggerConfig {
+	args := m.Called()
+	return args.Get(0).(config.LoggerConfig)
+}
+
+func (m *MockConfig) Database() config.DatabaseConfig {
+	args := m.Called()
+	return args.Get(0).(config.DatabaseConfig)
+}
+
+func (m *MockConfig) Engine() config.EngineConfig {
+	args := m.Called()
+	return args.Get(0).(config.EngineConfig)
+}
+
+func (m *MockConfig) Browser() config.BrowserConfig {
+	args := m.Called()
+	return args.Get(0).(config.BrowserConfig)
+}
+
+func (m *MockConfig) Network() config.NetworkConfig {
+	args := m.Called()
+	return args.Get(0).(config.NetworkConfig)
+}
+
+func (m *MockConfig) IAST() config.IASTConfig {
+	args := m.Called()
+	return args.Get(0).(config.IASTConfig)
+}
+
+func (m *MockConfig) Scanners() config.ScannersConfig {
+	args := m.Called()
+	return args.Get(0).(config.ScannersConfig)
+}
+
+// JWT provides a mock function for the JWT getter.
+func (m *MockConfig) JWT() config.JWTConfig {
+	args := m.Called()
+	return args.Get(0).(config.JWTConfig)
+}
+
+func (m *MockConfig) Agent() config.AgentConfig {
+	args := m.Called()
+	return args.Get(0).(config.AgentConfig)
+}
+
+func (m *MockConfig) Discovery() config.DiscoveryConfig {
+	args := m.Called()
+	return args.Get(0).(config.DiscoveryConfig)
+}
+
+func (m *MockConfig) Autofix() config.AutofixConfig {
+	args := m.Called()
+	return args.Get(0).(config.AutofixConfig)
+}
+
+func (m *MockConfig) Scan() config.ScanConfig {
+	args := m.Called()
+	return args.Get(0).(config.ScanConfig)
+}
+
+// --- Setters ---
+
+func (m *MockConfig) SetScanConfig(sc config.ScanConfig) {
+	m.Called(sc)
+}
+
+// Discovery Setters
+func (m *MockConfig) SetDiscoveryMaxDepth(d int) {
+	m.Called(d)
+}
+
+func (m *MockConfig) SetDiscoveryIncludeSubdomains(b bool) {
+	m.Called(b)
+}
+
+// Engine Setters
+func (m *MockConfig) SetEngineWorkerConcurrency(w int) {
+	m.Called(w)
+}
+
+// Browser Setters
+func (m *MockConfig) SetBrowserHeadless(b bool) {
+	m.Called(b)
+}
+
+func (m *MockConfig) SetBrowserDisableCache(b bool) {
+	m.Called(b)
+}
+
+func (m *MockConfig) SetBrowserIgnoreTLSErrors(b bool) {
+	m.Called(b)
+}
+
+func (m *MockConfig) SetBrowserDebug(b bool) {
+	m.Called(b)
+}
+
+// Humanoid Setters
+func (m *MockConfig) SetBrowserHumanoidEnabled(b bool) {
+	m.Called(b)
+}
+
+func (m *MockConfig) SetBrowserHumanoidClickHoldMinMs(ms int) {
+	m.Called(ms)
+}
+
+func (m *MockConfig) SetBrowserHumanoidClickHoldMaxMs(ms int) {
+	m.Called(ms)
+}
+
+func (m *MockConfig) SetBrowserHumanoidKeyHoldMean(ms float64) {
+	m.Called(ms)
+}
+
+// Network Setters
+func (m *MockConfig) SetNetworkCaptureResponseBodies(b bool) {
+	m.Called(b)
+}
+
+func (m *MockConfig) SetNetworkNavigationTimeout(d time.Duration) {
+	m.Called(d)
+}
+
+func (m *MockConfig) SetNetworkPostLoadWait(d time.Duration) {
+	m.Called(d)
+}
+
+func (m *MockConfig) SetNetworkIgnoreTLSErrors(b bool) {
+	m.Called(b)
+}
+
+// IAST Setters
+func (m *MockConfig) SetIASTEnabled(b bool) {
+	m.Called(b)
+}
+
+// JWT Setters
+func (m *MockConfig) SetJWTEnabled(b bool) {
+	m.Called(b)
+}
+
+func (m *MockConfig) SetJWTBruteForceEnabled(b bool) {
+	m.Called(b)
+}
 
 // -- LLM Client Mock --
 
@@ -234,4 +401,43 @@ func (m *MockStore) GetFindingsByScanID(ctx context.Context, scanID string) ([]s
 		return nil, args.Error(1)
 	}
 	return args.Get(0).([]schemas.Finding), args.Error(1)
+}
+
+// -- IDOR Session Mock --
+
+// MockIdorSession is a mock implementation of the idor.Session interface.
+type MockIdorSession struct {
+	mock.Mock
+}
+
+// ApplyToRequest is the mock implementation that satisfies the idor.Session interface.
+func (m *MockIdorSession) ApplyToRequest(r *http.Request) {
+	m.Called(r)
+}
+
+// WithAuthToken is a helper method to configure the mock for the common use case
+// of applying a bearer token to the Authorization header. It returns the mock
+// instance for fluent configuration.
+func (m *MockIdorSession) WithAuthToken(token string) *MockIdorSession {
+	m.On("ApplyToRequest", mock.Anything).Run(func(args mock.Arguments) {
+		req := args.Get(0).(*http.Request)
+		if token != "" {
+			req.Header.Set("Authorization", "Bearer "+token)
+		}
+	})
+	return m
+}
+
+// MockOrchestrator is a mock implementation of the schemas.Orchestrator interface.
+// It is isolated in its own file to prevent compilation issues from other mocks.
+type MockOrchestrator struct {
+	mock.Mock
+}
+
+// StartScan provides a mock function for the orchestrator's StartScan method.
+func (m *MockOrchestrator) StartScan(ctx context.Context, targets []string, scanID string) error {
+	// This call tells the testify mock library that the method was called with these arguments.
+	args := m.Called(ctx, targets, scanID)
+	// It then returns whatever error (or nil) was configured for this call in the test.
+	return args.Error(0)
 }

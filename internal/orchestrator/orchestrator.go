@@ -28,7 +28,8 @@ func init() {
 // Orchestrator manages the high-level lifecycle of a scan.
 // It is injected with fully configured engine components.
 type Orchestrator struct {
-	cfg             *config.Config
+	// REFACTOR: Depends on the interface, not the concrete type.
+	cfg             config.Interface
 	logger          *zap.Logger
 	discoveryEngine schemas.DiscoveryEngine
 	taskEngine      schemas.TaskEngine
@@ -37,7 +38,8 @@ type Orchestrator struct {
 // New creates a new Orchestrator with its dependencies provided as schemas.
 // This decoupling is crucial for testability and architectural flexibility.
 func New(
-	cfg *config.Config,
+	// REFACTOR: Accepts the interface, making the component more modular.
+	cfg config.Interface,
 	logger *zap.Logger,
 	discoveryEngine schemas.DiscoveryEngine,
 	taskEngine schemas.TaskEngine,
@@ -68,7 +70,6 @@ func (o *Orchestrator) StartScan(ctx context.Context, targets []string, scanID s
 	o.logger.Info("Discovery engine started")
 
 	// 2. Start the task engine, passing it the channel from the discovery engine.
-	// FIX: The TaskEngine now consumes tasks directly from the channel provided here.
 	o.taskEngine.Start(ctx, taskChan)
 	o.logger.Info("Task engine started and consuming tasks")
 

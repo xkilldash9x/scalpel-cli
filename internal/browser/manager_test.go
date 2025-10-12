@@ -8,7 +8,6 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	// "os" // Removed unused import
 	"sync"
 	"testing"
 	"time"
@@ -20,7 +19,6 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
@@ -52,17 +50,12 @@ func (tw *testingWriter) Write(p []byte) (n int, err error) {
 // setupTestManager creates a new Manager instance configured for testing.
 // It now accepts the `*testing.T` object to create a test specific logger.
 func setupTestManager(t *testing.T) (*browser.Manager, *config.Config) {
-	// Manually create a config for testing.
-	cfg := &config.Config{
-		Browser: config.BrowserConfig{
-			Humanoid: humanoid.DefaultConfig(),
-		},
-		Network: config.NetworkConfig{},
-		IAST:    config.IASTConfig{},
-	}
-	// Configure minimal settings for testing.
-	cfg.Browser.Humanoid.Enabled = false
-	cfg.Network.PostLoadWait = 10 * time.Millisecond
+	// Manually create a config for testing using the default constructor.
+	cfg := config.NewDefaultConfig()
+
+	// Configure minimal settings for testing using setters.
+	cfg.SetBrowserHumanoidEnabled(false)
+	cfg.SetNetworkPostLoadWait(10 * time.Millisecond)
 
 	// -- Logger Configuration --
 	// Create a zap logger that writes to the test's own log output.
@@ -202,15 +195,15 @@ func TestManager_NavigateAndExtract(t *testing.T) {
 	// 1. Setup Mock Server with various link types.
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		fmt.Fprintln(w, `
-		<html><body>
-			<a href="/absolute/path">Absolute Link</a>
-			<a href="relative/path">Relative Link</a>
-			<a href="/?query=1">Query Link</a>
-			<a href="http://external.com/link">External Link</a>
-			<a href="#fragment">Fragment Link (should be ignored)</a>
-			<a href="">Empty Link (should be ignored)</a>
-			<a href="javascript:void(0)">JS Link (should be ignored)</a>
-		</body></html>`)
+        <html><body>
+            <a href="/absolute/path">Absolute Link</a>
+            <a href="relative/path">Relative Link</a>
+            <a href="/?query=1">Query Link</a>
+            <a href="http://external.com/link">External Link</a>
+            <a href="#fragment">Fragment Link (should be ignored)</a>
+            <a href="">Empty Link (should be ignored)</a>
+            <a href="javascript:void(0)">JS Link (should be ignored)</a>
+        </body></html>`)
 	}))
 	defer server.Close()
 

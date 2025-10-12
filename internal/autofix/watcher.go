@@ -25,8 +25,9 @@ var jsonMessageRegex = regexp.MustCompile(`"msg":"(.*?)"`)
 
 // Watcher monitors application logs for crashes and generates a post-mortem report.
 type Watcher struct {
-	logger      *zap.Logger
-	cfg         *config.Config
+	logger *zap.Logger
+	// Corrected to use the configuration interface
+	cfg         config.Interface
 	appLogPath  string
 	dastLogPath string
 	projectRoot string
@@ -34,13 +35,16 @@ type Watcher struct {
 }
 
 // NewWatcher initializes the Watcher service.
-func NewWatcher(logger *zap.Logger, cfg *config.Config, reportChan chan<- PostMortem, projectRoot string) (*Watcher, error) {
-	appLogPath := cfg.Logger.LogFile
+// Corrected to accept the configuration interface
+func NewWatcher(logger *zap.Logger, cfg config.Interface, reportChan chan<- PostMortem, projectRoot string) (*Watcher, error) {
+	// Corrected to use the interface's getter methods
+	appLogPath := cfg.Logger().LogFile
 	if appLogPath == "" {
 		return nil, fmt.Errorf("logger.log_file must be configured for crash detection")
 	}
 
-	dastLogPath := cfg.Autofix.DASTLogPath
+	// Corrected to use the interface's getter methods
+	dastLogPath := cfg.Autofix().DASTLogPath
 	if dastLogPath == "" {
 		logger.Debug("Autofix: DAST log path not configured. Request correlation will be unavailable.")
 	}

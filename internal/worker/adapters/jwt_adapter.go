@@ -27,14 +27,18 @@ func NewJWTAdapter() *JWTAdapter {
 func (a *JWTAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
 	// The adapter's primary role is to correctly configure and
 	// delegate the analysis task to the underlying analyzer.
-	
-	// extract the necessary configuration from the global context.
+
+	// extract the necessary configuration from the global context using the new contract.
 	bruteForceEnabled := false
-	if analysisCtx.Global != nil &&
-		analysisCtx.Global.Config != nil {
-		bruteForceEnabled = analysisCtx.Global.Config.Scanners.Static.JWT.BruteForceEnabled
+	if analysisCtx.Global != nil && analysisCtx.Global.Config != nil {
+		jwtConfig := analysisCtx.Global.Config.JWT()
+		// If the entire JWT scanner is disabled, we should stop here.
+		if !jwtConfig.Enabled {
+			return nil
+		}
+		bruteForceEnabled = jwtConfig.BruteForceEnabled
 	}
-	
+
 	// instantiate the actual analyzer with the correct logger and configuration.
 	analyzer := jwt.NewJWTAnalyzer(analysisCtx.Logger, bruteForceEnabled)
 

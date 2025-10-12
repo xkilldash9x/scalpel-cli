@@ -17,6 +17,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/evolution/analyst"
 	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
 	"github.com/xkilldash9x/scalpel-cli/internal/llmclient"
 )
@@ -39,6 +40,8 @@ type Agent struct {
 
 	// Manages the self-healing subsystem.
 	selfHeal *SelfHealOrchestrator
+	// Manages the proactive self-improvement subsystem.
+	evolution EvolutionEngine
 }
 
 // Acts as a factory to create the appropriate GraphStore.
@@ -70,18 +73,18 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 	// 1. Core Components (Bus, KG, LLM)
 	bus := NewCognitiveBus(logger, 100)
 
-	kg, err := NewGraphStoreFromConfig(ctx, globalCtx.Config.Agent.KnowledgeGraph, globalCtx.DBPool, logger)
+	kg, err := NewGraphStoreFromConfig(ctx, globalCtx.Config.Agent().KnowledgeGraph, globalCtx.DBPool, logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create knowledge graph store: %w", err)
 	}
 
-	llmRouter, err := llmclient.NewClient(globalCtx.Config.Agent, logger)
+	llmRouter, err := llmclient.NewClient(globalCtx.Config.Agent(), logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create LLM router for agent: %w", err)
 	}
 
 	// 2. Mind
-	mind := NewLLMMind(logger, llmRouter, globalCtx.Config.Agent, kg, bus)
+	mind := NewLLMMind(logger, llmRouter, globalCtx.Config.Agent(), kg, bus)
 
 	// 3. Executors and Humanoid
 	projectRoot, _ := os.Getwd()
@@ -90,16 +93,29 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 		return session
 	})
 
-	h := humanoid.New(humanoid.DefaultConfig(), logger.Named("humanoid"), session)
+	h := humanoid.New(globalCtx.Config.Browser().Humanoid, logger.Named("humanoid"), session)
 
 	// 4. Initialize Self-Healing (Autofix) System.
 	// This initializes the system but does not start monitoring yet.
-	selfHeal, err := NewSelfHealOrchestrator(logger, globalCtx.Config, llmRouter)
+	selfHeal, err := NewSelfHealOrchestrator(logger, globalCtx.Config.Autofix(), llmRouter)
 	if err != nil {
 		// If initialization fails (e.g., missing log file config), log the error
 		// but allow the agent to continue without self-healing.
 		logger.Error("Failed to initialize Self-Healing system. Proceeding without it.", zap.Error(err))
 		selfHeal = nil
+	}
+
+	// 5. Initialize Self-Improvement (Evolution) System.
+	// The evolution analyst requires the full config, the LLM client, and the KG client.
+	// The KG implementation (GraphStore) satisfies the schemas.KnowledgeGraphClient interface structurally.
+	// The initialization logic inside NewImprovementAnalyst handles checking if the feature is enabled via config (Agent.Evolution),
+	// and returns nil if disabled.
+	// We cast the analyst instance to the EvolutionEngine interface.
+	evoAnalyst, err := analyst.NewImprovementAnalyst(logger, globalCtx.Config, llmRouter, kg)
+	if err != nil {
+		// If initialization fails (e.g., cannot determine project root), log the error
+		// but allow the agent to continue without evolution capabilities.
+		logger.Error("Failed to initialize Evolution system (ImprovementAnalyst). Proceeding without it.", zap.Error(err))
 	}
 
 	agent := &Agent{
@@ -114,6 +130,7 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 		kg:         kg,
 		llmClient:  llmRouter,
 		selfHeal:   selfHeal,
+		evolution:  evoAnalyst, // Assign the analyst (which might be nil if disabled)
 	}
 	return agent, nil
 }
@@ -123,7 +140,6 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 	a.logger.Info("Agent is commencing mission.", zap.String("objective", a.mission.Objective))
 	missionCtx, cancelMission := context.WithCancel(ctx)
 	defer cancelMission() // Ensures all subsystems (including selfHeal) are stopped when mission ends.
-
 	// Start the Self-Healing system if initialized.
 	if a.selfHeal != nil {
 		// The self-healing system runs concurrently for the duration of the mission context.
@@ -200,6 +216,11 @@ func (a *Agent) actionLoop(ctx context.Context) {
 						a.finish(*result)
 					}
 					return
+
+				case ActionEvolveCodebase:
+					a.logger.Info("Agent decided to initiate self-improvement (Evolution).", zap.String("rationale", action.Rationale))
+					// Evolution runs synchronously within this goroutine.
+					execResult = a.executeEvolution(ctx, action)
 
 				case ActionClick, ActionInputText, ActionHumanoidDragAndDrop:
 					a.logger.Debug("Orchestrating humanoid action", zap.String("type", string(action.Type)))
@@ -304,6 +325,99 @@ func (a *Agent) executeHumanoidAction(ctx context.Context, action Action) *Execu
 	return result
 }
 
+// executeEvolution handles the EVOLVE_CODEBASE action by invoking the EvolutionEngine.
+func (a *Agent) executeEvolution(ctx context.Context, action Action) *ExecutionResult {
+	if a.evolution == nil {
+		// This handles cases where initialization failed or the feature was disabled in config.
+		return &ExecutionResult{
+			Status:          "failed",
+			ObservationType: ObservedSystemState,
+			ErrorCode:       ErrCodeFeatureDisabled,
+			ErrorDetails:    map[string]interface{}{"message": "Evolution capability is disabled or failed to initialize."},
+		}
+	}
+
+	// 1. Extract parameters
+	// The objective is passed in the 'value' field (preferred) or 'metadata.objective'.
+	objective := action.Value
+	if objective == "" {
+		if obj, ok := action.Metadata["objective"].(string); ok {
+			objective = obj
+		}
+	}
+
+	if objective == "" {
+		return &ExecutionResult{
+			Status:          "failed",
+			ObservationType: ObservedSystemState,
+			ErrorCode:       ErrCodeInvalidParameters,
+			ErrorDetails:    map[string]interface{}{"message": "EVOLVE_CODEBASE requires an objective (in 'value' or 'metadata.objective')."},
+		}
+	}
+
+	// Target files are passed in 'metadata.target_files'.
+	// We must robustly handle the types that result from JSON unmarshalling (often []interface{}).
+	var targetFiles []string
+	if filesRaw, ok := action.Metadata["target_files"]; ok {
+		switch v := filesRaw.(type) {
+		case []string:
+			targetFiles = v
+		case []interface{}:
+			for _, item := range v {
+				if fileName, ok := item.(string); ok {
+					targetFiles = append(targetFiles, fileName)
+				}
+				// Silently ignore non-string types in the array.
+			}
+			// Silently ignore other types for metadata.target_files.
+		}
+	}
+
+	if len(targetFiles) == 0 {
+		a.logger.Warn("EVOLVE_CODEBASE initiated without specific target_files. Analyst will determine scope.")
+	}
+
+	// 2. Run the Evolution Engine
+	a.logger.Info("Starting Evolution Analyst OODA loop...", zap.String("objective", objective), zap.Strings("target_files", targetFiles))
+
+	// Run the engine synchronously (blocking the agent's action goroutine until improvement is done).
+	// We set a specific timeout for the evolution process, derived from the mission context.
+	// 45 minutes is chosen as a reasonable upper bound for a complex improvement cycle.
+	evoCtx, cancel := context.WithTimeout(ctx, 45*time.Minute)
+	defer cancel()
+
+	err := a.evolution.Run(evoCtx, objective, targetFiles)
+
+	// 3. Process the result
+	result := &ExecutionResult{
+		// The observation type specifically relates to the outcome of the evolution process.
+		ObservationType: ObservedEvolutionResult,
+	}
+
+	if err != nil {
+		a.logger.Error("Evolution Analyst finished with error.", zap.Error(err))
+		result.Status = "failed"
+
+		// Determine specific error code
+		errorCode := ErrCodeEvolutionFailure
+		// Check if the error was due to timeout (either the explicit 45m or the parent mission context)
+		if evoCtx.Err() == context.DeadlineExceeded || strings.Contains(err.Error(), "timed out") {
+			errorCode = ErrCodeTimeoutError
+		}
+
+		result.ErrorCode = errorCode
+		result.ErrorDetails = map[string]interface{}{"message": err.Error()}
+		result.Data = map[string]string{"status": "Failed/Timeout", "objective": objective, "error": err.Error()}
+	} else {
+		a.logger.Info("Evolution Analyst finished successfully.")
+		result.Status = "success"
+		// The detailed outcome is recorded in the Knowledge Graph by the analyst itself.
+		result.Data = map[string]string{"status": "Completed", "objective": objective, "message": "Self-improvement cycle completed successfully."}
+	}
+
+	return result
+}
+
 func (a *Agent) postObservation(ctx context.Context, sourceAction Action, result *ExecutionResult) {
 	obs := Observation{
 		ID:             uuid.New().String(),
@@ -334,7 +448,7 @@ func (a *Agent) concludeMission(ctx context.Context) (*MissionResult, error) {
 
 	systemPrompt := "You are the Mind of 'scalpel-cli'. The mission has concluded. Your task is to act as a security analyst and write the final report summary."
 	userPrompt := fmt.Sprintf(
-		"The mission to '%s' has concluded. Based on the complete knowledge graph provided below, synthesize a summary of your findings. Identify the most critical vulnerabilities, noteworthy observations, and provide a concise, professional report summary. The summary should be in plain text format.\n\nKnowledge Graph Snapshot:\n%s",
+		"The mission to '%s' has concluded. Based on the complete knowledge graph provided below, synthesize a summary of your findings. Identify the most critical vulnerabilities, noteworthy observations (including any EVOLVE_CODEBASE actions), and provide a concise, professional report summary. The summary should be in plain text format.\n\nKnowledge Graph Snapshot:\n%s",
 		a.mission.Objective, string(subgraphJSON),
 	)
 

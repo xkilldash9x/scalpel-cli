@@ -1,3 +1,4 @@
+// File: api/schemas/schemas.go
 package schemas
 
 import (
@@ -5,6 +6,13 @@ import (
 	"encoding/json"
 	"time"
 )
+
+// Store defines the interface for persisting and retrieving scan data.
+// This allows the command logic to be decoupled from the concrete database implementation.
+type Store interface {
+	PersistData(ctx context.Context, data *ResultEnvelope) error
+	GetFindingsByScanID(ctx context.Context, scanID string) ([]Finding, error)
+}
 
 // -- Task & Finding Schemas --
 
@@ -170,6 +178,7 @@ type ObservationType string
 const (
 	ObservationSystemState     ObservationType = "SYSTEM_STATE"
 	ObservationCodebaseContext ObservationType = "CODEBASE_CONTEXT"
+	ObservationEvolutionResult ObservationType = "EVOLUTION_RESULT"
 )
 
 // -- Canonical Knowledge Graph Data Model --
@@ -353,7 +362,7 @@ type Persona struct {
 
 // DefaultPersona provides a fallback persona if none is specified.
 var DefaultPersona = Persona{
-	UserAgent:   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36",
+	UserAgent:   "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/536.36",
 	Platform:    "Win32",
 	Languages:   []string{"en-US", "en"},
 	Width:       1920,
@@ -474,11 +483,15 @@ type FetchResponse struct {
 
 // -- Humanoid Interaction Schemas --
 
-// ElementGeometry defines the bounding box and vertices of a DOM element.
+// ElementGeometry defines the bounding box, vertices, and metadata of a DOM element.
 type ElementGeometry struct {
 	Vertices []float64 `json:"vertices"`
 	Width    int64     `json:"width"`
 	Height   int64     `json:"height"`
+	// TagName (e.g., "INPUT", "BUTTON") used for behavioral biasing.
+	TagName string `json:"tagName"`
+	// Type (e.g., 'text', 'password', 'checkbox') used for behavioral biasing.
+	Type string `json:"type,omitempty"`
 }
 
 // MouseEventType defines the type of a mouse event.
@@ -678,6 +691,11 @@ type DiscoveryEngine interface {
 type TaskEngine interface {
 	Start(ctx context.Context, taskChan <-chan Task)
 	Stop()
+}
+
+// Orchestrator defines the interface for the scan orchestrator component.
+type Orchestrator interface {
+	StartScan(ctx context.Context, targets []string, scanID string) error
 }
 
 // -- Centralized Core Service Interfaces --

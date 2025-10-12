@@ -1,3 +1,4 @@
+// ./internal/browser/humanoid/keyboard.go
 package humanoid
 
 import (
@@ -9,6 +10,7 @@ import (
 	"unicode"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
 // -- keyboardNeighbors maps characters to their adjacent keys on a QWERTY layout --
@@ -20,6 +22,19 @@ var keyboardNeighbors = map[rune]string{
 	'a': "qwsz", 's': "awedxz", 'd': "serfcx", 'f': "drtgvc", 'g': "ftyhbv",
 	'h': "gyujnb", 'j': "huikmn", 'k': "jiol,m", 'l': "kop;.",
 	'z': "asx", 'x': "zsdc", 'c': "xdfv", 'v': "cfgb", 'b': "vghn", 'n': "bhjm", 'm': "njk,",
+}
+
+// -- homoglyphs maps characters to visually similar characters --
+var homoglyphs = map[rune][]rune{
+	'o': {'0'}, 'O': {'0'},
+	'l': {'1', 'I'}, 'I': {'1', 'l'},
+	'i': {'1', 'l'},
+	's': {'5'}, 'S': {'5'},
+	'z': {'2'}, 'Z': {'2'},
+	'a': {'@'},
+	'b': {'8'}, 'B': {'8'},
+	';': {':'}, ':': {';'},
+	',': {'.'}, '.': {','},
 }
 
 // -- commonNgrams contains common letter combinations to simulate rhythmic typing --
@@ -72,26 +87,39 @@ func (h *Humanoid) Type(ctx context.Context, selector string, text string, opts 
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
-	// Update fatigue based on the typing effort (length of text).
-	h.updateFatigue(float64(len(text)) * 0.05)
+	// Update fatigue/habituation based on the typing effort (length of text). Intensity factor 0.05 per character.
+	h.updateFatigueAndHabituation(float64(len(text)) * 0.05)
 
 	// 1. Preparation: Use an internal helper to focus the element.
+	// ActionType is handled within clickToFocus (MOVE then CLICK).
 	if err := h.clickToFocus(ctx, selector, opts); err != nil {
 		return fmt.Errorf("humanoid: failed to click/focus selector '%s': %w", selector, err)
 	}
 
-	// Pause after focusing to simulate cognitive planning.
-	if err := h.cognitivePause(ctx, 250, 100); err != nil {
+	// Pause after focusing to simulate cognitive planning (Mean Scale 2.0, StdDev Scale 1.5).
+	// cognitivePause handles the ActionType switch internally (from CLICK to TYPE).
+	if err := h.cognitivePause(ctx, 2.0, 1.5, ActionTypeType); err != nil {
 		return err
 	}
 
 	// Convert the entire text to runes for processing.
 	runes := []rune(text)
+	cfg := h.dynamicConfig
+	burstPauseProb := cfg.KeyBurstPauseProbability
 
-	// 2. Execution Loop: Type character by character. The IKD model handles rhythm.
+	// 2. Execution Loop: Type character by character.
 	for i := 0; i < len(runes); i++ {
 		if ctx.Err() != nil {
 			return ctx.Err()
+		}
+
+		// Introduce Burst Pause (Cognitive delay during typing).
+		if h.rng.Float64() < burstPauseProb {
+			// Burst pauses are longer than standard IKD (Mean Scale 3.0, StdDev Scale 2.0).
+			// ActionType remains TYPE.
+			if err := h.cognitivePause(ctx, 3.0, 2.0, ActionTypeType); err != nil {
+				return err
+			}
 		}
 
 		// Speed factor is generally 1.0, relying on IKD for timing.
@@ -113,7 +141,14 @@ func (h *Humanoid) Type(ctx context.Context, selector string, text string, opts 
 func (h *Humanoid) clickToFocus(ctx context.Context, selector string, opts *InteractionOptions) error {
 	// ensureVisible and moveToSelector are handled within the internal click logic.
 	// We call moveToSelector here which handles ensureVisible internally.
+	// ActionType is set to MOVE within moveToSelector.
 	if err := h.moveToSelector(ctx, selector, opts); err != nil {
+		return err
+	}
+
+	// Cognitive pause before the click (Mean Scale 0.5, StdDev Scale 0.5).
+	// cognitivePause handles the ActionType switch (from MOVE to CLICK).
+	if err := h.cognitivePause(ctx, 0.5, 0.5, ActionTypeClick); err != nil {
 		return err
 	}
 
@@ -188,25 +223,28 @@ func (h *Humanoid) sendString(ctx context.Context, keys string) error {
 	return h.executor.Sleep(ctx, h.keyHoldDuration())
 }
 
-// keyHoldDuration calculates key hold time. Assumes lock is held.
+// keyHoldDuration calculates key hold time using Ex-Gaussian distribution. Assumes lock is held.
 func (h *Humanoid) keyHoldDuration() time.Duration {
 	cfg := h.dynamicConfig
-	mean := cfg.KeyHoldMean
-	stdDev := cfg.KeyHoldStdDev
-	randNorm := h.rng.NormFloat64()
+	// Use the specific KeyHold parameters (Mu, Sigma, Tau).
+	mu := cfg.KeyHoldMu
+	sigma := cfg.KeyHoldSigma
+	tau := cfg.KeyHoldTau
 
-	delay := randNorm*stdDev + mean
+	delay := h.randExGaussian(mu, sigma, tau)
 
-	// Apply fatigue (longer holds when tired).
+	// Apply fatigue (longer holds when tired, factor 0.2). Habituation is already factored into dynamic config.
 	delay *= (1.0 + h.fatigueLevel*0.2)
 
-	if delay < 20.0 { // Ensure a minimum realistic hold time.
+	// Ensure a minimum realistic hold time (20ms).
+	if delay < 20.0 {
 		delay = 20.0 + h.rng.Float64()*5.0
 	}
 	return time.Duration(delay) * time.Millisecond
 }
 
-// keyPause introduces a human-like inter-key delay (IKD) using advanced modeling. Assumes lock is held.
+// keyPause introduces a human-like inter-key delay (IKD) using Ex-Gaussian modeling and physical factors.
+// Assumes lock is held.
 func (h *Humanoid) keyPause(ctx context.Context, meanScale, stdDevScale float64, runes []rune, index int) error {
 	// If it's the first character (index 0), there is no IKD.
 	if index == 0 {
@@ -217,19 +255,21 @@ func (h *Humanoid) keyPause(ctx context.Context, meanScale, stdDevScale float64,
 	}
 
 	cfg := h.dynamicConfig
-	randNorm := h.rng.NormFloat64()
 	fatigueLevel := h.fatigueLevel
 
-	mean := cfg.KeyPauseMean * meanScale
-	stdDev := cfg.KeyPauseStdDev * stdDevScale
+	// 1. Calculate Base IKD Distribution Parameters (Ex-Gaussian)
+	// Use specific IKD parameters (Mu, Sigma, Tau).
+	mu := cfg.IKDMu * meanScale
+	sigma := cfg.IKDSigma * stdDevScale
+	tau := cfg.IKDTau * stdDevScale
 	minDelay := cfg.KeyPauseMin * meanScale
 
-	// --- Advanced IKD Modeling ---
+	// --- Advanced IKD Modeling: Applying Modifiers ---
 	ikdFactor := 1.0
 
 	// Apply factors only if we have the context (runes) and it's not the start of the sequence.
 	if runes != nil && index > 0 && index < len(runes) {
-		// 1. N-gram (Rhythm) Factor
+		// 2. N-gram (Rhythm) Factor
 		ngramFactor := 1.0
 		if index > 1 {
 			trigraph := strings.ToLower(string(runes[index-2 : index+1]))
@@ -246,7 +286,7 @@ func (h *Humanoid) keyPause(ctx context.Context, meanScale, stdDevScale float64,
 		}
 		ikdFactor *= ngramFactor
 
-		// 2. Physical Effort Factor (Hand/Finger switching, Distance)
+		// 3. Physical Effort Factor (Hand/Finger switching, Distance)
 		prevKey := getKeyInfo(runes[index-1])
 		currentKey := getKeyInfo(runes[index])
 
@@ -282,17 +322,19 @@ func (h *Humanoid) keyPause(ctx context.Context, meanScale, stdDevScale float64,
 		ikdFactor *= physicalFactor * distanceFactor
 	}
 
-	// Apply the combined IKD factor
-	mean *= ikdFactor
-	stdDev *= ikdFactor // StdDev also scales with the mean.
+	// Apply the combined IKD factor to the distribution parameters.
+	mu *= ikdFactor
+	sigma *= ikdFactor
+	tau *= ikdFactor
 	minDelay *= ikdFactor
 
-	// 3. Fatigue Factor
+	// 4. Fatigue Factor
 	fatigueFactor := 1.0 + fatigueLevel*cfg.KeyPauseFatigueFactor
-	mean *= fatigueFactor
+	mu *= fatigueFactor
+	tau *= fatigueFactor // Fatigue disproportionately increases Tau (long delays).
 
-	// Calculate final delay
-	delay := randNorm*stdDev + mean
+	// Calculate final delay using the modified Ex-Gaussian parameters.
+	delay := h.randExGaussian(mu, sigma, tau)
 	finalDelay := math.Max(minDelay, delay)
 	duration := time.Duration(finalDelay) * time.Millisecond
 
@@ -303,12 +345,20 @@ func (h *Humanoid) keyPause(ctx context.Context, meanScale, stdDevScale float64,
 }
 
 // introduceTypo decides which kind of typo to simulate. Assumes lock is held.
-func (h *Humanoid) introduceTypo(ctx context.Context, cfg Config, runes []rune, i int) (introduced bool, advanced bool, err error) {
+func (h *Humanoid) introduceTypo(ctx context.Context, cfg config.HumanoidConfig, runes []rune, i int) (introduced bool, advanced bool, err error) {
 	char := runes[i]
 	p := h.rng.Float64()
 
+	if p < cfg.TypoHomoglyphRate {
+		// A corrected typo is "introduced" but does not advance the main rune counter.
+		corrected, _, err := h.introduceHomoglyphTypo(ctx, char)
+		return corrected, false, err
+	}
+	p -= cfg.TypoHomoglyphRate
+
 	if p < cfg.TypoNeighborRate {
-		return h.introduceNeighborTypo(ctx, char)
+		corrected, _, err := h.introduceNeighborTypo(ctx, char)
+		return corrected, false, err
 	}
 	p -= cfg.TypoNeighborRate
 
@@ -317,19 +367,54 @@ func (h *Humanoid) introduceTypo(ctx context.Context, cfg Config, runes []rune, 
 		if i+1 < len(runes) {
 			nextChar = runes[i+1]
 		}
+		// Transposition is unique because it may advance the main rune counter.
 		return h.introduceTransposition(ctx, char, nextChar)
 	}
 	p -= cfg.TypoTransposeRate
 
 	if p < cfg.TypoOmissionRate {
-		return h.introduceOmission(ctx, char)
+		corrected, _, err := h.introduceOmission(ctx, char)
+		return corrected, false, err
 	}
 
-	return h.introduceInsertion(ctx, char)
+	// Any remaining probability falls through to an insertion typo.
+	corrected, _, err := h.introduceInsertion(ctx, char)
+	return corrected, false, err
 }
 
 // --- Typo Implementations (all assume lock is held) ---
-// Updated to ensure keyPause calls during correction pass index=0 and runes=nil to signify a cognitive pause rather than IKD.
+
+func (h *Humanoid) introduceHomoglyphTypo(ctx context.Context, char rune) (bool, bool, error) {
+	if candidates, ok := homoglyphs[char]; ok && len(candidates) > 0 {
+		cfg := h.dynamicConfig
+		typoChar := candidates[h.rng.Intn(len(candidates))]
+
+		if err := h.sendString(ctx, string(typoChar)); err != nil {
+			return true, false, err
+		}
+
+		shouldCorrect := h.rng.Float64() < cfg.TypoCorrectionProbability
+		if shouldCorrect {
+			// Pause to notice typo (Cognitive pause, not IKD).
+			if err := h.keyPause(ctx, cfg.TypoCorrectionPauseMeanScale, cfg.TypoCorrectionPauseStdDevScale, nil, 0); err != nil {
+				return true, false, err
+			}
+			if err := h.sendString(ctx, string(KeyBackspace)); err != nil {
+				return true, false, err
+			}
+			// Pause after correction.
+			if err := h.keyPause(ctx, 1.2, 0.5, nil, 0); err != nil {
+				return true, false, err
+			}
+			if err := h.sendString(ctx, string(char)); err != nil {
+				return true, false, err
+			}
+		}
+		return true, false, nil
+	}
+	// No homoglyph found for this char, so no typo was introduced.
+	return false, false, nil
+}
 
 func (h *Humanoid) introduceNeighborTypo(ctx context.Context, char rune) (bool, bool, error) {
 	lowerChar := unicode.ToLower(char)

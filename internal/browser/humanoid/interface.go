@@ -9,6 +9,20 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
+// ActionType categorizes the type of interaction performed. Used for task switching logic.
+type ActionType string
+
+const (
+	ActionTypeNone     ActionType = "NONE"
+	ActionTypeMove     ActionType = "MOVE"
+	ActionTypeClick    ActionType = "CLICK"
+	ActionTypeDrag     ActionType = "DRAG"
+	ActionTypeType     ActionType = "TYPE"
+	ActionTypeScroll   ActionType = "SCROLL"
+	ActionTypePause    ActionType = "PAUSE"
+	ActionTypeNavigate ActionType = "NAVIGATE"
+)
+
 // InteractionOptions provides a flexible way to configure humanoid actions.
 type InteractionOptions struct {
 	// If set, controls whether the humanoid will automatically scroll until the element is in view.
@@ -27,7 +41,8 @@ type Controller interface {
 	IntelligentClick(ctx context.Context, selector string, opts *InteractionOptions) error
 	DragAndDrop(ctx context.Context, startSelector, endSelector string, opts *InteractionOptions) error
 	Type(ctx context.Context, selector string, text string, opts *InteractionOptions) error
-	CognitivePause(ctx context.Context, meanMs, stdDevMs float64) error
+	// CognitivePause signature updated to use scaling factors for the Ex-Gaussian model.
+	CognitivePause(ctx context.Context, meanScale, stdDevScale float64) error
 }
 
 // Executor defines the low-level interface required by the Humanoid controller.
