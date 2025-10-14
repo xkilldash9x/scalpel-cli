@@ -98,7 +98,7 @@ func (h *Humanoid) moveToVector(ctx context.Context, target Vector2D, opts *Inte
 
 	// Simulate the trajectory using the Spring-Damped model.
 	// The simulation handles its own timing, event dispatching, and updates h.currentPos.
-	finalVelocity, err := h.simulateTrajectory(ctx, startPos, target, field, h.currentButtonState)
+	_, err := h.simulateTrajectory(ctx, startPos, target, field, h.currentButtonState)
 	if err != nil {
 		return err
 	}
@@ -116,7 +116,6 @@ func (h *Humanoid) moveToVector(ctx context.Context, target Vector2D, opts *Inte
 		}
 	}
 
-	h.logger.Debug("moveToVector completed", zap.Any("finalVelocity", finalVelocity), zap.Float64("distance", dist))
 	return nil
 }
 

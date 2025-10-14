@@ -14,6 +14,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/auth/idor"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/jsoncompare"
 	"go.uber.org/zap"
 )
 
@@ -88,6 +89,9 @@ func (a *IDORAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCon
 	}
 	analysisCtx.Logger.Info("Found potential identifiers to test.", zap.Int("count", len(identifiers)))
 
+	// -- Instantiate the new comparison service.
+	comparer := jsoncompare.NewService()
+
 	// -- Loop through each identifier and test for IDOR by manipulating it.
 	for _, ident := range identifiers {
 		logger := analysisCtx.Logger.With(zap.String("identifier_value", ident.Value), zap.String("location", string(ident.Location)))
@@ -103,7 +107,7 @@ func (a *IDORAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCon
 		for k, v := range params.HTTPHeaders {
 			originalReq.Header.Set(k, v)
 		}
-		// FIX: Pass the context 'ctx' as the first argument to match the function signature.
+
 		modifiedReq, _, err := idor.ApplyTestValue(ctx, originalReq, []byte(params.HTTPBody), ident, testValue)
 		if err != nil {
 			logger.Error("Failed to apply test value to request", zap.Error(err))
@@ -130,12 +134,12 @@ func (a *IDORAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCon
 		}
 
 		// -- The core upgrade: Use semantic comparison instead of a simple status code check.
-		rules := idor.DefaultHeuristicRules()
-		rules.SpecificValuesToIgnore = make(map[string]struct{})
-		rules.SpecificValuesToIgnore[ident.Value] = struct{}{}
-		rules.SpecificValuesToIgnore[testValue] = struct{}{}
+		opts := jsoncompare.DefaultOptions()
+		opts.SpecificValuesToIgnore = make(map[string]struct{})
+		opts.SpecificValuesToIgnore[ident.Value] = struct{}{}
+		opts.SpecificValuesToIgnore[testValue] = struct{}{}
 
-		comparisonResult, err := idor.CompareResponses(baseRespBody, testRespBody, rules)
+		comparisonResult, err := comparer.CompareWithOptions(baseRespBody, testRespBody, opts)
 		if err != nil {
 			logger.Error("Failed to compare responses", zap.Error(err))
 			continue

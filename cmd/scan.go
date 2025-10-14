@@ -5,32 +5,24 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"net/url"
 	"strings"
 	"time"
 
 	"github.com/google/uuid"
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
-	"github.com/xkilldash9x/scalpel-cli/internal/discovery"
-	"github.com/xkilldash9x/scalpel-cli/internal/engine"
-	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
-	"github.com/xkilldash9x/scalpel-cli/internal/orchestrator"
 	"github.com/xkilldash9x/scalpel-cli/internal/reporting"
 	"github.com/xkilldash9x/scalpel-cli/internal/results"
-	"github.com/xkilldash9x/scalpel-cli/internal/store"
-	"github.com/xkilldash9x/scalpel-cli/internal/worker"
 )
 
 // newScanCmd creates and configures the `scan` command.
-func newScanCmd() *cobra.Command {
+// It is now decoupled from the component initialization logic.
+func newScanCmd(factory ComponentFactory) *cobra.Command {
 	scanCmd := &cobra.Command{
 		Use:   "scan [targets...]",
 		Short: "Starts a new security scan against the specified targets",
@@ -41,43 +33,20 @@ func newScanCmd() *cobra.Command {
 
 			cfg, err := getConfigFromContext(ctx)
 			if err != nil {
-				return err
+				return err // Error is already descriptive
 			}
 
-			if cmd.Flags().Changed("depth") {
-				depth, _ := cmd.Flags().GetInt("depth")
-				cfg.SetDiscoveryMaxDepth(depth)
-			}
-			if cmd.Flags().Changed("concurrency") {
-				concurrency, _ := cmd.Flags().GetInt("concurrency")
-				cfg.SetEngineWorkerConcurrency(concurrency)
-			}
-
-			scope, _ := cmd.Flags().GetString("scope")
-			switch strings.ToLower(scope) {
-			case "subdomain":
-				cfg.SetDiscoveryIncludeSubdomains(true)
-			case "strict":
-				cfg.SetDiscoveryIncludeSubdomains(false)
-			default:
-				logger.Warn("Invalid scope value provided, defaulting to 'strict'", zap.String("scope", scope))
-				cfg.SetDiscoveryIncludeSubdomains(false)
-			}
+			// Apply flag-based overrides to the configuration.
+			// This logic is now cleanly separated and easy to test.
+			applyScanFlagOverrides(cmd, cfg)
 
 			output, _ := cmd.Flags().GetString("output")
 			format, _ := cmd.Flags().GetString("format")
 			targets := args
 
-			components, err := initializeScanComponents(ctx, cfg, targets, logger)
-			if err != nil {
-				if components != nil {
-					components.Shutdown()
-				}
-				return fmt.Errorf("failed to initialize scan components: %w", err)
-			}
-			defer components.Shutdown()
-
-			return runScan(ctx, logger, cfg, targets, output, format, components)
+			// The core logic is delegated to a testable function that accepts
+			// the factory as a dependency.
+			return runScan(ctx, logger, cfg, targets, output, format, factory)
 		},
 	}
 
@@ -85,28 +54,100 @@ func newScanCmd() *cobra.Command {
 	scanCmd.Flags().StringP("format", "f", "sarif", "Format for the output report (e.g., 'sarif', 'json').")
 	scanCmd.Flags().IntP("depth", "d", 0, "Maximum crawl depth. (Overrides config/env)")
 	scanCmd.Flags().IntP("concurrency", "j", 0, "Number of concurrent engine workers. (Overrides config/env)")
-	scanCmd.Flags().String("scope", "strict", "Scan scope strategy (e.g., 'strict', 'subdomain'). (Overrides config/env)")
+	scanCmd.Flags().String("scope", "strict", "Scan scope strategy ('strict' or 'subdomain'). (Overrides config/env)")
 
 	return scanCmd
 }
 
-// runScan contains the core, testable logic for the scan command.
+// applyScanFlagOverrides centralizes the logic for updating the config based on CLI flags.
+func applyScanFlagOverrides(cmd *cobra.Command, cfg config.Interface) {
+	logger := observability.GetLogger()
+
+	if cmd.Flags().Changed("depth") {
+		depth, _ := cmd.Flags().GetInt("depth")
+		cfg.SetDiscoveryMaxDepth(depth)
+		logger.Debug("Applied --depth flag override.", zap.Int("value", depth))
+	}
+	if cmd.Flags().Changed("concurrency") {
+		concurrency, _ := cmd.Flags().GetInt("concurrency")
+		cfg.SetEngineWorkerConcurrency(concurrency)
+		logger.Debug("Applied --concurrency flag override.", zap.Int("value", concurrency))
+	}
+	if cmd.Flags().Changed("scope") {
+		scope, _ := cmd.Flags().GetString("scope")
+		switch strings.ToLower(scope) {
+		case "subdomain":
+			cfg.SetDiscoveryIncludeSubdomains(true)
+			logger.Debug("Applied --scope flag override.", zap.String("value", "subdomain"))
+		case "strict":
+			cfg.SetDiscoveryIncludeSubdomains(false)
+			logger.Debug("Applied --scope flag override.", zap.String("value", "strict"))
+		default:
+			logger.Warn("Invalid --scope value provided, defaulting to 'strict'.", zap.String("provided_scope", scope))
+			cfg.SetDiscoveryIncludeSubdomains(false)
+		}
+	}
+}
+
+// FIX: This new helper function correctly normalizes all target URLs.
+// It loops through every target, adds a default scheme if missing, and validates the result.
+func normalizeTargets(targets []string) ([]string, error) {
+	normalized := make([]string, 0, len(targets))
+	for _, target := range targets {
+		if strings.TrimSpace(target) == "" {
+			continue
+		}
+
+		// Trim and then check for a scheme
+		t := strings.TrimSpace(target)
+		if !strings.HasPrefix(t, "http://") && !strings.HasPrefix(t, "https://") {
+			t = "https://" + t
+		}
+
+		// Parse the URL to validate its structure.
+		u, err := url.Parse(t)
+		if err != nil {
+			return nil, fmt.Errorf("invalid target URL '%s': %w", target, err)
+		}
+		if u.Scheme == "" || u.Host == "" {
+			return nil, fmt.Errorf("malformed target URL after normalization: '%s'", t)
+		}
+
+		normalized = append(normalized, u.String())
+	}
+	return normalized, nil
+}
+
+// runScan contains the core, testable logic for executing a scan.
+// It no longer knows how to create components, only how to use them.
 func runScan(
 	ctx context.Context,
 	logger *zap.Logger,
 	cfg config.Interface,
 	targets []string,
 	output, format string,
-	components *scanComponents,
+	factory ComponentFactory,
 ) error {
+	// Initialize all dependencies using the factory.
+	rawComponents, err := factory.Create(ctx, cfg, targets)
+	if err != nil {
+		// If creation fails, components are not initialized, so no shutdown is needed.
+		return fmt.Errorf("failed to initialize scan components: %w", err)
+	}
+	// Perform a type assertion to get the concrete component struct.
+	components, ok := rawComponents.(*Components)
+	if !ok {
+		// This indicates a programming error (the factory returned the wrong type).
+		return fmt.Errorf("component factory returned an invalid type; expected *Components but got %T", rawComponents)
+	}
+	defer components.Shutdown()
+
 	scanID := uuid.New().String()
 
-	scanTargets := make([]string, len(targets))
-	copy(scanTargets, targets)
-	if len(scanTargets) > 0 {
-		if !strings.HasPrefix(scanTargets[0], "http://") && !strings.HasPrefix(scanTargets[0], "https://") {
-			scanTargets[0] = "https://" + scanTargets[0]
-		}
+	// FIX: Replaced the buggy single-target logic with a call to our robust helper function.
+	scanTargets, err := normalizeTargets(targets)
+	if err != nil {
+		return fmt.Errorf("failed to normalize targets: %w", err)
 	}
 
 	logger.Info("Starting new scan",
@@ -117,20 +158,22 @@ func runScan(
 		zap.Bool("include_subdomains", cfg.Discovery().IncludeSubdomains),
 	)
 
+	// Execute the scan via the orchestrator.
 	if err := components.Orchestrator.StartScan(ctx, scanTargets, scanID); err != nil {
 		if errors.Is(err, context.Canceled) {
-			logger.Warn("Scan aborted gracefully", zap.String("scanID", scanID))
-			return fmt.Errorf("scan aborted by user signal")
+			logger.Warn("Scan aborted gracefully by user signal.", zap.String("scanID", scanID))
+			return fmt.Errorf("scan aborted by user")
 		}
-		logger.Error("Scan failed during orchestration", zap.Error(err), zap.String("scanID", scanID))
+		logger.Error("Scan failed during orchestration.", zap.Error(err), zap.String("scanID", scanID))
 		return err
 	}
 
-	logger.Info("Scan execution completed successfully", zap.String("scanID", scanID))
+	logger.Info("Scan execution completed successfully.", zap.String("scanID", scanID))
 
+	// Generate a report if an output file was specified.
 	if output != "" {
 		if err := generateReport(ctx, components.Store, scanID, format, output, logger); err != nil {
-			return err
+			return err // Error is already descriptive
 		}
 	}
 
@@ -142,157 +185,11 @@ func runScan(
 	return nil
 }
 
-// scanComponents holds initialized services.
-type scanComponents struct {
-	Store           schemas.Store
-	BrowserManager  schemas.BrowserManager
-	KnowledgeGraph  schemas.KnowledgeGraphClient
-	TaskEngine      schemas.TaskEngine
-	DiscoveryEngine schemas.DiscoveryEngine
-	Orchestrator    schemas.Orchestrator
-	DBPool          *pgxpool.Pool
-	// For managing the lifecycle of the findings consumer
-	findingsChan   chan schemas.Finding
-	cancelFindings context.CancelFunc
-}
-
-// Shutdown gracefully closes all components.
-func (sc *scanComponents) Shutdown() {
-	// Signal the findings consumer to stop, then close the channel.
-	if sc.cancelFindings != nil {
-		sc.cancelFindings()
-	}
-	if sc.findingsChan != nil {
-		close(sc.findingsChan)
-	}
-
-	if sc.TaskEngine != nil {
-		sc.TaskEngine.Stop()
-	}
-	if sc.DiscoveryEngine != nil {
-		sc.DiscoveryEngine.Stop()
-	}
-	if sc.BrowserManager != nil {
-		// Use a background context for shutdown to ensure it runs even if the main context is cancelled.
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
-		defer cancel()
-		if err := sc.BrowserManager.Shutdown(shutdownCtx); err != nil {
-			observability.GetLogger().Warn("Error during browser manager shutdown", zap.Error(err))
-		}
-	}
-	if sc.DBPool != nil {
-		sc.DBPool.Close()
-	}
-}
-
-// initializeScanComponents handles dependency injection.
-func initializeScanComponents(ctx context.Context, cfg config.Interface, targets []string, logger *zap.Logger) (*scanComponents, error) {
-	components := &scanComponents{}
-
-	// 1. Database Pool
-	if cfg.Database().URL == "" {
-		return nil, fmt.Errorf("database URL is not configured (SCALPEL_DATABASE_URL)")
-	}
-	dbPool, err := pgxpool.New(ctx, cfg.Database().URL)
-	if err != nil {
-		return nil, fmt.Errorf("failed to connect to database: %w", err)
-	}
-	components.DBPool = dbPool
-
-	// 2. Store
-	dbStore, err := store.New(ctx, dbPool, logger)
-	if err != nil {
-		return components, fmt.Errorf("failed to initialize database store: %w", err)
-	}
-	components.Store = dbStore
-
-	// 3. Findings Channel and Consumer
-	findingsChan := make(chan schemas.Finding, 256)
-	components.findingsChan = findingsChan
-
-	findingsCtx, cancelFindings := context.WithCancel(context.Background())
-	components.cancelFindings = cancelFindings
-	go startFindingsConsumer(findingsCtx, findingsChan, dbStore, logger)
-
-	// 4. Browser Manager
-	browserManager, err := browser.NewManager(ctx, logger, cfg)
-	if err != nil {
-		return components, fmt.Errorf("failed to initialize browser manager: %w", err)
-	}
-	components.BrowserManager = browserManager
-
-	// 5. Knowledge Graph
-	kg := knowledgegraph.NewPostgresKG(dbPool, logger)
-	components.KnowledgeGraph = kg
-
-	// 6. OAST Provider (Out-of-Band Application Security Testing)
-	// The analyzer handles a nil provider gracefully. We'll initialize it here
-	// once it can be configured. For now, it remains an optional component.
-	var oastProvider schemas.OASTProvider
-	// TODO: When OAST is configurable, initialize it here. For example:
-	// if cfg.OAST().Enabled {
-	//     oastProvider, err = oast.NewProvider(cfg.OAST(), logger)
-	//     if err != nil { return nil, err }
-	// }
-
-	// 7. Global Context
-	// This is the fully wired-up context shared across all analysis tasks.
-	globalCtx := &core.GlobalContext{
-		Config:         cfg,
-		Logger:         logger,
-		BrowserManager: browserManager,
-		DBPool:         dbPool,
-		KGClient:       kg,
-		OASTProvider:   oastProvider, // This will be nil for now, which is handled correctly.
-		FindingsChan:   findingsChan,
-	}
-
-	// 8. Worker
-	taskWorker, err := worker.NewMonolithicWorker(cfg, logger, globalCtx)
-	if err != nil {
-		return components, fmt.Errorf("failed to create worker: %w", err)
-	}
-
-	// 9. Task Engine
-	taskEngine, err := engine.New(cfg, logger, dbStore, taskWorker, globalCtx)
-	if err != nil {
-		return components, fmt.Errorf("failed to initialize task engine: %w", err)
-	}
-	components.TaskEngine = taskEngine
-
-	// 10. Discovery Engine
-	scopeManager, err := discovery.NewBasicScopeManager(targets[0], cfg.Discovery().IncludeSubdomains)
-	if err != nil {
-		return components, fmt.Errorf("failed to initialize scope manager: %w", err)
-	}
-	httpClient := network.NewClient(nil)
-	httpAdapter := discovery.NewHTTPClientAdapter(httpClient)
-	discoveryCfg := discovery.Config{
-		MaxDepth:           cfg.Discovery().MaxDepth,
-		Concurrency:        cfg.Discovery().Concurrency,
-		Timeout:            cfg.Discovery().Timeout,
-		PassiveEnabled:     cfg.Discovery().PassiveEnabled,
-		CrtShRateLimit:     cfg.Discovery().CrtShRateLimit,
-		CacheDir:           cfg.Discovery().CacheDir,
-		PassiveConcurrency: cfg.Discovery().PassiveConcurrency,
-	}
-	passiveRunner := discovery.NewPassiveRunner(discoveryCfg, httpAdapter, scopeManager, logger)
-	discoveryEngine := discovery.NewEngine(discoveryCfg, scopeManager, kg, browserManager, passiveRunner, logger)
-	components.DiscoveryEngine = discoveryEngine
-
-	// 11. Orchestrator
-	orch, err := orchestrator.New(cfg, logger, discoveryEngine, taskEngine)
-	if err != nil {
-		return components, fmt.Errorf("failed to create orchestrator: %w", err)
-	}
-	components.Orchestrator = orch
-
-	return components, nil
-}
-
 // startFindingsConsumer runs a goroutine that reads from the findings channel and persists them.
 func startFindingsConsumer(ctx context.Context, findingsChan <-chan schemas.Finding, dbStore schemas.Store, logger *zap.Logger) {
 	logger.Info("Starting findings consumer goroutine...")
+	defer logger.Info("Findings consumer goroutine shut down.")
+
 	for {
 		select {
 		case finding, ok := <-findingsChan:
@@ -301,41 +198,47 @@ func startFindingsConsumer(ctx context.Context, findingsChan <-chan schemas.Find
 				return
 			}
 			// Persist the single finding by wrapping it in an envelope.
-			// This is inefficient (one transaction per finding) but robust.
+			// This is less efficient (one transaction per finding) but robust against batch failures.
 			envelope := &schemas.ResultEnvelope{
 				ScanID:    finding.ScanID,
 				TaskID:    finding.TaskID,
 				Timestamp: time.Now(),
 				Findings:  []schemas.Finding{finding},
 			}
+			// Use a background context with a timeout for persistence.
 			persistCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 			if err := dbStore.PersistData(persistCtx, envelope); err != nil {
-				logger.Error("Failed to persist real-time finding", zap.Error(err), zap.String("finding_id", finding.ID))
+				logger.Error("Failed to persist real time finding.", zap.Error(err), zap.String("finding_id", finding.ID))
 			}
-			cancel()
+			cancel() // Release resources associated with the timeout context.
 		case <-ctx.Done():
-			logger.Info("Findings consumer context cancelled, shutting down.")
+			logger.Info("Findings consumer context canceled, shutting down.")
 			return
 		}
 	}
 }
 
 // generateReport handles result processing and report writing.
-func generateReport(ctx context.Context, dbStore schemas.Store, scanID, format, outputPath string, logger *zap.Logger) error {
+func generateReport(_ context.Context, dbStore schemas.Store, scanID, format, outputPath string, logger *zap.Logger) error {
 	logger.Info("Generating scan report...", zap.String("format", format), zap.String("output_path", outputPath))
+
+	// Use a background context for report generation to ensure it completes
+	// even if the main scan context was canceled (e.g., by Ctrl+C after the scan finished).
+	reportCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
+	defer cancel()
 
 	reporter, err := reporting.New(format, outputPath, logger, Version)
 	if err != nil {
 		return fmt.Errorf("failed to initialize reporter: %w", err)
 	}
 	defer func() {
-		if err := reporter.Close(); err != nil {
-			logger.Error("Failed to close reporter", zap.Error(err))
+		if closeErr := reporter.Close(); closeErr != nil {
+			logger.Error("Failed to close reporter.", zap.Error(closeErr))
 		}
 	}()
 
 	pipeline := results.NewPipeline(dbStore, logger)
-	processedResults, err := pipeline.ProcessScanResults(ctx, scanID)
+	processedResults, err := pipeline.ProcessScanResults(reportCtx, scanID)
 	if err != nil {
 		return fmt.Errorf("failed to process scan results: %w", err)
 	}

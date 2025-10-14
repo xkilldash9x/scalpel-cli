@@ -57,8 +57,7 @@ func newSelfHealCmd() *cobra.Command {
 	cmd.Flags().String("panic-log", "", "Path to the panic log file.")
 	cmd.Flags().StringSlice("original-args", []string{}, "The original arguments to the command that panicked.")
 
-	_ = cmd.Flags().MarkFlagRequired("panic-log")
-
+	_ = cmd.MarkFlagRequired("panic-log")
 	return cmd
 }
 

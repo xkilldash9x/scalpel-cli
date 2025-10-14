@@ -131,7 +131,6 @@ func (m *Manager) NewAnalysisContext(
 		delete(m.sessions, sessionID)
 		m.sessionsMux.Unlock()
 		m.wg.Done()
-		m.logger.Debug("Session removed from manager", zap.String("session_id", sessionID))
 	}
 	s.SetOnClose(onCloseCallback)
 
@@ -157,7 +156,6 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	}
 	m.sessionsMux.Unlock()
 
-	m.logger.Debug("Closing sessions concurrently.", zap.Int("count", len(sessionsToClose)))
 	for _, s := range sessionsToClose {
 		// Launch as a goroutine so one slow session doesn't block others.
 		go func(sess *session.Session) {
@@ -231,7 +229,6 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, targetURL string) (res
 	// Use a separate, background context for cleanup. This ensures the session
 	// close logic runs even if the parent 'ctx' has timed out.
 	defer func() {
-		m.logger.Debug("Closing temporary session.", zap.String("session_id", sessionCtx.ID()))
 		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 		defer cancel()
 		if closeErr := sessionCtx.Close(closeCtx); closeErr != nil {
@@ -246,17 +243,12 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, targetURL string) (res
 	// REFACTOR: Use the provided 'ctx' for the operations instead of calling GetContext().
 	// This adheres to Go best practices and respects the operation's deadline/cancellation.
 	opCtx := ctx
-	m.logger.Debug("Starting link extraction.", zap.String("session_id", sessionCtx.ID()), zap.String("url", targetURL))
 
-	navStart := time.Now()
 	// Use opCtx for Navigate.
 	if err = sessionCtx.Navigate(opCtx, targetURL); err != nil {
-		m.logger.Error("Navigation failed during link extraction.", zap.Error(err), zap.Duration("duration", time.Since(navStart)), zap.String("session_id", sessionCtx.ID()))
 		return nil, fmt.Errorf("failed to navigate to %s: %w", targetURL, err)
 	}
-	m.logger.Debug("Navigation succeeded.", zap.Duration("duration", time.Since(navStart)), zap.String("session_id", sessionCtx.ID()))
 
-	stabStart := time.Now()
 	// Use opCtx for WaitForAsync.
 	if stabErr := sessionCtx.WaitForAsync(opCtx, 0); stabErr != nil {
 		// Check if the context was cancelled before returning a generic stabilization error.
@@ -265,9 +257,7 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, targetURL string) (res
 		}
 		return nil, fmt.Errorf("stabilization after navigation failed: %w", stabErr)
 	}
-	m.logger.Debug("Stabilization after navigation succeeded.", zap.Duration("duration", time.Since(stabStart)), zap.String("session_id", sessionCtx.ID()))
 
-	scriptStart := time.Now()
 	const script = `(function() {
         var links = [];
         var elements = document.querySelectorAll('a[href]');
@@ -288,7 +278,6 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, targetURL string) (res
 	if err != nil {
 		return nil, fmt.Errorf("failed to execute link extraction script: %w", err)
 	}
-	m.logger.Debug("Script execution finished.", zap.Duration("duration", time.Since(scriptStart)), zap.String("session_id", sessionCtx.ID()))
 
 	// Use opCtx for WaitForAsync.
 	if stabErr := sessionCtx.WaitForAsync(opCtx, 0); stabErr != nil {
@@ -297,14 +286,11 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, targetURL string) (res
 		}
 		return nil, fmt.Errorf("stabilization after script execution failed: %w", stabErr)
 	}
-	m.logger.Debug("Stabilization after script execution succeeded.", zap.String("session_id", sessionCtx.ID()))
 
-	decodeStart := time.Now()
 	var rawLinks []string
 	if err = json.Unmarshal(resultJSON, &rawLinks); err != nil {
 		return nil, fmt.Errorf("failed to decode script result into string slice: %w", err)
 	}
-	m.logger.Debug("Successfully decoded script result.", zap.Duration("duration", time.Since(decodeStart)), zap.Int("raw_link_count", len(rawLinks)), zap.String("session_id", sessionCtx.ID()))
 
 	baseURL, parseErr := url.Parse(targetURL)
 	if parseErr != nil {
@@ -322,7 +308,6 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, targetURL string) (res
 
 		u, resolveErr := baseURL.Parse(trimmedHref)
 		if resolveErr != nil {
-			m.logger.Debug("Skipping invalid href found on page", zap.String("href", href), zap.Error(resolveErr))
 			continue
 		}
 
@@ -340,6 +325,5 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, targetURL string) (res
 			seen[resolvedStr] = true
 		}
 	}
-	m.logger.Debug("Link extraction and resolution complete.", zap.Int("resolved_link_count", len(resolvedLinks)), zap.String("session_id", sessionCtx.ID()))
 	return resolvedLinks, nil
 }

@@ -53,6 +53,7 @@ require (
 )
 
 require (
+	github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6
 	github.com/PuerkitoBio/goquery v1.10.3
 	github.com/antchfx/xpath v1.3.5 // indirect
 	github.com/davecgh/go-spew v1.1.1 // indirect

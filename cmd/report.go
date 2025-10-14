@@ -13,14 +13,58 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"github.com/xkilldash9x/scalpel-cli/internal/reporting"
 	"github.com/xkilldash9x/scalpel-cli/internal/results"
 	"github.com/xkilldash9x/scalpel-cli/internal/store"
 )
 
+// storeProvider defines an interface for creating a store, allowing for easy mocking.
+// It returns the store, a cleanup function, and an error.
+type storeProvider interface {
+	Create(ctx context.Context, cfg config.Interface) (schemas.Store, func(), error)
+}
+
+// defaultStoreProvider is the production implementation for creating a real store service.
+type defaultStoreProvider struct{}
+
+// NewStoreProvider creates a new production-ready store provider.
+func NewStoreProvider() storeProvider {
+	return &defaultStoreProvider{}
+}
+
+func (p *defaultStoreProvider) Create(ctx context.Context, cfg config.Interface) (schemas.Store, func(), error) {
+	logger := observability.GetLogger()
+	if cfg.Database().URL == "" {
+		return nil, nil, fmt.Errorf("database URL is not configured (SCALPEL_DATABASE_URL)")
+	}
+
+	pool, err := pgxpool.New(ctx, cfg.Database().URL)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to connect to database: %w", err)
+	}
+
+	if err := pool.Ping(ctx); err != nil {
+		pool.Close()
+		return nil, nil, fmt.Errorf("failed to ping database: %w", err)
+	}
+
+	storeService, err := store.New(ctx, pool, logger)
+	if err != nil {
+		pool.Close()
+		return nil, nil, fmt.Errorf("failed to initialize store service: %w", err)
+	}
+
+	cleanup := func() {
+		pool.Close()
+		logger.Debug("Database connection pool closed (via report cleanup).")
+	}
+	return storeService, cleanup, nil
+}
+
 // newReportCmd creates and configures the `report` command.
-func newReportCmd() *cobra.Command {
+func newReportCmd(provider storeProvider) *cobra.Command {
 	var scanID string
 	var outputPath string
 	var format string
@@ -34,54 +78,13 @@ func newReportCmd() *cobra.Command {
 			ctx := cmd.Context()
 			logger := observability.GetLogger()
 
-			// Get the config from the context, not a global singleton.
 			cfg, err := getConfigFromContext(ctx)
 			if err != nil {
 				return err
 			}
 
-			logger.Info("Starting report generation", zap.String("scan_id", scanID))
-
-			// Initialize Database Connection
-			// CORRECTED: Called cfg.Database() as a method to access its URL field.
-			pool, err := connectToDatabase(ctx, cfg.Database().URL)
-			if err != nil {
-				return err
-			}
-			defer pool.Close()
-
-			// Initialize Store Service
-			storeService, err := store.New(ctx, pool, logger)
-			if err != nil {
-				return fmt.Errorf("failed to initialize store service: %w", err)
-			}
-
-			// Process Results
-			pipeline := results.NewPipeline(storeService, logger)
-			processedResults, err := pipeline.ProcessScanResults(ctx, scanID)
-			if err != nil {
-				logger.Error("Failed to process results", zap.Error(err), zap.String("scan_id", scanID))
-				return fmt.Errorf("failed to process scan results: %w", err)
-			}
-
-			finalEnvelope := &schemas.ResultEnvelope{
-				ScanID:    scanID,
-				Timestamp: time.Now(),
-				Findings:  processedResults.Findings,
-			}
-
-			// Output Generation
-			if outputPath != "" {
-				if err := writeReportFile(logger, finalEnvelope, outputPath, format); err != nil {
-					return err
-				}
-			} else {
-				if err := printReportToStdout(finalEnvelope); err != nil {
-					return err
-				}
-			}
-
-			return nil
+			// Delegate to the testable core logic function.
+			return runReport(ctx, logger, cfg, scanID, outputPath, format, provider)
 		},
 	}
 
@@ -93,23 +96,52 @@ func newReportCmd() *cobra.Command {
 	return reportCmd
 }
 
-// connectToDatabase establishes a connection pool.
-func connectToDatabase(ctx context.Context, dbURL string) (*pgxpool.Pool, error) {
-	if dbURL == "" {
-		return nil, fmt.Errorf("database URL is not configured (SCALPEL_DATABASE_URL)")
-	}
+// runReport contains the core, testable logic for generating a report.
+func runReport(
+	ctx context.Context,
+	logger *zap.Logger,
+	cfg config.Interface,
+	scanID, outputPath, format string,
+	provider storeProvider,
+) error {
+	logger.Info("Starting report generation", zap.String("scan_id", scanID))
 
-	pool, err := pgxpool.New(ctx, dbURL)
+	// Initialize Store Service using the injected provider (real or mock).
+	storeService, cleanup, err := provider.Create(ctx, cfg)
 	if err != nil {
-		return nil, fmt.Errorf("failed to connect to database: %w", err)
+		return fmt.Errorf("failed to initialize store: %w", err)
+	}
+	// Ensure cleanup is not nil before deferring (safe for mocks that might not provide a cleanup).
+	if cleanup != nil {
+		defer cleanup()
 	}
 
-	if err := pool.Ping(ctx); err != nil {
-		pool.Close()
-		return nil, fmt.Errorf("failed to ping database: %w", err)
+	// Process Results
+	pipeline := results.NewPipeline(storeService, logger)
+	processedResults, err := pipeline.ProcessScanResults(ctx, scanID)
+	if err != nil {
+		logger.Error("Failed to process results", zap.Error(err), zap.String("scan_id", scanID))
+		return fmt.Errorf("failed to process scan results: %w", err)
 	}
 
-	return pool, nil
+	finalEnvelope := &schemas.ResultEnvelope{
+		ScanID:    scanID,
+		Timestamp: time.Now(),
+		Findings:  processedResults.Findings,
+	}
+
+	// Output Generation
+	if outputPath != "" {
+		if err := writeReportFile(logger, finalEnvelope, outputPath, format); err != nil {
+			return err
+		}
+	} else {
+		if err := printReportToStdout(finalEnvelope); err != nil {
+			return err
+		}
+	}
+
+	return nil
 }
 
 // writeReportFile handles writing the report to a file using the reporting module.
@@ -118,7 +150,11 @@ func writeReportFile(logger *zap.Logger, envelope *schemas.ResultEnvelope, outpu
 	if err != nil {
 		return fmt.Errorf("failed to initialize reporter: %w", err)
 	}
-	defer reporter.Close()
+	defer func() {
+		if err := reporter.Close(); err != nil {
+			logger.Warn("Failed to close reporter cleanly.", zap.Error(err))
+		}
+	}()
 
 	if err := reporter.Write(envelope); err != nil {
 		return fmt.Errorf("failed to write report file: %w", err)

@@ -1,10 +1,12 @@
-// types.go
+// File: internal/analysis/auth/idor/types.go
 package idor
 
 import (
 	"fmt"
 	"net/http"
-	"regexp"
+
+	// Import the centralized jsoncompare package.
+	"github.com/xkilldash9x/scalpel-cli/internal/jsoncompare"
 )
 
 // Severity levels for findings.
@@ -17,53 +19,17 @@ const (
 )
 
 // Session defines the interface for an authenticated user session.
-// This allows the analyzer to apply session details (like cookies or headers) to a request.
 type Session interface {
-	// IsAuthenticated should return true if the session represents a logged-in user.
 	IsAuthenticated() bool
-	// ApplyToRequest modifies an *http.Request to use the session's authentication credentials.
 	ApplyToRequest(req *http.Request)
 }
 
 // RequestResponsePair holds a matched HTTP request and its response, including raw bodies.
-// Storing bodies as []byte is essential for repeatable analysis and comparison.
 type RequestResponsePair struct {
 	Request      *http.Request
 	RequestBody  []byte
 	Response     *http.Response
 	ResponseBody []byte
-}
-
-// HeuristicRules defines the set of rules for identifying dynamic data in responses.
-type HeuristicRules struct {
-	KeyPatterns              []*regexp.Regexp
-	CheckValueForUUID        bool
-	CheckValueForTimestamp   bool
-	CheckValueForHighEntropy bool
-	// EntropyThreshold defines the minimum Shannon entropy (bits per character) to be considered dynamic.
-	EntropyThreshold float64
-	// IgnoreArrayOrder determines if the order of elements in arrays should matter during comparison.
-	IgnoreArrayOrder bool
-
-	// SpecificValuesToIgnore is used internally during Manipulation tests to normalize the tested identifiers.
-	// It allows structural comparison even when the resource data differs.
-	SpecificValuesToIgnore map[string]struct{}
-	// NormalizeAllValuesForStructure indicates that all primitive values (leaf nodes) should be normalized
-	// to focus purely on the structure (keys, nesting) of the JSON. Used for Manipulation tests.
-	NormalizeAllValuesForStructure bool
-}
-
-// DeepCopy creates a concurrency-safe copy of the HeuristicRules.
-func (h HeuristicRules) DeepCopy() HeuristicRules {
-	copy := h
-	// Copy slices/maps to ensure isolation between concurrent comparisons.
-	copy.KeyPatterns = append([]*regexp.Regexp(nil), h.KeyPatterns...)
-	copy.SpecificValuesToIgnore = make(map[string]struct{})
-	// Although the map is usually empty in the base config, we copy it defensively.
-	for k, v := range h.SpecificValuesToIgnore {
-		copy.SpecificValuesToIgnore[k] = v
-	}
-	return copy
 }
 
 // Config holds the configuration for the IDOR analysis.
@@ -72,8 +38,10 @@ type Config struct {
 	Session Session
 	// SecondSession (User B) used for horizontal bypass checks.
 	SecondSession Session
-	// ComparisonRules defines how to normalize and compare responses for equivalence.
-	ComparisonRules HeuristicRules
+	// ComparisonOptions defines how to normalize and compare responses.
+	// This allows the IDOR analyzer to specify preferences to the jsoncompare service.
+	// Renamed from ComparisonRules/HeuristicRules in the original implementation.
+	ComparisonOptions jsoncompare.Options
 	// ConcurrencyLevel defines the number of concurrent workers for replaying requests.
 	ConcurrencyLevel int
 	// HttpClient is the client used to replay requests. Should be configured externally or defaults will be applied.
@@ -91,8 +59,9 @@ type Finding struct {
 	// Details specific to Manipulation checks
 	Identifier  *ObservedIdentifier
 	TestedValue string
-	// Details regarding the comparison result (useful for debugging normalization)
-	ComparisonDetails *ResponseComparisonResult
+	// Details regarding the comparison result (using the centralized type).
+	// Renamed from ComparisonDetails/ResponseComparisonResult.
+	ComparisonDetails *jsoncompare.ComparisonResult
 }
 
 // --- Types related to Identifier Extraction (for Manipulation strategy) ---

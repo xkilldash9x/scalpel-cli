@@ -71,13 +71,13 @@ type BrowserEnvironment interface {
 
 // DOMBridge manages the synchronization between the *html.Node DOM and the Goja runtime.
 type DOMBridge struct {
-	mu                   sync.RWMutex
-	document             *html.Node
-	runtime              *goja.Runtime // The runtime currently bound (ephemeral)
-	logger               *zap.Logger
-	browser              BrowserEnvironment
-	persona              schemas.Persona
-	layoutRoot           *layout.LayoutBox
+	mu         sync.RWMutex
+	document   *html.Node
+	runtime    *goja.Runtime // The runtime currently bound (ephemeral)
+	logger     *zap.Logger
+	browser    BrowserEnvironment
+	persona    schemas.Persona
+	layoutRoot *layout.LayoutBox
 	// nodeMap stores the mapping between Go *html.Node and Goja JS objects for the currently bound runtime.
 	nodeMap              map[*html.Node]*goja.Object
 	localStorage         map[string]string
@@ -85,7 +85,7 @@ type DOMBridge struct {
 	currentLocationState map[string]string
 	// eventListeners stores listeners attached via JS. This persists across BindToRuntime calls
 	// but the Goja Values (the listeners themselves) are specific to the runtime they were created in.
-	eventListeners       map[*html.Node]map[string]*listenerGroup
+	eventListeners map[*html.Node]map[string]*listenerGroup
 }
 
 // nativeNode is embedded within a Goja object to link it back to the Go *html.Node.
@@ -309,7 +309,8 @@ func (b *DOMBridge) bindDocumentAndElementMethods(obj *goja.Object, node *html.N
 	_ = obj.Set("querySelectorAll", b.jsQuerySelectorAll(native))
 	_ = obj.Set("cloneNode", b.jsCloneNode(native))
 
-	if node.Type == html.DocumentNode {
+	switch node.Type {
+	case html.DocumentNode:
 		// Document specific methods
 		_ = obj.Set("getElementById", b.jsGetElementById())
 		_ = obj.Set("createElement", b.jsCreateElement())
@@ -326,7 +327,7 @@ func (b *DOMBridge) bindDocumentAndElementMethods(obj *goja.Object, node *html.N
 		if head := htmlquery.FindOne(node, "//head"); head != nil {
 			_ = obj.Set("head", b.wrapNode(head))
 		}
-	} else if node.Type == html.ElementNode {
+	case html.ElementNode:
 		// Element specific properties and methods
 		_ = obj.Set("tagName", strings.ToUpper(node.Data))
 		b.defineHTMLProperties(obj, node)
@@ -714,7 +715,7 @@ func (b *DOMBridge) jsRemoveChild(parentNative *nativeNode) func(goja.FunctionCa
 		if childNative.node.Parent == parentNative.node {
 			parentNative.node.RemoveChild(childNative.node)
 		} else {
-			panic(b.runtime.NewGoError(errors.New("NotFoundError: The node to be removed is not a child of this node.")))
+			panic(b.runtime.NewGoError(errors.New("NotFoundError: The node to be removed is not a child of this node")))
 		}
 		return call.Argument(0) // Returns the removed child
 	}
@@ -745,7 +746,7 @@ func (b *DOMBridge) jsInsertBefore(parentNative *nativeNode) func(goja.FunctionC
 			if refNative.node.Parent == parentNative.node {
 				parentNative.node.InsertBefore(newNative.node, refNative.node)
 			} else {
-				panic(b.runtime.NewGoError(errors.New("NotFoundError: The reference node is not a child of this node.")))
+				panic(b.runtime.NewGoError(errors.New("NotFoundError: The reference node is not a child of this node")))
 			}
 		}
 
@@ -921,7 +922,7 @@ func (b *DOMBridge) dispatchEventInternal(targetNode *html.Node, eventType strin
 	}
 
 	var (
-		stopPropagation        bool
+		stopPropagation          bool
 		stopImmediatePropagation bool
 		defaultPrevented         bool
 		currentPhase             uint16
@@ -1733,7 +1734,8 @@ func (b *DOMBridge) serializeForm(formNode, submitterNode *html.Node) url.Values
 		}
 		tagName := strings.ToLower(el.Data)
 
-		if tagName == "input" {
+		switch tagName {
+		case "input":
 			inputType := strings.ToLower(htmlquery.SelectAttr(el, "type"))
 			_, isChecked := getAttribute(el, "checked")
 
@@ -1755,9 +1757,9 @@ func (b *DOMBridge) serializeForm(formNode, submitterNode *html.Node) url.Values
 				val, _ := getAttribute(el, "value")
 				values.Add(name, val)
 			}
-		} else if tagName == "textarea" {
+		case "textarea":
 			values.Add(name, htmlquery.InnerText(el))
-		} else if tagName == "select" {
+		case "select":
 			options, _ := htmlquery.QueryAll(el, ".//option")
 			var selected bool
 			for _, opt := range options {
@@ -1771,7 +1773,7 @@ func (b *DOMBridge) serializeForm(formNode, submitterNode *html.Node) url.Values
 				val, _ := getAttribute(options[0], "value")
 				values.Add(name, val)
 			}
-		} else if tagName == "button" {
+		case "button":
 			if el == submitterNode {
 				val, _ := getAttribute(el, "value")
 				values.Add(name, val)

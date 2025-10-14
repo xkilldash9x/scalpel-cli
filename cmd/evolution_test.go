@@ -5,6 +5,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -14,6 +15,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 )
 
 // MockAnalystRunner is a mock implementation of the AnalystRunner interface.
@@ -34,6 +36,7 @@ func setupTestConfig(t *testing.T) config.Interface {
 }
 
 // 1. Unit Testing: initializeKGClient()
+// NOTE: This assumes initializeKGClient is defined in the cmd package (e.g., evolution.go).
 func TestInitializeKGClient(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	ctx := context.Background()
@@ -62,8 +65,10 @@ func TestInitializeKGClient(t *testing.T) {
 	})
 
 	t.Run("Postgres (Config Parsing and Connection Attempt)", func(t *testing.T) {
-		// The call to config.Set is no longer needed as the function under test
-		// receives all its required configuration via its arguments.
+		// This test confirms that a connection failure is handled correctly.
+		// It uses a context with a short timeout to avoid hanging.
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
 
 		kgCfg := config.KnowledgeGraphConfig{
 			Type: "postgres",
@@ -76,11 +81,12 @@ func TestInitializeKGClient(t *testing.T) {
 		_, _, err := initializeKGClient(ctx, kgCfg, logger, false)
 
 		assert.Error(t, err)
-		// Check for a more generic error that indicates a connection problem.
+		// Check for a generic error that indicates a connection problem during the ping phase.
 		assert.Contains(t, err.Error(), "failed to ping PostgreSQL")
 	})
 }
 
+// NOTE: This assumes runEvolve, AnalystRunner, and the initializer function type are defined in the cmd package.
 func TestRunEvolve(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	ctx := context.Background()
@@ -94,7 +100,8 @@ func TestRunEvolve(t *testing.T) {
 		expectedFiles := []string{"file1.go"}
 
 		// Mock the initializer to return our mock runner.
-		mockInitFn := func(logger *zap.Logger, cfg config.Interface, llmClient schemas.LLMClient, kgClient schemas.KnowledgeGraphClient) (AnalystRunner, error) {
+		// Renamed logger to _ as it is unused in this mock implementation, fixing "declared and not used" error.
+		mockInitFn := func(_ *zap.Logger, cfg config.Interface, llmClient schemas.LLMClient, kgClient schemas.KnowledgeGraphClient) (AnalystRunner, error) {
 			assert.NotNil(t, llmClient)
 			assert.NotNil(t, kgClient)
 			return mockRunner, nil
@@ -121,7 +128,8 @@ func TestRunEvolve(t *testing.T) {
 	// Test Case: Initialization Failure (Analyst)
 	t.Run("AnalystInitFailure", func(t *testing.T) {
 		expectedErr := errors.New("init failed")
-		mockInitFn := func(logger *zap.Logger, cfg config.Interface, llmClient schemas.LLMClient, kgClient schemas.KnowledgeGraphClient) (AnalystRunner, error) {
+		// Renamed logger to _ as it is unused in this mock implementation.
+		mockInitFn := func(_ *zap.Logger, cfg config.Interface, llmClient schemas.LLMClient, kgClient schemas.KnowledgeGraphClient) (AnalystRunner, error) {
 			return nil, expectedErr
 		}
 
@@ -130,4 +138,33 @@ func TestRunEvolve(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to initialize Improvement Analyst: init failed")
 	})
+}
+
+func TestEvolveCmd_RunE_LLMInitializationFailure(t *testing.T) {
+	// This test specifically checks the RunE function of the cobra command,
+	// ensuring that an error during dependency setup (before runEvolve is called)
+	// is handled correctly.
+	// Arrange
+	observability.ResetForTest()
+	observability.InitializeLogger(config.LoggerConfig{Level: "fatal"}) // Keep output clean
+
+	// Create a config that will cause the LLM client to fail initialization.
+	// For example, by having no models configured.
+	badCfg := config.NewDefaultConfig()
+	badCfg.AgentCfg.LLM.Models = make(map[string]config.LLMModelConfig) // No models
+
+	// Create the command instance.
+	evolveCmd := newEvolveCmd()
+	ctx := context.WithValue(context.Background(), configKey, badCfg)
+	evolveCmd.SetContext(ctx)
+
+	// Set required flags to pass initial cobra validation.
+	evolveCmd.SetArgs([]string{"--objective", "this will fail"})
+
+	// Act
+	err := evolveCmd.Execute()
+
+	// Assert
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to initialize LLM client")
 }

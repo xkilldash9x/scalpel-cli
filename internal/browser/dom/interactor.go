@@ -16,6 +16,7 @@ import (
 	"github.com/antchfx/htmlquery"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/layout"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"golang.org/x/net/html"
 )
 
@@ -25,7 +26,7 @@ import (
 type Interactor struct {
 	logger      Logger
 	page        CorePagePrimitives
-	humanoidCfg HumanoidConfig
+	humanoidCfg config.HumanoidConfig
 	stabilizeFn StabilizationFunc
 	rng         *rand.Rand
 }
@@ -62,7 +63,7 @@ type discoveryResult struct {
 }
 
 // NewInteractor creates a new interactor instance.
-func NewInteractor(logger Logger, hCfg HumanoidConfig, stabilizeFn StabilizationFunc, page CorePagePrimitives) *Interactor {
+func NewInteractor(logger Logger, hCfg config.HumanoidConfig, stabilizeFn StabilizationFunc, page CorePagePrimitives) *Interactor {
 	if logger == nil {
 		logger = &NopLogger{}
 	}
@@ -96,8 +97,6 @@ func (i *Interactor) ExploreStep(ctx context.Context, config schemas.Interaction
 
 	// Note: Depth tracking is managed by the caller (Session).
 
-	i.logger.Debug("Starting exploration step.")
-
 	// Initial pause (simulating reading the page), only if this is the first interaction overall (approximation).
 	if i.humanoidCfg.Enabled && len(interactedElements) == 0 {
 		if err := i.cognitivePause(ctx, 800, 300); err != nil {
@@ -130,7 +129,6 @@ func (i *Interactor) interact(
 		return false, nil // Stop this step if discovery fails.
 	}
 	if len(newElements) == 0 {
-		i.logger.Debug("No new interactive elements found.")
 		return false, nil
 	}
 
@@ -153,7 +151,6 @@ func (i *Interactor) interact(
 		}
 
 		// Execute the interaction.
-		i.logger.Debug(fmt.Sprintf("Attempting interaction: %s", element.Description))
 		actionCtx, cancelAction := context.WithTimeout(ctx, 60*time.Second) // Generous timeout for the action itself.
 		err := i.executeInteraction(actionCtx, element)
 		cancelAction()
@@ -164,13 +161,11 @@ func (i *Interactor) interact(
 		if err != nil {
 			// If the parent context was cancelled, we must stop immediately and propagate the error.
 			if ctx.Err() != nil {
-				i.logger.Debug(fmt.Sprintf("Interaction stopped due to parent context cancellation: %v", ctx.Err()))
 				return false, ctx.Err()
 			}
 
 			// Log failure but continue exploration with other elements in this list.
 			if actionCtx.Err() == nil {
-				i.logger.Debug(fmt.Sprintf("Interaction failed: %v", err))
 			}
 			continue
 		}
@@ -189,7 +184,6 @@ func (i *Interactor) interact(
 
 		// Strategy: Any successful interaction may change the DOM.
 		// We return to the caller for stabilization and re-rendering.
-		i.logger.Debug("Interaction successful. Returning to session for stabilization and re-render.")
 		return true, nil
 	}
 
@@ -206,6 +200,7 @@ const interactiveXPath = `
     //*[normalize-space(@contenteditable)='true' or normalize-space(@contenteditable)=''] |
     //*[(@role='button' or @role='link' or @role='tab' or @role='menuitem' or @role='checkbox' or @role='radio')]
 `
+
 // findLayoutBoxForNode recursively searches the layout tree for the box corresponding to a given html.Node.
 func findLayoutBoxForNode(root *layout.LayoutBox, target *html.Node) *layout.LayoutBox {
 	if root == nil || root.StyledNode == nil {
@@ -259,7 +254,6 @@ func (i *Interactor) discoverElements(ctx context.Context, layoutRoot *layout.La
 	// 3. Filter out disabled/interacted elements and generate stable fingerprints.
 	return i.filterAndFingerprint(results, interacted), nil
 }
-
 
 // extractElementData pulls relevant information from an html.Node.
 func extractElementData(node *html.Node) ElementData {
@@ -393,7 +387,7 @@ func (i *Interactor) executeInteraction(ctx context.Context, element interactive
 	keyHold := 0.0
 	clickMin, clickMax := 0, 0
 	if i.humanoidCfg.Enabled {
-		keyHold = i.humanoidCfg.KeyHoldMeanMs
+		keyHold = i.humanoidCfg.KeyHoldMu
 		clickMin = i.humanoidCfg.ClickHoldMinMs
 		clickMax = i.humanoidCfg.ClickHoldMaxMs
 	}
@@ -404,11 +398,9 @@ func (i *Interactor) executeInteraction(ctx context.Context, element interactive
 	} else if isTextInputElement(data) {
 		// Handle text inputs, textareas, contenteditable.
 		payload := i.generateInputPayload(data)
-		i.logger.Debug(fmt.Sprintf("Typing '%s' into %s", payload, element.Description))
 		err = i.page.ExecuteType(ctx, element.Selector, payload, keyHold)
 	} else {
 		// Handle links, buttons, summary, checkboxes, radios, submit inputs, ARIA roles, etc.
-		i.logger.Debug(fmt.Sprintf("Clicking %s", element.Description))
 		err = i.page.ExecuteClick(ctx, element.Selector, clickMin, clickMax)
 	}
 
@@ -435,16 +427,13 @@ func (i *Interactor) handleSelectInteraction(ctx context.Context, selector strin
 		// Randomly select one option starting from the second one.
 		selectedIndex := i.rng.Intn(len(options)-1) + 1
 		selectedValue := options[selectedIndex]
-		i.logger.Debug(fmt.Sprintf("Selecting value '%s' (index %d) in %s", selectedValue, selectedIndex, selector))
 		return i.page.ExecuteSelect(ctx, selector, selectedValue)
 	} else if len(options) == 1 {
 		// If only one option exists, select it.
-		i.logger.Debug(fmt.Sprintf("Selecting only available value '%s' in %s", options[0], selector))
 		return i.page.ExecuteSelect(ctx, selector, options[0])
 	}
 
 	// No valid options found.
-	i.logger.Debug(fmt.Sprintf("No valid options to select in %s", selector))
 	return nil
 }
 

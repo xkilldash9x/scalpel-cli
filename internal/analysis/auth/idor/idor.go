@@ -1,4 +1,4 @@
-// idor.go
+// File: internal/analysis/auth/idor/idor.go
 package idor
 
 import (
@@ -11,6 +11,7 @@ import (
 	"strings"
 	"sync"
 
+	"github.com/xkilldash9x/scalpel-cli/internal/jsoncompare"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -41,34 +42,28 @@ const (
 	TestTypeManipulation = "Manipulation"
 )
 
-// Detect performs the IDOR analysis concurrently using errgroup for robust management.
-func Detect(ctx context.Context, traffic []RequestResponsePair, config Config, logger *log.Logger) ([]Finding, error) {
-	// Use errgroup for robust concurrency management, synchronization, and context propagation.
+// Detect performs the IDOR analysis concurrently.
+// It now accepts the comparer interface.
+func Detect(ctx context.Context, traffic []RequestResponsePair, config Config, logger *log.Logger, comparer jsoncompare.JSONComparison) ([]Finding, error) {
 	g, groupCtx := errgroup.WithContext(ctx)
-	// Set the concurrency limit. This effectively manages the worker pool size.
 	g.SetLimit(config.ConcurrencyLevel)
 
-	// Channel to collect findings safely from concurrent workers.
 	findingsChan := make(chan Finding, config.ConcurrencyLevel)
 
 	logger.Printf("Starting IDOR analysis with concurrency level %d...", config.ConcurrencyLevel)
 
-	// Use a WaitGroup to track the producer goroutine.
 	var producerWG sync.WaitGroup
 	producerWG.Add(1)
 
-	// Producer loop: Generate tasks in a separate goroutine to prevent deadlocks
-	// when the findings channel buffer or worker pool is full.
+	// Producer loop: Generate tasks.
 	go func() {
 		defer producerWG.Done()
 
 		for _, pair := range traffic {
-			// Check for cancellation before proceeding.
 			if groupCtx.Err() != nil {
 				return
 			}
 
-			// Capture loop variable
 			currentPair := pair
 
 			if shouldSkipRequest(currentPair.Request) {
@@ -76,25 +71,21 @@ func Detect(ctx context.Context, traffic []RequestResponsePair, config Config, l
 			}
 
 			// Strategy 1: Horizontal IDOR Check
-			// This might block if the worker pool (g.SetLimit) is full. This is desired behavior.
 			g.Go(func() error {
-				// The groupCtx ensures that if any goroutine fails, the context is cancelled for others.
 				return analyzeTask(groupCtx, config.HttpClient, analysisTask{
 					Pair:     currentPair,
 					Config:   config,
 					TestType: TestTypeHorizontal,
-				}, findingsChan, logger)
+				}, findingsChan, logger, comparer)
 			})
 
 			// Strategy 2: Resource Manipulation Check
 			identifiers := ExtractIdentifiers(currentPair.Request, currentPair.RequestBody)
 			for _, ident := range identifiers {
-				// Check for cancellation inside the inner loop as well.
 				if groupCtx.Err() != nil {
 					return
 				}
 
-				// Capture loop variable
 				currentIdent := ident
 				testValue, err := GenerateTestValue(currentIdent)
 				if err != nil {
@@ -109,47 +100,36 @@ func Detect(ctx context.Context, traffic []RequestResponsePair, config Config, l
 						TestType:   TestTypeManipulation,
 						Identifier: &currentIdent,
 						TestValue:  testValue,
-					}, findingsChan, logger)
+					}, findingsChan, logger, comparer)
 				})
 			}
 		}
 	}()
 
-	// Waiter Goroutine: Waits for producer to finish scheduling, then waits for workers, then closes channel.
+	// Waiter Goroutine
 	go func() {
-		producerWG.Wait() // Wait for all g.Go() calls to be made.
-		g.Wait()          // Wait for all workers to complete.
+		producerWG.Wait()
+		g.Wait()
 		close(findingsChan)
 	}()
 
-	// Collect results (Main Goroutine)
-	// This now runs concurrently with the producer and workers, preventing deadlock.
+	// Collect results
 	var findings []Finding
-	// Range over the channel until it's closed by the waiter goroutine.
 	for finding := range findingsChan {
 		findings = append(findings, finding)
 	}
 
-	// MODIFICATION: Replaced flawed error handling with a correct, simpler version.
-	// First, wait for all goroutines managed by the errgroup to finish.
-	// The 'err' will be the first non-nil error returned by a worker.
 	err := g.Wait()
 
-	// Now, check the original context that was passed into Detect.
-	// If it was cancelled, that is the root cause and its error should be returned.
-	// This correctly returns context.DeadlineExceeded when appropriate.
 	if ctx.Err() != nil {
 		return findings, ctx.Err()
 	}
 
-	// Otherwise, if the original context is fine, we return the error
-	// that the errgroup captured from one of its workers (which could be nil).
 	return findings, err
 }
 
-// analyzeTask performs the actual HTTP request replay and comparison based on the task type.
-func analyzeTask(ctx context.Context, client *http.Client, task analysisTask, findingsChan chan<- Finding, logger *log.Logger) error {
-	// Check context before starting work (Idiomatic Context usage)
+// analyzeTask performs the actual HTTP request replay and comparison.
+func analyzeTask(ctx context.Context, client *http.Client, task analysisTask, findingsChan chan<- Finding, logger *log.Logger, comparer jsoncompare.JSONComparison) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -164,25 +144,22 @@ func analyzeTask(ctx context.Context, client *http.Client, task analysisTask, fi
 	// 1. Prepare the request based on the strategy
 	switch task.TestType {
 	case TestTypeHorizontal:
-		// Use User B's session, keep the original request structure.
 		session = task.Config.SecondSession
 		replayReq, err = cloneRequest(ctx, task.Pair.Request, task.Pair.RequestBody)
 		if err != nil {
 			logger.Printf("Error cloning request: %v", err)
-			return nil // Non-fatal error for this task
+			return nil
 		}
 		finding.Severity = SeverityHigh
 		finding.Evidence = "User B successfully accessed User A's resource (Horizontal)."
 	case TestTypeManipulation:
-		// Use User A's session, modify the identifier in the request.
 		session = task.Config.Session
-		// Pass the worker context (ctx) to ApplyTestValue for correct context propagation.
 		replayReq, _, err = ApplyTestValue(ctx, task.Pair.Request, task.Pair.RequestBody, *task.Identifier, task.TestValue)
 		if err != nil {
 			logger.Printf("Error applying test value: %v", err)
-			return nil // Non-fatal error for this task
+			return nil
 		}
-		finding.Severity = SeverityMedium // Default to Medium, can be adjusted based on sensitivity.
+		finding.Severity = SeverityMedium
 		finding.Evidence = fmt.Sprintf("Successfully accessed resource with manipulated ID '%s' (Manipulation).", task.TestValue)
 		finding.Identifier = task.Identifier
 		finding.TestedValue = task.TestValue
@@ -193,24 +170,21 @@ func analyzeTask(ctx context.Context, client *http.Client, task analysisTask, fi
 
 	// 2. Apply session and execute
 	session.ApplyToRequest(replayReq)
-	// URL and Method might be modified in Manipulation strategy.
 	finding.URL = replayReq.URL.String()
 	finding.Method = replayReq.Method
 
 	resp, respBody, err := executeRequest(client, replayReq)
 	if err != nil {
-		// Network errors (timeouts, connection issues) or context cancellation during request.
 		if ctx.Err() != nil {
-			return ctx.Err() // Propagate cancellation error
+			return ctx.Err()
 		}
-		// Ignore other network errors in the context of IDOR findings.
+		// Ignore other network errors.
 		return nil
 	}
 	finding.StatusCode = resp.StatusCode
 
-	// 3. Evaluate the response
-	// Pass the test type and identifier details to allow specialized comparison logic.
-	vulnerable, comparisonResult, err := evaluateResponse(task.Pair, resp, respBody, task.Config.ComparisonRules, task.TestType, task.Identifier, task.TestValue)
+	// 3. Evaluate the response using the injected comparer service.
+	vulnerable, comparisonResult, err := evaluateResponse(task.Pair, resp, respBody, task.Config.ComparisonOptions, task.TestType, task.Identifier, task.TestValue, comparer)
 	if err != nil {
 		logger.Printf("Error evaluating response for %s: %v", replayReq.URL, err)
 		return nil
@@ -219,7 +193,6 @@ func analyzeTask(ctx context.Context, client *http.Client, task analysisTask, fi
 	if vulnerable {
 		finding.ComparisonDetails = comparisonResult
 
-		// Send finding back to the collector
 		select {
 		case findingsChan <- *finding:
 		case <-ctx.Done():
@@ -230,50 +203,47 @@ func analyzeTask(ctx context.Context, client *http.Client, task analysisTask, fi
 	return nil
 }
 
-// evaluateResponse determines if the replay response indicates a vulnerability by comparing it to the original.
-func evaluateResponse(originalPair RequestResponsePair, replayResp *http.Response, replayBody []byte, rules HeuristicRules, testType string, identifier *ObservedIdentifier, testValue string) (bool, *ResponseComparisonResult, error) {
+// evaluateResponse determines if the replay response indicates a vulnerability.
+func evaluateResponse(originalPair RequestResponsePair, replayResp *http.Response, replayBody []byte, baseOpts jsoncompare.Options, testType string, identifier *ObservedIdentifier, testValue string, comparer jsoncompare.JSONComparison) (bool, *jsoncompare.ComparisonResult, error) {
 	originalResp := originalPair.Response
 
 	// Heuristic 1: Status Code Analysis
 	isOriginalSuccess := originalResp.StatusCode >= 200 && originalResp.StatusCode < 400
 	isReplaySuccess := replayResp.StatusCode >= 200 && replayResp.StatusCode < 400
 
-	// If the replay resulted in an authorization error (401/403), the authorization check works.
 	if replayResp.StatusCode == http.StatusUnauthorized || replayResp.StatusCode == http.StatusForbidden {
 		return false, nil, nil
 	}
 
-	// If the original was successful but the replay was not (e.g., 404, 500), it's likely not vulnerable
-	// (or in the case of Manipulation, the manipulated resource ID doesn't exist).
 	if isOriginalSuccess && !isReplaySuccess {
 		return false, nil, nil
 	}
 
-	// If both are successful (or both failed similarly), we must compare the content.
 	// Heuristic 2: Semantic Body Comparison (The core check)
 
-	comparisonRules := rules
+	// Start with a concurrency-safe copy of the base options provided in the config.
+	comparisonOpts := baseOpts.DeepCopy()
 
 	// Enhance normalization specifically for Manipulation tests.
-	// When User A accesses Resource B (manipulation), the response content will differ from Resource A.
-	// To verify structural equivalence, we enable structural comparison.
+	// We need structural comparison because User A accessing Resource B will have different data than Resource A.
 	if testType == TestTypeManipulation && identifier != nil {
-		// Create a deep copy of the rules to avoid modifying the shared config (concurrency safety).
-		comparisonRules = rules.DeepCopy()
+		// Enable structural comparison mode.
+		comparisonOpts.NormalizeAllValuesForStructure = true
 
-		// FIX: Enable structural comparison mode.
-		comparisonRules.NormalizeAllValuesForStructure = true
-
-		// Add the original value and the test value to the ignore list for this specific comparison.
-		// (This is technically redundant with NormalizeAllValuesForStructure, but provides defense in depth).
-		comparisonRules.SpecificValuesToIgnore[identifier.Value] = struct{}{}
-		comparisonRules.SpecificValuesToIgnore[testValue] = struct{}{}
+		// Explicitly ignore the tested identifiers (defense in depth).
+		// Ensure the map is initialized (DeepCopy handles this, but safety first).
+		if comparisonOpts.SpecificValuesToIgnore == nil {
+			comparisonOpts.SpecificValuesToIgnore = make(map[string]struct{})
+		}
+		comparisonOpts.SpecificValuesToIgnore[identifier.Value] = struct{}{}
+		comparisonOpts.SpecificValuesToIgnore[testValue] = struct{}{}
 	}
 
-	// We compare the replayed response body against the original response body.
-	comparisonResult, err := CompareResponses(originalPair.ResponseBody, replayBody, comparisonRules)
+	// We compare the replayed response body against the original response body using the injected service.
+	comparisonResult, err := comparer.CompareWithOptions(originalPair.ResponseBody, replayBody, comparisonOpts)
 	if err != nil {
-		return false, nil, err
+		// The service handles non-JSON gracefully, so this error indicates an unexpected processing issue.
+		return false, nil, fmt.Errorf("error during response comparison processing: %w", err)
 	}
 
 	// If the responses are semantically equivalent after normalization, it indicates IDOR.
@@ -283,7 +253,6 @@ func evaluateResponse(originalPair RequestResponsePair, replayResp *http.Respons
 // cloneRequest creates a deep copy of an http.Request, ensuring the body is readable.
 func cloneRequest(ctx context.Context, original *http.Request, body []byte) (*http.Request, error) {
 	cloned := original.Clone(ctx)
-	// Idiomatic optimization: len(nil slice) is 0, so the explicit nil check is redundant.
 	if len(body) > 0 {
 		cloned.Body = io.NopCloser(bytes.NewReader(body))
 		cloned.ContentLength = int64(len(body))
@@ -302,7 +271,7 @@ func executeRequest(client *http.Client, req *http.Request) (*http.Response, []b
 	}
 	defer resp.Body.Close()
 
-	// Read the body (limit size to prevent excessive memory usage in high-throughput scenarios)
+	// Read the body (limit size)
 	const maxBodySize = 5 * 1024 * 1024 // 5MB limit
 	bodyReader := io.LimitReader(resp.Body, maxBodySize)
 	body, err := io.ReadAll(bodyReader)

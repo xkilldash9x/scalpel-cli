@@ -122,7 +122,6 @@ func (ip *InterceptionProxy) setupHandlers() {
 // handleRequest processes an incoming request through the registered hooks.
 func (ip *InterceptionProxy) handleRequest(r *http.Request, ctx *goproxy.ProxyCtx) (*http.Request, *http.Response) {
 	reqURL := getRequestURL(ctx)
-	ip.logger.Debug("Proxy intercepted request", zap.String("method", r.Method), zap.String("url", reqURL))
 
 	ip.hooksMutex.RLock()
 	hooks := ip.requestHooks
@@ -133,7 +132,6 @@ func (ip *InterceptionProxy) handleRequest(r *http.Request, ctx *goproxy.ProxyCt
 		newReq, resp := hook(currentReq, ctx)
 
 		if resp != nil {
-			ip.logger.Debug("Request short-circuited by a hook", zap.String("url", reqURL))
 			return newReq, resp
 		}
 
@@ -174,8 +172,6 @@ func (ip *InterceptionProxy) handleResponse(r *http.Response, ctx *goproxy.Proxy
 
 		return goproxy.NewResponse(ctx.Req, goproxy.ContentTypeText, http.StatusBadGateway, fmt.Sprintf("Proxy error: upstream connection failed: %s", errorMsg))
 	}
-
-	ip.logger.Debug("Proxy received response", zap.Int("status", r.StatusCode), zap.String("url", reqURL))
 
 	ip.hooksMutex.RLock()
 	hooks := ip.responseHooks

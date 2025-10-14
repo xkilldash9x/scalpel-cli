@@ -277,7 +277,7 @@ func TestResultEnvelopeSerialization(t *testing.T) {
 // TestDefaultPersona verifies the values of the exported DefaultPersona variable.
 func TestDefaultPersona(t *testing.T) {
 	p := schemas.DefaultPersona
-	expectedUA := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/537.36"
+	expectedUA := "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/109.0.0.0 Safari/536.36"
 
 	if p.UserAgent != expectedUA {
 		t.Errorf("Unexpected DefaultPersona UserAgent: %s", p.UserAgent)

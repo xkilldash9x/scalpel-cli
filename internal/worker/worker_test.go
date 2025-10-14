@@ -44,6 +44,7 @@ func TestNewMonolithicWorker_Registration(t *testing.T) {
 
 	expectedTasks := []schemas.TaskType{
 		schemas.TaskAnalyzeWebPageTaint,
+		schemas.TaskAnalyzeWebPageProtoPP, // Added this to match the new adapter
 		schemas.TaskTestAuthATO,
 		schemas.TaskTestAuthIDOR,
 		schemas.TaskAnalyzeHeaders,
@@ -59,15 +60,15 @@ func TestNewMonolithicWorker_Registration(t *testing.T) {
 				Global: w.GlobalCtx(),
 			}
 
+			// For this registration test, we don't care about the outcome, just that it doesn't panic
+			// or return the "no adapter" error. Some adapters will error without a full context.
 			err := w.ProcessTask(context.Background(), analysisCtx)
 
 			// The primary goal of this test is to confirm an adapter is registered.
 			// The most direct way to test this is to ensure we do NOT get the
-			// "no adapter registered" error. Some adapters may legitimately
-			// return no error with a blank context, so requiring an error
-			// for all cases is too strict.
+			// "no adapter or direct handler registered" error.
 			if err != nil {
-				assert.NotContains(t, err.Error(), "no adapter registered for task type",
+				assert.NotContains(t, err.Error(), "no adapter or direct handler registered for task type",
 					"The adapter should be registered, but an unexpected error occurred.")
 			}
 		})
@@ -90,7 +91,8 @@ func TestMonolithicWorker_ProcessTask_UnknownAdapter(t *testing.T) {
 	err = w.ProcessTask(context.Background(), analysisCtx)
 
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "no adapter registered for task type 'NON_EXISTENT_TASK'")
+	// FIX: Updated the expected error message to match the more descriptive one in the code.
+	assert.Contains(t, err.Error(), "no adapter or direct handler registered for task type 'NON_EXISTENT_TASK'")
 }
 
 // TestMonolithicWorker_ProcessTask_AdapterFailurePropagation tests that if an adapter

@@ -17,6 +17,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/xkilldash9x/scalpel-cli/internal/jsoncompare"
 	"go.uber.org/goleak"
 )
 
@@ -166,6 +167,7 @@ func TestDetect_Integration(t *testing.T) {
 	client := server.Client()
 	t.Cleanup(client.CloseIdleConnections)
 	logger := log.New(io.Discard, "", 0)
+	comparer := jsoncompare.NewService()
 
 	userA := &MockSession{UserID: "UserA", Authenticated: true}
 	userB := &MockSession{UserID: "UserB", Authenticated: true}
@@ -182,14 +184,14 @@ func TestDetect_Integration(t *testing.T) {
 	traffic := []RequestResponsePair{pair1, pair2}
 
 	config := Config{
-		Session:          userA,
-		SecondSession:    userB,
-		ComparisonRules:  DefaultHeuristicRules(),
-		ConcurrencyLevel: 5,
-		HttpClient:       client,
+		Session:           userA,
+		SecondSession:     userB,
+		ComparisonOptions: jsoncompare.DefaultOptions(),
+		ConcurrencyLevel:  5,
+		HttpClient:        client,
 	}
 
-	findings, err := Detect(context.Background(), traffic, config, logger)
+	findings, err := Detect(context.Background(), traffic, config, logger, comparer)
 	require.NoError(t, err, "Detect returned an unexpected error")
 
 	if len(findings) != 2 {
@@ -218,13 +220,14 @@ func TestDetect_ConcurrencyAndCancellation(t *testing.T) {
 	userA := &MockSession{UserID: "UserA", Authenticated: true}
 	testClient := server.Client()
 	t.Cleanup(testClient.CloseIdleConnections)
+	comparer := jsoncompare.NewService()
 
 	config := Config{
-		Session:          userA,
-		SecondSession:    userA,
-		ComparisonRules:  DefaultHeuristicRules(),
-		ConcurrencyLevel: 10,
-		HttpClient:       testClient,
+		Session:           userA,
+		SecondSession:     userA,
+		ComparisonOptions: jsoncompare.DefaultOptions(),
+		ConcurrencyLevel:  10,
+		HttpClient:        testClient,
 	}
 
 	ctx, cancel := context.WithTimeout(context.Background(), 50*time.Millisecond)
@@ -242,7 +245,7 @@ func TestDetect_ConcurrencyAndCancellation(t *testing.T) {
 
 	logger := log.New(io.Discard, "", 0)
 	startTime := time.Now()
-	_, err := Detect(ctx, traffic, config, logger)
+	_, err := Detect(ctx, traffic, config, logger, comparer)
 	duration := time.Since(startTime)
 
 	require.Error(t, err, "Expected an error due to context timeout, but got nil")
@@ -273,13 +276,14 @@ func TestDetect_Robustness_tDeadlinePattern(t *testing.T) {
 	userA := &MockSession{UserID: "UserA", Authenticated: true}
 	client := server.Client()
 	t.Cleanup(client.CloseIdleConnections)
+	comparer := jsoncompare.NewService()
 
 	config := Config{
-		Session:          userA,
-		SecondSession:    userA,
-		ComparisonRules:  DefaultHeuristicRules(),
-		HttpClient:       client,
-		ConcurrencyLevel: 1,
+		Session:           userA,
+		SecondSession:     userA,
+		ComparisonOptions: jsoncompare.DefaultOptions(),
+		HttpClient:        client,
+		ConcurrencyLevel:  1,
 	}
 
 	var traffic []RequestResponsePair
@@ -292,7 +296,7 @@ func TestDetect_Robustness_tDeadlinePattern(t *testing.T) {
 	}
 
 	logger := log.New(io.Discard, "", 0)
-	_, err := Detect(ctx, traffic, config, logger)
+	_, err := Detect(ctx, traffic, config, logger, comparer)
 
 	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Detect() returned unexpected error: %v", err)
@@ -312,13 +316,14 @@ func TestDetect_ConcurrencySafety(t *testing.T) {
 	userB := &MockSession{UserID: "UserB", Authenticated: true}
 	client := server.Client()
 	t.Cleanup(client.CloseIdleConnections)
+	comparer := jsoncompare.NewService()
 
 	config := Config{
-		Session:          userA,
-		SecondSession:    userB,
-		ComparisonRules:  DefaultHeuristicRules(),
-		ConcurrencyLevel: 20,
-		HttpClient:       client,
+		Session:           userA,
+		SecondSession:     userB,
+		ComparisonOptions: jsoncompare.DefaultOptions(),
+		ConcurrencyLevel:  20,
+		HttpClient:        client,
 	}
 
 	var traffic []RequestResponsePair
@@ -354,6 +359,6 @@ func TestDetect_ConcurrencySafety(t *testing.T) {
 	})
 
 	logger := log.New(io.Discard, "", 0)
-	_, err := Detect(context.Background(), traffic, config, logger)
+	_, err := Detect(context.Background(), traffic, config, logger, comparer)
 	require.NoError(t, err, "Detect() returned unexpected error")
 }

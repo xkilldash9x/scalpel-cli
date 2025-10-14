@@ -491,19 +491,9 @@ func NewSession(
 		return nil, fmt.Errorf("failed to initialize VM pool: %w", err)
 	}
 
-	// Configure humanoid interaction if enabled.
-	var domHCfg dom.HumanoidConfig
+	// Configure humanoid interaction.
 	browserCfg := cfg.Browser()
-
-	// The humanoid controller is now initialized directly from the static config.
-	// The complex runtime logic (RNG, timings) is encapsulated within the controller.
 	s.humanoidController = humanoid.New(browserCfg.Humanoid, log.Named("humanoid"), s)
-
-	if browserCfg.Humanoid.Enabled {
-		// The dom.HumanoidConfig only needs to know if it's enabled, as other
-		// details are now managed by the humanoidController.
-		domHCfg.Enabled = true
-	}
 
 	// Set up the network stack with appropriate middleware.
 	if err := s.initializeNetworkStack(log); err != nil {
@@ -515,7 +505,14 @@ func NewSession(
 	stabilizeFn := func(ctx context.Context) error {
 		return s.stabilize(ctx)
 	}
-	s.interactor = dom.NewInteractor(NewZapAdapter(log.Named("interactor")), domHCfg, stabilizeFn, s)
+
+	// The DOM interactor uses the humanoid configuration to inform its behavior.
+	s.interactor = dom.NewInteractor(
+		NewZapAdapter(log.Named("interactor")),
+		browserCfg.Humanoid,
+		stabilizeFn,
+		s,
+	)
 
 	// Initialize the state for the initial (empty) document.
 	if err := s.resetStateForNewDocument(s.ctx, nil, nil); err != nil {

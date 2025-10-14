@@ -1,7 +1,3 @@
-# Default configuration for scalpel-cli
-# NOTE: For production deployments, override settings using environment variables
-# (e.g., SCALPEL_DATABASE_URL) or a config.local.yaml file.
-
 logger:
   service_name: "scalpel-cli"
   log_file: "logs/scalpel.log"
@@ -22,7 +18,6 @@ logger:
     fatal: "magenta"
 
 database:
-  # This value will be overridden by the SCALPEL_DATABASE_URL environment variable.
   url: ""
 
 engine:

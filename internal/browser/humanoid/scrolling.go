@@ -408,15 +408,11 @@ func (h *Humanoid) intelligentScroll(ctx context.Context, selector string) error
 
 		// 2. Process Results
 		if !result.ElementExists {
-			h.logger.Debug("Humanoid: Scroll target element does not exist", zap.String("selector", selector))
 			return nil
 		}
 		if result.IsIntersecting || result.IsComplete {
-			h.logger.Debug("Humanoid: Scroll complete", zap.Bool("intersecting", result.IsIntersecting), zap.Int("iteration", iteration), zap.Bool("useMouseWheel", useMouseWheel), zap.Bool("isDetentWheel", isDetentWheel))
-
 			// 3. Handle Overshoot (if applicable)
 			if result.IsComplete && !result.IsIntersecting && shouldOvershoot {
-				h.logger.Debug("Humanoid: Simulating scroll overshoot")
 				// Use the same method (wheel/scrollBy/detent) for the overshoot.
 				if err := h.simulateOvershoot(ctx, selector, readDensityFactor, result.VerticalDelta, result.HorizontalDelta, useMouseWheel, isDetentWheel); err != nil {
 					return err
@@ -440,7 +436,6 @@ func (h *Humanoid) intelligentScroll(ctx context.Context, selector string) error
 
 		// 5. Handle Regression (if applicable)
 		if shouldRegress && iteration > 2 && (result.VerticalDelta > 100 || result.HorizontalDelta > 100) {
-			h.logger.Debug("Humanoid: Simulating scroll regression")
 			// Use the same method (wheel/scrollBy/detent) for the regression.
 			if err := h.simulateRegression(ctx, selector, readDensityFactor, result.VerticalDelta, result.HorizontalDelta, useMouseWheel, isDetentWheel); err != nil {
 				return err

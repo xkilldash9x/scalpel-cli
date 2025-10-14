@@ -345,6 +345,8 @@ func (m *LLMMind) generateSystemPrompt() string {
 	- PERFORM_COMPLEX_TASK: Instruct the agent to perform a high level action (e.g., 'LOGIN'). Use sparingly.
 
 	3. Analysis & System:
+	- ANALYZE_PROTOTYPE_POLLUTION: Actively scan the current page for client-side prototype pollution and DOM clobbering. Use this after navigation or significant UI changes.
+	  Example: {"type": "ANALYZE_PROTOTYPE_POLLUTION", "rationale": "Analyzing the dashboard for potential client-side vulnerabilities."}
 	- GATHER_CODEBASE_CONTEXT: Read source code for a module. (Params: metadata={"module_path": "..."})
 	- CONCLUDE: Finish the mission.
 `

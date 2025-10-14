@@ -8,31 +8,14 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
-// HumanoidConfig defines parameters for simulating human behavior timings.
-type HumanoidConfig struct {
-	Enabled        bool
-	KeyHoldMeanMs  float64 // Average time a key is held down during typing
-	ClickHoldMinMs int     // Minimum time the mouse button is held down
-	ClickHoldMaxMs int     // Maximum time the mouse button is held down
-}
-
-// Default Configs
-// NewDefaultInteractionConfig creates a default config using the canonical schema.
+// NewDefaultInteractionConfig returns a default configuration for autonomous interaction.
+// This is used when a user requests autonomous exploration without providing specific parameters.
 func NewDefaultInteractionConfig() schemas.InteractionConfig {
 	return schemas.InteractionConfig{
+		Steps:                   []schemas.InteractionStep{},
 		MaxDepth:                5,
-		MaxInteractionsPerDepth: 5,
+		MaxInteractionsPerDepth: 15,
 		InteractionDelayMs:      500,
-		PostInteractionWaitMs:   1000,
-	}
-}
-
-func NewDefaultHumanoidConfig() HumanoidConfig {
-	return HumanoidConfig{
-		Enabled:        true,
-		KeyHoldMeanMs:  65.0,
-		ClickHoldMinMs: 50,
-		ClickHoldMaxMs: 150,
 	}
 }
 
