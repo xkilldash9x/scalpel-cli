@@ -2,171 +2,171 @@
 package cmd
 
 import (
+	"bytes"
+	"context"
+	"fmt"
+	"os"
+	"strings"
 	"testing"
-	"time"
 
+	"github.com/spf13/cobra"
 	"github.com/spf13/viper"
 	"github.com/stretchr/testify/require"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
-// newTestConfig creates a fully populated configuration for use in tests by setting
-// values in Viper and unmarshaling them into the config struct. This provides a
-// consistent baseline for testing without using struct literals, which is no longer
-// possible due to private fields.
+// newTestConfig creates a fully populated and layered configuration for use in tests.
+// It correctly layers defaults, explicit values, and environment variables.
 func newTestConfig(t *testing.T) config.Interface {
 	t.Helper()
+
+	// 1. Create a single Viper instance that will hold all config layers.
 	v := viper.New()
 
-	// -- Logger --
-	v.Set("logger.service_name", "scalpel-cli")
-	v.Set("logger.log_file", "logs/scalpel.log")
-	v.Set("logger.level", "info")
-	v.Set("logger.format", "json")
-	v.Set("logger.add_source", false)
-	v.Set("logger.max_size", 10)
-	v.Set("logger.max_backups", 3)
-	v.Set("logger.max_age", 7)
-	v.Set("logger.compress", true)
-	v.Set("logger.colors.debug", "cyan")
-	v.Set("logger.colors.info", "green")
-	v.Set("logger.colors.warn", "yellow")
-	v.Set("logger.colors.error", "red")
-	v.Set("logger.colors.dpanic", "magenta")
-	v.Set("logger.colors.panic", "magenta")
-	v.Set("logger.colors.fatal", "magenta")
+	// 2. Set all the default values from your config package. This is the base layer.
+	config.SetDefaults(v)
 
-	// -- Database --
-	// URL is expected to be set by env in tests
-
-	// -- Engine --
-	v.Set("engine.queue_size", 1000)
-	v.Set("engine.worker_concurrency", 8)
-	v.Set("engine.default_task_timeout", 15*time.Minute)
-
-	// -- Browser --
-	v.Set("browser.headless", true)
-	v.Set("browser.disable_cache", true)
-	v.Set("browser.ignore_tls_errors", false)
-	v.Set("browser.concurrency", 2)
+	// 3. Set any explicit values for the test environment.
 	v.Set("browser.debug", true)
-	v.Set("browser.args", []string{
-		"--no-sandbox", "--disable-setuid-sandbox", "--disable-dev-shm-usage",
-		"--disable-gpu", "--no-first-run", "--no-default-browser-check",
-		"--disable-popup-blocking", "--disable-prompt-on-repost", "--disable-extensions",
-		"--disable-translate", "--disable-sync", "--disable-background-networking",
-		"--disable-component-update", "--metrics-recording-only", "--mute-audio",
-		"--safebrowsing-disable-auto-update",
-	})
-	v.Set("browser.viewport.width", 1920)
-	v.Set("browser.viewport.height", 1080)
-	v.Set("browser.humanoid.enabled", true)
-	v.Set("browser.humanoid.providers", []string{"fingerprint", "header"})
-
-	// -- Network --
-	v.Set("network.timeout", 30*time.Second)
-	v.Set("network.navigation_timeout", 90*time.Second)
-	v.Set("network.post_load_wait", 2*time.Second)
-	v.Set("network.capture_response_bodies", true)
-	v.Set("network.ignore_tls_errors", false)
-	v.Set("network.headers.User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 ScalpelV2/1.0")
-	v.Set("network.proxy.enabled", false)
-	v.Set("network.proxy.address", "127.0.0.1:8080")
-
-	// -- IAST --
-	v.Set("iast.enabled", false)
-
-	// -- Scanners --
-	v.Set("scanners.passive.headers.enabled", true)
-	v.Set("scanners.static.jwt.enabled", true)
-	v.Set("scanners.static.jwt.brute_force_enabled", true)
-	v.Set("scanners.static.jwt.dictionary_file", "config/jwt.secrets.list")
-	v.Set("scanners.active.taint.enabled", true)
-	v.Set("scanners.active.taint.depth", 3)
-	v.Set("scanners.active.taint.concurrency", 2)
-	v.Set("scanners.active.protopollution.enabled", true)
-	v.Set("scanners.active.protopollution.wait_duration", 8*time.Second)
-	v.Set("scanners.active.timeslip.enabled", true)
-	v.Set("scanners.active.timeslip.request_count", 25)
-	v.Set("scanners.active.timeslip.max_concurrency", 10)
-	v.Set("scanners.active.timeslip.threshold_ms", 500)
-	v.Set("scanners.active.auth.ato.enabled", true)
-	v.Set("scanners.active.auth.ato.concurrency", 4)
-	v.Set("scanners.active.auth.ato.min_request_delay_ms", 500)
-	v.Set("scanners.active.auth.ato.request_delay_jitter_ms", 500)
-	v.Set("scanners.active.auth.ato.success_keywords", []string{"welcome", "redirect", "dashboard", "logout", "\"success\":true"})
-	v.Set("scanners.active.auth.ato.user_failure_keywords", []string{"user not found", "invalid user", "no such account", "user does not exist"})
-	v.Set("scanners.active.auth.ato.pass_failure_keywords", []string{"invalid password", "incorrect password", "authentication failed"})
-	v.Set("scanners.active.auth.ato.generic_failure_keywords", []string{"login failed", "invalid credentials"})
-	v.Set("scanners.active.auth.ato.lockout_keywords", []string{"account locked", "too many attempts"})
-	v.Set("scanners.active.auth.idor.enabled", true)
-	v.Set("scanners.active.auth.idor.ignore_list", []string{"csrf_token", "X-CSRF-Token", "nonce", "viewstate"})
-	v.Set("scanners.active.auth.idor.test_strategies.NumericID", []string{"increment", "decrement"})
-	v.Set("scanners.active.auth.idor.test_strategies.UUID", []string{"horizontal_swap"})
-	v.Set("scanners.active.auth.idor.test_strategies.Base64Encoded", []string{"bit_flip"})
-	v.Set("scanners.active.auth.idor.test_strategies.ObjectID", []string{"increment_char"})
-
-	// -- Discovery --
-	v.Set("discovery.max_depth", 5)
-	v.Set("discovery.concurrency", 20)
-	v.Set("discovery.timeout", 15*time.Minute)
-	v.Set("discovery.passive_enabled", true)
-	v.Set("discovery.include_subdomains", true)
-	v.Set("discovery.crtsh_rate_limit", 2.0)
-	v.Set("discovery.passive_concurrency", 10)
-
-	// -- Agent --
-	v.Set("agent.llm.default_fast_model", "gemini-2.5-flash")
-	v.Set("agent.llm.default_powerful_model", "gemini-2.5-pro")
-	v.Set("agent.knowledge_graph.type", "postgres")
-
-	// -- Autofix --
-	v.Set("autofix.enabled", false)
-	v.Set("autofix.min_confidence_threshold", 0.75)
-	v.Set("autofix.cooldown_seconds", 300)
-	v.Set("autofix.keep_workspace_on_failure", false)
 	v.Set("autofix.git.author_name", "Kyle McAllister")
 	v.Set("autofix.git.author_email", "xkilldash9x@proton.me")
 	v.Set("autofix.github.repo_owner", "xkilldash9x")
 	v.Set("autofix.github.repo_name", "scalpel-cli")
-	v.Set("autofix.github.base_branch", "main")
+	v.Set("network.headers.User-Agent", "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36 ScalpelV2/1.0")
 
+	// 4. Set environment variables that the test will use.
+	t.Setenv("SCALPEL_DATABASE_URL", "postgres://test:test@localhost/testdb")
+	t.Setenv("SCALPEL_AGENT_LLM_MODELS_GEMINI-2.5-PRO_API_KEY", "fake-api-key-for-testing")
+
+	// 5. Configure Viper to automatically read environment variables.
+	v.SetEnvPrefix("SCALPEL")
+	v.AutomaticEnv()
+
+	// 6. Create the final config object from the layered Viper instance.
 	cfg, err := config.NewConfigFromViper(v)
 	require.NoError(t, err, "Failed to create new test config from viper")
 
 	return cfg
 }
 
-// setupCompleteTestConfig provides a consistent and complete configuration state for tests.
-// It starts with a default Viper-based config, then layers environment variables over it.
-func setupCompleteTestConfig(t *testing.T) config.Interface {
+// executeCommandNoPreRun is for testing argument and flag validation without
+// triggering the config validation in PersistentPreRunE.
+func executeCommandNoPreRun(t *testing.T, args ...string) (string, error) {
 	t.Helper()
+	// Create a new root command for each test run to ensure isolation.
+	testRootCmd, _ := newRootCmd()
 
-	// 1. Get the default, fully-populated config from our helper.
-	// This returns an interface, but we know the underlying type is *config.Config
-	// for the purpose of unmarshaling.
-	cfg := newTestConfig(t)
+	buf := new(bytes.Buffer)
+	testRootCmd.PersistentPreRunE = nil // Disable config loading for simple validation tests.
+	testRootCmd.SetOut(buf)
+	testRootCmd.SetErr(buf)
+	testRootCmd.SetArgs(args)
+	err := testRootCmd.ExecuteContext(context.Background())
+	return buf.String(), err
+}
 
-	// 2. Set environment variables required for tests.
-	t.Setenv("SCALPEL_GEMINI_API_KEY", "fake-api-key-for-testing")
-	t.Setenv("SCALPEL_DATABASE_URL", "postgres://test:test@localhost/testdb")
+// createTempConfig helper
+func createTempConfig(t *testing.T, content string) string {
+	t.Helper()
+	tmpfile, err := os.CreateTemp("", "test-config-*.yaml")
+	require.NoError(t, err)
+	_, err = tmpfile.Write([]byte(content))
+	require.NoError(t, err)
+	require.NoError(t, tmpfile.Close())
+	return tmpfile.Name()
+}
 
-	// 3. Use a new Viper instance to layer environment variables over the defaults.
-	v := viper.New()
-	v.SetEnvPrefix("SCALPEL")
-	v.AutomaticEnv()
+// newRootCmd is a helper to create a clean rootCmd instance for testing,
+// returning the command and a pointer to its config variable.
+func newRootCmd() (*cobra.Command, *config.Interface) {
+	var cfgFile string
+	var appConfig config.Interface
 
-	// Unmarshal into the existing config struct to override defaults with env vars.
-	// We must cast the interface to its concrete type for viper to unmarshal into it.
-	err := v.Unmarshal(cfg.(*config.Config))
-	require.NoError(t, err, "Failed to unmarshal env vars into test config")
+	rootCmd := &cobra.Command{
+		Use:   "scalpel-cli",
+		Short: "A powerful security tool for web application analysis.",
+		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
+			v := viper.New()
 
-	// 4. Manually populate any complex fields that aren't easily set by defaults/env.
-	// This part is tricky now because we have an interface. The best way is to
-	// expose a new setter on the interface if this is needed. For this specific
-	// case, the model config should ideally be part of the viper setup.
-	// For now, this step is removed as it's not compatible with the interface.
-	// If required, we would add a `SetLLMModel(key string, model Cfg)` to the interface.
+			// The logic here now perfectly mirrors the application's `initializeConfig`
+			// This is the key to fixing the test failures.
 
-	return cfg
+			// 1. Set default values.
+			config.SetDefaults(v)
+
+			// 2. Set up environment variable handling.
+			v.SetEnvPrefix("SCALPEL")
+			v.SetEnvKeyReplacer(strings.NewReplacer(".", "_"))
+			v.AutomaticEnv()
+
+			// 3. Bind cobra flags to our local Viper instance.
+			if err := v.BindPFlags(cmd.Flags()); err != nil {
+				return fmt.Errorf("failed to bind command flags: %w", err)
+			}
+			if err := v.BindPFlags(cmd.PersistentFlags()); err != nil {
+				return fmt.Errorf("failed to bind persistent command flags: %w", err)
+			}
+
+			// 4. Read the configuration file if specified.
+			if cfgFile != "" {
+				v.SetConfigFile(cfgFile)
+				if err := v.ReadInConfig(); err != nil {
+					if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
+						return fmt.Errorf("error reading config file: %w", err)
+					}
+				}
+			}
+
+			// 5. Create the final config object from the layered Viper instance.
+			concreteCfg, err := config.NewConfigFromViper(v)
+			if err != nil {
+				return fmt.Errorf("failed to load or validate config: %w", err)
+			}
+			appConfig = concreteCfg
+
+			// 6. Manually apply the command-specific logic that normally happens in RunE.
+			// This is necessary because tests often mock the RunE function.
+			if cmd.Use == "scan [targets...]" {
+				// FIX: Read the depth value directly from the Cobra flag.
+				depth, _ := cmd.Flags().GetInt("depth")
+
+				if cmd.Flags().Changed("depth") {
+					// depth, _ := cmd.Flags().GetInt("depth") // Moved up
+					appConfig.SetDiscoveryMaxDepth(depth)
+				}
+				scanCfg := appConfig.Scan()
+				// scanCfg.Depth = v.GetInt("scan.depth") // Old logic relied on incorrect Viper binding
+				scanCfg.Depth = depth // Use the depth read from the flag
+				scanCfg.Targets = args
+				appConfig.SetScanConfig(scanCfg)
+			}
+			return nil
+		},
+	}
+
+	rootCmd.PersistentFlags().StringVar(&cfgFile, "config", "", "config file (default is ./scalpel.yaml)")
+
+	// --- Add subcommands ---
+	scanCmd := &cobra.Command{
+		Use:  "scan [targets...]",
+		Args: cobra.MinimumNArgs(1),
+		RunE: func(cmd *cobra.Command, args []string) error {
+			return nil
+		},
+	}
+	scanCmd.Flags().IntP("depth", "d", 0, "Crawling depth limit")
+	// FIX: Removed the binding to the global viper instance, which caused confusion and test failures.
+	// _ = viper.BindPFlag("scan.depth", scanCmd.Flags().Lookup("depth"))
+
+	rootCmd.AddCommand(scanCmd)
+
+	reportCmd := &cobra.Command{
+		Use:  "report",
+		RunE: func(cmd *cobra.Command, args []string) error { return nil },
+	}
+	reportCmd.Flags().String("scan-id", "", "Scan ID to generate a report for")
+	_ = reportCmd.MarkFlagRequired("scan-id")
+	rootCmd.AddCommand(reportCmd)
+
+	return rootCmd, &appConfig
 }

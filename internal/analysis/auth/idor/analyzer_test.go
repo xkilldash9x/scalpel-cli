@@ -15,13 +15,16 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
+	"github.com/xkilldash9x/scalpel-cli/internal/jsoncompare"
 )
 
 // TestAnalyzer_AnalyzeTraffic_Validation verifies the prerequisite checks.
 func TestAnalyzer_AnalyzeTraffic_Validation(t *testing.T) {
 	t.Parallel()
+	// Discard logger output for clean test runs.
 	logger := log.New(io.Discard, "", 0)
-	analyzer := NewIDORAnalyzer(logger)
+	// Initialize the analyzer with a real comparer service instance.
+	analyzer := NewIDORAnalyzer(logger, jsoncompare.NewService())
 	ctx := context.Background()
 
 	// Define Sessions (using MockSession from idor_test.go)
@@ -85,7 +88,7 @@ func TestAnalyzer_AnalyzeTraffic_Validation(t *testing.T) {
 				// If we don't expect an error, we must ensure the error is nil OR context.DeadlineExceeded
 				// because the analysis might have started and then timed out.
 				// MODIFICATION: Use errors.Is for robust checking of context errors.
-				if err != nil && !errors.Is(err, context.DeadlineExceeded) {
+				if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 					t.Fatalf("Expected no error (or DeadlineExceeded), but got: %v", err)
 				}
 			}
@@ -95,7 +98,10 @@ func TestAnalyzer_AnalyzeTraffic_Validation(t *testing.T) {
 
 // TestValidateAndConfigure_Defaults verifies that production defaults are correctly applied.
 func TestValidateAndConfigure_Defaults(t *testing.T) {
-	logger := log.New(io.Discard, "", 0)
+	// Setup a dummy analyzer to call the internal method.
+	analyzer := &IDORAnalyzer{
+		logger: log.New(io.Discard, "", 0),
+	}
 	userA := &MockSession{Authenticated: true}
 	userB := &MockSession{Authenticated: true}
 
@@ -105,7 +111,7 @@ func TestValidateAndConfigure_Defaults(t *testing.T) {
 		// Leave others empty to test defaults
 	}
 
-	err := validateAndConfigure(&config, logger)
+	err := analyzer.validateAndConfigure(&config)
 	if err != nil {
 		t.Fatalf("validateAndConfigure failed: %v", err)
 	}
@@ -127,10 +133,10 @@ func TestValidateAndConfigure_Defaults(t *testing.T) {
 		t.Errorf("ConcurrencyLevel default was not set correctly (Got %d).", config.ConcurrencyLevel)
 	}
 
-	// Check if default comparison rules were applied
-	defaultRules := DefaultHeuristicRules()
+	// Check if default comparison options were applied
+	defaultOpts := jsoncompare.DefaultOptions()
 	// We must ignore unexported fields when comparing regexp.Regexp structs
-	if diff := cmp.Diff(defaultRules, config.ComparisonRules, cmpopts.IgnoreUnexported(regexp.Regexp{})); diff != "" {
-		t.Errorf("ComparisonRules mismatch (-want +got):\n%s", diff)
+	if diff := cmp.Diff(defaultOpts, config.ComparisonOptions, cmpopts.IgnoreUnexported(regexp.Regexp{})); diff != "" {
+		t.Errorf("ComparisonOptions mismatch (-want +got):\n%s", diff)
 	}
 }

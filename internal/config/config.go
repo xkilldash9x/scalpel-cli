@@ -62,95 +62,90 @@ type Interface interface {
 	SetATOConfig(atoCfg ATOConfig)
 }
 
-// Config holds the entire application configuration, minus any module-specific configs.
-// It uses private fields to enforce access through the Interface's getter methods.
+// Config holds the entire application configuration.
 type Config struct {
-	logger    LoggerConfig    `mapstructure:"logger" yaml:"logger"`
-	database  DatabaseConfig  `mapstructure:"database" yaml:"database"`
-	engine    EngineConfig    `mapstructure:"engine" yaml:"engine"`
-	browser   BrowserConfig   `mapstructure:"browser" yaml:"browser"`
-	network   NetworkConfig   `mapstructure:"network" yaml:"network"`
-	iast      IASTConfig      `mapstructure:"iast" yaml:"iast"`
-	scanners  ScannersConfig  `mapstructure:"scanners" yaml:"scanners"`
-	agent     AgentConfig     `mapstructure:"agent" yaml:"agent"`
-	discovery DiscoveryConfig `mapstructure:"discovery" yaml:"discovery"`
-	autofix   AutofixConfig   `mapstructure:"autofix" yaml:"autofix"`
-	// scanConfig gets its marching orders from CLI flags, not the config file.
-	scan ScanConfig `mapstructure:"-" yaml:"-"`
-}
-
-func (c *Config) SetBrowserHumanoidKeyHoldMeanMs(f float64) {
-	panic("unimplemented")
+	LoggerCfg    LoggerConfig    `mapstructure:"logger" yaml:"logger"`
+	DatabaseCfg  DatabaseConfig  `mapstructure:"database" yaml:"database"`
+	EngineCfg    EngineConfig    `mapstructure:"engine" yaml:"engine"`
+	BrowserCfg   BrowserConfig   `mapstructure:"browser" yaml:"browser"`
+	NetworkCfg   NetworkConfig   `mapstructure:"network" yaml:"network"`
+	IASTCfg      IASTConfig      `mapstructure:"iast" yaml:"iast"`
+	ScannersCfg  ScannersConfig  `mapstructure:"scanners" yaml:"scanners"`
+	AgentCfg     AgentConfig     `mapstructure:"agent" yaml:"agent"`
+	DiscoveryCfg DiscoveryConfig `mapstructure:"discovery" yaml:"discovery"`
+	AutofixCfg   AutofixConfig   `mapstructure:"autofix" yaml:"autofix"`
+	// ScanCfg gets its marching orders from CLI flags, not the config file.
+	ScanCfg ScanConfig `mapstructure:"-" yaml:"-"`
 }
 
 // --- Interface Method Implementations (Getters) ---
 
-func (c *Config) Logger() LoggerConfig       { return c.logger }
-func (c *Config) Database() DatabaseConfig   { return c.database }
-func (c *Config) Engine() EngineConfig       { return c.engine }
-func (c *Config) Browser() BrowserConfig     { return c.browser }
-func (c *Config) Network() NetworkConfig     { return c.network }
-func (c *Config) IAST() IASTConfig           { return c.iast }
-func (c *Config) Scanners() ScannersConfig   { return c.scanners }
-func (c *Config) JWT() JWTConfig             { return c.scanners.Static.JWT }
-func (c *Config) Agent() AgentConfig         { return c.agent }
-func (c *Config) Discovery() DiscoveryConfig { return c.discovery }
-func (c *Config) Autofix() AutofixConfig     { return c.autofix }
-func (c *Config) Scan() ScanConfig           { return c.scan }
+func (c *Config) Logger() LoggerConfig       { return c.LoggerCfg }
+func (c *Config) Database() DatabaseConfig   { return c.DatabaseCfg }
+func (c *Config) Engine() EngineConfig       { return c.EngineCfg }
+func (c *Config) Browser() BrowserConfig     { return c.BrowserCfg }
+func (c *Config) Network() NetworkConfig     { return c.NetworkCfg }
+func (c *Config) IAST() IASTConfig           { return c.IASTCfg }
+func (c *Config) Scanners() ScannersConfig   { return c.ScannersCfg }
+func (c *Config) JWT() JWTConfig             { return c.ScannersCfg.Static.JWT }
+func (c *Config) Agent() AgentConfig         { return c.AgentCfg }
+func (c *Config) Discovery() DiscoveryConfig { return c.DiscoveryCfg }
+func (c *Config) Autofix() AutofixConfig     { return c.AutofixCfg }
+func (c *Config) Scan() ScanConfig           { return c.ScanCfg }
 
 // --- Interface Method Implementations (Setters) ---
 
-func (c *Config) SetScanConfig(sc ScanConfig) { c.scan = sc }
+func (c *Config) SetScanConfig(sc ScanConfig) { c.ScanCfg = sc }
 
 // Discovery Setters
-func (c *Config) SetDiscoveryMaxDepth(d int) { c.discovery.MaxDepth = d }
+func (c *Config) SetDiscoveryMaxDepth(d int) { c.DiscoveryCfg.MaxDepth = d }
 func (c *Config) SetDiscoveryIncludeSubdomains(b bool) {
-	c.discovery.IncludeSubdomains = b
+	c.DiscoveryCfg.IncludeSubdomains = b
 }
 
 // Engine Setters
-func (c *Config) SetEngineWorkerConcurrency(w int) { c.engine.WorkerConcurrency = w }
+func (c *Config) SetEngineWorkerConcurrency(w int) { c.EngineCfg.WorkerConcurrency = w }
 
 // Browser Setters
-func (c *Config) SetBrowserHeadless(b bool)        { c.browser.Headless = b }
-func (c *Config) SetBrowserDisableCache(b bool)    { c.browser.DisableCache = b }
-func (c *Config) SetBrowserIgnoreTLSErrors(b bool) { c.browser.IgnoreTLSErrors = b }
-func (c *Config) SetBrowserDebug(b bool)           { c.browser.Debug = b }
+func (c *Config) SetBrowserHeadless(b bool)        { c.BrowserCfg.Headless = b }
+func (c *Config) SetBrowserDisableCache(b bool)    { c.BrowserCfg.DisableCache = b }
+func (c *Config) SetBrowserIgnoreTLSErrors(b bool) { c.BrowserCfg.IgnoreTLSErrors = b }
+func (c *Config) SetBrowserDebug(b bool)           { c.BrowserCfg.Debug = b }
 
 // Humanoid Setters
-func (c *Config) SetBrowserHumanoidEnabled(b bool) { c.browser.Humanoid.Enabled = b }
+func (c *Config) SetBrowserHumanoidEnabled(b bool) { c.BrowserCfg.Humanoid.Enabled = b }
 func (c *Config) SetBrowserHumanoidClickHoldMinMs(ms int) {
-	c.browser.Humanoid.ClickHoldMinMs = ms
+	c.BrowserCfg.Humanoid.ClickHoldMinMs = ms
 }
 func (c *Config) SetBrowserHumanoidClickHoldMaxMs(ms int) {
-	c.browser.Humanoid.ClickHoldMaxMs = ms
+	c.BrowserCfg.Humanoid.ClickHoldMaxMs = ms
 }
 func (c *Config) SetBrowserHumanoidKeyHoldMu(ms float64) {
-	c.browser.Humanoid.KeyHoldMu = ms
+	c.BrowserCfg.Humanoid.KeyHoldMu = ms
 }
 
 // Network Setters
 func (c *Config) SetNetworkCaptureResponseBodies(b bool) {
-	c.network.CaptureResponseBodies = b
+	c.NetworkCfg.CaptureResponseBodies = b
 }
 func (c *Config) SetNetworkNavigationTimeout(d time.Duration) {
-	c.network.NavigationTimeout = d
+	c.NetworkCfg.NavigationTimeout = d
 }
-func (c *Config) SetNetworkPostLoadWait(d time.Duration) { c.network.PostLoadWait = d }
-func (c *Config) SetNetworkIgnoreTLSErrors(b bool)       { c.network.IgnoreTLSErrors = b }
+func (c *Config) SetNetworkPostLoadWait(d time.Duration) { c.NetworkCfg.PostLoadWait = d }
+func (c *Config) SetNetworkIgnoreTLSErrors(b bool)       { c.NetworkCfg.IgnoreTLSErrors = b }
 
 // IAST Setters
-func (c *Config) SetIASTEnabled(b bool) { c.iast.Enabled = b }
+func (c *Config) SetIASTEnabled(b bool) { c.IASTCfg.Enabled = b }
 
 // JWT Setters
-func (c *Config) SetJWTEnabled(b bool) { c.scanners.Static.JWT.Enabled = b }
+func (c *Config) SetJWTEnabled(b bool) { c.ScannersCfg.Static.JWT.Enabled = b }
 func (c *Config) SetJWTBruteForceEnabled(b bool) {
-	c.scanners.Static.JWT.BruteForceEnabled = b
+	c.ScannersCfg.Static.JWT.BruteForceEnabled = b
 }
 
 // ATO Setter
 func (c *Config) SetATOConfig(atoCfg ATOConfig) {
-	c.scanners.Active.Auth.ATO = atoCfg
+	c.ScannersCfg.Active.Auth.ATO = atoCfg
 }
 
 // AutofixConfig holds settings for the self-healing (autofix) subsystem.
@@ -163,166 +158,6 @@ type AutofixConfig struct {
 	KeepWorkspaceOnFailure bool         `mapstructure:"keep_workspace_on_failure" yaml:"keep_workspace_on_failure"`
 	Git                    GitConfig    `mapstructure:"git" yaml:"git"`
 	GitHub                 GitHubConfig `mapstructure:"github" yaml:"github"`
-}
-
-// Agent implements Interface.
-func (a AutofixConfig) Agent() AgentConfig {
-	panic("unimplemented")
-}
-
-// Autofix implements Interface.
-func (a AutofixConfig) Autofix() AutofixConfig {
-	panic("unimplemented")
-}
-
-// Browser implements Interface.
-func (a AutofixConfig) Browser() BrowserConfig {
-	panic("unimplemented")
-}
-
-// Database implements Interface.
-func (a AutofixConfig) Database() DatabaseConfig {
-	panic("unimplemented")
-}
-
-// Discovery implements Interface.
-func (a AutofixConfig) Discovery() DiscoveryConfig {
-	panic("unimplemented")
-}
-
-// Engine implements Interface.
-func (a AutofixConfig) Engine() EngineConfig {
-	panic("unimplemented")
-}
-
-// IAST implements Interface.
-func (a AutofixConfig) IAST() IASTConfig {
-	panic("unimplemented")
-}
-
-// JWT implements Interface.
-func (a AutofixConfig) JWT() JWTConfig {
-	panic("unimplemented")
-}
-
-// Logger implements Interface.
-func (a AutofixConfig) Logger() LoggerConfig {
-	panic("unimplemented")
-}
-
-// Network implements Interface.
-func (a AutofixConfig) Network() NetworkConfig {
-	panic("unimplemented")
-}
-
-// Scan implements Interface.
-func (a AutofixConfig) Scan() ScanConfig {
-	panic("unimplemented")
-}
-
-// Scanners implements Interface.
-func (a AutofixConfig) Scanners() ScannersConfig {
-	panic("unimplemented")
-}
-
-// SetATOConfig implements Interface.
-func (a AutofixConfig) SetATOConfig(atoCfg ATOConfig) {
-	panic("unimplemented")
-}
-
-// SetBrowserDebug implements Interface.
-func (a AutofixConfig) SetBrowserDebug(bool) {
-	panic("unimplemented")
-}
-
-// SetBrowserDisableCache implements Interface.
-func (a AutofixConfig) SetBrowserDisableCache(bool) {
-	panic("unimplemented")
-}
-
-// SetBrowserHeadless implements Interface.
-func (a AutofixConfig) SetBrowserHeadless(bool) {
-	panic("unimplemented")
-}
-
-// SetBrowserHumanoidClickHoldMaxMs implements Interface.
-func (a AutofixConfig) SetBrowserHumanoidClickHoldMaxMs(ms int) {
-	panic("unimplemented")
-}
-
-// SetBrowserHumanoidClickHoldMinMs implements Interface.
-func (a AutofixConfig) SetBrowserHumanoidClickHoldMinMs(ms int) {
-	panic("unimplemented")
-}
-
-// SetBrowserHumanoidEnabled implements Interface.
-func (a AutofixConfig) SetBrowserHumanoidEnabled(bool) {
-	panic("unimplemented")
-}
-
-// SetBrowserHumanoidKeyHoldMu implements Interface.
-func (a AutofixConfig) SetBrowserHumanoidKeyHoldMu(ms float64) {
-	panic("unimplemented")
-}
-
-// SetBrowserIgnoreTLSErrors implements Interface.
-func (a AutofixConfig) SetBrowserIgnoreTLSErrors(bool) {
-	panic("unimplemented")
-}
-
-// SetDiscoveryIncludeSubdomains implements Interface.
-func (a AutofixConfig) SetDiscoveryIncludeSubdomains(bool) {
-	panic("unimplemented")
-}
-
-// SetDiscoveryMaxDepth implements Interface.
-func (a AutofixConfig) SetDiscoveryMaxDepth(int) {
-	panic("unimplemented")
-}
-
-// SetEngineWorkerConcurrency implements Interface.
-func (a AutofixConfig) SetEngineWorkerConcurrency(int) {
-	panic("unimplemented")
-}
-
-// SetIASTEnabled implements Interface.
-func (a AutofixConfig) SetIASTEnabled(bool) {
-	panic("unimplemented")
-}
-
-// SetJWTBruteForceEnabled implements Interface.
-func (a AutofixConfig) SetJWTBruteForceEnabled(bool) {
-	panic("unimplemented")
-}
-
-// SetJWTEnabled implements Interface.
-func (a AutofixConfig) SetJWTEnabled(bool) {
-	panic("unimplemented")
-}
-
-// SetNetworkCaptureResponseBodies implements Interface.
-func (a AutofixConfig) SetNetworkCaptureResponseBodies(bool) {
-	panic("unimplemented")
-}
-
-// SetNetworkIgnoreTLSErrors implements Interface.
-func (a AutofixConfig) SetNetworkIgnoreTLSErrors(bool) {
-	panic("unimplemented")
-}
-
-// SetNetworkNavigationTimeout implements Interface.
-func (a AutofixConfig) SetNetworkNavigationTimeout(d time.Duration) {
-	panic("unimplemented")
-}
-
-// SetNetworkPostLoadWait implements Interface.
-func (a AutofixConfig) SetNetworkPostLoadWait(d time.Duration) {
-	panic("unimplemented")
-}
-
-// SetScanConfig implements Interface.
-func (a AutofixConfig) SetScanConfig(sc ScanConfig) {
-	panic("unimplemented")
 }
 
 // GitConfig defines the committer identity.
@@ -371,12 +206,12 @@ type DatabaseConfig struct {
 
 // EngineConfig configures the core task processing engine.
 type EngineConfig struct {
-	QueueSize          int           `mapstructure:"queue_size" yaml:"queue_size"`
-	WorkerConcurrency  int           `mapstructure:"worker_concurrency" yaml:"worker_concurrency"`
-	DefaultTaskTimeout time.Duration `mapstructure:"default_task_timeout" yaml:"default_task_timeout"`
+	QueueSize             int           `mapstructure:"queue_size" yaml:"queue_size"`
+	WorkerConcurrency     int           `mapstructure:"worker_concurrency" yaml:"worker_concurrency"`
+	DefaultTaskTimeout    time.Duration `mapstructure:"default_task_timeout" yaml:"default_task_timeout"`
+	FindingsBatchSize     int           `mapstructure:"findings_batch_size" yaml:"findings_batch_size"`
+	FindingsFlushInterval time.Duration `mapstructure:"findings_flush_interval" yaml:"findings_flush_interval"`
 }
-
-// NOTE: HumanoidConfig is now defined in internal/config/humanoid_config.go
 
 // BrowserConfig holds settings for the headless browser instances.
 type BrowserConfig struct {
@@ -613,6 +448,8 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("engine.queue_size", 1000)
 	v.SetDefault("engine.worker_concurrency", 10)
 	v.SetDefault("engine.default_task_timeout", "5m")
+	v.SetDefault("engine.findings_batch_size", 100)
+	v.SetDefault("engine.findings_flush_interval", "2s")
 
 	// -- Browser --
 	v.SetDefault("browser.headless", true)
@@ -620,7 +457,7 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("browser.ignore_tls_errors", false)
 	v.SetDefault("browser.concurrency", 4)
 	v.SetDefault("browser.debug", true)
-	// Initialize all Humanoid defaults using the centralized function in humanoid_config.go.
+	// Initialize all Humanoid defaults
 	setHumanoidDefaults(v)
 
 	// -- Network --
@@ -655,6 +492,7 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("discovery.passive_concurrency", 10)
 
 	// -- Agent --
+	// FIX: Align the default model with the test expectation.
 	v.SetDefault("agent.llm.default_fast_model", "gemini-2.5-flash")
 	v.SetDefault("agent.llm.default_powerful_model", "gemini-2.5-pro")
 	v.SetDefault("agent.knowledge_graph.type", "postgres")
@@ -680,11 +518,118 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("autofix.github.base_branch", "main")
 }
 
+// setHumanoidDefaults provides a comprehensive set of default values for the humanoid simulation.
+func setHumanoidDefaults(v *viper.Viper) {
+	const prefix = "browser.humanoid."
+	// --- Main Switch ---
+	v.SetDefault(prefix+"enabled", true)
+
+	// --- General Physics & Limits ---
+	v.SetDefault(prefix+"max_velocity", 2500.0)
+	v.SetDefault(prefix+"time_step", "8ms")
+	v.SetDefault(prefix+"max_sim_time", "5s")
+
+	// --- Movement Physics (Spring-Damped Model) ---
+	v.SetDefault(prefix+"omega", 25.0)
+	v.SetDefault(prefix+"zeta", 0.85)
+
+	// --- Fitts's Law (Terminal Pause Estimation) ---
+	v.SetDefault(prefix+"fitts_a", 120.0)
+	v.SetDefault(prefix+"fitts_b", 140.0)
+	v.SetDefault(prefix+"fitts_w_terminal", 10.0)
+	v.SetDefault(prefix+"fitts_jitter_percent", 0.15)
+
+	// --- Ex-Gaussian Timing Model (Cognitive & Action Delays) ---
+	v.SetDefault(prefix+"ex_gaussian_mu", 150.0)
+	v.SetDefault(prefix+"ex_gaussian_sigma", 40.0)
+	v.SetDefault(prefix+"ex_gaussian_tau", 80.0)
+	v.SetDefault(prefix+"task_switch_mu", 200.0)
+	v.SetDefault(prefix+"task_switch_sigma", 60.0)
+	v.SetDefault(prefix+"task_switch_tau", 120.0)
+
+	// --- Noise and Perturbations ---
+	v.SetDefault(prefix+"pink_noise_amplitude", 2.5)
+	v.SetDefault(prefix+"gaussian_strength", 0.7)
+	v.SetDefault(prefix+"click_noise", 1.5)
+	v.SetDefault(prefix+"hesitation_drift_factor", 1.5)
+	v.SetDefault(prefix+"sdn_factor", 0.001)
+
+	// --- Anti-Periodicity (Breaking Rhythmic Patterns) ---
+	v.SetDefault(prefix+"anti_periodicity_min_pause", "200ms")
+	v.SetDefault(prefix+"anti_periodicity_time_jitter", "3ms")
+	v.SetDefault(prefix+"anti_periodicity_frame_drop_prob", 0.05)
+
+	// --- Trajectory Behavior & Micro-corrections ---
+	v.SetDefault(prefix+"micro_correction_threshold", 150.0)
+	v.SetDefault(prefix+"target_inner_aim_percent", 0.8)
+	v.SetDefault(prefix+"target_velocity_bias_max", 0.1)
+	v.SetDefault(prefix+"target_velocity_bias_thresh", 800.0)
+	v.SetDefault(prefix+"min_move_distance", 2.0)
+	v.SetDefault(prefix+"terminal_dist_threshold", 1.5)
+	v.SetDefault(prefix+"terminal_velocity_threshold", 20.0)
+	v.SetDefault(prefix+"anticipatory_movement_threshold", 200.0)
+	v.SetDefault(prefix+"anticipatory_movement_distance", 5.0)
+	v.SetDefault(prefix+"anticipatory_movement_duration", "50ms")
+	v.SetDefault(prefix+"anticipatory_movement_omega_factor", 0.3)
+	v.SetDefault(prefix+"anticipatory_movement_zeta_factor", 2.0)
+
+	// --- Fatigue & Habituation Modeling ---
+	v.SetDefault(prefix+"fatigue_increase_rate", 0.01)
+	v.SetDefault(prefix+"fatigue_recovery_rate", 0.02)
+	v.SetDefault(prefix+"habituation_rate", 0.005)
+
+	// --- Clicking Behavior ---
+	v.SetDefault(prefix+"click_hold_min_ms", 40)
+	v.SetDefault(prefix+"click_hold_max_ms", 120)
+
+	// --- Inter-Key Delay (IKD) Modeling ---
+	v.SetDefault(prefix+"key_hold_mu", 50.0)
+	v.SetDefault(prefix+"key_hold_sigma", 15.0)
+	v.SetDefault(prefix+"key_hold_tau", 25.0)
+	v.SetDefault(prefix+"ikd_mu", 90.0)
+	v.SetDefault(prefix+"ikd_sigma", 30.0)
+	v.SetDefault(prefix+"ikd_tau", 40.0)
+	v.SetDefault(prefix+"key_pause_min", 20.0)
+	v.SetDefault(prefix+"key_pause_ngram_factor_2", 0.75)
+	v.SetDefault(prefix+"key_pause_ngram_factor_3", 0.65)
+	v.SetDefault(prefix+"ikd_hand_alternation_bonus", 0.8)
+	v.SetDefault(prefix+"ikd_same_finger_penalty", 1.4)
+	v.SetDefault(prefix+"ikd_distance_factor", 0.05)
+	v.SetDefault(prefix+"key_pause_fatigue_factor", 0.4)
+	v.SetDefault(prefix+"key_burst_pause_probability", 0.03)
+
+	// --- Typo Simulation ---
+	v.SetDefault(prefix+"typo_rate", 0.04)
+	v.SetDefault(prefix+"typo_homoglyph_rate", 0.10)
+	v.SetDefault(prefix+"typo_neighbor_rate", 0.40)
+	v.SetDefault(prefix+"typo_transpose_rate", 0.15)
+	v.SetDefault(prefix+"typo_omission_rate", 0.15)
+	v.SetDefault(prefix+"typo_correction_probability", 0.85)
+	v.SetDefault(prefix+"typo_shift_correction_probability", 0.95)
+	v.SetDefault(prefix+"typo_omission_notice_probability", 0.60)
+	v.SetDefault(prefix+"typo_insertion_notice_probability", 0.70)
+	v.SetDefault(prefix+"typo_correction_pause_mean_scale", 4.0)
+	v.SetDefault(prefix+"typo_correction_pause_std_dev_scale", 2.0)
+
+	// --- Scrolling Behavior ---
+	v.SetDefault(prefix+"scroll_read_density_factor", 0.7)
+	v.SetDefault(prefix+"scroll_overshoot_probability", 0.20)
+	v.SetDefault(prefix+"scroll_regression_probability", 0.10)
+	v.SetDefault(prefix+"scroll_mouse_wheel_probability", 0.60)
+	v.SetDefault(prefix+"scroll_detent_wheel_probability", 0.75)
+
+	// --- Session Persona Randomization ---
+	v.SetDefault(prefix+"persona_jitter_movement", 0.15)
+	v.SetDefault(prefix+"persona_jitter_damping", 0.10)
+	v.SetDefault(prefix+"persona_jitter_skill", 0.20)
+}
+
 // NewConfigFromViper creates a new configuration instance from a viper object.
 func NewConfigFromViper(v *viper.Viper) (*Config, error) {
 	var cfg Config
 
-	// Bind environment variables for sensitive data
+	// Bind environment variables for sensitive data and critical configuration.
+	v.BindEnv("database.url", "SCALPEL_DATABASE_URL")
 	v.BindEnv("autofix.github.token", "SCALPEL_AUTOFIX_GH_TOKEN")
 	v.BindEnv("agent.knowledge_graph.postgres.password", "SCALPEL_KG_PASSWORD")
 
@@ -692,9 +637,13 @@ func NewConfigFromViper(v *viper.Viper) (*Config, error) {
 		return nil, fmt.Errorf("error unmarshaling config: %w", err)
 	}
 
-	// Manually load the token if Unmarshal didn't pick it up
-	if cfg.autofix.Enabled && cfg.autofix.GitHub.Token == "" {
-		cfg.autofix.GitHub.Token = os.Getenv("SCALPEL_AUTOFIX_GH_TOKEN")
+	// Manually load the token if Unmarshal didn't pick it up (fallback)
+	if cfg.AutofixCfg.Enabled && cfg.AutofixCfg.GitHub.Token == "" {
+		if token := v.GetString("autofix.github.token"); token != "" {
+			cfg.AutofixCfg.GitHub.Token = token
+		} else {
+			cfg.AutofixCfg.GitHub.Token = os.Getenv("SCALPEL_AUTOFIX_GH_TOKEN")
+		}
 	}
 
 	if err := cfg.Validate(); err != nil {
@@ -705,22 +654,16 @@ func NewConfigFromViper(v *viper.Viper) (*Config, error) {
 
 // Validate checks the configuration for required fields and sane values.
 func (c *Config) Validate() error {
-	// Relaxing the requirement for database.url as it might not be needed in all contexts.
-	/*
-		if c.database.URL == "" {
-			return fmt.Errorf("database.url is a required configuration field")
-		}
-	*/
-	if c.engine.WorkerConcurrency <= 0 {
+	if c.EngineCfg.WorkerConcurrency <= 0 {
 		return fmt.Errorf("engine.worker_concurrency must be a positive integer")
 	}
-	if c.browser.Concurrency <= 0 {
+	if c.BrowserCfg.Concurrency <= 0 {
 		return fmt.Errorf("browser.concurrency must be a positive integer")
 	}
-	if err := c.autofix.Validate(); err != nil {
+	if err := c.AutofixCfg.Validate(); err != nil {
 		return fmt.Errorf("autofix configuration invalid: %w", err)
 	}
-	if err := c.agent.Evolution.Validate(); err != nil {
+	if err := c.AgentCfg.Evolution.Validate(); err != nil {
 		return fmt.Errorf("agent.evolution configuration invalid: %w", err)
 	}
 	return nil

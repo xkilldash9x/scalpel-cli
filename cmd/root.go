@@ -3,6 +3,7 @@ package cmd
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -37,6 +38,7 @@ var rootCmd = &cobra.Command{
 
 		// 1. Initialize configuration loading into our local viper instance.
 		if err := initializeConfig(cmd, v); err != nil {
+			// Use a basic logger if the main one can't be initialized.
 			basicLogger, _ := zap.NewDevelopment()
 			defer basicLogger.Sync()
 			basicLogger.Error("Failed to initialize configuration", zap.Error(err))
@@ -52,7 +54,6 @@ var rootCmd = &cobra.Command{
 		}
 
 		// 3. Initialize the logger using the validated config.
-		// CORRECTED: Called cfg.Logger() as a method.
 		observability.InitializeLogger(cfg.Logger())
 		logger := observability.GetLogger()
 		logger.Info("Starting Scalpel-CLI", zap.String("version", Version))
@@ -74,18 +75,27 @@ var rootCmd = &cobra.Command{
 
 // Execute adds all child commands to the root command and sets flags appropriately.
 func Execute(ctx context.Context) error {
-	rootCmd.AddCommand(newScanCmd())
-	rootCmd.AddCommand(newReportCmd())
+	// Initialize the component factories/providers for production.
+	componentFactory := NewComponentFactory()
+	storeProvider := NewStoreProvider()
+
+	// Inject the dependencies into their respective commands.
+	rootCmd.AddCommand(newScanCmd(componentFactory))
+	rootCmd.AddCommand(newReportCmd(storeProvider))
 	rootCmd.AddCommand(newSelfHealCmd())
 	rootCmd.AddCommand(newEvolveCmd())
 
 	if err := rootCmd.ExecuteContext(ctx); err != nil {
-		if logger := observability.GetLogger(); logger != nil && logger != zap.NewNop() {
-			if ctx.Err() == nil {
+		logger := observability.GetLogger()
+		// Only log the error if the context wasn't canceled (i.e., not a Ctrl+C).
+		// This avoids redundant error messages on graceful shutdown.
+		if !errors.Is(ctx.Err(), context.Canceled) {
+			if logger != nil && logger != zap.NewNop() {
 				logger.Error("Command execution failed", zap.Error(err))
+			} else {
+				// Fallback if the logger wasn't initialized.
+				fmt.Fprintln(os.Stderr, "Error:", err)
 			}
-		} else {
-			fmt.Fprintln(os.Stderr, "Error:", err)
 		}
 		return err
 	}
@@ -122,6 +132,7 @@ func initializeConfig(cmd *cobra.Command, v *viper.Viper) error {
 	if cfgFile != "" {
 		v.SetConfigFile(cfgFile)
 		if err := v.ReadInConfig(); err != nil {
+			// It's okay if the file is not found, but any other error is a problem.
 			if _, ok := err.(viper.ConfigFileNotFoundError); !ok {
 				return fmt.Errorf("error reading config file: %w", err)
 			}
@@ -133,9 +144,8 @@ func initializeConfig(cmd *cobra.Command, v *viper.Viper) error {
 
 // getConfigFromContext is a helper function for subcommands to retrieve the config.
 func getConfigFromContext(ctx context.Context) (config.Interface, error) {
-	cfg, ok := ctx.Value(configKey).(config.Interface)
-	if !ok || cfg == nil {
-		return nil, fmt.Errorf("configuration not found in context")
+	if cfg, ok := ctx.Value(configKey).(config.Interface); ok && cfg != nil {
+		return cfg, nil
 	}
-	return cfg, nil
+	return nil, fmt.Errorf("configuration not found in context; this indicates a bug in command setup")
 }

@@ -93,11 +93,13 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 		return session
 	})
 
-	h := humanoid.New(globalCtx.Config.Browser().Humanoid, logger.Named("humanoid"), session)
+	// Pass the specific humanoid configuration struct that the New function now expects.
+	browserCfg := globalCtx.Config.Browser()
+	h := humanoid.New(browserCfg.Humanoid, logger.Named("humanoid"), session)
 
 	// 4. Initialize Self-Healing (Autofix) System.
 	// This initializes the system but does not start monitoring yet.
-	selfHeal, err := NewSelfHealOrchestrator(logger, globalCtx.Config.Autofix(), llmRouter)
+	selfHeal, err := NewSelfHealOrchestrator(logger, globalCtx.Config, llmRouter)
 	if err != nil {
 		// If initialization fails (e.g., missing log file config), log the error
 		// but allow the agent to continue without self-healing.
@@ -106,11 +108,6 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 	}
 
 	// 5. Initialize Self-Improvement (Evolution) System.
-	// The evolution analyst requires the full config, the LLM client, and the KG client.
-	// The KG implementation (GraphStore) satisfies the schemas.KnowledgeGraphClient interface structurally.
-	// The initialization logic inside NewImprovementAnalyst handles checking if the feature is enabled via config (Agent.Evolution),
-	// and returns nil if disabled.
-	// We cast the analyst instance to the EvolutionEngine interface.
 	evoAnalyst, err := analyst.NewImprovementAnalyst(logger, globalCtx.Config, llmRouter, kg)
 	if err != nil {
 		// If initialization fails (e.g., cannot determine project root), log the error
@@ -305,9 +302,6 @@ func (a *Agent) executeHumanoidAction(ctx context.Context, action Action) *Execu
 
 	if err != nil {
 		result.Status = "failed"
-
-		// -- FIX APPLIED --
-		// Assumes ParseBrowserError returns an ErrorCode type, not a string.
 		errorCode, errorDetails := ParseBrowserError(err, action)
 
 		if errorCode == ErrCodeExecutionFailure {
@@ -338,7 +332,6 @@ func (a *Agent) executeEvolution(ctx context.Context, action Action) *ExecutionR
 	}
 
 	// 1. Extract parameters
-	// The objective is passed in the 'value' field (preferred) or 'metadata.objective'.
 	objective := action.Value
 	if objective == "" {
 		if obj, ok := action.Metadata["objective"].(string); ok {
@@ -355,8 +348,6 @@ func (a *Agent) executeEvolution(ctx context.Context, action Action) *ExecutionR
 		}
 	}
 
-	// Target files are passed in 'metadata.target_files'.
-	// We must robustly handle the types that result from JSON unmarshalling (often []interface{}).
 	var targetFiles []string
 	if filesRaw, ok := action.Metadata["target_files"]; ok {
 		switch v := filesRaw.(type) {
@@ -367,9 +358,7 @@ func (a *Agent) executeEvolution(ctx context.Context, action Action) *ExecutionR
 				if fileName, ok := item.(string); ok {
 					targetFiles = append(targetFiles, fileName)
 				}
-				// Silently ignore non-string types in the array.
 			}
-			// Silently ignore other types for metadata.target_files.
 		}
 	}
 
@@ -379,10 +368,6 @@ func (a *Agent) executeEvolution(ctx context.Context, action Action) *ExecutionR
 
 	// 2. Run the Evolution Engine
 	a.logger.Info("Starting Evolution Analyst OODA loop...", zap.String("objective", objective), zap.Strings("target_files", targetFiles))
-
-	// Run the engine synchronously (blocking the agent's action goroutine until improvement is done).
-	// We set a specific timeout for the evolution process, derived from the mission context.
-	// 45 minutes is chosen as a reasonable upper bound for a complex improvement cycle.
 	evoCtx, cancel := context.WithTimeout(ctx, 45*time.Minute)
 	defer cancel()
 
@@ -390,17 +375,13 @@ func (a *Agent) executeEvolution(ctx context.Context, action Action) *ExecutionR
 
 	// 3. Process the result
 	result := &ExecutionResult{
-		// The observation type specifically relates to the outcome of the evolution process.
 		ObservationType: ObservedEvolutionResult,
 	}
 
 	if err != nil {
 		a.logger.Error("Evolution Analyst finished with error.", zap.Error(err))
 		result.Status = "failed"
-
-		// Determine specific error code
 		errorCode := ErrCodeEvolutionFailure
-		// Check if the error was due to timeout (either the explicit 45m or the parent mission context)
 		if evoCtx.Err() == context.DeadlineExceeded || strings.Contains(err.Error(), "timed out") {
 			errorCode = ErrCodeTimeoutError
 		}
@@ -411,7 +392,6 @@ func (a *Agent) executeEvolution(ctx context.Context, action Action) *ExecutionR
 	} else {
 		a.logger.Info("Evolution Analyst finished successfully.")
 		result.Status = "success"
-		// The detailed outcome is recorded in the Knowledge Graph by the analyst itself.
 		result.Data = map[string]string{"status": "Completed", "objective": objective, "message": "Self-improvement cycle completed successfully."}
 	}
 

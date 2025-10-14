@@ -57,7 +57,6 @@ func NewTestFixture(t *testing.T, configurators ...FixtureConfigurator) *TestFix
 	cfg.SetBrowserHumanoidEnabled(true)
 	cfg.SetBrowserHumanoidClickHoldMinMs(5)
 	cfg.SetBrowserHumanoidClickHoldMaxMs(15)
-	cfg.SetBrowserHumanoidKeyHoldMeanMs(10.0)
 	cfg.SetBrowserHeadless(true)
 	cfg.SetBrowserDisableCache(true)
 	cfg.SetBrowserIgnoreTLSErrors(true)

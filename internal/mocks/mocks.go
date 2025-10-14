@@ -8,6 +8,7 @@ import (
 	"sync"
 	"time"
 
+	// Removed unused import "github.com/spf13/cobra"
 	"github.com/stretchr/testify/mock"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
@@ -21,77 +22,88 @@ type MockConfig struct {
 	mock.Mock
 }
 
-// SetBrowserHumanoidKeyHoldMu implements config.Interface.
 func (m *MockConfig) SetBrowserHumanoidKeyHoldMu(ms float64) {
-	panic("unimplemented")
+	m.Called(ms)
 }
 
-// SetATOConfig implements config.Interface.
 func (m *MockConfig) SetATOConfig(atoCfg config.ATOConfig) {
-	panic("unimplemented")
+	m.Called(atoCfg)
 }
 
 // --- Getters ---
 
+// Helper function to safely retrieve mock return values or return a default zero value.
+func safeGet[T any](args mock.Arguments, index int) T {
+	val := args.Get(index)
+	if val == nil {
+		var zero T
+		return zero
+	}
+	if casted, ok := val.(T); ok {
+		return casted
+	}
+	// Fallback if type assertion fails unexpectedly.
+	var zero T
+	return zero
+}
+
 func (m *MockConfig) Logger() config.LoggerConfig {
-	args := m.Called()
-	return args.Get(0).(config.LoggerConfig)
+	return safeGet[config.LoggerConfig](m.Called(), 0)
 }
 
 func (m *MockConfig) Database() config.DatabaseConfig {
-	args := m.Called()
-	return args.Get(0).(config.DatabaseConfig)
+	return safeGet[config.DatabaseConfig](m.Called(), 0)
 }
 
 func (m *MockConfig) Engine() config.EngineConfig {
-	args := m.Called()
-	return args.Get(0).(config.EngineConfig)
+	return safeGet[config.EngineConfig](m.Called(), 0)
 }
 
 func (m *MockConfig) Browser() config.BrowserConfig {
-	args := m.Called()
-	return args.Get(0).(config.BrowserConfig)
+	return safeGet[config.BrowserConfig](m.Called(), 0)
 }
 
 func (m *MockConfig) Network() config.NetworkConfig {
-	args := m.Called()
-	return args.Get(0).(config.NetworkConfig)
+	return safeGet[config.NetworkConfig](m.Called(), 0)
 }
 
 func (m *MockConfig) IAST() config.IASTConfig {
-	args := m.Called()
-	return args.Get(0).(config.IASTConfig)
+	return safeGet[config.IASTConfig](m.Called(), 0)
 }
 
 func (m *MockConfig) Scanners() config.ScannersConfig {
-	args := m.Called()
-	return args.Get(0).(config.ScannersConfig)
+	return safeGet[config.ScannersConfig](m.Called(), 0)
 }
 
-// JWT provides a mock function for the JWT getter.
 func (m *MockConfig) JWT() config.JWTConfig {
-	args := m.Called()
-	return args.Get(0).(config.JWTConfig)
+	return safeGet[config.JWTConfig](m.Called(), 0)
 }
 
 func (m *MockConfig) Agent() config.AgentConfig {
-	args := m.Called()
-	return args.Get(0).(config.AgentConfig)
+	return safeGet[config.AgentConfig](m.Called(), 0)
 }
 
 func (m *MockConfig) Discovery() config.DiscoveryConfig {
+	// Special handling for DiscoveryConfig because it contains a pointer (*bool).
 	args := m.Called()
-	return args.Get(0).(config.DiscoveryConfig)
+	if args.Get(0) == nil {
+		// Provide a safe default for the pointer field PassiveEnabled
+		defaultBool := false
+		return config.DiscoveryConfig{PassiveEnabled: &defaultBool}
+	}
+	// Ensure type safety if a non-nil value is returned.
+	if cfg, ok := args.Get(0).(config.DiscoveryConfig); ok {
+		return cfg
+	}
+	return config.DiscoveryConfig{}
 }
 
 func (m *MockConfig) Autofix() config.AutofixConfig {
-	args := m.Called()
-	return args.Get(0).(config.AutofixConfig)
+	return safeGet[config.AutofixConfig](m.Called(), 0)
 }
 
 func (m *MockConfig) Scan() config.ScanConfig {
-	args := m.Called()
-	return args.Get(0).(config.ScanConfig)
+	return safeGet[config.ScanConfig](m.Called(), 0)
 }
 
 // --- Setters ---
@@ -100,7 +112,6 @@ func (m *MockConfig) SetScanConfig(sc config.ScanConfig) {
 	m.Called(sc)
 }
 
-// Discovery Setters
 func (m *MockConfig) SetDiscoveryMaxDepth(d int) {
 	m.Called(d)
 }
@@ -109,12 +120,10 @@ func (m *MockConfig) SetDiscoveryIncludeSubdomains(b bool) {
 	m.Called(b)
 }
 
-// Engine Setters
 func (m *MockConfig) SetEngineWorkerConcurrency(w int) {
 	m.Called(w)
 }
 
-// Browser Setters
 func (m *MockConfig) SetBrowserHeadless(b bool) {
 	m.Called(b)
 }
@@ -131,7 +140,6 @@ func (m *MockConfig) SetBrowserDebug(b bool) {
 	m.Called(b)
 }
 
-// Humanoid Setters
 func (m *MockConfig) SetBrowserHumanoidEnabled(b bool) {
 	m.Called(b)
 }
@@ -144,11 +152,8 @@ func (m *MockConfig) SetBrowserHumanoidClickHoldMaxMs(ms int) {
 	m.Called(ms)
 }
 
-func (m *MockConfig) SetBrowserHumanoidKeyHoldMean(ms float64) {
-	m.Called(ms)
-}
+// Removed extraneous SetBrowserHumanoidKeyHoldMean
 
-// Network Setters
 func (m *MockConfig) SetNetworkCaptureResponseBodies(b bool) {
 	m.Called(b)
 }
@@ -165,12 +170,10 @@ func (m *MockConfig) SetNetworkIgnoreTLSErrors(b bool) {
 	m.Called(b)
 }
 
-// IAST Setters
 func (m *MockConfig) SetIASTEnabled(b bool) {
 	m.Called(b)
 }
 
-// JWT Setters
 func (m *MockConfig) SetJWTEnabled(b bool) {
 	m.Called(b)
 }
@@ -181,13 +184,12 @@ func (m *MockConfig) SetJWTBruteForceEnabled(b bool) {
 
 // -- LLM Client Mock --
 
-// MockLLMClient mocks the schemas.LLMClient interface.
 type MockLLMClient struct {
 	mock.Mock
 }
 
-// Generate provides a mock function for LLM calls.
 func (m *MockLLMClient) Generate(ctx context.Context, req schemas.GenerationRequest) (string, error) {
+	// Respect context cancellation.
 	select {
 	case <-ctx.Done():
 		return "", ctx.Err()
@@ -199,7 +201,6 @@ func (m *MockLLMClient) Generate(ctx context.Context, req schemas.GenerationRequ
 
 // -- Knowledge Graph Client Mock --
 
-// MockKGClient mocks the schemas.KnowledgeGraphClient interface.
 type MockKGClient struct {
 	mock.Mock
 }
@@ -212,36 +213,35 @@ func (m *MockKGClient) AddEdge(ctx context.Context, edge schemas.Edge) error {
 }
 func (m *MockKGClient) GetNode(ctx context.Context, id string) (schemas.Node, error) {
 	args := m.Called(ctx, id)
-	if args.Get(0) == nil {
-		return schemas.Node{}, args.Error(1)
+	if node, ok := args.Get(0).(schemas.Node); ok {
+		return node, args.Error(1)
 	}
-	return args.Get(0).(schemas.Node), args.Error(1)
+	return schemas.Node{}, args.Error(1)
 }
 func (m *MockKGClient) GetEdges(ctx context.Context, nodeID string) ([]schemas.Edge, error) {
 	args := m.Called(ctx, nodeID)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+	if edges, ok := args.Get(0).([]schemas.Edge); ok {
+		return edges, args.Error(1)
 	}
-	return args.Get(0).([]schemas.Edge), args.Error(1)
+	return nil, args.Error(1)
 }
 func (m *MockKGClient) GetNeighbors(ctx context.Context, nodeID string) ([]schemas.Node, error) {
 	args := m.Called(ctx, nodeID)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+	if nodes, ok := args.Get(0).([]schemas.Node); ok {
+		return nodes, args.Error(1)
 	}
-	return args.Get(0).([]schemas.Node), args.Error(1)
+	return nil, args.Error(1)
 }
-func (m *MockKGClient) QueryImprovementHistory(ctx context.Context, goalObjective string, limit int) ([]schemas.Node, error) {
-	args := m.Called(ctx, goalObjective, limit)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+func (m *MockKGClient) QueryImprovementHistory(ctx context.Context, goal string, limit int) ([]schemas.Node, error) {
+	args := m.Called(ctx, goal, limit)
+	if nodes, ok := args.Get(0).([]schemas.Node); ok {
+		return nodes, args.Error(1)
 	}
-	return args.Get(0).([]schemas.Node), args.Error(1)
+	return nil, args.Error(1)
 }
 
 // -- Session Context Mock --
 
-// MockSessionContext implements the schemas.SessionContext interface for testing.
 type MockSessionContext struct {
 	mock.Mock
 	exposedFunctions map[string]interface{}
@@ -306,61 +306,58 @@ func (m *MockSessionContext) AddFinding(ctx context.Context, finding schemas.Fin
 }
 func (m *MockSessionContext) CollectArtifacts(ctx context.Context) (*schemas.Artifacts, error) {
 	args := m.Called(ctx)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+	if artifacts, ok := args.Get(0).(*schemas.Artifacts); ok {
+		return artifacts, args.Error(1)
 	}
-	return args.Get(0).(*schemas.Artifacts), args.Error(1)
+	return nil, args.Error(1)
 }
 func (m *MockSessionContext) GetElementGeometry(ctx context.Context, selector string) (*schemas.ElementGeometry, error) {
 	args := m.Called(ctx, selector)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+	if geom, ok := args.Get(0).(*schemas.ElementGeometry); ok {
+		return geom, args.Error(1)
 	}
-	return args.Get(0).(*schemas.ElementGeometry), args.Error(1)
+	return nil, args.Error(1)
 }
 func (m *MockSessionContext) ExecuteScript(ctx context.Context, script string, scriptArgs []interface{}) (json.RawMessage, error) {
 	args := m.Called(ctx, script, scriptArgs)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+	if msg, ok := args.Get(0).(json.RawMessage); ok {
+		return msg, args.Error(1)
 	}
-	return args.Get(0).(json.RawMessage), args.Error(1)
+	return nil, args.Error(1)
 }
 
 // -- Browser Manager Mock --
 
-// MockBrowserManager mocks the schemas.BrowserManager interface.
 type MockBrowserManager struct {
 	mock.Mock
 }
 
-func (m *MockBrowserManager) NewAnalysisContext(sessionCtx context.Context, cfg interface{}, persona schemas.Persona, taintTemplate string, taintConfig string, findingsChan chan<- schemas.Finding) (schemas.SessionContext, error) {
+func (m *MockBrowserManager) NewAnalysisContext(sessionCtx context.Context, cfg interface{}, persona schemas.Persona, taintTemplate, taintConfig string, findingsChan chan<- schemas.Finding) (schemas.SessionContext, error) {
 	args := m.Called(sessionCtx, cfg, persona, taintTemplate, taintConfig, findingsChan)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+	if ctx, ok := args.Get(0).(schemas.SessionContext); ok {
+		return ctx, args.Error(1)
 	}
-	return args.Get(0).(schemas.SessionContext), args.Error(1)
+	return nil, args.Error(1)
 }
 func (m *MockBrowserManager) Shutdown(ctx context.Context) error { return m.Called(ctx).Error(0) }
 
 // -- OAST Provider Mock --
 
-// MockOASTProvider mocks the OASTProvider interface.
 type MockOASTProvider struct {
 	mock.Mock
 }
 
 func (m *MockOASTProvider) GetInteractions(ctx context.Context, canaries []string) ([]schemas.OASTInteraction, error) {
 	args := m.Called(ctx, canaries)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+	if interactions, ok := args.Get(0).([]schemas.OASTInteraction); ok {
+		return interactions, args.Error(1)
 	}
-	return args.Get(0).([]schemas.OASTInteraction), args.Error(1)
+	return nil, args.Error(1)
 }
 func (m *MockOASTProvider) GetServerURL() string { return m.Called().String(0) }
 
 // -- Analyzer Mock --
 
-// MockAnalyzer is a mock implementation of the core.Analyzer interface.
 type MockAnalyzer struct {
 	mock.Mock
 }
@@ -370,11 +367,8 @@ func (m *MockAnalyzer) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 }
 func (m *MockAnalyzer) Name() string        { return m.Called().String(0) }
 func (m *MockAnalyzer) Description() string { return m.Called().String(0) }
-
-// Type provides a mock function for returning the analyzer type.
 func (m *MockAnalyzer) Type() core.AnalyzerType {
 	args := m.Called()
-	// Return the type configured in the mock setup, default to Unknown.
 	if t, ok := args.Get(0).(core.AnalyzerType); ok {
 		return t
 	}
@@ -383,41 +377,32 @@ func (m *MockAnalyzer) Type() core.AnalyzerType {
 
 // -- Store Mock --
 
-// MockStore mocks the store.Store interface.
 type MockStore struct {
 	mock.Mock
 }
 
-// PersistData provides a mock function for persisting result envelopes.
 func (m *MockStore) PersistData(ctx context.Context, data *schemas.ResultEnvelope) error {
 	args := m.Called(ctx, data)
 	return args.Error(0)
 }
 
-// GetFindingsByScanID provides a mock function for retrieving findings.
 func (m *MockStore) GetFindingsByScanID(ctx context.Context, scanID string) ([]schemas.Finding, error) {
 	args := m.Called(ctx, scanID)
-	if args.Get(0) == nil {
-		return nil, args.Error(1)
+	if findings, ok := args.Get(0).([]schemas.Finding); ok {
+		return findings, args.Error(1)
 	}
-	return args.Get(0).([]schemas.Finding), args.Error(1)
+	return nil, args.Error(1)
 }
 
 // -- IDOR Session Mock --
 
-// MockIdorSession is a mock implementation of the idor.Session interface.
 type MockIdorSession struct {
 	mock.Mock
 }
 
-// ApplyToRequest is the mock implementation that satisfies the idor.Session interface.
 func (m *MockIdorSession) ApplyToRequest(r *http.Request) {
 	m.Called(r)
 }
-
-// WithAuthToken is a helper method to configure the mock for the common use case
-// of applying a bearer token to the Authorization header. It returns the mock
-// instance for fluent configuration.
 func (m *MockIdorSession) WithAuthToken(token string) *MockIdorSession {
 	m.On("ApplyToRequest", mock.Anything).Run(func(args mock.Arguments) {
 		req := args.Get(0).(*http.Request)
@@ -428,16 +413,59 @@ func (m *MockIdorSession) WithAuthToken(token string) *MockIdorSession {
 	return m
 }
 
-// MockOrchestrator is a mock implementation of the schemas.Orchestrator interface.
-// It is isolated in its own file to prevent compilation issues from other mocks.
+// -- Orchestrator Mock --
+
 type MockOrchestrator struct {
 	mock.Mock
 }
 
-// StartScan provides a mock function for the orchestrator's StartScan method.
 func (m *MockOrchestrator) StartScan(ctx context.Context, targets []string, scanID string) error {
-	// This call tells the testify mock library that the method was called with these arguments.
 	args := m.Called(ctx, targets, scanID)
-	// It then returns whatever error (or nil) was configured for this call in the test.
 	return args.Error(0)
+}
+
+// -- Component Factory Mock (for testing cmd/scan.go) --
+
+// MockComponentFactory mocks the ComponentFactory interface.
+type MockComponentFactory struct {
+	mock.Mock
+}
+
+// Create provides a mock function for component creation.
+// It returns interface{} to avoid a direct dependency on the cmd package (where Components is defined),
+// preventing an import cycle. The calling test code will perform a type assertion.
+func (m *MockComponentFactory) Create(ctx context.Context, cfg config.Interface, targets []string) (interface{}, error) {
+	args := m.Called(ctx, cfg, targets)
+	return args.Get(0), args.Error(1)
+}
+
+// -- Engine Mocks --
+
+// MockTaskEngine mocks the schemas.TaskEngine interface.
+type MockTaskEngine struct {
+	mock.Mock
+}
+
+func (m *MockTaskEngine) Start(ctx context.Context, taskChan <-chan schemas.Task) {
+	m.Called(ctx, taskChan)
+}
+func (m *MockTaskEngine) Stop() {
+	m.Called()
+}
+
+// MockDiscoveryEngine mocks the schemas.DiscoveryEngine interface.
+type MockDiscoveryEngine struct {
+	mock.Mock
+}
+
+func (m *MockDiscoveryEngine) Start(ctx context.Context, targets []string) (<-chan schemas.Task, error) {
+	args := m.Called(ctx, targets)
+	if ch, ok := args.Get(0).(<-chan schemas.Task); ok {
+		return ch, args.Error(1)
+	}
+	return nil, args.Error(1)
+}
+
+func (m *MockDiscoveryEngine) Stop() {
+	m.Called()
 }

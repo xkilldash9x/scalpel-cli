@@ -8,11 +8,11 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
-	"go.uber.org/zap/zaptest"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 )
 
 // MockMetalystRunner is a mock implementation of the MetalystRunner interface.
@@ -32,9 +32,14 @@ func setupHealTestConfig(t *testing.T) config.Interface {
 	return config.NewDefaultConfig()
 }
 
+// NOTE: This assumes runSelfHeal, MetalystRunner, and the initializer function type are defined in the cmd package.
 func TestRunSelfHeal(t *testing.T) {
 	// Common arrange steps for all sub-tests
-	logger := zaptest.NewLogger(t)
+	// Use a silenced global logger for these tests.
+	observability.ResetForTest()
+	observability.InitializeLogger(config.LoggerConfig{Level: "fatal"})
+	logger := observability.GetLogger()
+
 	ctx := context.Background()
 	cfg := setupHealTestConfig(t)
 	mockLLM := new(mocks.MockLLMClient)
@@ -106,4 +111,31 @@ func TestRunSelfHeal(t *testing.T) {
 		assert.Contains(t, err.Error(), "--panic-log is required")
 		mockRunner.AssertNotCalled(t, "Run")
 	})
+}
+
+func TestSelfHealCmd_RunE_LLMInitializationFailure(t *testing.T) {
+	// This test specifically checks the RunE function of the cobra command,
+	// ensuring that an error during dependency setup is handled correctly.
+
+	// Arrange
+	// FIX: Initialize the global logger properly for the test run.
+	observability.ResetForTest()
+	observability.InitializeLogger(config.LoggerConfig{Level: "fatal"}) // Keep output clean
+
+	badCfg := config.NewDefaultConfig()
+	badCfg.AgentCfg.LLM.Models = make(map[string]config.LLMModelConfig) // No models
+
+	selfHealCmd := newSelfHealCmd()
+	ctx := context.WithValue(context.Background(), configKey, badCfg)
+	selfHealCmd.SetContext(ctx)
+
+	// Set required flags to pass initial cobra validation.
+	selfHealCmd.SetArgs([]string{"--panic-log", "dummy.log"})
+
+	// Act
+	err := selfHealCmd.Execute()
+
+	// Assert
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to initialize LLM client")
 }

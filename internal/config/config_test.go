@@ -1,4 +1,3 @@
-// internal/config/config_test.go
 package config
 
 import (
@@ -34,29 +33,22 @@ func TestConfigValidation(t *testing.T) {
 	t.Run("Core Validation", func(t *testing.T) {
 		// Start with a valid default config.
 		cfg := NewDefaultConfig()
-		cfg.database.URL = "postgres://user:pass@host/db"
+		cfg.DatabaseCfg.URL = "postgres://user:pass@host/db"
 
 		// Test Case: Valid Config
 		err := cfg.Validate()
 		assert.NoError(t, err, "A valid config should not produce a validation error")
 
-		// Test Case: Missing Database URL
-		cfgInvalidDB := *cfg
-		cfgInvalidDB.database.URL = ""
-		err = cfgInvalidDB.Validate()
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "database.url is a required")
-
 		// Test Case: Invalid Engine Concurrency
 		cfgInvalidEngine := *cfg
-		cfgInvalidEngine.engine.WorkerConcurrency = 0
+		cfgInvalidEngine.EngineCfg.WorkerConcurrency = 0
 		err = cfgInvalidEngine.Validate()
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "engine.worker_concurrency must be a positive integer")
 
 		// Test Case: Invalid Browser Concurrency
 		cfgInvalidBrowser := *cfg
-		cfgInvalidBrowser.browser.Concurrency = -1
+		cfgInvalidBrowser.BrowserCfg.Concurrency = -1
 		err = cfgInvalidBrowser.Validate()
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "browser.concurrency must be a positive integer")
@@ -101,13 +93,39 @@ func TestConfigValidation(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "GitHub token is required but not found")
 	})
+
+	t.Run("Evolution Validation", func(t *testing.T) {
+		validEvo := EvolutionConfig{
+			Enabled:    true,
+			MaxCycles:  10,
+			SettleTime: 500 * time.Millisecond,
+		}
+		assert.NoError(t, validEvo.Validate())
+
+		disabledEvo := validEvo
+		disabledEvo.Enabled = false
+		assert.NoError(t, disabledEvo.Validate(), "disabled evolution config should always be valid")
+
+		invalidCycles := validEvo
+		invalidCycles.MaxCycles = 0
+		err := invalidCycles.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "max_cycles must be greater than 0")
+
+		invalidSettleTime := validEvo
+		invalidSettleTime.SettleTime = -1 * time.Second
+		err = invalidSettleTime.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "settle_time must be a positive duration")
+	})
 }
 
 // -- Factory Function Tests --
 
 func TestNewConfigFromViper(t *testing.T) {
 	t.Run("Successful Load", func(t *testing.T) {
-		yamlConfig := []byte(`
+		// Renaming this variable to avoid any potential linter confusion or hidden name collisions.
+		yamlBytes := []byte(`
 database:
   url: "postgres://test:test@localhost/test"
 engine:
@@ -116,8 +134,9 @@ browser:
   concurrency: 2
 `)
 		v := viper.New()
+		SetDefaults(v) // Set defaults first
 		v.SetConfigType("yaml")
-		err := v.ReadConfig(bytes.NewBuffer(yamlConfig))
+		err := v.ReadConfig(bytes.NewBuffer(yamlBytes))
 		require.NoError(t, err)
 
 		cfg, err := NewConfigFromViper(v)
@@ -130,12 +149,13 @@ browser:
 	t.Run("Validation Failure", func(t *testing.T) {
 		v := viper.New()
 		SetDefaults(v)
-		v.Set("database.url", "") // Intentionally invalid
+		v.Set("engine.worker_concurrency", 0) // Intentionally invalid
 
 		cfg, err := NewConfigFromViper(v)
 		assert.Error(t, err)
 		assert.Nil(t, cfg)
 		assert.Contains(t, err.Error(), "invalid configuration")
+		assert.Contains(t, err.Error(), "engine.worker_concurrency must be a positive integer")
 	})
 
 	t.Run("Environment Variable Binding", func(t *testing.T) {
@@ -179,6 +199,7 @@ scanners:
           numericid: ["increment"]
 `
 	v := viper.New()
+	SetDefaults(v) // Set defaults first
 	v.SetConfigType("yaml")
 	err := v.ReadConfig(bytes.NewBufferString(yamlInput))
 	require.NoError(t, err)

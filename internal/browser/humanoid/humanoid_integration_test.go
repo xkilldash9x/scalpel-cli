@@ -35,6 +35,10 @@ func assertContextCancellation(t *testing.T, err error) {
 
 // setupSessionTestEnvironment initializes a real browser session and a test server.
 // The session itself serves as the humanoid.Executor.
+// internal/browser/humanoid/humanoid_integration_test.go
+
+// setupSessionTestEnvironment initializes a real browser session and a test server.
+// The session itself serves as the humanoid.Executor.
 func setupSessionTestEnvironment(t *testing.T) (context.Context, *session.Session, *httptest.Server) {
 	t.Helper()
 

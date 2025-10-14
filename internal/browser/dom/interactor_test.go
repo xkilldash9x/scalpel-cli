@@ -16,9 +16,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/parser"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/layout"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/parser"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/style"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"golang.org/x/net/html"
 )
 
@@ -171,7 +172,7 @@ func TestInteractor_DiscoveryAndFiltering(t *testing.T) {
 		`
 	mockPage := &MockCorePagePrimitives{DOMSnapshot: htmlContent}
 	logger := &NopLogger{}
-	interactor := NewInteractor(logger, NewDefaultHumanoidConfig(), nil, mockPage)
+	interactor := NewInteractor(logger, config.HumanoidConfig{}, nil, mockPage)
 
 	// Since discoverElements now requires a layout tree, we parse the HTML
 	// and build a mock tree to pass into the function.
@@ -206,7 +207,7 @@ func TestInteractor_ExploreStep_FlowAndStateChange(t *testing.T) {
 	initialHTML := `<html><body><input type="text" id="input1"><button id="change-state-btn">Change</button></body></html>`
 	mockPage := &MockCorePagePrimitives{DOMSnapshot: initialHTML}
 	logger := &NopLogger{}
-	hConfig := HumanoidConfig{Enabled: false} // Disable delays
+	hConfig := config.HumanoidConfig{Enabled: false} // Disable delays
 	interactor := NewInteractor(logger, hConfig, mockStabilizeFn(mockPage), mockPage)
 
 	// Use a seeded RNG to make the test deterministic
@@ -259,4 +260,3 @@ func TestInteractor_ExploreStep_FlowAndStateChange(t *testing.T) {
 	mockPage.mu.Unlock()
 	assert.Contains(t, finalDOM, "Changed!")
 }
-

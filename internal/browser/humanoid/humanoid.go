@@ -8,23 +8,10 @@ import (
 	"sync"
 	"time"
 
-	// Removed "github.com/aquilax/go-perlin"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"go.uber.org/zap"
 )
-
-// humanoidTestConfig is an unexported mock that satisfies the config.Interface
-// for the limited purpose of testing the Humanoid constructor.
-type humanoidTestConfig struct {
-	config.Interface
-	BrowserCfg config.BrowserConfig
-}
-
-// Browser returns the test browser configuration.
-func (m *humanoidTestConfig) Browser() config.BrowserConfig {
-	return m.BrowserCfg
-}
 
 // Humanoid defines the state and capabilities for simulating human like interactions.
 type Humanoid struct {
@@ -56,8 +43,7 @@ type Humanoid struct {
 }
 
 // New creates and initializes a new Humanoid instance.
-func New(cfg config.Interface, logger *zap.Logger, executor Executor) *Humanoid {
-	humanoidCfg := cfg.Browser().Humanoid
+func New(humanoidCfg config.HumanoidConfig, logger *zap.Logger, executor Executor) *Humanoid {
 
 	h := &Humanoid{
 		logger:   logger,
@@ -119,10 +105,8 @@ func NewTestHumanoid(executor Executor, seed int64) *Humanoid {
 	humanoidCfg.FatigueRecoveryRate = 0.01
 	humanoidCfg.HabituationRate = 0.005
 
-	testBrowserCfg := config.BrowserConfig{Humanoid: humanoidCfg}
-	mockCfg := &humanoidTestConfig{BrowserCfg: testBrowserCfg}
-
-	h := New(mockCfg, zap.NewNop(), executor)
+	// The mock object is no longer needed. We pass the struct directly.
+	h := New(humanoidCfg, zap.NewNop(), executor)
 
 	h.mu.Lock()
 	defer h.mu.Unlock()

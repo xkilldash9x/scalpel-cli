@@ -691,16 +691,16 @@ func (a *ATOAnalyzer) executePause(ctx context.Context, h *humanoid.Humanoid) er
 
 	} else {
 		// Fallback: Use the legacy randomized sleep using the operation context.
-		a.legacyPause(ctx)
-		return nil
+		// Propagate the error from legacyPause (e.g., context.Canceled).
+		return a.legacyPause(ctx)
 	}
 }
 
 // legacyPause introduces a variable delay. This is used as a fallback when the Humanoid module is unavailable.
-func (a *ATOAnalyzer) legacyPause(ctx context.Context) {
+func (a *ATOAnalyzer) legacyPause(ctx context.Context) error {
 	// Check if any delay is configured.
 	if a.cfg.MinRequestDelayMs <= 0 && a.cfg.RequestDelayJitterMs <= 0 {
-		return
+		return nil
 	}
 
 	baseDelayMs := a.cfg.MinRequestDelayMs
@@ -718,7 +718,9 @@ func (a *ATOAnalyzer) legacyPause(ctx context.Context) {
 	delay := time.Duration(baseDelayMs+jitter) * time.Millisecond
 	select {
 	case <-time.After(delay):
+		return nil
 	case <-ctx.Done():
+		return ctx.Err()
 	}
 }
 
