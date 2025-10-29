@@ -15,17 +15,20 @@
         ErrorCallbackName: "{{.ErrorCallbackName}}",
         CanaryPrefix: "SCALPEL",
         // Property name used specifically for Prototype Pollution probes.
-        PollutionCheckProperty: "scalpelPolluted"
+        PollutionCheckProperty: "scalpelPolluted",
+        // Flag for exposing internals during unit testing (set via global variable before loading)
+        IsTesting: scope.__SCALPEL_TEST_MODE__ || false
     };
 
     // Determine the context (Main Window or Web Worker)
     const IS_WORKER = typeof WorkerGlobalScope !== 'undefined' && self instanceof WorkerGlobalScope;
     const CONTEXT_NAME = IS_WORKER ? "Worker" : "Window";
 
+    // FIX: Explicitly use scope.console to ensure we use the instrumented environment's console (e.g., JSDOM during testing).
     const logger = {
-        warn: (...args) => console.warn(`[Scalpel Taint Shim - ${CONTEXT_NAME}]`, ...args),
-        error: (...args) => console.error(`[Scalpel Taint Shim - ${CONTEXT_NAME}]`, ...args),
-        log: (...args) => console.log(`[Scalpel Taint Shim - ${CONTEXT_NAME}]`, ...args)
+        warn: (...args) => scope.console.warn(`[Scalpel Taint Shim - ${CONTEXT_NAME}]`, ...args),
+        error: (...args) => scope.console.error(`[Scalpel Taint Shim - ${CONTEXT_NAME}]`, ...args),
+        log: (...args) => scope.console.log(`[Scalpel Taint Shim - ${CONTEXT_NAME}]`, ...args)
     };
 
     // Predefined condition handlers for CSP compatibility.
@@ -84,13 +87,20 @@
      * Implements deep checking with cycle detection and depth limits.
      */
     function isTainted(value, depth = 0, seen = new WeakSet()) {
-        const MAX_DEPTH = 4; // Limit recursion depth for performance.
+        const MAX_DEPTH = 4; // Limit recursion depth for performance and robustness.
+
+        // FIX: Check depth limit first to ensure strict boundary compliance and prevent excessive recursion.
+        // Previously, string checks occurred before depth checks, allowing detection at depth > MAX_DEPTH.
+        if (depth > MAX_DEPTH) {
+            return false;
+        }
 
         if (typeof value === 'string') {
             return value.includes(CONFIG.CanaryPrefix);
         }
 
-        if (typeof value !== 'object' || value === null || depth > MAX_DEPTH) {
+        // Simplified check since depth is already handled above.
+        if (typeof value !== 'object' || value === null) {
             return false;
         }
 
@@ -99,9 +109,10 @@
         seen.add(value);
 
         // Handle Arrays and specialized iterable objects (URLSearchParams, FormData)
+        // ROBUSTNESS: Use scope.* to ensure we use the correct global objects in both Window/Worker contexts and test environments.
         if (Array.isArray(value) ||
-            (typeof URLSearchParams !== 'undefined' && value instanceof URLSearchParams) ||
-            (typeof FormData !== 'undefined' && value instanceof FormData)) {
+            (typeof scope.URLSearchParams !== 'undefined' && value instanceof scope.URLSearchParams) ||
+            (typeof scope.FormData !== 'undefined' && value instanceof scope.FormData)) {
 
             const iterator = (typeof value.values === 'function') ? value.values() : value;
             for (const val of iterator) {
@@ -144,7 +155,8 @@
                 try {
                     let stringValue;
                     // Handle complex types before reporting.
-                    if (typeof Request !== 'undefined' && value instanceof Request) {
+                    // ROBUSTNESS: Use scope.Request.
+                    if (typeof scope.Request !== 'undefined' && value instanceof scope.Request) {
                         stringValue = value.url; // For FETCH_URL sink when Request object is used
                     } else if (typeof value === 'object' && value !== null) {
                         try {
@@ -239,16 +251,30 @@
                 // --- Specialized Argument Handlers (Pre-processing) ---
 
                 // 1. Fetch Handlers (fetch)
-                if (sinkDef.Name === 'fetch' && typeof Request !== 'undefined') {
-                    if (sinkDef.Type === 'FETCH_BODY' && sinkDef.ArgIndex === 1 && args.length > 1 && args[1] && args[1].body) {
-                        // Inspect the body property of the options object (arg 1).
-                        valueToInspect = args[1].body;
-                    } else if (sinkDef.Type === 'FETCH_URL' && sinkDef.ArgIndex === 0 && args.length > 0) {
-                        // Inspect the URL (arg 0). Handle both string and Request object.
-                        if (args[0] instanceof Request) {
-                            valueToInspect = args[0].url;
+                // We determine context based on ArgIndex because 'fetch'
+                // is overloaded for both URL (Arg 0) and Body (Arg 1) sinks.
+                if (sinkDef.Name === 'fetch') {
+                    
+                    // A. FETCH_BODY (ArgIndex 1)
+                    if (sinkDef.ArgIndex === 1) {
+                        if (args.length > 1 && args[1] && args[1].body) {
+                            // Inspect the body property of the options object (arg 1).
+                            valueToInspect = args[1].body;
                         } else {
-                            valueToInspect = args[0];
+                            // Prevent false positive taint check on the options object itself.
+                            valueToInspect = null;
+                        }
+                    } 
+                    // B. FETCH_URL (ArgIndex 0)
+                    else if (sinkDef.ArgIndex === 0) {
+                        if (args.length > 0) {
+                            // Inspect the URL (arg 0). Handle both string and Request object (if Request is defined).
+                            // ROBUSTNESS: Use scope.Request.
+                            if (typeof scope.Request !== 'undefined' && args[0] instanceof scope.Request) {
+                                valueToInspect = args[0].url;
+                            } else {
+                                valueToInspect = args[0];
+                            }
                         }
                     }
                 }
@@ -410,29 +436,48 @@
     }
 
     /**
-     * SHADOW DOM SUPPORT: Instruments the creation of Shadow Roots.
+     * SHADOW DOM SUPPORT:
+     * Global instrumentation applied during initialization covers APIs used within the Shadow DOM
+     * (e.g., Element.prototype.innerHTML), provided the configuration uses absolute paths.
+     * Explicitly overriding attachShadow to dynamically instrument Shadow Roots is therefore redundant.
      */
-    function instrumentShadowDOM() {
-        if (IS_WORKER || typeof Element === 'undefined' || !Element.prototype.attachShadow) return;
 
-        const originalAttachShadow = Element.prototype.attachShadow;
-        Element.prototype.attachShadow = function(options) {
-            const shadowRoot = originalAttachShadow.call(this, options);
+    /**
+     * Helper function to instrument addEventListener on various prototypes (EventTarget, Window, etc.).
+     * FIX: This addresses inconsistencies across environments (like JSDOM) where patching
+     * EventTarget.prototype alone might not successfully intercept window.addEventListener.
+     */
+    function instrumentEventListener(prototype) {
+        if (!prototype || typeof prototype.addEventListener !== 'function') return;
 
-            try {
-                // Apply instrumentation to the ShadowRoot itself (e.g. shadowRoot.innerHTML).
-                applyInstrumentation(shadowRoot);
-                // Global prototypes are already instrumented by initialize().
-                // We do not need a MutationObserver here.
-            } catch (e) {
-                reportShimError(e, "Error during Shadow DOM instrumentation (attachShadow)");
+        const originalAddEventListener = prototype.addEventListener;
+
+        // FIX: Prevent re-instrumentation using the existing cache. The previous implementation bypassed this.
+        if (instrumentedCache.has(originalAddEventListener)) return;
+
+        const wrapper = function(type, listener, options) {
+            let listenerToUse = listener;
+            // Check for 'message' events (IPC/postMessage)
+            if (type === 'message' && typeof listener === 'function') {
+                listenerToUse = function(event) {
+                    // Check if the data property is tainted
+                    if (isTainted(event.data)) {
+                        // Log the flow. We rely on subsequent sinks to catch the actual vulnerability.
+                        logger.log("Tainted data received via postMessage/onmessage", event.origin);
+                    }
+                    // Call the original listener robustly
+                    return Reflect.apply(listener, this, [event]);
+                };
             }
-
-            return shadowRoot;
+            // Call the original addEventListener robustly
+            return Reflect.apply(originalAddEventListener, this, [type, listenerToUse, options]);
         };
+
+        prototype.addEventListener = wrapper;
+        instrumentedCache.add(wrapper);
+        instrumentedCache.add(originalAddEventListener);
     }
-
-
+    
     /**
      * WEB WORKER SUPPORT: Instruments the creation and communication of Web Workers.
      */
@@ -469,25 +514,32 @@
             logger.log("IAST Shim initialized within Web Worker context.");
         }
 
-        // 3. Instrument EventTarget.addEventListener to track incoming 'message' events (IPC Taint Flow)
-        if (typeof EventTarget !== 'undefined' && EventTarget.prototype.addEventListener) {
-            const originalAddEventListener = EventTarget.prototype.addEventListener;
-            EventTarget.prototype.addEventListener = function(type, listener, options) {
-                let listenerToUse = listener;
-                if (type === 'message' && typeof listener === 'function') {
-                    listenerToUse = function(event) {
-                        // Check if the data property is tainted
-                        if (isTainted(event.data)) {
-                            // Log the flow. We rely on subsequent sinks to catch the actual vulnerability if the data is used unsafely.
-                            logger.log("Tainted data received via postMessage/onmessage", event.origin);
-                        }
-                        return listener.call(this, event);
-                    };
-                }
-                return originalAddEventListener.call(this, type, listenerToUse, options);
-            };
+       // 3. Instrument addEventListener to track incoming 'message' events (IPC Taint Flow)
+
+        // Instrument the base EventTarget.prototype
+        if (typeof scope.EventTarget !== 'undefined') {
+            instrumentEventListener(scope.EventTarget.prototype);
         }
-    }
+
+        // FIX: Explicitly instrument specific prototypes known to be targets for 'message' events.
+        if (!IS_WORKER) {
+            // Instrument Window.prototype (for window.addEventListener) - Crucial for JSDOM compatibility.
+            if (typeof scope.Window !== 'undefined') {
+                instrumentEventListener(scope.Window.prototype);
+            }
+            // *** START FIX ***
+            // Explicitly patch the global 'window' object as well for JSDOM compatibility.
+            if (typeof scope.addEventListener === 'function') {
+                 instrumentEventListener(scope); // 'scope' is 'self', which is 'window' here
+            }
+            // *** END FIX ***
+        } else {
+             // Instrument WorkerGlobalScope.prototype (for self.addEventListener in workers)
+             if (typeof scope.WorkerGlobalScope !== 'undefined') {
+                instrumentEventListener(scope.WorkerGlobalScope.prototype);
+             }
+        }
+   }
 
     /**
      * PROTOTYPE POLLUTION DETECTION: Checks if Object.prototype has been polluted by our probes.
@@ -527,17 +579,14 @@
             // 1. Set up the execution proof callback wrapper.
             initializeExecutionProofCallback();
 
-            // 2. Apply instrumentation to the current global scope (Window or Worker) and core prototypes.
+            // 2. Apply instrumentation based on the configuration.
+            // We assume configuration paths (sinkDef.Name) are absolute (relative to the global scope).
             applyInstrumentation(scope);
-            if (typeof Object !== 'undefined' && Object.prototype) applyInstrumentation(Object.prototype);
-            if (typeof Function !== 'undefined' && Function.prototype) applyInstrumentation(Function.prototype);
-            if (typeof Element !== 'undefined' && Element.prototype) applyInstrumentation(Element.prototype);
-            if (typeof HTMLElement !== 'undefined' && HTMLElement.prototype) applyInstrumentation(HTMLElement.prototype);
-            if (typeof Window !== 'undefined' && Window.prototype) applyInstrumentation(Window.prototype);
 
-
+            // NOTE: Removed redundant calls to applyInstrumentation on specific prototypes (e.g. Element.prototype).
+            // If prototypes need instrumentation, they should be specified in the config (e.g., "Element.prototype.innerHTML").
+            
             // 3. Instrument advanced features.
-            instrumentShadowDOM();
             instrumentWebWorkers();
 
             // 4. Check for Prototype Pollution.
@@ -554,5 +603,16 @@
     }
 
     initialize();
+
+    // Expose internals for testing if in test mode
+    if (CONFIG.IsTesting) {
+        scope.__SCALPEL_INTERNALS__ = {
+            isTainted: isTainted,
+            resolvePath: resolvePath,
+            CONFIG: CONFIG,
+            ConditionHandlers: ConditionHandlers,
+            getStackTrace: getStackTrace
+        };
+    }
 
 })(self); // Use 'self' which refers to the global scope in both Window and Worker contexts.
