@@ -15,7 +15,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zapcore"
 	"go.uber.org/zap/zaptest"
+	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
@@ -317,6 +320,33 @@ func setupCorrelationTest(t *testing.T) (*Analyzer, *MockResultsReporter) {
 	return analyzer, reporter
 }
 
+func TestHandleShimError(t *testing.T) {
+	// This test primarily checks that the analyzer receives the event and logs it.
+	// We use a logger observer to verify this.
+	core, hook := observer.New(zaptest.NewLogger(t).Core())
+	logger := zaptest.NewLogger(t).WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core { return core }))
+
+	analyzer, _, _ := setupAnalyzer(t, nil, false)
+	analyzer.logger = logger // Replace default logger with observed logger
+
+	errorEvent := ShimErrorEvent{
+		Error:      "TypeError: null is not an object",
+		Location:   "instrumentFunction(fetch)",
+		StackTrace: "at wrapper (shim.js:100)",
+	}
+
+	// Call the handler directly (this is what the browser session does)
+	analyzer.handleShimError(errorEvent)
+
+	// Verify that an error log was produced
+	require.Equal(t, 1, hook.Len(), "Expected one error log entry")
+	entry := hook.All()[0]
+	assert.Equal(t, "JavaScript Instrumentation Shim Error reported.", entry.Message)
+	fields := entry.ContextMap()
+	assert.Equal(t, errorEvent.Error, fields["error_message"])
+	assert.Equal(t, errorEvent.Location, fields["location"])
+}
+
 func finalizeCorrelationTest(t *testing.T, analyzer *Analyzer) {
 	t.Helper()
 	if analyzer.backgroundCancel != nil {
@@ -360,6 +390,76 @@ func TestProcessSinkEvent_ValidFlow(t *testing.T) {
 	assert.Equal(t, "at app.js:42", finding.StackTrace)
 }
 
+func TestProcessSinkEvent_InvalidFlow_Suppressed(t *testing.T) {
+	// Setup analyzer and observer to check logs for suppression reason
+	core, hook := observer.New(zaptest.NewLogger(t).Core())
+	logger := zaptest.NewLogger(t).WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core { return core }))
+
+	analyzer, reporter := setupCorrelationTest(t)
+	analyzer.logger = logger
+
+	// XSS probe flowing into a WebSocketSend sink is invalid according to ValidTaintFlows (FP)
+	canary := analyzer.generateCanary("T", schemas.ProbeTypeXSS)
+	payload := fmt.Sprintf("<svg onload=%s>", canary)
+	probe := ActiveProbe{Type: schemas.ProbeTypeXSS, Canary: canary, Value: payload}
+	analyzer.registerProbe(probe)
+
+	sinkEvent := SinkEvent{Type: schemas.SinkWebSocketSend, Value: payload}
+
+	// Expect no report
+	analyzer.eventsChan <- sinkEvent
+	finalizeCorrelationTest(t, analyzer)
+
+	assert.Empty(t, reporter.GetFindings())
+	// Verify suppression log
+	assert.Equal(t, 1, hook.FilterMessage("Context mismatch: Taint flow suppressed (False Positive).").Len())
+}
+
+func TestProcessSinkEvent_SanitizationDetected(t *testing.T) {
+	analyzer, reporter := setupCorrelationTest(t)
+	canary := analyzer.generateCanary("T", schemas.ProbeTypeXSS)
+	originalPayload := fmt.Sprintf("<img src=x onerror=%s>", canary)
+	probe := ActiveProbe{Type: schemas.ProbeTypeXSS, Canary: canary, Value: originalPayload}
+	analyzer.registerProbe(probe)
+
+	// Payload at sink has tags stripped, but canary remains
+	sanitizedValue := fmt.Sprintf("img src=x onerror=%s", canary)
+	sinkEvent := SinkEvent{Type: schemas.SinkInnerHTML, Value: sanitizedValue}
+
+	reporter.On("Report", mock.Anything).Return().Once()
+
+	analyzer.eventsChan <- sinkEvent
+	finalizeCorrelationTest(t, analyzer)
+
+	require.Len(t, reporter.GetFindings(), 1)
+	finding := reporter.GetFindings()[0]
+	assert.Equal(t, SanitizationPartial, finding.SanitizationLevel)
+	assert.Contains(t, finding.Detail, "HTML tags modified or stripped")
+}
+
+func TestProcessSinkEvent_MultipleCanaries(t *testing.T) {
+	analyzer, reporter := setupCorrelationTest(t)
+	canary1 := analyzer.generateCanary("M1", schemas.ProbeTypeXSS)
+	canary2 := analyzer.generateCanary("M2", schemas.ProbeTypeSSTI)
+
+	analyzer.registerProbe(ActiveProbe{Type: schemas.ProbeTypeXSS, Canary: canary1, Value: canary1})
+	analyzer.registerProbe(ActiveProbe{Type: schemas.ProbeTypeSSTI, Canary: canary2, Value: canary2})
+
+	// Value contains both canaries
+	sinkValue := fmt.Sprintf("<div>%s and %s</div>", canary1, canary2)
+	sinkEvent := SinkEvent{Type: schemas.SinkInnerHTML, Value: sinkValue}
+
+	reporter.On("Report", mock.Anything).Return().Twice()
+
+	analyzer.eventsChan <- sinkEvent
+	finalizeCorrelationTest(t, analyzer)
+
+	require.Len(t, reporter.GetFindings(), 2)
+	findings := reporter.GetFindings()
+	canariesFound := []string{findings[0].Canary, findings[1].Canary}
+	assert.ElementsMatch(t, []string{canary1, canary2}, canariesFound)
+}
+
 func TestProcessOASTInteraction_Valid(t *testing.T) {
 	analyzer, reporter := setupCorrelationTest(t)
 	canary := analyzer.generateCanary("T", schemas.ProbeTypeOAST)
@@ -377,6 +477,53 @@ func TestProcessOASTInteraction_Valid(t *testing.T) {
 	require.NotNil(t, finding.OASTDetails)
 	assert.Equal(t, "DNS", finding.OASTDetails.Protocol)
 	assert.Equal(t, interactionTime, finding.OASTDetails.InteractionTime)
+}
+
+func TestProcessExecutionProof_Valid(t *testing.T) {
+	analyzer, reporter := setupCorrelationTest(t)
+	canary := analyzer.generateCanary("XSS", schemas.ProbeTypeXSS)
+	probe := ActiveProbe{Type: schemas.ProbeTypeXSS, Canary: canary, Source: schemas.SourceCookie}
+	analyzer.registerProbe(probe)
+
+	proofEvent := ExecutionProofEvent{
+		Canary:     canary,
+		StackTrace: "at <anonymous>:1:1 (via img onerror)",
+	}
+
+	reporter.On("Report", mock.Anything).Return().Once()
+
+	analyzer.eventsChan <- proofEvent
+
+	finalizeCorrelationTest(t, analyzer)
+
+	require.Len(t, reporter.GetFindings(), 1)
+	finding := reporter.GetFindings()[0]
+	assert.Equal(t, schemas.SinkExecution, finding.Sink)
+	assert.True(t, finding.IsConfirmed)
+	assert.Equal(t, "Payload execution confirmed via JS callback.", finding.Detail)
+	assert.Equal(t, canary, finding.Canary)
+	assert.Equal(t, "at <anonymous>:1:1 (via img onerror)", finding.StackTrace)
+}
+
+func TestProcessPrototypePollutionConfirmation_Valid(t *testing.T) {
+	analyzer, reporter := setupCorrelationTest(t)
+	canary := analyzer.generateCanary("PP", schemas.ProbeTypePrototypePollution)
+	payload := fmt.Sprintf(`{"__proto__":{"scalpelPolluted":"%s"}}`, canary)
+	probe := ActiveProbe{Type: schemas.ProbeTypePrototypePollution, Canary: canary, Value: payload, Source: schemas.SourceLocalStorage}
+	analyzer.registerProbe(probe)
+
+	// The SinkEvent structure for PP confirmation
+	confirmationEvent := SinkEvent{Type: schemas.SinkPrototypePollution, Value: canary, Detail: "scalpelPolluted"}
+
+	reporter.On("Report", mock.Anything).Return().Once()
+	analyzer.eventsChan <- confirmationEvent
+	finalizeCorrelationTest(t, analyzer)
+
+	require.Len(t, reporter.GetFindings(), 1)
+	finding := reporter.GetFindings()[0]
+	assert.Equal(t, schemas.SinkPrototypePollution, finding.Sink)
+	assert.True(t, finding.IsConfirmed)
+	assert.Equal(t, "Successfully polluted Object.prototype property: scalpelPolluted", finding.Detail)
 }
 
 // Test Cases: False Positive Reduction Logic (Unit Tests)
@@ -436,6 +583,60 @@ func TestCheckSanitization(t *testing.T) {
 }
 
 // Test Cases: Background Workers (State Management)
+
+func TestCleanupExpiredProbes(t *testing.T) {
+	analyzer, _, _ := setupAnalyzer(t, func(c *Config) {
+		// Configure very fast expiration and cleanup
+		c.ProbeExpirationDuration = 20 * time.Millisecond
+		c.CleanupInterval = 5 * time.Millisecond
+	}, false)
+
+	// Register probes
+	analyzer.registerProbe(ActiveProbe{Canary: "ACTIVE_1", CreatedAt: time.Now()})
+	analyzer.registerProbe(ActiveProbe{Canary: "EXPIRED_1", CreatedAt: time.Now().Add(-time.Minute)})
+
+	analyzer.probesMutex.RLock()
+	assert.Len(t, analyzer.activeProbes, 2)
+	analyzer.probesMutex.RUnlock()
+
+	// Start the background worker
+	analyzer.backgroundCtx, analyzer.backgroundCancel = context.WithCancel(context.Background())
+	analyzer.producersWG.Add(1)
+	go analyzer.cleanupExpiredProbes()
+
+	// Wait for cleanup to occur
+	assert.Eventually(t, func() bool {
+		analyzer.probesMutex.RLock()
+		defer analyzer.probesMutex.RUnlock()
+		// Check if EXPIRED_1 is gone.
+		_, exists := analyzer.activeProbes["EXPIRED_1"]
+		return !exists
+	}, 100*time.Millisecond, 5*time.Millisecond, "Expired probe was not cleaned up")
+
+	// Stop the worker
+	analyzer.backgroundCancel()
+	analyzer.producersWG.Wait()
+}
+
+func TestEnqueueEvent_Backpressure_Logging(t *testing.T) {
+	// Setup analyzer with a minimal buffer and observe logs
+	core, hook := observer.New(zaptest.NewLogger(t).Core())
+	logger := zaptest.NewLogger(t).WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core { return core }))
+
+	analyzer, _, _ := setupAnalyzer(t, func(c *Config) {
+		c.EventChannelBuffer = 1
+	}, false)
+	analyzer.logger = logger
+	analyzer.backgroundCtx = context.Background() // Mock active context
+
+	// Fill the buffer and trigger backpressure
+	analyzer.enqueueEvent(SinkEvent{Detail: "Event 1"}, "Test")
+	analyzer.enqueueEvent(SinkEvent{Detail: "Event 2 (Dropped)"}, "Test")
+
+	assert.Len(t, analyzer.eventsChan, 1)
+	// Verify the warning log for backpressure
+	assert.Equal(t, 1, hook.FilterMessage("Event channel full, dropping event. Consider increasing CorrelationWorkers or EventChannelBuffer.").Len())
+}
 
 func TestPollOASTInteractions_CanaryFiltering(t *testing.T) {
 	analyzer, _, mockOAST := setupAnalyzer(t, func(c *Config) {
@@ -526,4 +727,39 @@ func TestAnalyze_HappyPath(t *testing.T) {
 	reporter.AssertExpectations(t)
 	mockOAST.AssertCalled(t, "GetInteractions", mock.Anything, mock.Anything)
 	assert.Error(t, analyzer.backgroundCtx.Err(), "Background context should be cancelled upon completion")
+}
+
+func TestAnalyze_Timeout(t *testing.T) {
+	// Setup analyzer with a very short timeout
+	analyzer, _, _ := setupAnalyzer(t, func(c *Config) {
+		c.AnalysisTimeout = 50 * time.Millisecond
+	}, false)
+
+	ctx := context.Background()
+	mockSession := mocks.NewMockSessionContext()
+
+	// Mock necessary calls for instrumentation and probing
+	mockSession.On("ExposeFunction", mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	mockSession.On("InjectScriptPersistently", mock.Anything, mock.Anything).Return(nil).Maybe()
+	mockSession.On("Navigate", mock.Anything, mock.Anything).Return(nil).Maybe()
+	mockSession.On("ExecuteScript", mock.Anything, mock.Anything, mock.Anything).Return(json.RawMessage("null"), nil).Maybe()
+
+	// Mock interaction to block until the context is cancelled (simulating long interaction)
+	mockSession.On("Interact", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		interactCtx := args.Get(0).(context.Context)
+		<-interactCtx.Done() // Wait for cancellation (timeout)
+	}).Return(context.Canceled).Once()
+
+	startTime := time.Now()
+	err := analyzer.Analyze(ctx, mockSession)
+	duration := time.Since(startTime)
+
+	// The error returned by Analyze itself might be nil if the timeout happens gracefully during probing/finalization
+	assert.NoError(t, err)
+	assert.Less(t, duration, 500*time.Millisecond, "Analysis should terminate shortly after timeout")
+
+	// Ensure shutdown was called (background context should be done)
+	assert.Error(t, analyzer.backgroundCtx.Err())
+
+	mockSession.AssertExpectations(t)
 }

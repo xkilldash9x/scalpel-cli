@@ -1,12 +1,15 @@
-
-async (selector, injectedDeltaY, injectedDeltaX, readDensityFactor, useMouseWheel, cursorX, cursorY, isDetentWheel) => {
+module.exports = async (selector, injectedDeltaY, injectedDeltaX, readDensityFactor, useMouseWheel, cursorX, cursorY, isDetentWheel) => {
     // --- Utility Functions ---
 
     // 1. getScrollableParent
     const getScrollableParent = (node, axis = 'y') => {
-        if (node == null || node === document.body || node === document.documentElement) {
+        // --- START FIX ---
+        // Remove document.body from this check. It must be evaluated.
+        if (node == null || node === document.documentElement) {
             return document.scrollingElement || document.documentElement;
         }
+        // --- END FIX ---
+
         if (node.nodeType !== Node.ELEMENT_NODE) {
             return getScrollableParent(node.parentNode, axis);
         }
@@ -79,7 +82,7 @@ async (selector, injectedDeltaY, injectedDeltaX, readDensityFactor, useMouseWhee
         let totalTextLength = 0;
         const walker = document.createTreeWalker(document.body, NodeFilter.SHOW_TEXT, {
             acceptNode: (node) => {
-                if (!node.parentElement || node.parentElement.offsetParent === null) return NodeFilter.FILTER_REJECT;
+            if (!node.parentElement) return NodeFilter.FILTER_REJECT;
 
                 const parentTagName = node.parentElement.tagName;
 
@@ -277,11 +280,11 @@ async (selector, injectedDeltaY, injectedDeltaX, readDensityFactor, useMouseWhee
             }
         } else {
             if (Math.abs(scrollAmountY) > 1 && scrollableParentY) {
-                scrollableParentY.scrollBy({ top: scrollAmountY, behavior: behavior });
+                scrollableParentY.scrollBy({ top: scrollAmountY, left: 0, behavior: behavior });
                 parentsToWaitFor.add(scrollableParentY);
             }
             if (Math.abs(scrollAmountX) > 1 && scrollableParentX) {
-                scrollableParentX.scrollBy({ left: scrollAmountX, behavior: behavior });
+                scrollableParentX.scrollBy({ top: 0, left: scrollAmountX, behavior: behavior });
                 parentsToWaitFor.add(scrollableParentX);
             }
         }
@@ -332,4 +335,4 @@ async (selector, injectedDeltaY, injectedDeltaX, readDensityFactor, useMouseWhee
         contentDensity: contentDensity,
         elementExists: true
     };
-}
+};
