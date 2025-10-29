@@ -43,10 +43,9 @@ func setupCognitiveBus(t *testing.T, bufferSize int) *CognitiveBus {
 	bus := NewCognitiveBus(logger, bufferSize)
 	// Make sure the bus is shutdown after the test, keeps things tidy and prevents resource leaks.
 	t.Cleanup(func() {
-		// A little peek inside (white box) to avoid a double shutdown if the test already handled it.
-		if !bus.isShutdown {
-			bus.Shutdown()
-		}
+		// Shutdown is idempotent (uses sync.Once), so it's safe to call unconditionally.
+		// The previous check for bus.isShutdown was a data race.
+		bus.Shutdown()
 	})
 	return bus
 }

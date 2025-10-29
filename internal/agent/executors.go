@@ -194,8 +194,13 @@ func (e *BrowserExecutor) handleWaitForAsync(ctx context.Context, session schema
 		switch v := val.(type) {
 		case float64:
 			durationMs = int(v)
-		case int, int64, float32:
-			durationMs = int(v.(int64))
+		// FIX: Handle integer types individually to avoid panic on type assertion in multi-type case.
+		case int:
+			durationMs = v
+		case int64:
+			durationMs = int(v)
+		case float32:
+			durationMs = int(v)
 		default:
 			e.logger.Warn("Invalid type for duration_ms, using default.", zap.Any("type", v))
 		}

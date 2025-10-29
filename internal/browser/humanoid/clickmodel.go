@@ -107,7 +107,8 @@ func (h *Humanoid) calculateTerminalFittsLaw(distance float64) time.Duration {
 		mt = 0
 	}
 
-	return time.Duration(mt) * time.Millisecond
+	// FIX: Convert float64 milliseconds (mt) to time.Duration (int64 nanoseconds) accurately to prevent truncation.
+	return time.Duration(mt * float64(time.Millisecond))
 }
 
 // calculateClickHoldDuration determines how long the mouse button is held down using Ex-Gaussian distribution.
@@ -134,5 +135,6 @@ func (h *Humanoid) calculateClickHoldDuration() time.Duration {
 	// Habituation is already factored into the dynamic Mu/Sigma/Tau.
 	durationMs *= (1.0 + h.fatigueLevel*0.25)
 
-	return time.Duration(durationMs) * time.Millisecond
+	// FIX: Ensure accurate conversion from float64 milliseconds to time.Duration (nanoseconds).
+	return time.Duration(durationMs * float64(time.Millisecond))
 }

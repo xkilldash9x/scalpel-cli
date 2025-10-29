@@ -1,5 +1,3 @@
-// File: cmd/scalpel/main.go
-
 /*
 Copyright © 2025 Kyle McAllister (xkilldash9x@proton.me)
 */
@@ -30,12 +28,12 @@ const asciiArt = `
       ,           ,
      /             \        "Precision is the difference between
     ((__-^^-,-^^-__))        a butcher and a surgeon."
-    ` + "`" + `-_---' ` + "`" + `---_-'` + "`" + `
-     <__|o` + "`" + ` 'o|__>           [ scalpel-cli v0.1.0-alpha ]
-        \  ` + "`" + `  /             +-----------------------------+
+    \` + `-_---' ` + `---_-'` + `
+     <__|o\` + ` 'o|__>           [ scalpel-cli v0.1.0-alpha ]
+        \  ` + `  /             +-----------------------------+
          ): : (              | 7 Analysis Modules        |
          :o_o:              | 0 Payloads                  |
-         _..-'` + "`" + `              +-----------------------------+
+         _..-` + "`" + `              +-----------------------------+
 `
 
 // Define function variables for dependency injection/mocking in tests.
@@ -68,8 +66,9 @@ func main() {
 		return
 	}
 
-	// --- Interactive Mode ---
-fmt.Println("Exiting scalpel-cli")	scanner := bufio.NewScanner(os.Stdin)
+	// -- Interactive Mode --
+	fmt.Print(asciiArt)
+	scanner := bufio.NewScanner(os.Stdin)
 
 	for {
 		fmt.Print("scalpel-cli > ")
@@ -95,7 +94,7 @@ fmt.Println("Exiting scalpel-cli")	scanner := bufio.NewScanner(os.Stdin)
 		osExit(1)
 	}
 
-	fmt.Println("\nExiting scalpel-cli.")
+	fmt.Println("Exiting scalpel-cli.")
 }
 
 // executeInteractiveCommand parses and runs the command from the interactive shell.

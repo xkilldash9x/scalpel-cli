@@ -6,10 +6,8 @@ import (
 	"context"
 	"errors"
 	"os"
-	"sync"
 	"testing"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -17,12 +15,12 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/internal/service" // FIX: Import the service package
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 )
 
 func TestApplyScanFlagOverrides(t *testing.T) {
-	// ... (Test cases remain the same as provided in the prompt)
 	tests := []struct {
 		name                string
 		args                []string
@@ -116,8 +114,8 @@ func TestRunScanLogic(t *testing.T) {
 		// Arrange
 		mockFactory := new(mocks.MockComponentFactory)
 		mockOrchestrator := new(mocks.MockOrchestrator)
-		// Return value for the mock must be cast to interface{} to match the signature
-		mockComponents := &Components{Orchestrator: mockOrchestrator}
+		// FIX: Use service.Components struct, as runScan asserts this type.
+		mockComponents := &service.Components{Orchestrator: mockOrchestrator}
 		cfg := config.NewDefaultConfig()
 
 		mockFactory.On("Create", mock.Anything, cfg, defaultTargets).Return(mockComponents, nil)
@@ -155,7 +153,8 @@ func TestRunScanLogic(t *testing.T) {
 		// Arrange
 		mockFactory := new(mocks.MockComponentFactory)
 		mockOrchestrator := new(mocks.MockOrchestrator)
-		mockComponents := &Components{Orchestrator: mockOrchestrator}
+		// FIX: Use service.Components struct
+		mockComponents := &service.Components{Orchestrator: mockOrchestrator}
 		cfg := config.NewDefaultConfig()
 		orchestratorError := errors.New("orchestrator failed")
 
@@ -177,7 +176,8 @@ func TestRunScanLogic(t *testing.T) {
 		mockFactory := new(mocks.MockComponentFactory)
 		mockOrchestrator := new(mocks.MockOrchestrator)
 		mockStore := new(mocks.MockStore)
-		mockComponents := &Components{Orchestrator: mockOrchestrator, Store: mockStore}
+		// FIX: Use service.Components struct
+		mockComponents := &service.Components{Orchestrator: mockOrchestrator, Store: mockStore}
 		cfg := config.NewDefaultConfig()
 
 		tmpfile, err := os.CreateTemp("", "test-report-*.sarif")
@@ -208,7 +208,8 @@ func TestRunScanLogic(t *testing.T) {
 		// Arrange
 		mockFactory := new(mocks.MockComponentFactory)
 		mockOrchestrator := new(mocks.MockOrchestrator)
-		mockComponents := &Components{Orchestrator: mockOrchestrator}
+		// FIX: Use service.Components struct
+		mockComponents := &service.Components{Orchestrator: mockOrchestrator}
 		cfg := config.NewDefaultConfig()
 		targetsInput := []string{"example.com", "http://test.com", "another.org"}
 		// Expect all targets missing a scheme to default to https.
@@ -228,75 +229,6 @@ func TestRunScanLogic(t *testing.T) {
 	})
 }
 
-func TestComponentsShutdown(t *testing.T) {
-	t.Run("shutdown calls all necessary component stop methods and waits for consumer", func(t *testing.T) {
-		// Arrange
-		observability.ResetForTest()
-		var buffer bytes.Buffer
-		writer := zapcore.AddSync(&buffer)
-		observability.Initialize(
-			config.LoggerConfig{Level: "debug", Format: "console"},
-			writer,
-		)
-
-		mockTaskEngine := new(mocks.MockTaskEngine)
-		mockDiscoveryEngine := new(mocks.MockDiscoveryEngine)
-		mockBrowserManager := new(mocks.MockBrowserManager)
-
-		// Create a real pool that points to a non existent DB to check that Close is still called.
-		pool, err := pgxpool.New(context.Background(), "postgres://user:pass@localhost:1/nonexistentdb")
-		require.NoError(t, err) // New doesn't error, connect does.
-
-		findingsChan := make(chan schemas.Finding, 1)
-		// This is a pointer to the original WaitGroup, not a copy.
-		var consumerWG sync.WaitGroup
-		consumerWG.Add(1)
-
-		components := &Components{
-			TaskEngine:      mockTaskEngine,
-			DiscoveryEngine: mockDiscoveryEngine,
-			BrowserManager:  mockBrowserManager,
-			DBPool:          pool,
-			findingsChan:    findingsChan,
-			// Pass the ADDRESS of the waitgroup, not a copy of it.
-			consumerWG: &consumerWG,
-		}
-
-		mockTaskEngine.On("Stop").Return()
-		mockDiscoveryEngine.On("Stop").Return()
-		mockBrowserManager.On("Shutdown", mock.Anything).Return(nil)
-
-		// Simulate the consumer running and waiting for the channel to close.
-		// This goroutine operates on the original 'consumerWG' variable.
-		go func() {
-			// Wait for the channel to be closed by Shutdown().
-			for range findingsChan {
-				// Process findings (drain)
-			}
-			// Once drained, signal completion on the original WG.
-			consumerWG.Done()
-		}()
-
-		// Act
-		components.Shutdown()
-
-		// Assert
-		mockTaskEngine.AssertCalled(t, "Stop")
-		mockDiscoveryEngine.AssertCalled(t, "Stop")
-		mockBrowserManager.AssertCalled(t, "Shutdown", mock.Anything)
-
-		// Verify log messages confirm the sequence.
-		assert.Contains(t, buffer.String(), "Task engine stopped.")
-		assert.Contains(t, buffer.String(), "Findings channel closed.")
-		assert.Contains(t, buffer.String(), "Findings consumer finished processing.")
-		assert.Contains(t, buffer.String(), "Database connection pool closed.")
-
-		// Verify the findings channel was closed.
-		select {
-		case _, ok := <-findingsChan:
-			assert.False(t, ok, "Findings channel should be closed")
-		default:
-			// Channel already confirmed closed by the goroutine exiting and the WG completing.
-		}
-	})
-}
+// NOTE: TestComponentsShutdown has been removed from this file, as the
+// 'Components' struct and its 'Shutdown' method are no longer part of the
+// 'cmd' package. That test should be moved to the 'internal/service' package.

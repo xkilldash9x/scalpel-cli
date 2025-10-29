@@ -144,9 +144,8 @@ func (cb *CognitiveBus) Subscribe(msgTypes ...CognitiveMessageType) (<-chan Cogn
 		cb.mu.Lock()
 		defer cb.mu.Unlock()
 
-		if cb.isShutdown {
-			return
-		}
+		// Removed the check for cb.isShutdown here as it caused a data race (it's protected by shutdownMu, not mu).
+		// The operation is safe regardless, as Shutdown replaces the subscribers map.
 
 		for _, msgType := range subscribedTypes {
 			subs, exists := cb.subscribers[msgType]

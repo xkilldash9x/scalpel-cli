@@ -41,6 +41,8 @@ type Controller interface {
 	IntelligentClick(ctx context.Context, selector string, opts *InteractionOptions) error
 	DragAndDrop(ctx context.Context, startSelector, endSelector string, opts *InteractionOptions) error
 	Type(ctx context.Context, selector string, text string, opts *InteractionOptions) error
+	// Shortcut executes a keyboard shortcut (e.g., "ctrl+c", "meta+a").
+	Shortcut(ctx context.Context, keysExpression string) error
 	// CognitivePause signature updated to use scaling factors for the Ex-Gaussian model.
 	CognitivePause(ctx context.Context, meanScale, stdDevScale float64) error
 }
@@ -50,6 +52,9 @@ type Executor interface {
 	Sleep(ctx context.Context, d time.Duration) error
 	DispatchMouseEvent(ctx context.Context, data schemas.MouseEventData) error
 	SendKeys(ctx context.Context, keys string) error
+	// DispatchStructuredKey handles pressing a key combination (like a shortcut).
+	// The executor is responsible for the KeyDown and KeyUp sequence.
+	DispatchStructuredKey(ctx context.Context, data schemas.KeyEventData) error
 	GetElementGeometry(ctx context.Context, selector string) (*schemas.ElementGeometry, error)
 	ExecuteScript(ctx context.Context, script string, args []interface{}) (json.RawMessage, error)
 }

@@ -33,6 +33,8 @@ type LLMMind struct {
 	mu             sync.RWMutex
 	wg             sync.WaitGroup
 	stopChan       chan struct{}
+	// stopOnce ensures the Stop method is idempotent and safe for concurrent calls.
+	stopOnce       sync.Once
 	stateReadyChan chan struct{}
 
 	contextLookbackSteps int
@@ -74,6 +76,9 @@ func NewLLMMind(
 func (m *LLMMind) Start(ctx context.Context) error {
 	m.logger.Info("Starting LLMMind cognitive loops.")
 
+	// Ensure Stop is always called when Start returns, to clean up resources like LTM.
+	defer m.Stop()
+
 	m.wg.Add(1)
 	go m.runObserverLoop(ctx)
 
@@ -96,7 +101,21 @@ func (m *LLMMind) Start(ctx context.Context) error {
 			m.wg.Wait()
 			return nil
 		case <-m.stateReadyChan:
-			m.executeDecisionCycle(ctx)
+			// Wrap the execution cycle in an anonymous function to handle panics gracefully.
+			func() {
+				defer func() {
+					if r := recover(); r != nil {
+						m.logger.Error("Panic recovered during decision cycle (OODA)",
+							zap.Any("panic_value", r),
+							zap.Stack("stack"),
+						)
+						// Transition back to Observing to allow potential recovery,
+						// unless the state is already terminal (handled by updateState).
+						m.updateState(StateObserving)
+					}
+				}()
+				m.executeDecisionCycle(ctx)
+			}()
 		}
 	}
 }
@@ -123,6 +142,19 @@ func (m *LLMMind) runObserverLoop(ctx context.Context) {
 			processingFailed := false
 			func() {
 				defer m.bus.Acknowledge(msg)
+
+				// Setup panic recovery for observation processing.
+				defer func() {
+					if r := recover(); r != nil {
+						m.logger.Error("Panic recovered during observation processing (Mind)",
+							zap.Any("panic_value", r),
+							zap.String("message_id", msg.ID),
+							zap.Stack("stack"),
+						)
+						// If the Mind panics while processing input, it cannot continue reliably.
+						processingFailed = true
+					}
+				}()
 
 				m.updateState(StateObserving)
 				if obs, ok := msg.Payload.(Observation); ok {
@@ -188,13 +220,16 @@ func (m *LLMMind) executeDecisionCycle(ctx context.Context) {
 		return
 	}
 
-	if action.Type == ActionConclude {
+	isConcluding := action.Type == ActionConclude
+
+	if isConcluding {
 		m.logger.Info("Mission concluded by LLM decision.", zap.String("rationale", action.Rationale))
 		m.updateState(StateCompleted)
 	}
 
 	// -- ACT --
-	if m.currentState != StateCompleted {
+	// Use the local variable 'isConcluding' instead of checking the shared 'm.currentState' to prevent a data/logical race.
+	if !isConcluding {
 		m.updateState(StateActing)
 	}
 
@@ -820,22 +855,36 @@ func (m *LLMMind) SetMission(mission Mission) {
 	m.signalStateReady()
 }
 
-// Safely transitions the Mind to a new state.
+// Safely transitions the Mind to a new state, enforcing state machine rules.
 func (m *LLMMind) updateState(newState AgentState) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	if m.currentState != newState {
-		m.logger.Debug("Mind state transition", zap.String("from", string(m.currentState)), zap.String("to", string(newState)))
-		m.currentState = newState
+
+	// Rule 1: Do not transition if the state is already the target state.
+	if m.currentState == newState {
+		return
 	}
+
+	// Rule 2: Terminal states (FAILED, COMPLETED) cannot be exited.
+	if m.currentState == StateFailed || m.currentState == StateCompleted {
+		// Log an attempt to transition out of a terminal state, but prevent it.
+		m.logger.Warn("Attempted to transition out of a terminal state. Ignoring.",
+			zap.String("current_state", string(m.currentState)),
+			zap.String("attempted_state", string(newState)))
+		return
+	}
+
+	// Transition is valid.
+	m.logger.Debug("Mind state transition", zap.String("from", string(m.currentState)), zap.String("to", string(newState)))
+	m.currentState = newState
 }
 
 // Gracefully shuts down the Mind's cognitive loops.
 func (m *LLMMind) Stop() {
-	select {
-	case <-m.stopChan:
-	default:
+	// Use sync.Once to guarantee the channel is closed exactly once, preventing panics
+	// if Stop is called concurrently or repeatedly.
+	m.stopOnce.Do(func() {
 		close(m.stopChan)
 		m.ltm.Stop() // Gracefully stop the LTM's background processes.
-	}
+	})
 }

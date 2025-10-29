@@ -13,17 +13,28 @@ import (
 type SuccessOracle struct {
 	config    *Config
 	isGraphQL bool
+	// FIX: Store compiled regexes here instead of the shared Config struct.
+	// This resolves the data race (CWE-362) detected during concurrent Analyzer initialization.
+	bodyRx   *regexp.Regexp
+	headerRx *regexp.Regexp
 }
 
 // NewSuccessOracle initializes the oracle with the validated configuration.
 func NewSuccessOracle(config *Config, isGraphQL bool) (*SuccessOracle, error) {
+	// Initialize the oracle instance.
+	oracle := &SuccessOracle{
+		config:    config,
+		isGraphQL: isGraphQL,
+	}
+
 	// Compile regexes during initialization for performance.
 	if config.Success.BodyRegex != "" {
 		rx, err := regexp.Compile(config.Success.BodyRegex)
 		if err != nil {
 			return nil, fmt.Errorf("invalid BodyRegex: %w", err)
 		}
-		config.Success.bodyRx = rx
+		// FIX: Store in the oracle instance.
+		oracle.bodyRx = rx
 	}
 
 	if config.Success.HeaderRegex != "" {
@@ -31,18 +42,17 @@ func NewSuccessOracle(config *Config, isGraphQL bool) (*SuccessOracle, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid HeaderRegex: %w", err)
 		}
-		config.Success.headerRx = rx
+		// FIX: Store in the oracle instance.
+		oracle.headerRx = rx
 	}
 
-	return &SuccessOracle{
-		config:    config,
-		isGraphQL: isGraphQL,
-	}, nil
+	return oracle, nil
 }
 
 // IsSuccess evaluates the RaceResponse against the configured success conditions.
 func (o *SuccessOracle) IsSuccess(resp *RaceResponse) bool {
-	if resp.Error != nil || resp.ParsedResponse == nil {
+	if resp.Error != nil ||
+		resp.ParsedResponse == nil {
 		return false
 	}
 
@@ -52,14 +62,16 @@ func (o *SuccessOracle) IsSuccess(resp *RaceResponse) bool {
 	}
 
 	// 2. Check Body Regex.
-	if o.config.Success.bodyRx != nil {
-		if !o.config.Success.bodyRx.Match(resp.SpecificBody) {
+	// FIX: Use the regex compiled in the oracle instance.
+	if o.bodyRx != nil {
+		if !o.bodyRx.Match(resp.SpecificBody) {
 			return false
 		}
 	}
 
 	// 3. Check Header Regex.
-	if o.config.Success.headerRx != nil {
+	// FIX: Use the regex compiled in the oracle instance.
+	if o.headerRx != nil {
 		if !o.checkHeaderRegex(resp.Headers) {
 			return false
 		}
@@ -93,7 +105,8 @@ func (o *SuccessOracle) checkStatusCode(statusCode int) bool {
 }
 
 func (o *SuccessOracle) checkHeaderRegex(headers http.Header) bool {
-	rx := o.config.Success.headerRx
+	// FIX: Use the regex compiled in the oracle instance.
+	rx := o.headerRx
 	if rx == nil {
 		return true
 	}
@@ -123,7 +136,8 @@ func (o *SuccessOracle) checkHeaderRegex(headers http.Header) bool {
 func isGraphQLSpecSuccess(responseBody []byte) bool {
 	// Ensure it's a JSON object before attempting to parse.
 	trimmedBody := bytes.TrimSpace(responseBody)
-	if len(trimmedBody) == 0 || trimmedBody[0] != '{' {
+	if len(trimmedBody) == 0 ||
+		trimmedBody[0] != '{' {
 		// If it's not a JSON object, it might not be a standard GraphQL response, rely on other indicators.
 		// However, if we expect GraphQL, a non-JSON object is usually a failure.
 		return false

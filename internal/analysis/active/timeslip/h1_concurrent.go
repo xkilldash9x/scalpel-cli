@@ -18,13 +18,18 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 	startTime := time.Now()
 
 	// 1. Configure the client.
-	// FIX: Renamed function, updated fields, and removed obsolete settings.
 	clientConfig := network.NewBrowserClientConfig()
 	clientConfig.RequestTimeout = config.Timeout
 	clientConfig.InsecureSkipVerify = config.InsecureSkipVerify
-	clientConfig.IdleConnTimeout = 0 // Disable idle connection pooling for this strategy.
+	clientConfig.IdleConnTimeout = 0 // Disable idle connection pooling.
+
+	// CRITICAL: Explicitly disable HTTP Keep-Alive to ensure every request uses a new TCP connection.
+	clientConfig.DisableKeepAlives = true
 
 	client := network.NewClient(clientConfig)
+
+	// Get the exclusion map once for use in all goroutines.
+	excludeMap := config.GetExcludedHeaders()
 
 	resultsChan := make(chan *RaceResponse, config.Concurrency)
 	var wg sync.WaitGroup
@@ -92,8 +97,7 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 				return
 			}
 			req.Header = mutatedHeaders
-			// Setting req.Close hints to the transport to close the connection after,
-			// which is the desired behavior for this "dogpile" strategy.
+			// Setting req.Close hints to the transport to close the connection after.
 			req.Close = true
 
 			resp, err := client.Do(req)
@@ -130,8 +134,8 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 			body := make([]byte, n)
 			copy(body, buf.Bytes()[:n])
 
-			// Generate the composite fingerprint.
-			fingerprint := GenerateFingerprint(resp.StatusCode, resp.Header, body)
+			// Generate the composite fingerprint using the configured exclusion map.
+			fingerprint := GenerateFingerprint(resp.StatusCode, resp.Header, body, excludeMap)
 
 			parsedResponse := &ParsedResponse{
 				StatusCode: resp.StatusCode,

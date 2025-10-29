@@ -55,7 +55,8 @@ func TestConfigureTLS_Defaults(t *testing.T) {
 	tlsConfig := configureTLS(config)
 
 	require.NotNil(t, tlsConfig, "TLS config should never be nil")
-	assert.Equal(t, uint16(requiredMinTLSVersion), tlsConfig.MinVersion)
+	// LINTER FIX: Renamed constant
+	assert.Equal(t, uint16(SecureMinTLSVersion), tlsConfig.MinVersion)
 	assert.False(t, tlsConfig.InsecureSkipVerify)
 
 	// FIX: The defaultSecureCipherSuites variable was removed. Compare against a new default config.
@@ -78,7 +79,8 @@ func TestConfigureTLS_CustomConfigCloneAndMerge(t *testing.T) {
 	tlsConfig := configureTLS(config)
 
 	assert.Equal(t, "custom.sni", tlsConfig.ServerName)
-	assert.Equal(t, uint16(requiredMinTLSVersion), tlsConfig.MinVersion, "Default MinVersion should be merged")
+	// LINTER FIX: Renamed constant
+	assert.Equal(t, uint16(SecureMinTLSVersion), tlsConfig.MinVersion, "Default MinVersion should be merged")
 	assert.NotEmpty(t, tlsConfig.CipherSuites, "Default CipherSuites should be merged")
 	assert.NotNil(t, tlsConfig.ClientSessionCache, "Default SessionCache should be merged")
 	assert.Equal(t, []string{"h2", "http/1.1"}, tlsConfig.NextProtos, "Default ALPN should be merged")
@@ -114,7 +116,8 @@ func TestConfigureTLS_CustomConfig_Hardening(t *testing.T) {
 
 	tlsConfig := configureTLS(config)
 
-	assert.Equal(t, uint16(requiredMinTLSVersion), tlsConfig.MinVersion, "MinVersion should be upgraded to TLS 1.2")
+	// LINTER FIX: Renamed constant
+	assert.Equal(t, uint16(SecureMinTLSVersion), tlsConfig.MinVersion, "MinVersion should be upgraded to TLS 1.2")
 	assert.NotSame(t, customTLS, tlsConfig, "Config should be cloned")
 }
 
@@ -273,7 +276,6 @@ func TestClient_HTTPS_Integration(t *testing.T) {
 	assert.Equal(t, "HTTP/1.1", resp.Proto, "httptest server often falls back to HTTP/1.1 in tests")
 }
 
-
 func TestClient_InsecureSkipVerify_Integration(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.Write([]byte("OK Insecure"))
@@ -290,7 +292,7 @@ func TestClient_InsecureSkipVerify_Integration(t *testing.T) {
 	clientInsecure := NewClient(config)
 
 	resp, err := clientInsecure.Get(server.URL)
-	require.NoError(t, err, "Client with InsecureSkipVerify enabled should succeed")
+	require.NoError(t, err, "Client with InsecureSkipVerify enabled should clear")
 	defer resp.Body.Close()
 
 	body, _ := io.ReadAll(resp.Body)

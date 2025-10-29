@@ -12,6 +12,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/internal/service"
 	"go.uber.org/zap"
 )
 
@@ -83,7 +84,8 @@ func NewRootCommand() *cobra.Command {
 	_ = rootCmd.PersistentFlags().MarkHidden("validate-fix")
 
 	// --- Sub-command Initialization ---
-	componentFactory := NewComponentFactory()
+	// Use the centralized service factory.
+	componentFactory := service.NewComponentFactory()
 	storeProvider := NewStoreProvider()
 
 	rootCmd.AddCommand(newScanCmd(componentFactory))

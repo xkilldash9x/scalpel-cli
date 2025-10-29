@@ -33,6 +33,7 @@ type ltm struct {
 	// A set of payload hashes for near-instant redundancy checks (O(1)).
 	payloadHashes map[[32]byte]string
 
+	stopOnce sync.Once
 	// Channel to signal the background janitor goroutine to stop.
 	stopChan chan struct{}
 	wg       sync.WaitGroup
@@ -178,10 +179,13 @@ func (l *ltm) purgeExpiredCache() {
 
 // Stop gracefully shuts down the LTM's background processes.
 func (l *ltm) Stop() {
-	// Closing the stopChan signals the janitor to exit its loop.
-	close(l.stopChan)
-	// Wait for the janitor goroutine to finish completely.
-	l.wg.Wait()
+	// Use sync.Once to ensure Stop is idempotent and won't panic on closing a closed channel.
+	l.stopOnce.Do(func() {
+		// Closing the stopChan signals the janitor to exit its loop.
+		close(l.stopChan)
+		// Wait for the janitor goroutine to finish completely.
+		l.wg.Wait()
+	})
 }
 
 var _ LTM = (*ltm)(nil)

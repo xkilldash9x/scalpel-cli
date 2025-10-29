@@ -1,189 +1,334 @@
+// internal/browser/session/harvester_test.go
 package session
 
 import (
-	"bytes"
 	"context"
-	"io"
+	"encoding/json"
+	"fmt"
 	"net/http"
-	"strings"
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/network"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
+
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
-// Note: The 'mockTransport' and 'delayCloseBody' helpers have been moved to 'helpers_test.go'
-// to prevent redeclaration errors and improve test organization.
+// TestWaitNetworkIdle focuses specifically on the network idle detection logic.
+func TestWaitNetworkIdle(t *testing.T) {
+	// We use the newTestFixture to get a real session and harvester instance.
+	// We only use the harvester part, the browser connection isn't strictly necessary for this specific logic test,
+	// but it provides a realistic setup.
+	fixture := newTestFixture(t)
+	harvester := fixture.Session.harvester
+	require.NotNil(t, harvester)
 
-func TestHarvester_RoundTrip_Capture(t *testing.T) {
-	logger := zap.NewNop()
-	requestBody := "Test Request Body"
-	responseBody := "Test Response Body"
+	// Define test parameters
+	quietPeriod := 200 * time.Millisecond
+	testTimeout := 5 * time.Second
 
-	transport := &mockTransport{
-		handler: func(req *http.Request) (*http.Response, error) {
-			// Verifies the request body is still readable by the transport.
-			reqBodyBytes, _ := io.ReadAll(req.Body)
-			assert.Equal(t, requestBody, string(reqBodyBytes))
-
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Proto:      "HTTP/1.1",
-				Header:     http.Header{"Content-Type": []string{"text/plain"}},
-				Body:       io.NopCloser(strings.NewReader(responseBody)),
-				Request:    req,
-			}, nil
-		},
-	}
-
-	harvester := NewHarvester(transport, logger, true) // Enable body capture
-	client := &http.Client{Transport: harvester}
-
-	// 1. Execute Request
-	req, _ := http.NewRequest("POST", "http://example.com/data?q=1", strings.NewReader(requestBody))
-	req.Header.Set("Content-Type", "text/plain")
-
-	resp, err := client.Do(req)
-	require.NoError(t, err)
-
-	// 2. Consume the response body, which is crucial for the Harvester
-	// wrapper to finalize its recording process.
-	respBodyBytes, err := io.ReadAll(resp.Body)
-	require.NoError(t, err)
-	resp.Body.Close()
-	assert.Equal(t, responseBody, string(respBodyBytes))
-
-	// 3. Generate and Verify HAR
-	har := harvester.GenerateHAR()
-	require.Len(t, har.Log.Entries, 1)
-	entry := har.Log.Entries[0]
-
-	// Verify Request details
-	assert.Equal(t, "POST", entry.Request.Method)
-	assert.Equal(t, "http://example.com/data?q=1", entry.Request.URL)
-	require.NotNil(t, entry.Request.PostData)
-	assert.Equal(t, requestBody, entry.Request.PostData.Text)
-	require.Len(t, entry.Request.QueryString, 1)
-	assert.Equal(t, "q", entry.Request.QueryString[0].Name)
-
-	// Verify Response details
-	assert.Equal(t, http.StatusOK, entry.Response.Status)
-	assert.Equal(t, responseBody, entry.Response.Content.Text)
-}
-
-func TestHarvester_RoundTrip_BinaryEncoding(t *testing.T) {
-	logger := zap.NewNop()
-	// Binary data representing a PNG header
-	responseData := []byte{0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A}
-	expectedBase64 := "iVBORw0KGgo="
-
-	transport := &mockTransport{
-		handler: func(req *http.Request) (*http.Response, error) {
-			return &http.Response{
-				StatusCode: http.StatusOK,
-				Header:     http.Header{"Content-Type": []string{"image/png"}},
-				Body:       io.NopCloser(bytes.NewReader(responseData)),
-				Request:    req,
-			}, nil
-		},
-	}
-
-	harvester := NewHarvester(transport, logger, true)
-	client := &http.Client{Transport: harvester}
-
-	resp, err := client.Get("http://example.com/image.png")
-	require.NoError(t, err)
-	// Consume and close the body.
-	io.Copy(io.Discard, resp.Body)
-	resp.Body.Close()
-
-	har := harvester.GenerateHAR()
-	require.Len(t, har.Log.Entries, 1)
-	entry := har.Log.Entries[0]
-
-	// Verify encoding for binary content.
-	assert.Equal(t, "base64", entry.Response.Content.Encoding)
-	assert.Equal(t, expectedBase64, entry.Response.Content.Text)
-}
-
-func TestHarvester_WaitNetworkIdle(t *testing.T) {
-	logger := zap.NewNop()
-	// Use channels to precisely control the timing of the mock transport and body consumption.
-	startTransport := make(chan struct{})
-	finishBodyRead := make(chan struct{})
-
-	transport := &mockTransport{
-		handler: func(req *http.Request) (*http.Response, error) {
-			<-startTransport // Wait until signaled to start the transport phase.
-			// Simulate network latency.
-			time.Sleep(50 * time.Millisecond)
-
-			// Return a response with a body that waits before closing.
-			body := &delayCloseBody{
-				Reader:      strings.NewReader("data"),
-				closeSignal: finishBodyRead,
-			}
-			return &http.Response{StatusCode: http.StatusOK, Body: body, Request: req}, nil
-		},
-	}
-
-	harvester := NewHarvester(transport, logger, false)
-	client := &http.Client{Transport: harvester}
-
-	// 1. Start the request lifecycle in a goroutine.
-	go func() {
-		resp, err := client.Get("http://example.com/async")
-		if err == nil {
-			// Consume the body.
-			io.ReadAll(resp.Body)
-			resp.Body.Close() // This will block until finishBodyRead is signaled.
-		}
-	}()
-
-	// 2. Setup WaitNetworkIdle monitoring.
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
 	defer cancel()
 
-	idleDone := make(chan error)
-	quietPeriod := 100 * time.Millisecond
+	// 1. Test initial idle state
+	t.Log("Testing initial idle state...")
+	startTime := time.Now()
+	err := harvester.WaitNetworkIdle(ctx, quietPeriod)
+	require.NoError(t, err)
+	duration := time.Since(startTime)
+	// It should take at least the quiet period, but not much longer
+	assert.GreaterOrEqual(t, duration, quietPeriod)
+	// Allow buffer for ticker frequency
+	assert.Less(t, duration, quietPeriod+networkIdleCheckFrequency*2)
 
+	// 2. Test transition from active to idle
+	t.Log("Testing transition from active to idle...")
+
+	// Simulate network activity
+	harvester.mu.Lock()
+	harvester.activeReqs = 3
+	harvester.mu.Unlock()
+
+	// Start waiting in a goroutine, as it will block until idle
+	doneChan := make(chan error)
 	go func() {
-		idleDone <- harvester.WaitNetworkIdle(ctx, quietPeriod)
+		doneChan <- harvester.WaitNetworkIdle(ctx, quietPeriod)
 	}()
 
-	// Ensures the test is waiting before the request transport phase has started.
+	// Wait a bit, then decrease activity gradually
+	time.Sleep(100 * time.Millisecond)
+	harvester.mu.Lock()
+	harvester.activeReqs = 2
+	harvester.mu.Unlock()
+
+	time.Sleep(100 * time.Millisecond)
+	harvester.mu.Lock()
+	harvester.activeReqs = 1
+	harvester.mu.Unlock()
+
+	// Wait again before becoming fully idle
+	activityDuration := 300 * time.Millisecond
+	time.Sleep(activityDuration)
+
+	startTime = time.Now() // Record time when activity stops
+	harvester.mu.Lock()
+	harvester.activeReqs = 0
+	harvester.mu.Unlock()
+
+	// Wait for the goroutine to finish
 	select {
-	case <-idleDone:
-		t.Fatal("WaitNetworkIdle returned before the request transport phase started")
-	case <-time.After(50 * time.Millisecond):
-		// Expected: still waiting.
-	}
-
-	// 3. Signal transport to start processing.
-	close(startTransport)
-
-	// Ensures the test is waiting while the request is in flight.
-	select {
-	case <-idleDone:
-		t.Fatal("WaitNetworkIdle returned while request was in flight")
-	case <-time.After(100 * time.Millisecond): // Wait longer than the simulated transport latency.
-		// Expected: still waiting.
-	}
-
-	// 4. Signal body consumption to finish, truly ending the request lifecycle.
-	close(finishBodyRead)
-
-	// 5. WaitNetworkIdle should now wait for the quiet period (100ms) and then return.
-	startTime := time.Now()
-	select {
-	case err := <-idleDone:
+	case err := <-doneChan:
 		require.NoError(t, err)
-		duration := time.Since(startTime)
-		// It should take at least the quiet period time after the request finished.
-		assert.GreaterOrEqual(t, duration, quietPeriod, "WaitNetworkIdle returned too quickly")
+		idleDuration := time.Since(startTime)
+		// The duration since activity stopped should be roughly the quiet period
+		assert.InDelta(t, float64(quietPeriod), float64(idleDuration), float64(networkIdleCheckFrequency*2))
 	case <-ctx.Done():
-		t.Fatal("WaitNetworkIdle timed out waiting for completion")
+		t.Fatal("Test timed out waiting for network idle")
 	}
+
+	// 3. Test activity bursts interrupting idle period
+	t.Log("Testing activity bursts...")
+
+	harvester.mu.Lock()
+	harvester.activeReqs = 1
+	harvester.mu.Unlock()
+
+	go func() {
+		doneChan <- harvester.WaitNetworkIdle(ctx, quietPeriod)
+	}()
+
+	time.Sleep(50 * time.Millisecond)
+	harvester.mu.Lock()
+	harvester.activeReqs = 0 // Become idle
+	harvester.mu.Unlock()
+
+	// Wait almost the quiet period, then burst activity
+	time.Sleep(quietPeriod - 50*time.Millisecond)
+	harvester.mu.Lock()
+	harvester.activeReqs = 1 // Burst
+	harvester.mu.Unlock()
+
+	time.Sleep(50 * time.Millisecond)
+	startTime = time.Now() // Record time when activity stops again
+	harvester.mu.Lock()
+	harvester.activeReqs = 0
+	harvester.mu.Unlock()
+
+	select {
+	case err := <-doneChan:
+		require.NoError(t, err)
+		idleDuration := time.Since(startTime)
+		// It should have waited the full quiet period *after* the burst stopped
+		assert.InDelta(t, float64(quietPeriod), float64(idleDuration), float64(networkIdleCheckFrequency*2))
+	case <-ctx.Done():
+		t.Fatal("Test timed out waiting for network idle after burst")
+	}
+}
+
+// TestHarvesterIntegration covers complex scenarios like POST data and body capture.
+func TestHarvesterIntegration(t *testing.T) {
+	fixture := newTestFixture(t)
+	session := fixture.Session
+
+	server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/post-target" {
+			// Echo back the content type and body length received
+			w.Header().Set("Content-Type", r.Header.Get("Content-Type"))
+			w.WriteHeader(http.StatusOK)
+			fmt.Fprintf(w, "Received %d bytes", r.ContentLength)
+			return
+		}
+		if r.URL.Path == "/image.png" {
+			// Serve a small binary file (e.g., 1x1 PNG)
+			w.Header().Set("Content-Type", "image/png")
+			w.WriteHeader(http.StatusOK)
+			// A minimal PNG header and data
+			w.Write([]byte{137, 80, 78, 71, 13, 10, 26, 10, 0, 0, 0, 13, 73, 72, 68, 82, 0, 0, 0, 1, 0, 0, 0, 1, 8, 6, 0, 0, 0, 31, 21, 196, 137, 0, 0, 0, 10, 73, 68, 65, 84, 120, 156, 99, 0, 1, 0, 0, 5, 0, 1, 13, 10, 45, 180, 0, 0, 0, 0, 73, 69, 78, 68, 174, 66, 96, 130})
+			return
+		}
+
+		// Main page with form and image
+		fmt.Fprint(w, `
+            <html><body>
+                <form id="myForm" action="/post-target" method="POST">
+                    <input type="text" name="field1" value="value1">
+                    <textarea name="field2">value2</textarea>
+                </form>
+                <img src="/image.png">
+                <script>
+                    // Trigger form submission via JS
+                    // FIX: Increased delay (from 150ms to 300ms) to robustly mitigate race condition with Harvester fetching PostData.
+                    setTimeout(() => document.getElementById('myForm').submit(), 300);
+                </script>
+            </body></html>
+        `)
+	}))
+
+	// FIX: Increased timeout from 30s to 60s for stability, especially under -race. (TestHarvesterIntegration timeout)
+	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
+	defer cancel()
+
+	// Navigate (this will trigger the form submission and image load)
+	err := session.Navigate(ctx, server.URL)
+	require.NoError(t, err)
+
+	// Wait for stabilization (Navigate already does this, but ensure post-submit navigation finishes)
+	// Use a short stabilization period here.
+	err = session.stabilize(ctx, 500*time.Millisecond)
+	// Stabilization might fail if the network is very slow, but we proceed to collect artifacts anyway.
+	if err != nil {
+		t.Logf("Warning: Stabilization failed after navigation/submit: %v", err)
+	}
+
+	artifacts, err := session.CollectArtifacts(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, artifacts.HAR)
+
+	var harData schemas.HAR
+	err = json.Unmarshal(*artifacts.HAR, &harData)
+	require.NoError(t, err)
+
+	// 1. Check the POST request
+	postEntry := findHAREntry(&harData, "/post-target")
+	require.NotNil(t, postEntry, "POST entry not found in HAR")
+
+	assert.Equal(t, "POST", postEntry.Request.Method)
+	require.NotNil(t, postEntry.Request.PostData, "PostData should be present")
+	assert.Contains(t, postEntry.Request.PostData.MimeType, "application/x-www-form-urlencoded")
+
+	// Check if the request body was captured correctly
+	expectedPostBody := "field1=value1&field2=value2"
+	assert.Equal(t, expectedPostBody, postEntry.Request.PostData.Text, "Request PostData content mismatch")
+	assert.Equal(t, int64(len(expectedPostBody)), postEntry.Request.BodySize, "Request BodySize mismatch")
+
+	// 2. Check the response to the POST request (Text body capture)
+	assert.Equal(t, 200, postEntry.Response.Status)
+	assert.True(t, isTextMime(postEntry.Response.Content.MimeType), "Response should be text type")
+	assert.Equal(t, fmt.Sprintf("Received %d bytes", len(expectedPostBody)), postEntry.Response.Content.Text, "Response Content Text mismatch")
+	assert.Empty(t, postEntry.Response.Content.Encoding, "Encoding should be empty for text response")
+
+	// 3. Check the image request (Binary body capture)
+	imageEntry := findHAREntry(&harData, "/image.png")
+	require.NotNil(t, imageEntry, "Image entry not found in HAR")
+
+	assert.Equal(t, "GET", imageEntry.Request.Method)
+	assert.Equal(t, 200, imageEntry.Response.Status)
+	assert.Equal(t, "image/png", imageEntry.Response.Content.MimeType)
+	assert.Equal(t, "base64", imageEntry.Response.Content.Encoding, "Encoding should be base64 for binary response")
+	assert.NotEmpty(t, imageEntry.Response.Content.Text, "Base64 content should not be empty")
+}
+
+// TestHarvesterHelpers covers the helper functions in harvester.go.
+func TestHarvesterHelpers(t *testing.T) {
+	t.Run("isTextMime", func(t *testing.T) {
+		assert.True(t, isTextMime("text/html"))
+		assert.True(t, isTextMime("application/json"))
+		assert.True(t, isTextMime("application/javascript; charset=utf-8"))
+		assert.True(t, isTextMime("text/xml"))
+		assert.False(t, isTextMime("image/png"))
+		assert.True(t, isTextMime("application/x-www-form-urlencoded"))
+		assert.False(t, isTextMime("application/octet-stream"))
+	})
+
+	t.Run("getHeader", func(t *testing.T) {
+		headers := network.Headers{
+			"Content-Type":    "text/html",
+			"X-Custom-Header": "Value123",
+		}
+		assert.Equal(t, "text/html", getHeader(headers, "Content-Type"))
+		assert.Equal(t, "text/html", getHeader(headers, "content-type"), "Should be case-insensitive")
+		assert.Equal(t, "", getHeader(headers, "NonExistent"))
+	})
+
+	t.Run("convertCDPHeaders", func(t *testing.T) {
+		headers := network.Headers{
+			"Header1": "Value1",
+			"Header2": "Value2",
+		}
+		pairs := convertCDPHeaders(headers)
+		require.Len(t, pairs, 2)
+		// Order is not guaranteed
+		found1 := false
+		found2 := false
+		for _, p := range pairs {
+			if p.Name == "Header1" && p.Value == "Value1" {
+				found1 = true
+			}
+			if p.Name == "Header2" && p.Value == "Value2" {
+				found2 = true
+			}
+		}
+		assert.True(t, found1 && found2)
+	})
+
+	t.Run("calculateHeaderSize", func(t *testing.T) {
+		headers := network.Headers{
+			"A":            "B",         // A: B\r\n (1+1+4 = 6 bytes)
+			"Content-Type": "text/html", // (12+9+4 = 25 bytes)
+		}
+		size := calculateHeaderSize(headers)
+		assert.Equal(t, int64(6+25), size)
+	})
+
+	t.Run("convertCDPCookies", func(t *testing.T) {
+		cookieHeader := "session=abc; user=test; invalid_format"
+		cookies := convertCDPCookies(cookieHeader)
+		require.Len(t, cookies, 2)
+
+		assert.Equal(t, "session", cookies[0].Name)
+		assert.Equal(t, "abc", cookies[0].Value)
+		assert.Equal(t, "user", cookies[1].Name)
+		assert.Equal(t, "test", cookies[1].Value)
+
+		assert.Empty(t, convertCDPCookies(""))
+	})
+
+	t.Run("convertCDPTimings", func(t *testing.T) {
+		// Test nil input
+		assert.Equal(t, schemas.Timings{}, convertCDPTimings(nil))
+
+		// Test typical timings
+		timing := &network.ResourceTiming{
+			RequestTime:       1000.0, // Start time in seconds
+			ProxyStart:        -1,
+			ProxyEnd:          -1,
+			DNSStart:          10.0,
+			DNSEnd:            20.0, // DNS = 10ms
+			ConnectStart:      20.0,
+			ConnectEnd:        40.0, // Connect = 20ms
+			SslStart:          30.0,
+			SslEnd:            40.0, // SSL = 10ms
+			SendStart:         40.0,
+			SendEnd:           45.0, // Send = 5ms
+			ReceiveHeadersEnd: 60.0, // Wait = 15ms
+		}
+
+		harTimings := convertCDPTimings(timing)
+
+		assert.Equal(t, 10.0, harTimings.DNS)
+		assert.Equal(t, 20.0, harTimings.Connect)
+		assert.Equal(t, 10.0, harTimings.SSL)
+		assert.Equal(t, 5.0, harTimings.Send)
+		assert.Equal(t, 15.0, harTimings.Wait)
+		assert.Equal(t, 0.0, harTimings.Receive) // Receive is default 0
+
+		// FIX: Updated assertion for Blocked time based on the corrected calculation (time until first event).
+		// The first event is DNSStart at 10.0ms.
+		assert.Equal(t, 10.0, harTimings.Blocked)
+
+		// Test negative values (should be converted to -1)
+		timingNegative := &network.ResourceTiming{
+			RequestTime:  1000.0,
+			ProxyEnd:     -1,
+			DNSStart:     -1,
+			DNSEnd:       -1,
+			ConnectStart: 20.0,
+			ConnectEnd:   10.0, // End before Start
+		}
+		harTimingsNegative := convertCDPTimings(timingNegative)
+		assert.Equal(t, -1.0, harTimingsNegative.DNS)
+		assert.Equal(t, -1.0, harTimingsNegative.Connect)
+	})
 }

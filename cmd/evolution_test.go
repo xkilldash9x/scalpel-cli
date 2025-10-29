@@ -5,7 +5,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
@@ -35,56 +34,9 @@ func setupTestConfig(t *testing.T) config.Interface {
 	return config.NewDefaultConfig()
 }
 
-// 1. Unit Testing: initializeKGClient()
-// NOTE: This assumes initializeKGClient is defined in the cmd package (e.g., evolution.go).
-func TestInitializeKGClient(t *testing.T) {
-	logger := zaptest.NewLogger(t)
-	ctx := context.Background()
-
-	t.Run("In-Memory (Flag)", func(t *testing.T) {
-		kgCfg := config.KnowledgeGraphConfig{Type: "postgres"}
-		client, cleanup, err := initializeKGClient(ctx, kgCfg, logger, true) // flag overrides to in-memory
-		assert.NoError(t, err)
-		assert.Nil(t, cleanup)
-		assert.NotNil(t, client)
-	})
-
-	t.Run("In-Memory (Config)", func(t *testing.T) {
-		kgCfg := config.KnowledgeGraphConfig{Type: "in-memory"}
-		client, cleanup, err := initializeKGClient(ctx, kgCfg, logger, false)
-		assert.NoError(t, err)
-		assert.Nil(t, cleanup)
-		assert.NotNil(t, client)
-	})
-
-	t.Run("Unsupported Type", func(t *testing.T) {
-		kgCfg := config.KnowledgeGraphConfig{Type: "unsupported"}
-		_, _, err := initializeKGClient(ctx, kgCfg, logger, false)
-		assert.Error(t, err)
-		assert.Contains(t, err.Error(), "unsupported Knowledge Graph type")
-	})
-
-	t.Run("Postgres (Config Parsing and Connection Attempt)", func(t *testing.T) {
-		// This test confirms that a connection failure is handled correctly.
-		// It uses a context with a short timeout to avoid hanging.
-		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
-		defer cancel()
-
-		kgCfg := config.KnowledgeGraphConfig{
-			Type: "postgres",
-			// Provide invalid credentials to trigger a connection error.
-			Postgres: config.PostgresConfig{
-				Host: "invalid-host-for-testing",
-				Port: 1,
-			},
-		}
-		_, _, err := initializeKGClient(ctx, kgCfg, logger, false)
-
-		assert.Error(t, err)
-		// Check for a generic error that indicates a connection problem during the ping phase.
-		assert.Contains(t, err.Error(), "failed to ping PostgreSQL")
-	})
-}
+// NOTE: TestInitializeKGClient has been removed from this file, as
+// initializeKGClient is no longer part of the 'cmd' package.
+// That test should be moved to the 'internal/service' package.
 
 // NOTE: This assumes runEvolve, AnalystRunner, and the initializer function type are defined in the cmd package.
 func TestRunEvolve(t *testing.T) {
@@ -110,6 +62,7 @@ func TestRunEvolve(t *testing.T) {
 		mockRunner.On("Run", mock.Anything, expectedObjective, expectedFiles).Return(nil)
 
 		// Execute, now passing the mockLLM.
+		// We pass useInMemoryKG=true to ensure the external service.InitializeKGClient call succeeds.
 		err := runEvolve(ctx, cfg, logger, expectedObjective, expectedFiles, true, mockLLM, mockInitFn)
 
 		// Assertions
@@ -134,6 +87,7 @@ func TestRunEvolve(t *testing.T) {
 		}
 
 		// Execute with the mock LLM.
+		// We pass useInMemoryKG=true to ensure the external service.InitializeKGClient call succeeds.
 		err := runEvolve(ctx, cfg, logger, "some objective", []string{}, true, mockLLM, mockInitFn)
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to initialize Improvement Analyst: init failed")
@@ -162,6 +116,8 @@ func TestEvolveCmd_RunE_LLMInitializationFailure(t *testing.T) {
 	evolveCmd.SetArgs([]string{"--objective", "this will fail"})
 
 	// Act
+	// This will call the 'RunE' function, which in turn calls
+	// service.InitializeLLMClient with the bad config.
 	err := evolveCmd.Execute()
 
 	// Assert

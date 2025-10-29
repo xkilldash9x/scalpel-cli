@@ -1,6 +1,3 @@
-//go:build concurrency
-// +build concurrency
-
 package timeslip
 
 import (
@@ -50,13 +47,15 @@ func TestGoroutineLeaks_Cancellation(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	// 1. Setup Mock Server with significant delay
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// FIX: Use NewTLSServer as H2Multiplexing requires HTTPS.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(5 * time.Second) // Long delay
 	}))
 	defer server.Close()
 
 	// 2. Setup Configuration
-	config := &Config{Concurrency: 10, Timeout: 10 * time.Second}
+	// FIX: Set InsecureSkipVerify for the self-signed TLS server.
+	config := &Config{Concurrency: 10, Timeout: 10 * time.Second, InsecureSkipVerify: true}
 	oracle, _ := NewSuccessOracle(config, false)
 	candidate := &RaceCandidate{Method: "GET", URL: server.URL}
 
@@ -94,16 +93,18 @@ func TestStress_AnalyzerConcurrency(t *testing.T) {
 	reporter := &MockReporter{} // Thread-safe mock
 
 	// Setup Mock Server
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// FIX: Use NewTLSServer as the Analyzer will attempt H2 strategies which require HTTPS.
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "{\"success\":true}")
 	}))
 	defer server.Close()
 
 	config := &Config{
-		Concurrency: 5,
-		Timeout:     1 * time.Second,
-		Success:     SuccessCondition{BodyRegex: "success"},
+		Concurrency:        5,
+		Timeout:            1 * time.Second,
+		Success:            SuccessCondition{BodyRegex: "success"},
+		InsecureSkipVerify: true, // FIX: Added InsecureSkipVerify
 	}
 	candidate := &RaceCandidate{Method: "GET", URL: server.URL}
 

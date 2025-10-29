@@ -1,3 +1,4 @@
+// File: internal/analysis/active/taint/analyzer.go
 package taint
 
 import (
@@ -17,7 +18,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid" // Added import
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 )
 
 //go:embed taint_shim.js
@@ -43,7 +44,7 @@ type Analyzer struct {
 	reporter     ResultsReporter
 	oastProvider OASTProvider
 	logger       *zap.Logger
-	shimTemplate *template.Template
+	shimTemplate string // <-- Changed from *template.Template to string
 
 	// -- State Management --
 	activeProbes map[string]ActiveProbe
@@ -68,11 +69,13 @@ type Analyzer struct {
 func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvider, logger *zap.Logger) (*Analyzer, error) {
 	taskLogger := logger.Named("taint_analyzer").With(zap.String("task_id", config.TaskID))
 
-	tmpl, err := template.ParseFS(taintShimFS, taintShimFilename)
+	// Read the raw template content directly
+	templateBytes, err := taintShimFS.ReadFile(taintShimFilename)
 	if err != nil {
-		taskLogger.Error("Failed to parse embedded taint shim template.", zap.Error(err))
-		return nil, fmt.Errorf("failed to parse embedded shim: %w", err)
+		taskLogger.Error("Failed to read embedded taint shim file.", zap.Error(err))
+		return nil, fmt.Errorf("failed to read embedded shim: %w", err)
 	}
+	templateContent := string(templateBytes)
 
 	// Apply robust defaults for performance and stability.
 	config = applyConfigDefaults(config)
@@ -84,8 +87,39 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 		logger:       taskLogger,
 		activeProbes: make(map[string]ActiveProbe),
 		eventsChan:   make(chan Event, config.EventChannelBuffer),
-		shimTemplate: tmpl,
+		shimTemplate: templateContent, // <-- Store the raw string
 	}, nil
+}
+
+// BuildTaintShim constructs the final JavaScript shim from a template string and config.
+// This function is exported to be used by the session manager during initialization.
+func BuildTaintShim(templateContent string, configJSON string) (string, error) {
+	// 1. Parse the template content passed as an argument.
+	tmpl, err := template.New("shim").Parse(templateContent)
+	if err != nil {
+		return "", fmt.Errorf("failed to parse provided shim template: %w", err)
+	}
+
+	// 2. Define the data structure for template execution.
+	data := struct {
+		SinksJSON         string
+		SinkCallbackName  string
+		ProofCallbackName string
+		ErrorCallbackName string
+	}{
+		SinksJSON:         configJSON,
+		SinkCallbackName:  JSCallbackSinkEvent,
+		ProofCallbackName: JSCallbackExecutionProof,
+		ErrorCallbackName: JSCallbackShimError,
+	}
+
+	// 3. Execute the template into a buffer.
+	var buf bytes.Buffer
+	if err := tmpl.Execute(&buf, data); err != nil {
+		return "", fmt.Errorf("failed to execute shim template: %w", err)
+	}
+
+	return buf.String(), nil
 }
 
 // applyConfigDefaults ensures that critical configuration parameters have sane default values.
@@ -233,30 +267,16 @@ func (a *Analyzer) instrument(ctx context.Context, session SessionContext) error
 }
 
 // generateShim creates the javascript instrumentation code from the embedded template.
+// REFACTOR: This function now uses the pre-loaded template string.
 func (a *Analyzer) generateShim() (string, error) {
+	// 1. Marshal the sinks config specific to this analyzer instance.
 	sinksJSON, err := json.Marshal(a.config.Sinks)
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal sinks configuration: %w", err)
 	}
 
-	data := struct {
-		SinksJSON         string
-		SinkCallbackName  string
-		ProofCallbackName string
-		ErrorCallbackName string
-	}{
-		SinksJSON:         string(sinksJSON),
-		SinkCallbackName:  JSCallbackSinkEvent,
-		ProofCallbackName: JSCallbackExecutionProof,
-		ErrorCallbackName: JSCallbackShimError,
-	}
-
-	var buf bytes.Buffer
-	if err := a.shimTemplate.Execute(&buf, data); err != nil {
-		return "", fmt.Errorf("failed to execute shim template: %w", err)
-	}
-
-	return buf.String(), nil
+	// 2. Call the exported BuildTaintShim function with the pre-loaded template string.
+	return BuildTaintShim(a.shimTemplate, string(sinksJSON))
 }
 
 // enqueueEvent provides a safe, non blocking mechanism for sending an event to the correlation engine.

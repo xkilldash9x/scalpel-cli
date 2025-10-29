@@ -18,7 +18,15 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"github.com/xkilldash9x/scalpel-cli/internal/reporting"
 	"github.com/xkilldash9x/scalpel-cli/internal/results"
+	"github.com/xkilldash9x/scalpel-cli/internal/service"
 )
+
+// ComponentFactory defines the interface required by the scan command, matching service.ComponentFactory.
+// We redefine the interface here to allow injection of mocks during testing without creating import cycles,
+// although we import 'service' to use the concrete Components struct in runScan.
+type ComponentFactory interface {
+	Create(ctx context.Context, cfg config.Interface, targets []string) (interface{}, error)
+}
 
 // newScanCmd creates and configures the `scan` command.
 // It is now decoupled from the component initialization logic.
@@ -131,14 +139,14 @@ func runScan(
 	// Initialize all dependencies using the factory.
 	rawComponents, err := factory.Create(ctx, cfg, targets)
 	if err != nil {
-		// If creation fails, components are not initialized, so no shutdown is needed.
+		// If creation fails, the factory handles the shutdown of partially initialized components.
 		return fmt.Errorf("failed to initialize scan components: %w", err)
 	}
-	// Perform a type assertion to get the concrete component struct.
-	components, ok := rawComponents.(*Components)
+	// Perform a type assertion to get the concrete component struct from the service package.
+	components, ok := rawComponents.(*service.Components)
 	if !ok {
 		// This indicates a programming error (the factory returned the wrong type).
-		return fmt.Errorf("component factory returned an invalid type; expected *Components but got %T", rawComponents)
+		return fmt.Errorf("component factory returned an invalid type; expected *service.Components but got %T", rawComponents)
 	}
 	defer components.Shutdown()
 
@@ -162,7 +170,8 @@ func runScan(
 	if err := components.Orchestrator.StartScan(ctx, scanTargets, scanID); err != nil {
 		if errors.Is(err, context.Canceled) {
 			logger.Warn("Scan aborted gracefully by user signal.", zap.String("scanID", scanID))
-			return fmt.Errorf("scan aborted by user")
+			// Return nil as the shutdown was graceful and initiated by the user.
+			return nil
 		}
 		logger.Error("Scan failed during orchestration.", zap.Error(err), zap.String("scanID", scanID))
 		return err
@@ -185,38 +194,8 @@ func runScan(
 	return nil
 }
 
-// startFindingsConsumer runs a goroutine that reads from the findings channel and persists them.
-func startFindingsConsumer(ctx context.Context, findingsChan <-chan schemas.Finding, dbStore schemas.Store, logger *zap.Logger) {
-	logger.Info("Starting findings consumer goroutine...")
-	defer logger.Info("Findings consumer goroutine shut down.")
-
-	for {
-		select {
-		case finding, ok := <-findingsChan:
-			if !ok {
-				logger.Info("Findings channel closed, consumer shutting down.")
-				return
-			}
-			// Persist the single finding by wrapping it in an envelope.
-			// This is less efficient (one transaction per finding) but robust against batch failures.
-			envelope := &schemas.ResultEnvelope{
-				ScanID:    finding.ScanID,
-				TaskID:    finding.TaskID,
-				Timestamp: time.Now(),
-				Findings:  []schemas.Finding{finding},
-			}
-			// Use a background context with a timeout for persistence.
-			persistCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-			if err := dbStore.PersistData(persistCtx, envelope); err != nil {
-				logger.Error("Failed to persist real time finding.", zap.Error(err), zap.String("finding_id", finding.ID))
-			}
-			cancel() // Release resources associated with the timeout context.
-		case <-ctx.Done():
-			logger.Info("Findings consumer context canceled, shutting down.")
-			return
-		}
-	}
-}
+// startFindingsConsumer has been moved to internal/service/initializers.go
+// and significantly improved with batching and robust shutdown handling.
 
 // generateReport handles result processing and report writing.
 func generateReport(_ context.Context, dbStore schemas.Store, scanID, format, outputPath string, logger *zap.Logger) error {

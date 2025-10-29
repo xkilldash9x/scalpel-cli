@@ -105,23 +105,28 @@ func NewTestHumanoid(executor Executor, seed int64) *Humanoid {
 	humanoidCfg.FatigueRecoveryRate = 0.01
 	humanoidCfg.HabituationRate = 0.005
 
-	// The mock object is no longer needed. We pass the struct directly.
-	h := New(humanoidCfg, zap.NewNop(), executor)
-
-	h.mu.Lock()
-	defer h.mu.Unlock()
-
-	// Overwrite the non-deterministic RNG and noise with deterministic ones.
+	// FIX: Initialize the struct manually instead of calling New() to ensure determinism
+	// and prevent finalizeSessionPersona from running with randomized values.
 	source := rand.NewSource(seed)
-	h.rng = rand.New(source)
-	// Use deterministic seeds for Pink Noise in tests.
-	h.noiseX = NewPinkNoiseGenerator(rand.New(rand.NewSource(seed)), 12)
-	h.noiseY = NewPinkNoiseGenerator(rand.New(rand.NewSource(seed+1)), 12)
+	rng := rand.New(source)
+	nOscillators := 12
 
-	// Ensure dynamic config matches the base config after New() potentially modified it.
-	h.dynamicConfig = h.baseConfig
-	// Force skill factor for testing if needed (New sets it randomly otherwise).
-	h.skillFactor = 1.0
+	h := &Humanoid{
+		logger:             zap.NewNop(),
+		executor:           executor,
+		baseConfig:         humanoidCfg,
+		dynamicConfig:      humanoidCfg, // Ensure dynamic config matches the base config.
+		rng:                rng,
+		currentButtonState: schemas.ButtonNone,
+		lastActionType:     ActionTypeNone,
+		// Force skill factor for testing.
+		skillFactor: 1.0,
+		// Initialize Pink Noise generators with deterministic seeds.
+		noiseX: NewPinkNoiseGenerator(rand.New(rand.NewSource(seed)), nOscillators),
+		noiseY: NewPinkNoiseGenerator(rand.New(rand.NewSource(seed+1)), nOscillators),
+	}
+
+	// We do NOT call finalizeSessionPersona here, as tests rely on the predictable baseConfig values.
 
 	return h
 }

@@ -280,7 +280,7 @@ func TestExecuteLoginAttempt_JSON(t *testing.T) {
 	mockCtx.On("GetHumanoid").Return(nil).Maybe()
 	mockCtx.On("ExecuteScript", ctx, mock.AnythingOfType("string"), mock.Anything).
 		Return(json.RawMessage(responseJSON), nil).
-		Run(func(args mock.Arguments) {
+		Run(func(args mock.Arguments) { // FIX: Corrected the function signature to match the mock's expectations.
 			scriptArgs := args.Get(2).([]interface{})
 			require.Len(t, scriptArgs, 4)
 
@@ -324,7 +324,7 @@ func TestExecuteLoginAttempt_FormURLEncoded(t *testing.T) {
 
 	mockCtx.On("GetHumanoid").Return(nil).Maybe()
 	mockCtx.On("ExecuteScript", ctx, mock.Anything, mock.Anything).
-		Return(json.RawMessage(responseJSON), nil).
+		Return(json.RawMessage(responseJSON), nil). // FIX: Corrected the function signature to match the mock's expectations.
 		Run(func(args mock.Arguments) {
 			scriptArgs := args.Get(2).([]interface{})
 			bodyString := scriptArgs[3].(string)
@@ -351,7 +351,7 @@ func TestGetFreshCSRFToken_Success(t *testing.T) {
 	mockCtx.On("GetHumanoid").Return(nil).Maybe()
 	mockCtx.On("Navigate", ctx, pageURL).Return(nil).Once()
 	mockCtx.On("WaitForAsync", ctx, 0).Return(nil).Once()
-	mockCtx.On("ExecuteScript", ctx, mock.AnythingOfType("string"), mock.MatchedBy(func(args []interface{}) bool {
+	mockCtx.On("ExecuteScript", ctx, mock.AnythingOfType("string"), mock.MatchedBy(func(args []interface{}) bool { // FIX: Corrected the function signature to match the mock's expectations.
 		return len(args) == 1 && len(args[0].([]string)) > 0
 	})).Return(json.RawMessage(tokenJSON), nil).Once()
 

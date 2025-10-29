@@ -3,6 +3,9 @@ package timeslip
 
 import (
 	"bytes"
+	// Rename crypto/rand to avoid collision with math/rand
+	crypto_rand "crypto/rand"
+	"encoding/binary"
 	"math/rand"
 	"net/http"
 	"strconv"
@@ -22,11 +25,21 @@ var (
 )
 
 // rngPool provides a pool of concurrency-safe PRNG instances.
+// Updated to use crypto/rand for seeding to ensure unpredictability and avoid seed collisions.
 var rngPool = sync.Pool{
 	New: func() interface{} {
-		// Seed each new PRNG uniquely upon creation.
-		//nolint:gosec // Weak RNG is acceptable here.
-		src := rand.NewSource(time.Now().UnixNano())
+		var seed int64
+		// Read 8 bytes from crypto/rand and convert to int64 for the seed.
+		err := binary.Read(crypto_rand.Reader, binary.BigEndian, &seed)
+		if err != nil {
+			// Fallback if crypto/rand fails (e.g., system entropy pool exhausted).
+			// This is less secure but prevents the application from crashing.
+			seed = time.Now().UnixNano()
+		}
+
+		// Use the strong seed, but the fast (non-cryptographic) math/rand algorithm.
+		//nolint:gosec // Weak RNG algorithm is acceptable here; we use a strong seed.
+		src := rand.NewSource(seed)
 		return rand.New(src)
 	},
 }
@@ -46,12 +59,21 @@ func putRNG(rng *rand.Rand) {
 func MutateRequest(body []byte, headers http.Header) ([]byte, http.Header, error) {
 	mutatedBody := body
 	mutatedHeaders := headers.Clone()
+
+	// FIX: Ensure the headers map is initialized if the input was nil (Clone() returns nil if input is nil).
+	// This prevents "panic: assignment to entry in nil map" in downstream consumers
+	// (like h1_singlebyte.go) that might try to Set headers on the result.
+	if mutatedHeaders == nil {
+		mutatedHeaders = make(http.Header)
+	}
+
 	const templateMarker = "{{"
 
 	// Optimization: Check if any mutation is actually needed.
 	needsMutation := bytes.Contains(body, []byte(templateMarker))
 	if !needsMutation {
 	headerCheck:
+		// We check the original headers for the marker, as mutatedHeaders might be empty if input was nil.
 		for _, values := range headers {
 			for _, value := range values {
 				// Use strings.Contains to avoid allocation.

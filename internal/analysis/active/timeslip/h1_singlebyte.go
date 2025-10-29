@@ -99,6 +99,9 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 		return nil, fmt.Errorf("no responses received")
 	}
 
+	// Get the exclusion map for fingerprinting.
+	excludeMap := config.GetExcludedHeaders()
+
 	// 6. Package the results.
 	result := &RaceResult{
 		Strategy:  H1SingleByteSend,
@@ -128,7 +131,8 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 		}
 
 		// Generate the composite fingerprint using the now-correct types.
-		fingerprint := GenerateFingerprint(localParsedResp.StatusCode, localParsedResp.Headers, localParsedResp.Body)
+		// Use the excludeMap.
+		fingerprint := GenerateFingerprint(localParsedResp.StatusCode, localParsedResp.Headers, localParsedResp.Body, excludeMap)
 
 		raceResp := &RaceResponse{
 			ParsedResponse: localParsedResp,
@@ -194,10 +198,20 @@ func preparePipelinedRequests(candidate *RaceCandidate, count int, host string) 
 		// Ensure Connection: keep-alive is set for pipelining.
 		req.Header.Set("Connection", "keep-alive")
 
+		// IMPROVEMENT: Explicitly disable 'Expect: 100-continue'.
+		// If a request has a body, the Go client might automatically add this header,
+		// or the server might expect it by default.
+		// If the server honors it, it will pause and send a 100 Continue response
+		// before reading the body. This ruins the synchronization of the single-byte strategy
+		// by causing the server to process the stream prematurely.
+		if len(mutatedBody) > 0 {
+			req.Header.Set("Expect", "")
+		}
+
 		// Ensure Content-Length is correct for the mutated body.
 		if len(mutatedBody) > 0 {
 			req.ContentLength = int64(len(mutatedBody))
-			req.Header.Set("Content-Length", fmt.Sprintf("%d", req.ContentLength))
+			// Note: req.Write() handles setting the Content-Length header if req.ContentLength is set.
 		}
 
 		// 3. Serialize the request using a pooled buffer.

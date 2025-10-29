@@ -68,22 +68,18 @@ func (e *CodebaseExecutor) Execute(ctx context.Context, action Action) (*Executi
 // analyzeCodebase orchestrates the full static analysis workflow.
 func (e *CodebaseExecutor) analyzeCodebase(pattern string) (string, error) {
 	// 1. Load, parse, and type check the packages.
-	// We must change the working directory to the project root for the package loader to work correctly.
-	originalWD, err := os.Getwd()
-	if err != nil {
-		return "", fmt.Errorf("failed to get current working directory: %w", err)
-	}
-	if err := os.Chdir(e.projectRoot); err != nil {
-		return "", fmt.Errorf("failed to change directory to project root '%s': %w", e.projectRoot, err)
-	}
-	defer os.Chdir(originalWD) // a little cleanup
+	// FIX: Removed os.Chdir(). (Guide 1.2)
+	// os.Chdir() modifies the working directory for the entire process, which is unsafe
+	// in a concurrent environment. The packages.Load configuration (specifically cfg.Dir
+	// in loadPackages) already correctly handles the project root context.
 
 	pkgs, err := e.loadPackages([]string{pattern})
 	if err != nil {
 		return "", fmt.Errorf("error loading packages: %w", err)
 	}
 	if len(pkgs) == 0 {
-		return "", fmt.Errorf("no packages were loaded for pattern '%s'", pattern)
+		// Improve error message clarity.
+		return "", fmt.Errorf("no packages were loaded for pattern '%s' in root '%s'", pattern, e.projectRoot)
 	}
 
 	// 2. Identify the packages belonging to the main module.

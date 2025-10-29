@@ -17,31 +17,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
-
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 )
-
-// SetupObservability ensures the global logger is initialized for tests.
-//
-// MISALIGNMENT: The report emphasizes strict state isolation in concurrent environments.
-// Relying on a global logger (Singleton pattern via observability.GetLogger())
-// violates this principle. Initializing global state here is also race-prone
-// as tests run concurrently. Best practice dictates using dependency injection
-// for loggers rather than global accessors.
-func SetupObservability(t *testing.T) {
-	t.Helper()
-
-	// BUILD FIX: The compiler error "undefined: observability.SetLogger" indicates that
-	// the SetLogger function is not exported from the observability package.
-	// ACTION REQUIRED: Go to the file defining this function (e.g., internal/observability/logger.go)
-	// and ensure the function name is capitalized (e.g., "SetLogger").
-	//
-	// The line below is crucial for preventing runtime panics caused by a nil logger.
-	if observability.GetLogger() == nil {
-		// CRITICAL: This line must be uncommented after exporting SetLogger.
-		// observability.SetLogger(zaptest.NewLogger(t))
-	}
-}
 
 // tlsTestHelper manages the lifecycle of dynamically generated certificates and test servers.
 type tlsTestHelper struct {
@@ -66,7 +42,6 @@ type tlsTestHelper struct {
 // newTLSTestHelper creates a new helper, generating the CA and a server certificate.
 func newTLSTestHelper(t *testing.T) *tlsTestHelper {
 	t.Helper()
-	SetupObservability(t)
 	helper := &tlsTestHelper{t: t}
 	helper.generateCA()
 	helper.generateServerCert()

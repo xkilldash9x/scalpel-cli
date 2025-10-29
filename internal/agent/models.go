@@ -70,12 +70,18 @@ const (
 
 // Action represents a specific step decided by the Mind.
 type Action struct {
-	ID        string     `json:"id"`
-	MissionID string     `json:"mission_id"`
-	ScanID    string     `json:"scan_id"` // Propagated for correlation.
-	Type      ActionType `json:"type"`
-	Selector  string     `json:"selector,omitempty"` // Primary selector for UI elements.
-	Value     string     `json:"value,omitempty"`    // Value for input actions.
+	ID        string `json:"id"`
+	MissionID string `json:"mission_id"`
+	ScanID    string `json:"scan_id"` // Propagated for correlation.
+
+	// Thought captures the step-by-step reasoning (Chain-of-Thought) of the LLM
+	// before it decided on the final action. This is crucial for debugging and
+	// improving the agent's decision-making process.
+	Thought string `json:"thought,omitempty"`
+
+	Type     ActionType `json:"type"`
+	Selector string     `json:"selector,omitempty"` // Primary selector for UI elements.
+	Value    string     `json:"value,omitempty"`    // Value for input actions.
 	// Metadata holds secondary parameters (e.g., 'target_selector' for DragAndDrop).
 	Metadata  map[string]interface{} `json:"metadata,omitempty"`
 	Rationale string                 `json:"rationale"`

@@ -18,14 +18,18 @@ import (
 	"go.uber.org/zap"
 )
 
+// Define the standard deviation multiplier threshold for timing anomalies.
+const timingAnomalyStdDevThreshold = 3.0
+
 // This var block holds the strategy execution functions. By making them variables,
 // we can replace them in our tests to mock their behavior without actually
 // executing them. This is key to fixing the "cannot assign to" error.
 var (
-	executeH1Concurrent	= ExecuteH1Concurrent
+	executeH1Concurrent     = ExecuteH1Concurrent
 	executeH1SingleByteSend = ExecuteH1SingleByteSend
-	executeH2Multiplexing	= ExecuteH2Multiplexing
-	executeGraphQLAsync	= ExecuteGraphQLAsync
+	executeH2Multiplexing   = ExecuteH2Multiplexing
+	executeH2Dependency     = ExecuteH2Dependency // Added H2 Dependency strategy
+	executeGraphQLAsync     = ExecuteGraphQLAsync
 )
 
 // Analyzer orchestrates the TimeSlip module, managing strategy execution and result analysis.
@@ -116,14 +120,17 @@ func (a *Analyzer) Analyze(ctx context.Context, candidate *RaceCandidate) error 
 			result, execErr = executeH1SingleByteSend(ctx, candidate, a.config, oracle)
 		case H2Multiplexing:
 			result, execErr = executeH2Multiplexing(ctx, candidate, a.config, oracle)
+		case H2Dependency:
+			result, execErr = executeH2Dependency(ctx, candidate, a.config, oracle)
 		case AsyncGraphQL:
 			result, execErr = executeGraphQLAsync(ctx, candidate, a.config, oracle)
 		}
 
 		if execErr != nil {
 			// If a strategy fails, we need to know why so we can decide whether to continue.
-			if errors.Is(execErr, ErrH2Unsupported) || errors.Is(execErr, ErrPipeliningRejected) {
-				a.logger.Info("Strategy not supported by target or intermediate proxy.", zap.String("strategy", string(strategy)), zap.Error(execErr))
+			// Added ErrH2FrameError to the list of recoverable errors.
+			if errors.Is(execErr, ErrH2Unsupported) || errors.Is(execErr, ErrPipeliningRejected) || errors.Is(execErr, ErrH2FrameError) {
+				a.logger.Info("Strategy not supported by target or encountered protocol error.", zap.String("strategy", string(strategy)), zap.Error(execErr))
 			} else if errors.Is(execErr, ErrTargetUnreachable) {
 				a.logger.Warn("Strategy failed due to target being unreachable or timing out.", zap.String("strategy", string(strategy)), zap.Error(execErr))
 				// Could consider breaking here if the target seems completely down.
@@ -167,9 +174,10 @@ func (a *Analyzer) determineStrategies(candidate *RaceCandidate) []RaceStrategy 
 		return []RaceStrategy{AsyncGraphQL}
 	}
 
-	// For standard HTTP endpoints, we attempt all applicable strategies in order of preference.
+	// For standard HTTP endpoints, we attempt all applicable strategies in order of preference (most precise first).
 	return []RaceStrategy{
-		H2Multiplexing,   // Preferred for efficiency if the target supports it.
+		H2Dependency,     // Preferred: Offers the tightest synchronization if H2 is supported.
+		H2Multiplexing,   // Efficient H2 strategy.
 		H1SingleByteSend, // The most precise technique for HTTP/1.1.
 		H1Concurrent,     // The classic brute force fallback.
 	}
@@ -407,6 +415,7 @@ func (a *Analyzer) calculateStatistics(responses []*RaceResponse) ResponseStatis
 	})
 
 	stats := ResponseStatistics{
+		Count:         len(durationsMs), // Populate the count for statistical analysis.
 		MinDurationMs: durationsMs[0],
 		MaxDurationMs: durationsMs[len(durationsMs)-1],
 	}
@@ -418,6 +427,7 @@ func (a *Analyzer) calculateStatistics(responses []*RaceResponse) ResponseStatis
 	}
 	stats.AvgDurationMs = float64(sum) / float64(len(durationsMs))
 
+	// Calculate Median
 	n := len(durationsMs)
 	if n%2 == 0 {
 		stats.MedDurationMs = float64(durationsMs[n/2-1]+durationsMs[n/2]) / 2.0
@@ -425,6 +435,7 @@ func (a *Analyzer) calculateStatistics(responses []*RaceResponse) ResponseStatis
 		stats.MedDurationMs = float64(durationsMs[n/2])
 	}
 
+	// Calculate Standard Deviation
 	var varianceSum float64
 	for _, d := range durationsMs {
 		varianceSum += math.Pow(float64(d)-stats.AvgDurationMs, 2)
@@ -480,31 +491,105 @@ func checkDifferentialState(result *RaceResult, config *Config, analysis *Analys
 
 func checkStateFlutter(result *RaceResult, config *Config, analysis *AnalysisResult) bool {
 	if len(analysis.UniqueResponses) > 1 && analysis.SuccessCount == 0 {
-		// This is a key change. If there's a significant timing delta,
+		// This is a key change. If there's a significant timing delta or high variation,
 		// we should not classify this as a "State Flutter". Instead, we should fall through
 		// to the timing anomaly heuristic, which is a better fit for that scenario.
-		if config.ThresholdMs > 0 && analysis.Stats.TimingDeltaMs > int64(config.ThresholdMs) {
+
+		// Calculate the Coefficient of Variation (CoV) = StdDev / Mean.
+		coefficientOfVariation := 0.0
+		if analysis.Stats.AvgDurationMs > 0 {
+			coefficientOfVariation = analysis.Stats.StdDevMs / analysis.Stats.AvgDurationMs
+		}
+
+		// If CoV is high (e.g. > 0.5) OR the simple delta threshold is met, defer to timing analysis.
+		const highVariationThreshold = 0.5
+		isHighVariation := coefficientOfVariation > highVariationThreshold
+		isLargeDelta := config.ThresholdMs > 0 && analysis.Stats.TimingDeltaMs > int64(config.ThresholdMs)
+
+		if isHighVariation || isLargeDelta {
 			return false // Defer to the timing anomaly heuristic.
 		}
 
 		analysis.Vulnerable = true
 		analysis.Confidence = 0.6
-		analysis.Details = fmt.Sprintf("VULNERABLE: State flutter detected. %d unique failure responses observed. Indicates unstable state under concurrency.", len(analysis.UniqueResponses))
+		// Update details to include CoV for better context.
+		analysis.Details = fmt.Sprintf("VULNERABLE: State flutter detected. %d unique failure responses observed with low timing variation (CoV: %.2f). Indicates unstable state under concurrency.", len(analysis.UniqueResponses), coefficientOfVariation)
 		return true
 	}
 	return false
 }
 
+// checkTimingAnomalies analyzes response times using statistical outlier detection.
 func checkTimingAnomalies(result *RaceResult, config *Config, analysis *AnalysisResult) bool {
-	// Timing anomalies are not a reliable indicator for async GraphQL, as batching can create artificial deltas.
-	if result.Strategy == AsyncGraphQL {
+	// Timing anomalies are unreliable for strategies where individual request timing is obscured or artificial.
+	// H2Dependency timing is not measured per request in the current implementation.
+	if result.Strategy == AsyncGraphQL || result.Strategy == H2Dependency {
 		return false
 	}
 
-	if config.ThresholdMs > 0 && analysis.Stats.TimingDeltaMs > int64(config.ThresholdMs) {
+	stats := analysis.Stats
+
+	// We need a minimum number of data points for meaningful statistics (e.g. 5).
+	minDataPoints := 5
+	if stats.Count < minDataPoints {
+		// Fallback to legacy threshold check if not enough data for stats, but enough for a simple delta.
+		if config.ThresholdMs > 0 && stats.TimingDeltaMs > int64(config.ThresholdMs) && stats.Count >= 2 {
+			analysis.Vulnerable = false
+			analysis.Confidence = 0.2 // Low confidence due to insufficient data.
+			analysis.Details = fmt.Sprintf("INFO: Timing delta detected (%dms), but insufficient data (%d points) for robust statistical analysis.", stats.TimingDeltaMs, stats.Count)
+			return true
+		}
+		return false
+	}
+
+	// IMPROVEMENT: Heuristic 1: Outlier Detection (Bimodal distribution indicator)
+	// A true race often manifests as N-1 fast responses and 1 slow response (the one that acquired the lock).
+
+	// Basic noise filtering: If StdDev or Median is very low, timing analysis is unreliable.
+	const minStdDevMs = 10.0
+	const minMedianMs = 20.0
+
+	if stats.StdDevMs >= minStdDevMs && stats.MedDurationMs >= minMedianMs {
+		// Calculate the upper bound: Median + (Threshold * StdDev).
+		upperBound := stats.MedDurationMs + (timingAnomalyStdDevThreshold * stats.StdDevMs)
+
+		// Check if the maximum duration significantly exceeds this bound.
+		if float64(stats.MaxDurationMs) > upperBound {
+			// Strong signal detected. Verify the distribution (looking for bimodal pattern).
+			outliers := 0
+			// We iterate over responses again to count outliers, as stats only holds aggregates.
+			for _, resp := range result.Responses {
+				if resp.Error == nil && resp.ParsedResponse != nil && resp.ParsedResponse.Duration > 0 {
+					if float64(resp.ParsedResponse.Duration.Milliseconds()) > upperBound {
+						outliers++
+					}
+				}
+			}
+
+			// If only a small fraction of requests are outliers (e.g., 1-2 requests, or < 15%), it strongly suggests a lock-wait.
+			if outliers > 0 && (outliers <= 2 || float64(outliers)/float64(stats.Count) < 0.15) {
+				analysis.Vulnerable = false
+				analysis.Confidence = 0.4 // Stronger signal than simple delta (0.3).
+
+				analysis.Details = fmt.Sprintf(
+					"INFO: Significant timing anomaly (Lock-Wait pattern) detected. %d/%d response(s) were statistical outliers (>%.1f SDs from median). Median: %.0fms, Max: %dms. Suggests sequential locking or significant resource contention.",
+					outliers, stats.Count, timingAnomalyStdDevThreshold, stats.MedDurationMs, stats.MaxDurationMs)
+
+				// If the distribution is clearly bimodal (e.g., only 1 outlier among many requests), the confidence increases.
+				if outliers == 1 && stats.Count >= 10 {
+					analysis.Confidence = 0.5
+					analysis.Details += " Bimodal distribution strongly suggests serialization."
+				}
+				return true
+			}
+		}
+	}
+
+	// Heuristic 2: Fallback to simple delta threshold (Legacy check)
+	if config.ThresholdMs > 0 && stats.TimingDeltaMs > int64(config.ThresholdMs) {
 		analysis.Vulnerable = false
 		analysis.Confidence = 0.3
-		analysis.Details = fmt.Sprintf("INFO: Significant timing delta detected (%dms). Suggests resource contention or sequential locking.", analysis.Stats.TimingDeltaMs)
+		analysis.Details = fmt.Sprintf("INFO: Significant timing delta detected (%dms) exceeds threshold. Suggests resource contention or sequential locking.", stats.TimingDeltaMs)
 		return true
 	}
 	return false

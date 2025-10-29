@@ -9,6 +9,7 @@ import (
 	"github.com/spf13/viper"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/internal/service" // FIX: Import the service package
 	"go.uber.org/zap"
 )
 
@@ -66,7 +67,8 @@ func newPristineRootCmd() *cobra.Command {
 	_ = cmd.PersistentFlags().MarkHidden("validate-fix")
 
 	// Re-attach subcommands, providing their required dependencies.
-	cmd.AddCommand(newScanCmd(NewComponentFactory()))
+	// FIX: Use the service package's ComponentFactory, just like in cmd/root.go
+	cmd.AddCommand(newScanCmd(service.NewComponentFactory()))
 	cmd.AddCommand(newReportCmd(NewStoreProvider()))
 
 	// Assuming these commands exist and are correctly defined elsewhere in the cmd package.

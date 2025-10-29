@@ -23,7 +23,7 @@ type Logger interface {
 type NopLogger struct{}
 
 func (n *NopLogger) Warn(msg string, args ...interface{})  {}
-func (n *NopLogger) Info(msg string, args ...interface{})   {}
+func (n *NopLogger) Info(msg string, args ...interface{})  {}
 func (n *NopLogger) Debug(msg string, args ...interface{}) {}
 func (n *NopLogger) Error(msg string, args ...interface{}) {}
 
@@ -42,7 +42,8 @@ const (
 	DefaultIdleConnTimeout     = 90 * time.Second
 )
 
-const requiredMinTLSVersion = tls.VersionTLS12
+// SecureMinTLSVersion defines the lowest TLS version considered secure by default.
+const SecureMinTLSVersion = tls.VersionTLS12
 
 // ClientConfig holds the configuration for the browser's HTTP client.
 type ClientConfig struct {
@@ -56,11 +57,15 @@ type ClientConfig struct {
 	// Dialer configuration (TCP Layer)
 	DialerConfig *DialerConfig
 
-	// Connection pool
+	// Connection pool and behavior
 	MaxIdleConns        int
 	MaxIdleConnsPerHost int
 	MaxConnsPerHost     int
 	IdleConnTimeout     time.Duration
+
+	// DisableKeepAlives prevents the transport from reusing TCP connections (HTTP Keep-Alive).
+	// This is useful for specific testing scenarios like race condition "dogpiling".
+	DisableKeepAlives bool
 
 	// Proxy
 	ProxyURL *url.URL
@@ -79,19 +84,19 @@ func NewBrowserClientConfig() *ClientConfig {
 	dialerCfg.KeepAlive = DefaultKeepAliveInterval
 
 	// Initialize a default in-memory cookie jar.
-	// For a production browser, this should be replaced with a persistent implementation.
 	jar, _ := cookiejar.New(nil) // cookiejar.New only errors if options are invalid (we pass nil).
 
 	return &ClientConfig{
-		DialerConfig:          dialerCfg,
-		InsecureSkipVerify:    false,
-		RequestTimeout:        DefaultRequestTimeout,
-		MaxIdleConns:          DefaultMaxIdleConns,
-		MaxIdleConnsPerHost:   DefaultMaxIdleConnsPerHost,
-		MaxConnsPerHost:       DefaultMaxConnsPerHost,
-		IdleConnTimeout:       DefaultIdleConnTimeout,
-		CookieJar:             jar,
-		Logger:                &NopLogger{},
+		DialerConfig:        dialerCfg,
+		InsecureSkipVerify:  false,
+		DisableKeepAlives:   false, // Default to allowing connection reuse
+		RequestTimeout:      DefaultRequestTimeout,
+		MaxIdleConns:        DefaultMaxIdleConns,
+		MaxIdleConnsPerHost: DefaultMaxIdleConnsPerHost,
+		MaxConnsPerHost:     DefaultMaxConnsPerHost,
+		IdleConnTimeout:     DefaultIdleConnTimeout,
+		CookieJar:           jar,
+		Logger:              &NopLogger{},
 	}
 }
 
@@ -112,6 +117,7 @@ func NewHTTPTransport(config *ClientConfig) *http.Transport {
 
 	// Prepare the dialer config for the transport's DialContext.
 	// We must set TLSConfig to nil here, as http.Transport manages the TLS handshake separately using TLSClientConfig.
+	// Create a copy to avoid mutating the original config.DialerConfig.
 	transportDialerConfig := *config.DialerConfig
 	transportDialerConfig.TLSConfig = nil
 
@@ -126,9 +132,10 @@ func NewHTTPTransport(config *ClientConfig) *http.Transport {
 		MaxIdleConnsPerHost:   config.MaxIdleConnsPerHost,
 		MaxConnsPerHost:       config.MaxConnsPerHost,
 		IdleConnTimeout:       config.IdleConnTimeout,
+		DisableKeepAlives:     config.DisableKeepAlives, // Apply the configuration
 		ResponseHeaderTimeout: DefaultResponseHeaderTimeout,
 		// CRITICAL: We must disable the transport's built-in Gzip handling
-		// because our CompressionMiddleware handles Gzip, Deflate, and Brotli.
+		// because our CompressionMiddleware handles Gzip, Deflate, and Brotli robustly.
 		DisableCompression: true,
 		ForceAttemptHTTP2:  true, // Always prefer H2
 	}
@@ -147,15 +154,14 @@ func NewClient(config *ClientConfig) *http.Client {
 	}
 	baseTransport := NewHTTPTransport(config)
 
-	// Wrap the transport with our middleware to handle compression (Brotli, Deflate, Gzip).
+	// Wrap the transport with our middleware to handle compression.
 	wrappedTransport := NewCompressionMiddleware(baseTransport)
 
 	client := &http.Client{
 		Transport: wrappedTransport,
 		Timeout:   config.RequestTimeout,
 		Jar:       config.CookieJar,
-		// For an automation browser, it's crucial to handle redirects manually
-		// to track navigation events, history, and state precisely.
+		// For an automation browser, handle redirects manually to track navigation precisely.
 		CheckRedirect: func(req *http.Request, via []*http.Request) error {
 			return http.ErrUseLastResponse
 		},
@@ -167,9 +173,11 @@ func NewClient(config *ClientConfig) *http.Client {
 // configureTLS sets up the TLS configuration and ensures strong defaults and ALPN settings.
 func configureTLS(config *ClientConfig) *tls.Config {
 	var tlsConfig *tls.Config
-	// 1. Get a base config, preferring a user-supplied one.
+	// 1. Get a base config, prioritizing user-supplied ClientConfig.TLSConfig, then DialerConfig.TLSConfig.
 	if config.TLSConfig != nil {
 		tlsConfig = config.TLSConfig.Clone()
+	} else if config.DialerConfig != nil && config.DialerConfig.TLSConfig != nil {
+		tlsConfig = config.DialerConfig.TLSConfig.Clone()
 	} else {
 		// No user config, so start with a fresh, secure default.
 		tlsConfig = NewDialerConfig().TLSConfig.Clone()
@@ -182,17 +190,27 @@ func configureTLS(config *ClientConfig) *tls.Config {
 	if len(tlsConfig.CipherSuites) == 0 {
 		tlsConfig.CipherSuites = defaults.CipherSuites
 	}
+	if len(tlsConfig.CurvePreferences) == 0 {
+		tlsConfig.CurvePreferences = defaults.CurvePreferences
+	}
 	if tlsConfig.ClientSessionCache == nil {
 		tlsConfig.ClientSessionCache = defaults.ClientSessionCache
 	}
 	if len(tlsConfig.NextProtos) == 0 {
-		// "h2" must be listed before "http/1.1" to prefer HTTP/2.
+		// Configure ALPN: "h2" must be listed before "http/1.1" to prefer HTTP/2.
 		tlsConfig.NextProtos = []string{"h2", "http/1.1"}
 	}
 
-	// 4. Apply security hardening.
-	if tlsConfig.MinVersion < requiredMinTLSVersion {
-		tlsConfig.MinVersion = requiredMinTLSVersion
+	// 4. Apply security hardening and verification.
+	// If the user didn't specify a MinVersion (MinVersion == 0), set the secure default.
+	if tlsConfig.MinVersion == 0 {
+		tlsConfig.MinVersion = SecureMinTLSVersion
+	}
+
+	// Warn if the resulting configuration uses an insecure TLS version.
+	if tlsConfig.MinVersion < SecureMinTLSVersion {
+		config.Logger.Warn("Insecure TLS configuration detected: Minimum TLS version is set below TLS 1.2. Connections may be vulnerable.",
+			"configured_version", tlsConfig.MinVersion)
 	}
 
 	// 5. Apply the final override for ignoring TLS errors.

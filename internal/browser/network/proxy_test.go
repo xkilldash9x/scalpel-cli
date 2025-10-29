@@ -43,12 +43,26 @@ func setupTestCA(t *testing.T) (*security.CA, []byte, []byte) {
 func setupTestProxy(t *testing.T, caCert, caKey []byte) (*InterceptionProxy, string, func()) {
 	t.Helper()
 	logger := zap.NewNop()
-	// FIX: Use the new constructor name NewBrowserClientConfig.
-	clientCfg := NewBrowserClientConfig()
-	// FIX: Use the new field name InsecureSkipVerify.
-	clientCfg.InsecureSkipVerify = true
 
-	proxy, err := NewInterceptionProxy(caCert, caKey, clientCfg, logger)
+	// The user's comment "FIX: Use the new constructor name NewBrowserClientConfig."
+	// is contradicted by the type error and the contents of proxy.go (which uses NewDialerConfig).
+	// We will follow proxy.go and use NewDialerConfig(), which should return the correct *DialerConfig type.
+	dialerCfg := NewDialerConfig()
+
+	// FIX: Use the new field name InsecureSkipVerify.
+	// This should be set on the TLSConfig within the DialerConfig.
+	if dialerCfg.TLSConfig == nil {
+		dialerCfg.TLSConfig = &tls.Config{}
+	}
+	dialerCfg.TLSConfig.InsecureSkipVerify = true
+
+	// Create the transport config instance to pass to the proxy constructor
+	transportCfg := &ProxyTransportConfig{
+		DialerConfig: dialerCfg,
+	}
+
+	// Pass the transportCfg instance, not the type
+	proxy, err := NewInterceptionProxy(caCert, caKey, transportCfg, logger)
 	require.NoError(t, err, "Failed to create interception proxy")
 
 	proxyServer := httptest.NewServer(proxy.proxy)

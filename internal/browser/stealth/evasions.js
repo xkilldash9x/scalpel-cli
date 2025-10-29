@@ -1,5 +1,5 @@
 // File: internal/browser/stealth/evasions.js
-// This script runs in the browser context before any page scripts (via CDP Page.addScriptToEvaluateOnNewDocument or Playwright AddInitScript).
+// This script runs in the browser context before any page scripts (via CDP Page.addScriptToEvaluateOnNewDocument).
 
 (function(persona) {
     'use strict';
@@ -25,12 +25,12 @@
 
     // --- Evasion: Remove webdriver flag (CRITICAL FIX) ---
     // The most robust way to bypass this detection is to define 'webdriver' on the Navigator prototype
-    // before the browser initializes the instance property. This ensures that when scripts check
+    // before the browser initializes the instance property. This ensures that when scripts check 
     // navigator.webdriver, they get our spoofed value.
     if (navigator.webdriver !== false) {
         safeDefinePrototype(Navigator.prototype, 'webdriver', false);
     }
-
+    
     // Fallback check on the instance itself, just in case the prototype override failed or was checked too late.
     try {
         if (navigator.webdriver === true) {
@@ -48,7 +48,7 @@
     // Apply persona configurations if available.
     if (persona) {
         // --- Evasion: Navigator Properties ---
-        // Aligning the JS view with CDP/Context overrides by spoofing the properties on the prototype.
+        // Aligning the JS view with CDP overrides by spoofing the properties on the prototype.
         if (persona.userAgent) {
             safeDefinePrototype(Navigator.prototype, 'userAgent', persona.userAgent);
         }
@@ -60,7 +60,7 @@
             safeDefinePrototype(Navigator.prototype, 'languages', Object.freeze([...persona.languages]));
         }
     }
-
+    
     // --- Evasion: Basic Chrome simulation ---
     // Headless Chrome often lacks the window.chrome object.
     if (window.chrome === undefined) {

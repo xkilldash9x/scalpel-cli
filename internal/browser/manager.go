@@ -1,329 +1,247 @@
-// Filename: browser/manager.go
+// internal/browser/manager.go
 package browser
 
 import (
 	"context"
 	"encoding/json"
 	"fmt"
-	"net/url"
-	"strings"
 	"sync"
-	"time"
+	"time" // Import time package for concurrent shutdown timeouts
 
-	"go.uber.org/zap"
-
+	"github.com/chromedp/chromedp"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/session"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"go.uber.org/zap"
 )
 
-// Manager handles the lifecycle of multiple browser sessions. It ensures that
-// sessions are created correctly and shut down gracefully. It's safe for concurrent use.
+// Constants for internal timeout management.
+const (
+	// REFACTOR: This is no longer used for init, as it conflicts with
+	// subsequent operation contexts due to chromedp's context latching.
+	// sessionInitTimeout = 30 * time.Second
+	cleanupTimeout = 5 * time.Second
+)
+
+// Manager handles the browser process lifecycle and session creation.
 type Manager struct {
-	ctx    context.Context
-	cancel context.CancelFunc
-	logger *zap.Logger
-	cfg    config.Interface // Manager-level default configuration.
-
-	sessions    map[string]*session.Session
-	sessionsMux sync.Mutex
-	wg          sync.WaitGroup
+	allocCtx context.Context
+	// allocCancel context.CancelFunc // REFACTOR: Removed. Lifecycle is managed externally.
+	logger   *zap.Logger
+	cfg      config.Interface // Use the interface
+	sessions map[string]*session.Session
+	mu       sync.RWMutex
 }
 
-// ProcessTask implements engine.Worker.
-func (m *Manager) ProcessTask(ctx context.Context, analysisCtx *core.AnalysisContext) error {
-	panic("unimplemented")
-}
+// NewManager creates a new browser manager using the provided allocator context.
+// REFACTOR: Updated signature to accept allocCtx instead of creating it.
+func NewManager(allocCtx context.Context, cfg config.Interface, logger *zap.Logger) (*Manager, error) {
+	// REFACTOR: Removed ExecAllocator creation logic (lines 26-44 in original).
 
-// Ensure Manager implements the required interfaces from the schemas package.
-var _ schemas.BrowserManager = (*Manager)(nil)
-var _ schemas.BrowserInteractor = (*Manager)(nil)
-
-// NewManager creates and initializes a new browser session manager.
-// It now accepts a default config to be used by convenience methods.
-func NewManager(ctx context.Context, logger *zap.Logger, cfg config.Interface) (*Manager, error) {
-	log := logger.Named("browser_manager_purego")
-	log.Info("Browser manager created (Pure Go implementation).")
-
-	// The manager's context is detached from the creation context on purpose,
-	// so it can outlive the creation call. We do a one time check to ensure
-	// the creation context hasn't already been cancelled.
-	select {
-	case <-ctx.Done():
-		log.Warn("Initialization context cancelled before manager creation.", zap.Error(ctx.Err()))
-		return nil, ctx.Err()
-	default:
+	// Ensure the provided allocator context is valid.
+	if allocCtx == nil {
+		return nil, fmt.Errorf("browser manager requires a valid allocator context (e.g., from chromedp.NewExecAllocator)")
+	}
+	// Idiomatic check for already cancelled context.
+	if allocCtx.Err() != nil {
+		return nil, fmt.Errorf("browser manager requires a non-cancelled allocator context")
 	}
 
-	managerCtx, cancel := context.WithCancel(context.Background())
-
 	m := &Manager{
-		ctx:      managerCtx,
-		cancel:   cancel,
-		logger:   log,
-		cfg:      cfg,
+		allocCtx: allocCtx,
+		// allocCancel: Removed.
+		logger:   logger.Named("browser_manager"),
+		cfg:      cfg, // Store the interface
 		sessions: make(map[string]*session.Session),
 	}
 
-	log.Info("Browser manager initialized.")
+	m.logger.Info("Browser manager initialized.")
 	return m, nil
 }
 
-// NewAnalysisContext creates a new, isolated browser session (like a new tab).
+// NewAnalysisContext creates a new browser tab (session) for analysis.
+// FIX: Added findingsChan chan<- schemas.Finding to match schemas.BrowserManager interface.
 func (m *Manager) NewAnalysisContext(
 	sessionCtx context.Context,
 	cfg interface{},
 	persona schemas.Persona,
 	taintTemplate string,
 	taintConfig string,
-	findingsChan chan<- schemas.Finding,
+	findingsChan chan<- schemas.Finding, // Added parameter
 ) (schemas.SessionContext, error) {
-	appConfig, ok := cfg.(config.Interface)
+	// FIX: Renamed variable from 'config' to 'appConfig' to avoid shadowing package name.
+	var appConfig config.Interface
+	var ok bool
+
+	appConfig, ok = cfg.(config.Interface) // Use config.Interface
 	if !ok {
-		return nil, fmt.Errorf("invalid config type provided: expected config.Interface")
-	}
-
-	if taintTemplate != "" || taintConfig != "" {
-		m.logger.Warn("Taint analysis (IAST) parameters are not supported in Pure Go browser mode.")
-	}
-
-	// This derived context ensures the session is canceled if either the specific
-	// session context is canceled or the entire manager is shut down.
-	derivedCtx, cancelSession := context.WithCancel(context.Background())
-
-	go func() {
-		select {
-		case <-sessionCtx.Done(): // The context for this specific operation.
-			cancelSession()
-		case <-m.ctx.Done(): // The manager's global context.
-			cancelSession()
-		case <-derivedCtx.Done(): // The session's own context.
+		// Fallback check for concrete type if interface assertion fails (e.g., from NavigateAndExtract)
+		if concreteCfg, ok := cfg.(*config.Config); ok {
+			appConfig = concreteCfg // Use the concrete type as it satisfies the interface
+		} else {
+			return nil, fmt.Errorf("invalid config type passed to NewAnalysisContext: expected config.Interface or *config.Config")
 		}
-	}()
-
-	// FIX: The technical review on browser failures indicated a critical data race
-	// could occur from concurrent, unsynchronized access to the underlying JS engine
-	// during session creation. While the exact cause is likely in the session package,
-	// we can guarantee safety by serializing the creation of new sessions. This lock
-	// ensures that `session.NewSession` is never called concurrently, eliminating the race.
-	m.sessionsMux.Lock()
-	defer m.sessionsMux.Unlock()
-
-	// Double check for manager shutdown after acquiring the lock.
-	if m.ctx.Err() != nil {
-		cancelSession()
-		return nil, fmt.Errorf("manager is shutting down: %w", m.ctx.Err())
 	}
 
-	s, err := session.NewSession(derivedCtx, appConfig, persona, m.logger, findingsChan)
+	// 1. Create the browser context (tab).
+
+	// REFACTOR (Doc Ref 4.2): Enable verbose CDP logging if the debug flag is set.
+	// This is "invaluable" for diagnosing complex issues by logging all raw CDP messages.
+	var browserOpts []chromedp.ContextOption
+	if appConfig.Browser().Debug {
+		// Adapt the zap logger to the format required by chromedp.WithDebugf.
+		debugLogger := m.logger.Named("cdp_verbose").Sugar().Debugf
+		browserOpts = append(browserOpts, chromedp.WithDebugf(debugLogger))
+	}
+
+	browserCtx, cancelBrowser := chromedp.NewContext(m.allocCtx, browserOpts...)
+
+	// 2. Combine contexts. browserCtx must be primary (parent) to inherit CDP values.
+	// We use the standardized session.CombineContext.
+	combinedCtx, combinedCancel := session.CombineContext(browserCtx, sessionCtx)
+
+	// 3. Prepare initialization context.
+	// REFACTOR: Removed intermediate initCtx.
+	// Due to a quirk in chromedp, the context used for the *first*
+	// chromedp.Run (in s.Initialize) "latches" its deadline,
+	// overriding deadlines of subsequent chromedp.Run calls (in s.Navigate).
+	// By using combinedCtx (the session's master context) for
+	// Initialize, we ensure the "latched" context is the long-lived
+	// session context. Operations like Navigate will properly
+	// derive from this and respect their own timeouts.
+	//
+	// We lose the granular sessionInitTimeout, but Initialize will
+	// still be bound by the overall sessionCtx lifetime.
+	//
+	// initCtx, initCancel := context.WithTimeout(combinedCtx, sessionInitTimeout) // REMOVED
+	// defer initCancel() // REMOVED
+
+	// 4. Create the master cancel function for the session that ensures cleanup of ALL resources.
+	masterCancel := func() {
+		// initCancel() // REMOVED
+		combinedCancel()
+		cancelBrowser() // Ensure the browser tab is closed.
+	}
+
+	// 5. Create the session instance.
+	// Passing nil for onClose initially, will set it later.
+	// Use 's' instead of 'session' to avoid shadowing package name.
+	// FIX: Pass findingsChan to NewSession.
+	s, err := session.NewSession(combinedCtx, masterCancel, appConfig, persona, m.logger, nil, findingsChan)
 	if err != nil {
-		cancelSession()
-		return nil, fmt.Errorf("failed to create new pure-go session: %w", err)
+		masterCancel() // Clean up resources on failure
+		return nil, fmt.Errorf("failed to create new session: %w", err)
 	}
 
-	m.wg.Add(1)
-	sessionID := s.ID()
+	// 6. Setup onClose callback for manager bookkeeping using the setter.
+	s.SetOnClose(func() {
+		m.mu.Lock()
+		defer m.mu.Unlock()
+		delete(m.sessions, s.ID())
+		m.logger.Debug("Session removed from manager.", zap.String("session_id", s.ID()))
+	})
 
-	onCloseCallback := func() {
-		cancelSession()
-		m.sessionsMux.Lock()
-		delete(m.sessions, sessionID)
-		m.sessionsMux.Unlock()
-		m.wg.Done()
+	// 7. Initialize the session using the session's master context.
+	// Initialization respects the combined context.
+	// REFACTOR: Pass combinedCtx instead of initCtx.
+	if err := s.Initialize(combinedCtx, taintTemplate, taintConfig); err != nil {
+		// If init fails, use a fresh, timed context for cleanup.
+		// s.Close() will call masterCancel().
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		defer cleanupCancel()
+		s.Close(cleanupCtx) // Close will call masterCancel and onClose.
+		return nil, fmt.Errorf("failed to initialize session: %w", err)
 	}
-	s.SetOnClose(onCloseCallback)
 
-	m.sessions[sessionID] = s
+	m.mu.Lock()
+	m.sessions[s.ID()] = s
+	m.mu.Unlock()
 
-	m.logger.Info("New session created", zap.String("sessionID", sessionID))
+	m.logger.Info("New session created.", zap.String("session_id", s.ID()))
 	return s, nil
 }
 
-// Shutdown gracefully closes all active browser sessions.
+// NavigateAndExtract is a convenience method that creates a temporary session
+// to navigate to a URL and extract all link hrefs from the page.
+// This function is synchronous and blocking.
+func (m *Manager) NavigateAndExtract(ctx context.Context, url string) ([]string, error) {
+	// REFACTOR: Decouple the session lifetime from the input operation context 'ctx'.
+	// We pass context.Background() so the session remains alive until explicitly closed.
+	// Operations (Navigate, ExecuteScript) will still respect 'ctx'.
+	session, err := m.NewAnalysisContext(context.Background(), m.cfg, schemas.DefaultPersona, "", "", nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to create session for navigation: %w", err)
+	}
+
+	// Ensure the session is closed robustly when the function returns.
+	defer func() {
+		// Use a fresh, timed context for closing, as the input 'ctx' might be cancelled if we are returning an error.
+		closeCtx, cancel := context.WithTimeout(context.Background(), cleanupTimeout)
+		defer cancel()
+		session.Close(closeCtx)
+	}()
+
+	// Operations must respect the input 'ctx'.
+	if err := session.Navigate(ctx, url); err != nil {
+		return nil, fmt.Errorf("failed to navigate to %s: %w", url, err)
+	}
+
+	script := `
+		(() => {
+			const links = [];
+			document.querySelectorAll('a').forEach(a => {
+				if (a.href) {
+					links.push(a.href);
+				}
+			});
+			return links;
+		})()
+	`
+
+	// ExecuteScript signature is (ctx, script, args) -> (json.RawMessage, error).
+	rawResult, err := session.ExecuteScript(ctx, script, nil)
+	if err != nil {
+		return nil, fmt.Errorf("failed to execute script for link extraction: %w", err)
+	}
+
+	// Unmarshal the result.
+	var hrefs []string
+	if err := json.Unmarshal(rawResult, &hrefs); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal extracted links: %w", err)
+	}
+
+	return hrefs, nil
+}
+
+// Shutdown gracefully closes all sessions. It does NOT close the browser process if the allocator is shared.
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.logger.Info("Shutting down browser manager.")
 
-	// Signal all managed sessions that shutdown has started.
-	m.cancel()
-
-	// Safely copy the list of sessions to close to avoid holding the lock
-	// while closing them.
-	m.sessionsMux.Lock()
+	m.mu.RLock()
 	sessionsToClose := make([]*session.Session, 0, len(m.sessions))
 	for _, s := range m.sessions {
 		sessionsToClose = append(sessionsToClose, s)
 	}
-	m.sessionsMux.Unlock()
+	m.mu.RUnlock()
 
+	// REFACTOR: Use a WaitGroup to close sessions concurrently for faster shutdown.
+	var wg sync.WaitGroup
 	for _, s := range sessionsToClose {
-		// Launch as a goroutine so one slow session doesn't block others.
+		wg.Add(1)
 		go func(sess *session.Session) {
+			defer wg.Done()
+			// REFACTOR: Use the provided context 'ctx' directly. This ensures the overall
+			// shutdown respects the caller's deadline without introducing intermediate timeouts.
 			if err := sess.Close(ctx); err != nil {
-				// Only log errors if the context wasn't already canceled (e.g., by timeout).
-				if ctx.Err() == nil {
-					m.logger.Warn("Error during session close initiated by manager shutdown", zap.String("session_id", sess.ID()), zap.Error(err))
-				}
+				// Log errors during session close, but don't fail the overall shutdown.
+				m.logger.Warn("Error closing session during manager shutdown.",
+					zap.String("session_id", sess.ID()),
+					zap.Error(err))
 			}
 		}(s)
 	}
+	wg.Wait()
 
-	// Wait for all sessions to signal they are done via the waitgroup.
-	done := make(chan struct{})
-	go func() {
-		m.wg.Wait()
-		close(done)
-	}()
-
-	select {
-	case <-done:
-		m.logger.Info("All sessions closed gracefully.")
-	case <-ctx.Done():
-		m.logger.Warn("Timeout waiting for sessions to close.", zap.Error(ctx.Err()))
-		return ctx.Err()
-	}
-
-	m.logger.Info("Browser manager shutdown complete.")
+	// m.allocCancel() // REFACTOR: Do not cancel the shared allocator context.
 	return nil
-}
-
-// NavigateAndExtract creates a temporary session to navigate and extract all link hrefs.
-// It manages the session's lifecycle internally, ensuring it's closed after the operation.
-func (m *Manager) NavigateAndExtract(ctx context.Context, targetURL string) (resolvedLinks []string, err error) {
-	m.logger.Info("NavigateAndExtract started.")
-	start := time.Now()
-
-	// This deferred logger provides excellent visibility into the operation's outcome.
-	defer func() {
-		if err != nil {
-			m.logger.Error("NavigateAndExtract finished with an error",
-				zap.Duration("totalDuration", time.Since(start)),
-				zap.Error(err),
-			)
-		} else {
-			m.logger.Info("NavigateAndExtract finished successfully",
-				zap.Duration("totalDuration", time.Since(start)),
-				zap.Int("resolved_link_count", len(resolvedLinks)),
-			)
-		}
-	}()
-
-	sessionCfg := m.cfg
-	if sessionCfg == nil {
-		// Fallback to a minimal config if the manager has none.
-		// Use NewDefaultConfig to ensure all fields are populated.
-		sessionCfg = config.NewDefaultConfig()
-		sessionCfg.SetNetworkPostLoadWait(200 * time.Millisecond)
-	}
-
-	// Findings for this temporary session can be discarded.
-	dummyFindingsChan := make(chan schemas.Finding, 32)
-	defer close(dummyFindingsChan)
-
-	// Pass the input 'ctx' as the sessionCtx for NewAnalysisContext.
-	sessionCtx, err := m.NewAnalysisContext(ctx, sessionCfg, schemas.DefaultPersona, "", "", dummyFindingsChan)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create temporary session: %w", err)
-	}
-
-	// Use a separate, background context for cleanup. This ensures the session
-	// close logic runs even if the parent 'ctx' has timed out.
-	defer func() {
-		closeCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
-		defer cancel()
-		if closeErr := sessionCtx.Close(closeCtx); closeErr != nil {
-			m.logger.Warn("Error closing temporary session", zap.Error(closeErr), zap.String("session_id", sessionCtx.ID()))
-			// If the main operation succeeded, propagate the close error.
-			if err == nil {
-				err = closeErr
-			}
-		}
-	}()
-
-	// REFACTOR: Use the provided 'ctx' for the operations instead of calling GetContext().
-	// This adheres to Go best practices and respects the operation's deadline/cancellation.
-	opCtx := ctx
-
-	// Use opCtx for Navigate.
-	if err = sessionCtx.Navigate(opCtx, targetURL); err != nil {
-		return nil, fmt.Errorf("failed to navigate to %s: %w", targetURL, err)
-	}
-
-	// Use opCtx for WaitForAsync.
-	if stabErr := sessionCtx.WaitForAsync(opCtx, 0); stabErr != nil {
-		// Check if the context was cancelled before returning a generic stabilization error.
-		if opCtx.Err() != nil {
-			return nil, opCtx.Err()
-		}
-		return nil, fmt.Errorf("stabilization after navigation failed: %w", stabErr)
-	}
-
-	const script = `(function() {
-        var links = [];
-        var elements = document.querySelectorAll('a[href]');
-        for (var i = 0; i < elements.length; i++) {
-            var el = elements[i];
-            if (el) {
-                var href = el.getAttribute('href');
-                if (href) {
-                    links.push(href);
-                }
-            }
-        }
-        return links;
-    })();`
-
-	// Use opCtx for ExecuteScript.
-	resultJSON, err := sessionCtx.ExecuteScript(opCtx, script, nil)
-	if err != nil {
-		return nil, fmt.Errorf("failed to execute link extraction script: %w", err)
-	}
-
-	// Use opCtx for WaitForAsync.
-	if stabErr := sessionCtx.WaitForAsync(opCtx, 0); stabErr != nil {
-		if opCtx.Err() != nil {
-			return nil, opCtx.Err()
-		}
-		return nil, fmt.Errorf("stabilization after script execution failed: %w", stabErr)
-	}
-
-	var rawLinks []string
-	if err = json.Unmarshal(resultJSON, &rawLinks); err != nil {
-		return nil, fmt.Errorf("failed to decode script result into string slice: %w", err)
-	}
-
-	baseURL, parseErr := url.Parse(targetURL)
-	if parseErr != nil {
-		m.logger.Warn("Failed to parse target URL for link resolution, returning raw links", zap.String("url", targetURL), zap.Error(parseErr))
-		return rawLinks, nil
-	}
-
-	seen := make(map[string]bool)
-	for _, href := range rawLinks {
-		trimmedHref := strings.TrimSpace(href)
-		// Filter out irrelevant or malformed hrefs.
-		if trimmedHref == "" || strings.HasPrefix(trimmedHref, "#") || strings.HasPrefix(trimmedHref, "javascript:") || strings.HasPrefix(trimmedHref, "mailto:") {
-			continue
-		}
-
-		u, resolveErr := baseURL.Parse(trimmedHref)
-		if resolveErr != nil {
-			continue
-		}
-
-		// Only consider http and https schemes.
-		if u.Scheme != "http" && u.Scheme != "https" {
-			continue
-		}
-
-		// Normalize the URL by removing the fragment.
-		u.Fragment = ""
-		resolvedStr := u.String()
-
-		if !seen[resolvedStr] {
-			resolvedLinks = append(resolvedLinks, resolvedStr)
-			seen[resolvedStr] = true
-		}
-	}
-	return resolvedLinks, nil
 }

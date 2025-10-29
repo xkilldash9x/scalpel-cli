@@ -11,6 +11,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/chromedp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
@@ -56,47 +57,71 @@ func setupSessionTestEnvironment(t *testing.T) (context.Context, *session.Sessio
 	logger := zap.NewNop()
 	findingsChan := make(chan schemas.Finding, 10)
 
-	// -- Create the session --
-	// This session will act as our executor, bridging humanoid actions to our browser engine.
-	sess, err := session.NewSession(context.Background(), cfg, schemas.DefaultPersona, logger, findingsChan)
-	require.NoError(t, err, "Failed to create a new session")
-
 	// -- Create the test HTTP server --
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// This simple HTML provides the targets for our interaction tests.
 		fmt.Fprintln(w, `
-		            <html>
-		                <head>
-		                    <style>
-		                        /* Basic styles to ensure elements have dimensions */
-		                        #target { width: 100px; height: 100px; background: blue; margin-top: 50px; }
-		                        #inputField { width: 200px; height: 20px; margin-top: 20px; display: inline-block; }
-		                    </style>
-		                </head>
-		                <body>
-		                    <h1>Humanoid Integration Test</h1>
-		                    <div id='target'>Target Box</div>
-		                    <input id="inputField" type="text" />
-		                </body>
-		            </html>
-		        `)
+			            <html>
+			                <head>
+			                    <style>
+			                        /* Basic styles to ensure elements have dimensions */
+			                        #target { width: 100px; height: 100px; background: blue; margin-top: 50px; }
+			                        #inputField { width: 200px; height: 20px; margin-top: 20px; display: inline-block; }
+			                    </style>
+			                </head>
+			                <body>
+			                    <h1>Humanoid Integration Test</h1>
+			                    <div id='target'>Target Box</div>
+			                    <input id="inputField" type="text" />
+			                </body>
+			            </html>
+			        `)
 	}))
+	t.Cleanup(server.Close) // Close server on cleanup
 
-	// -- Navigate the session to the test server --
-	ctx := context.Background()
-	err = sess.Navigate(ctx, server.URL)
-	require.NoError(t, err, "Session could not navigate to the test server")
+	// -- Set up headless browser --
+	allocCtx, cancelAlloc := chromedp.NewExecAllocator(
+		context.Background(),
+		append(chromedp.DefaultExecAllocatorOptions[:],
+			chromedp.Flag("headless", true),
+			chromedp.Flag("disable-gpu", true),
+			chromedp.Flag("no-sandbox", true),
+		)...,
+	)
+	t.Cleanup(cancelAlloc)
 
-	// -- Setup cleanup functions --
+	// -- Create the master session context --
+	masterCtx, masterCancel := chromedp.NewContext(allocCtx, chromedp.WithLogf(t.Logf))
+	// Note: masterCancel is called by sess.Close(), so we don't add it to t.Cleanup separately.
+
+	// -- Create the session --
+	// This session will act as our executor, bridging humanoid actions to our browser engine.
+	sess, err := session.NewSession(
+		masterCtx,    // Pass the master browser context
+		masterCancel, // Pass its cancel function
+		cfg,
+		schemas.DefaultPersona,
+		logger,
+		nil, // onClose callback (not needed for this test)
+		findingsChan,
+	)
+	require.NoError(t, err, "Failed to create a new session")
+
+	// -- Setup cleanup function for the session --
 	t.Cleanup(func() {
-		server.Close()
 		if err := sess.Close(context.Background()); err != nil {
 			t.Logf("Error closing session during cleanup: %v", err)
 		}
 		close(findingsChan)
 	})
 
-	return ctx, sess, server
+	// -- Navigate the session to the test server --
+	// We use an operational context (can be masterCtx or a derived one)
+	err = sess.Initialize(masterCtx, "", "") // Pass empty taint strings
+	require.NoError(t, err, "Session failed to initialize")
+	err = sess.Navigate(masterCtx, server.URL)
+	require.NoError(t, err, "Session could not navigate to the test server")
+
+	return masterCtx, sess, server
 }
 
 // TestContextCancellation_DuringMovement verifies that a MoveTo operation

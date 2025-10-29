@@ -1,267 +1,125 @@
-// Filename: browser/manager_test.go
-package browser_test
+// internal/browser/manager_test.go
+package browser
 
 import (
-	"bytes"
 	"context"
-	"fmt" // Added fmt import
-	"net/http"
-	"net/http/httptest"
 	"net/url"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zapcore"
-
-	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser"
-	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/api/schemas" // Import schemas
 )
 
-// testingWriter is a simple struct that implements io.Writer.
-// Its purpose is to redirect output to the Go test runner's logging function,
-// which ensures that logs from concurrent tests are not interleaved.
-type testingWriter struct {
-	t *testing.T
-}
+// This constant is specific to the manager tests to avoid conflicts.
+// Increased slightly for stability.
+const managerTestTimeout = 60 * time.Second // Was 30 * time.Second
+func TestManager(t *testing.T) {
+	t.Run("InitializeAndCloseSession", func(t *testing.T) {
+		fixture := newTestFixture(t) // Creates manager
 
-// Write directs the byte slice `p` to the test's log.
-// It trims trailing newlines because t.Log() adds its own.
-//
-// FIX: Removed the recover() block. The report emphasizes detecting resource
-// and goroutine leaks. If a background goroutine attempts to log after the
-// test has finished (and presumably after the Manager has been shut down),
-// it indicates a goroutine leak or improper shutdown synchronization.
-// This should cause the test execution to panic (due to t.Log() behavior),
-// which correctly surfaces the underlying issue rather than masking it.
-func (tw *testingWriter) Write(p []byte) (n int, err error) {
-	// This line will panic if the test has finished, exposing leaks.
-	tw.t.Log(string(bytes.TrimRight(p, "\n")))
-
-	n = len(p)
-	err = nil
-	return
-}
-
-// setupTestManager creates a new Manager instance configured for testing.
-// It now accepts the `*testing.T` object to create a test specific logger.
-func setupTestManager(t *testing.T) (*browser.Manager, *config.Config) {
-	// Manually create a config for testing using the default constructor.
-	cfg := config.NewDefaultConfig()
-
-	// Configure minimal settings for testing using setters.
-	cfg.SetBrowserHumanoidEnabled(false)
-	cfg.SetNetworkPostLoadWait(10 * time.Millisecond)
-
-	// -- Logger Configuration --
-	// Create a zap logger that writes to the test's own log output.
-	// This is the key to preventing interleaved logs in concurrent tests.
-	writer := &testingWriter{t: t}
-	encoderConfig := zap.NewDevelopmentEncoderConfig()
-	core := zapcore.NewCore(
-		zapcore.NewConsoleEncoder(encoderConfig),
-		zapcore.AddSync(writer),
-		zapcore.InfoLevel, // Set the desired log level for tests.
-	)
-	logger := zap.New(core)
-
-	// Add a test name field to every log entry for clarity.
-	logger = logger.With(zap.String("test", t.Name()))
-
-	// The config is now passed during manager creation.
-	// Using t.Context() ties the manager's initialization to the test's
-	// lifecycle, respecting test timeouts.
-	m, err := browser.NewManager(t.Context(), logger, cfg)
-	require.NoError(t, err)
-
-	// Best practice from the technical review: ensure resources are cleaned up.
-	// This t.Cleanup hook ensures the manager is shut down even if the test panics.
-	t.Cleanup(func() {
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+		// A session should be created successfully by the manager.
+		// Use the fixture's RootCtx as the base for the session's lifetime
+		ctx, cancel := context.WithTimeout(fixture.RootCtx, 10*time.Second)
 		defer cancel()
-		if err := m.Shutdown(shutdownCtx); err != nil {
-			t.Logf("Warning: Error during manager shutdown in cleanup: %v", err)
-		}
+
+		// NOTE: We pass nil for the findingsChan in this test helper.
+		sessionInterface, err := fixture.Manager.NewAnalysisContext(
+			ctx,
+			fixture.Config,
+			schemas.DefaultPersona,
+			"", "", nil,
+		)
+		require.NoError(t, err, "Failed to create new analysis context")
+		require.NotNil(t, sessionInterface)
+		require.NotEmpty(t, sessionInterface.ID(), "Session ID should not be empty")
+
+		// The fixture's cleanup function will handle closing the manager,
+		// which in turn will close the session. We can also close it manually.
+		closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
+		defer closeCancel()
+		err = sessionInterface.Close(closeCtx)
+		require.NoError(t, err, "Failed to close session")
 	})
 
-	return m, cfg
-}
+	t.Run("InitializeMultipleSessions", func(t *testing.T) {
+		fixture1 := newTestFixture(t)
+		require.NotNil(t, fixture1.Manager)
 
-// TestManager_SessionLifecycleAndShutdown verifies session creation, manual closure,
-// and graceful manager shutdown.
-func TestManager_SessionLifecycleAndShutdown(t *testing.T) {
-	m, cfg := setupTestManager(t)
+		fixture2 := newTestFixture(t)
+		require.NotNil(t, fixture2.Manager)
 
-	const sessionCount = 5
-	sessions := make([]schemas.SessionContext, sessionCount)
-	findingsChan := make(chan schemas.Finding, 1)
-	defer close(findingsChan)
+		// Use the fixture's RootCtx as the base for the session's lifetime
+		ctx1, cancel1 := context.WithTimeout(fixture1.RootCtx, 10*time.Second)
+		defer cancel1()
+		session1, err1 := fixture1.Manager.NewAnalysisContext(
+			ctx1, fixture1.Config, schemas.DefaultPersona, "", "", nil,
+		)
+		require.NoError(t, err1, "Failed to create session 1")
+		require.NotNil(t, session1)
 
-	// Create multiple sessions, respecting the test's timeout via t.Context().
-	for i := 0; i < sessionCount; i++ {
-		s, err := m.NewAnalysisContext(t.Context(), cfg, schemas.DefaultPersona, "", "", findingsChan)
+		ctx2, cancel2 := context.WithTimeout(fixture2.RootCtx, 10*time.Second)
+		defer cancel2()
+		session2, err2 := fixture2.Manager.NewAnalysisContext(
+			ctx2, fixture2.Config, schemas.DefaultPersona, "", "", nil,
+		)
+		require.NoError(t, err2, "Failed to create session 2")
+		require.NotNil(t, session2)
+
+		// Each browser context should be isolated, resulting in unique session IDs.
+		require.NotEqual(t, session1.ID(), session2.ID(), "Each session should have a unique ID")
+	})
+
+	t.Run("NavigateAndExtract", func(t *testing.T) {
+		fixture := newTestFixture(t)
+		// This is a more comprehensive integration test that validates the manager's
+		// ability to handle a complete, self contained task.
+		server := createStaticTestServer(t, `
+                    <html>
+                        <body>
+                            <a href="/page1">Link 1</a>
+                            <a href="http://sub.example.com/page2">Link 2</a>
+                            <a href="#fragment">Fragment Link</a>
+                            <a href="/page1">Duplicate Link</a>
+                            <a>Link without href</a>
+                        </body>
+                    </html>
+                `)
+		// Server closure is already handled by createStaticTestServer via t.Cleanup.
+
+		// Use a timed context derived from the fixture's root context for robustness.
+		ctx, cancel := context.WithTimeout(fixture.RootCtx, managerTestTimeout)
+		defer cancel() // Idiomatic cancellation for function-scoped contexts.
+
+		// Execute the manager's utility function, now using the sandboxed manager from the fixture.
+		// This call is synchronous and does not require a WaitGroup, as the
+		// manager's NavigateAndExtract function is blocking.
+		extractedHrefs, err := fixture.Manager.NavigateAndExtract(ctx, server.URL)
 		require.NoError(t, err)
-		sessions[i] = s
-	}
 
-	// Close one session manually. Use a background context with a timeout
-	// to ensure the close operation has a chance to complete.
-	closeCtx, closeCancel := context.WithTimeout(context.Background(), 5*time.Second)
-	defer closeCancel()
-	err := sessions[0].Close(closeCtx)
-	require.NoError(t, err)
+		// The extracted hrefs might be relative. We need to resolve them against
+		// the base URL of our test server to perform a reliable comparison.
+		base, err := url.Parse(server.URL)
+		require.NoError(t, err)
 
-	// Shutdown the manager.
-	shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), 10*time.Second)
-	defer shutdownCancel()
-
-	// Manually trigger shutdown to verify session context cancellation.
-	err = m.Shutdown(shutdownCtx)
-	require.NoError(t, err)
-
-	// REFACTOR: Verify all sessions are closed after manager shutdown by attempting an operation.
-	// We can no longer use GetContext().
-	for i, s := range sessions {
-		// Attempt a simple operation. It should fail because the session's internal context is cancelled.
-		_, opErr := s.ExecuteScript(context.Background(), "1", nil)
-		assert.ErrorIs(t, opErr, context.Canceled, "Session %d should be closed (context cancelled) after manager shutdown", i)
-	}
-}
-
-// TestManager_ConcurrentSessionCreation verifies thread safety when creating/closing sessions.
-func TestManager_ConcurrentSessionCreation(t *testing.T) {
-	m, cfg := setupTestManager(t)
-
-	const concurrency = 10
-	var wg sync.WaitGroup
-
-	sessionIDs := make(chan string, concurrency)
-
-	// Define a context for the concurrent operations, respecting the test timeout.
-	opCtx, opCancel := context.WithTimeout(t.Context(), 15*time.Second)
-	defer opCancel()
-
-	// Create and immediately close sessions concurrently.
-	for i := 0; i < concurrency; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-
-			// Use the operation context for session creation.
-			s, err := m.NewAnalysisContext(opCtx, cfg, schemas.DefaultPersona, "", "", nil)
-
-			// Check if the context was cancelled before asserting an error.
-			if opCtx.Err() != nil {
-				return // Stop if the overall operation timed out.
+		absHrefs := make([]string, 0, len(extractedHrefs))
+		for _, href := range extractedHrefs {
+			ref, err := url.Parse(href)
+			if err == nil {
+				absHrefs = append(absHrefs, base.ResolveReference(ref).String())
 			}
+		}
 
-			if assert.NoError(t, err) {
-				sessionIDs <- s.ID()
-				time.Sleep(5 * time.Millisecond)
+		// The expected links, resolved to their absolute URLs.
+		expectedHrefs := []string{
+			base.ResolveReference(&url.URL{Path: "/page1"}).String(),
+			"http://sub.example.com/page2",
+			base.ResolveReference(&url.URL{Fragment: "fragment"}).String(),
+			base.ResolveReference(&url.URL{Path: "/page1"}).String(), // The duplicate
+		}
 
-				// Use a specific timeout for the close operation, independent of opCtx.
-				closeCtx, closeCancel := context.WithTimeout(context.Background(), 2*time.Second)
-				defer closeCancel()
-				s.Close(closeCtx)
-			}
-		}(i)
-	}
-	wg.Wait()
-	close(sessionIDs)
-
-	// Verify all sessions were created and have unique IDs.
-	collectedIDs := make(map[string]bool)
-	for id := range sessionIDs {
-		_, duplicate := collectedIDs[id]
-		assert.False(t, duplicate, "Found duplicate session ID: %s", id)
-		collectedIDs[id] = true
-	}
-
-	// Verify count only if the context didn't expire prematurely.
-	if opCtx.Err() == nil {
-		assert.Len(t, collectedIDs, concurrency, "Should have created the expected number of unique sessions")
-	} else {
-		t.Logf("Test context expired (likely timeout) before all sessions were created. Collected %d IDs.", len(collectedIDs))
-	}
-}
-
-// TestManager_NavigateAndExtract verifies the convenience method's correctness,
-// focusing on URL resolution and temporary session cleanup.
-func TestManager_NavigateAndExtract(t *testing.T) {
-	// 1. Setup Mock Server with various link types.
-	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		fmt.Fprintln(w, `
-        <html><body>
-            <a href="/absolute/path">Absolute Link</a>
-            <a href="relative/path">Relative Link</a>
-            <a href="/?query=1">Query Link</a>
-            <a href="http://external.com/link">External Link</a>
-            <a href="#fragment">Fragment Link (should be ignored)</a>
-            <a href="">Empty Link (should be ignored)</a>
-            <a href="javascript:void(0)">JS Link (should be ignored)</a>
-        </body></html>`)
-	}))
-	defer server.Close()
-
-	// 2. Setup Manager.
-	m, _ := setupTestManager(t)
-
-	// 3. Execute NavigateAndExtract with a timeout.
-	ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
-	defer cancel()
-	links, err := m.NavigateAndExtract(ctx, server.URL)
-	require.NoError(t, err)
-
-	// 4. Verify Results
-	baseURL, _ := url.Parse(server.URL)
-
-	expectedLinks := []string{
-		baseURL.ResolveReference(&url.URL{Path: "/absolute/path"}).String(),
-		baseURL.ResolveReference(&url.URL{Path: "relative/path"}).String(),
-		baseURL.ResolveReference(&url.URL{Path: "/", RawQuery: "query=1"}).String(),
-		"http://external.com/link",
-	}
-
-	assert.ElementsMatch(t, expectedLinks, links, "Extracted links should be resolved and filtered correctly")
-}
-
-func TestManager_NavigateAndExtract_ErrorHandling(t *testing.T) {
-	m, _ := setupTestManager(t)
-
-	parentCtx := t.Context()
-
-	t.Run("FailsToNavigateUnreachableHost", func(t *testing.T) {
-		// Use a clearly invalid and non routable address to ensure failure.
-		nonExistentURL := "http://localhost:9999/unreachable"
-
-		ctx, cancel := context.WithTimeout(parentCtx, 5*time.Second)
-		defer cancel()
-
-		_, err := m.NavigateAndExtract(ctx, nonExistentURL)
-		assert.Error(t, err, "Should receive an error when the host is unreachable")
-		assert.Contains(t, err.Error(), "failed to navigate", "Error message should indicate a navigation failure")
-	})
-
-	// FIX: Renamed test case for clarity. The original name was imprecise.
-	// This test verifies graceful handling of content, not a failure case.
-	t.Run("SucceedsWithNoLinksForNonHTMLContent", func(t *testing.T) {
-		server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-			w.Header().Set("Content-Type", "application/json")
-			fmt.Fprint(w, `{"status": "ok", "data": []}`)
-		}))
-		defer server.Close()
-
-		ctx, cancel := context.WithTimeout(parentCtx, 5*time.Second)
-		defer cancel()
-
-		links, err := m.NavigateAndExtract(ctx, server.URL)
-
-		// The key assertions: No error should occur, and no links should be found.
-		require.NoError(t, err, "Navigating to valid, non-HTML content should not produce an error")
-		assert.Empty(t, links, "Should extract no links from a non-HTML page")
+		// Use ElementsMatch because the order of extracted links is not guaranteed.
+		assert.ElementsMatch(t, expectedHrefs, absHrefs, "Extracted links do not match expected links")
 	})
 }

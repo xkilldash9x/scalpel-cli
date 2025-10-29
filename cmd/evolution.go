@@ -4,18 +4,15 @@ package cmd
 import (
 	"context"
 	"fmt"
-	"time"
 
-	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/cobra"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/evolution/analyst"
-	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
-	"github.com/xkilldash9x/scalpel-cli/internal/llmclient"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/internal/service"
 )
 
 // AnalystRunner defines the interface for the component that can execute
@@ -58,11 +55,10 @@ WARNING: This process modifies the local codebase. Ensure your working directory
 				return err // Error is already descriptive
 			}
 
-			// Initialize the dependencies here, in the "real" entrypoint.
-			llmClient, err := llmclient.NewClient(cfg.Agent(), logger)
+			// Initialize the LLM client using the centralized initializer.
+			llmClient, err := service.InitializeLLMClient(cfg.Agent(), logger)
 			if err != nil {
-				logger.Error("Failed to initialize LLM client. Evolution requires a configured LLM.", zap.Error(err))
-				return fmt.Errorf("failed to initialize LLM client: %w", err)
+				return err // Error is already logged and formatted by the initializer
 			}
 
 			// Delegate the core logic to a separate, testable function.
@@ -94,8 +90,8 @@ func runEvolve(
 		return fmt.Errorf("--objective is required")
 	}
 
-	// 1. Initialize the Knowledge Graph Client (Memory).
-	kgClient, cleanup, err := initializeKGClient(ctx, cfg.Agent().KnowledgeGraph, logger, useInMemoryKG)
+	// 1. Initialize the Knowledge Graph Client using the centralized initializer.
+	kgClient, cleanup, err := service.InitializeKGClient(ctx, cfg.Agent().KnowledgeGraph, logger, useInMemoryKG)
 	if err != nil {
 		logger.Error("Failed to initialize Knowledge Graph client.", zap.Error(err))
 		return fmt.Errorf("failed to initialize KG client: %w", err)
@@ -118,56 +114,4 @@ func runEvolve(
 
 	logger.Info("Evolution process completed successfully.")
 	return nil
-}
-
-// initializeKGClient connects to the database or starts an in-memory Knowledge Graph.
-func initializeKGClient(ctx context.Context, cfg config.KnowledgeGraphConfig, logger *zap.Logger, useInMemory bool) (schemas.KnowledgeGraphClient, func(), error) {
-	// Determine if we're falling back to the in-memory graph due to configuration,
-	// rather than an explicit command-line flag.
-	isInMemoryByDefault := !useInMemory && (cfg.Type == "memory" || cfg.Type == "in-memory" || cfg.Type == "")
-
-	if useInMemory || isInMemoryByDefault {
-		// If we are using the in-memory graph because of the config file (and not the explicit flag),
-		// log a loud warning that this is not suitable for production.
-		if isInMemoryByDefault {
-			logger.Warn("No persistent Knowledge Graph configured; defaulting to a temporary in-memory store. All learned data will be lost on exit. This is not recommended for production use.")
-		}
-		logger.Info("Initializing In-Memory Knowledge Graph.")
-		kg, err := knowledgegraph.NewInMemoryKG(logger)
-		return kg, nil, err
-	}
-
-	if cfg.Type == "postgres" {
-		logger.Info("Initializing PostgreSQL Knowledge Graph.", zap.String("host", cfg.Postgres.Host))
-		connString := fmt.Sprintf("postgres://%s:%s@%s:%d/%s?sslmode=%s",
-			cfg.Postgres.User, cfg.Postgres.Password, cfg.Postgres.Host, cfg.Postgres.Port, cfg.Postgres.DBName, cfg.Postgres.SSLMode)
-
-		poolConfig, err := pgxpool.ParseConfig(connString)
-		if err != nil {
-			return nil, nil, fmt.Errorf("unable to parse PGX pool config: %w", err)
-		}
-		poolConfig.MaxConns = 10
-		poolConfig.MinConns = 2
-		poolConfig.MaxConnLifetime = 1 * time.Hour
-		poolConfig.MaxConnIdleTime = 30 * time.Minute
-
-		pool, err := pgxpool.NewWithConfig(ctx, poolConfig)
-		if err != nil {
-			return nil, nil, fmt.Errorf("unable to create PGX connection pool: %w", err)
-		}
-
-		if err := pool.Ping(ctx); err != nil {
-			pool.Close()
-			return nil, nil, fmt.Errorf("failed to ping PostgreSQL: %w", err)
-		}
-
-		kg := knowledgegraph.NewPostgresKG(pool, logger)
-		cleanup := func() {
-			logger.Info("Closing PostgreSQL connection pool.")
-			pool.Close()
-		}
-		return kg, cleanup, nil
-	}
-
-	return nil, nil, fmt.Errorf("unsupported Knowledge Graph type: %s", cfg.Type)
 }

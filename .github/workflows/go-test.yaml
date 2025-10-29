@@ -34,5 +34,6 @@ jobs:
     # Step 3: Run the tests
     - name: Test
       # The "go test ./..." command runs tests in the current directory and all subdirectories.
-      # The "-v" flag provides verbose output, just like you've been using.
-      run: go test -v ./...
+      # The "-v" flag provides verbose output.
+      # The "-race" flag enables the Go race detector, enforcing concurrency safety.
+      run: go test -v -race ./...

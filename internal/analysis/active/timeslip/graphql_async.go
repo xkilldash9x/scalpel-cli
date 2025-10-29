@@ -70,6 +70,9 @@ func ExecuteGraphQLAsync(ctx context.Context, candidate *RaceCandidate, config *
 		Raw:        resp,
 	}
 
+	// Get the exclusion map for fingerprinting.
+	excludeMap := config.GetExcludedHeaders()
+
 	// 3. Parse the batched response.
 	var batchedResponse []json.RawMessage
 	// Check if it looks like a batched response (JSON array), accounting for whitespace.
@@ -77,7 +80,8 @@ func ExecuteGraphQLAsync(ctx context.Context, candidate *RaceCandidate, config *
 	isBatched := len(trimmedBody) > 0 && trimmedBody[0] == '['
 
 	if !isBatched || json.Unmarshal(body, &batchedResponse) != nil {
-		return handleNonBatchedGraphQLResponse(parsedHTTPResp, duration, oracle), nil
+		// Pass the excludeMap to the non-batched handler.
+		return handleNonBatchedGraphQLResponse(parsedHTTPResp, duration, oracle, excludeMap), nil
 	}
 
 	// 4. Transform individual operation results into RaceResponses.
@@ -91,7 +95,8 @@ func ExecuteGraphQLAsync(ctx context.Context, candidate *RaceCandidate, config *
 		opBody := []byte(opResultRaw)
 
 		// Generate the composite fingerprint.
-		fingerprint := GenerateFingerprint(resp.StatusCode, resp.Header, opBody)
+		// Use the excludeMap.
+		fingerprint := GenerateFingerprint(resp.StatusCode, resp.Header, opBody, excludeMap)
 
 		raceResp := &RaceResponse{
 			ParsedResponse: parsedHTTPResp,
@@ -150,8 +155,10 @@ func constructBatchedGraphQL(candidate *RaceCandidate, count int) ([]byte, error
 }
 
 // handleNonBatchedGraphQLResponse handles cases where the server returns a single response.
-func handleNonBatchedGraphQLResponse(parsedResp *ParsedResponse, duration time.Duration, oracle *SuccessOracle) *RaceResult {
-	fingerprint := GenerateFingerprint(parsedResp.StatusCode, parsedResp.Headers, parsedResp.Body)
+// FIX: Updated to accept excludeMap as map[string]bool.
+func handleNonBatchedGraphQLResponse(parsedResp *ParsedResponse, duration time.Duration, oracle *SuccessOracle, excludeMap map[string]bool) *RaceResult {
+	// Use the excludeMap for fingerprinting.
+	fingerprint := GenerateFingerprint(parsedResp.StatusCode, parsedResp.Headers, parsedResp.Body, excludeMap)
 
 	raceResp := &RaceResponse{
 		ParsedResponse: parsedResp,

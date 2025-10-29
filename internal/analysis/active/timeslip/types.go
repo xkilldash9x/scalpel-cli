@@ -5,7 +5,8 @@ import (
 	"bytes"
 	"errors"
 	"net/http"
-	"regexp"
+
+	// FIX: regexp import removed as compiled regexes are moved to SuccessOracle.
 	"sync"
 	"time"
 )
@@ -17,6 +18,8 @@ var (
 	ErrTargetUnreachable   = errors.New("target unreachable or timed out")
 	ErrConfigurationError  = errors.New("configuration or input data error")
 	ErrPayloadMutationFail = errors.New("payload mutation failed")
+	// ErrH2FrameError indicates an issue during manual H2 frame processing (e.g., in H2Dependency).
+	ErrH2FrameError = errors.New("H2 frame processing error")
 )
 
 // ParsedResponse holds the essential details of an HTTP response.
@@ -26,7 +29,8 @@ type ParsedResponse struct {
 	Headers    http.Header
 	Body       []byte
 	Duration   time.Duration
-	Raw        *http.Response
+	// Raw might be nil if the response was constructed manually (e.g., H2Dependency).
+	Raw *http.Response
 }
 
 // RaceStrategy defines the technique used to induce the race condition.
@@ -36,14 +40,16 @@ const (
 	H1Concurrent     RaceStrategy = "H1_CONCURRENT"
 	H1SingleByteSend RaceStrategy = "H1_SINGLE_BYTE_SEND"
 	H2Multiplexing   RaceStrategy = "H2_MULTIPLEXING"
-	AsyncGraphQL     RaceStrategy = "ASYNC_GRAPHQL_BATCH"
+	// H2Dependency uses H2 Stream Dependencies (PRIORITY frames) for precise synchronization.
+	H2Dependency RaceStrategy = "H2_DEPENDENCY"
+	AsyncGraphQL RaceStrategy = "ASYNC_GRAPHQL_BATCH"
 )
 
 // RaceCandidate defines the target request to be used in the race condition test.
 type RaceCandidate struct {
-	Method    string
-	URL       string
-	Headers   http.Header
+	Method  string
+	URL     string
+	Headers http.Header
 	// Body may contain template variables like {{UUID}} or {{NONCE}}.
 	Body      []byte
 	IsGraphQL bool
@@ -58,18 +64,17 @@ type SuccessCondition struct {
 	// HeaderRegex: Must match at least one response header (Key: Value).
 	HeaderRegex string `json:"header_regex,omitempty"`
 
-	// Compiled regexes (unexported).
-	bodyRx   *regexp.Regexp
-	headerRx *regexp.Regexp
+	// FIX: Removed compiled regexes (bodyRx, headerRx).
+	// Storing them in the shared Config caused data races during concurrent Analyzer initialization.
+	// They are now stored within the SuccessOracle instance.
 }
 
 // Config holds the configuration parameters for the TimeSlip analysis.
 type Config struct {
-	Concurrency int           `json:"concurrency"`
-	Timeout     time.Duration `json:"timeout"`
-	// FIX: Renamed to match the underlying network.ClientConfig field for consistency.
-	InsecureSkipVerify bool `json:"insecure_skip_verify"`
-	ThresholdMs        int  `json:"threshold_ms"`
+	Concurrency        int           `json:"concurrency"`
+	Timeout            time.Duration `json:"timeout"`
+	InsecureSkipVerify bool          `json:"insecure_skip_verify"`
+	ThresholdMs        int           `json:"threshold_ms"`
 
 	// Success defines the conditions for a successful operation.
 	Success SuccessCondition `json:"success_conditions"`
@@ -81,6 +86,61 @@ type Config struct {
 	// ExpectedSuccesses defines the maximum number of successful operations expected.
 	// If nil or <= 0, defaults to 1 (standard TOCTOU assumption).
 	ExpectedSuccesses int `json:"expected_successes,omitempty"`
+
+	// ExcludeHeadersFromFingerprint allows adding extra headers to the default exclusion list
+	// for fingerprinting (e.g., specific custom volatile headers).
+	ExcludeHeadersFromFingerprint []string `json:"exclude_headers_fingerprint,omitempty"`
+
+	// Internal map for quick lookups during fingerprinting (unexported).
+	excludeHeadersMap map[string]bool
+}
+
+// InitializeExcludedHeaders sets up the internal map for fast lookups.
+// It merges the default exclusions with any user-provided exclusions.
+func (c *Config) InitializeExcludedHeaders() {
+	c.excludeHeadersMap = make(map[string]bool)
+	// Add defaults first
+	// FIX: Use the exported DefaultExcludedHeaders.
+	for k := range DefaultExcludedHeaders {
+		c.excludeHeadersMap[k] = true
+	}
+	// Add configured extras, ensuring canonical format.
+	for _, header := range c.ExcludeHeadersFromFingerprint {
+		c.excludeHeadersMap[http.CanonicalHeaderKey(header)] = true
+	}
+}
+
+// GetExcludedHeaders returns the map of headers to exclude.
+// It uses lazy initialization for the map.
+func (c *Config) GetExcludedHeaders() map[string]bool {
+	if c.excludeHeadersMap == nil {
+		c.InitializeExcludedHeaders()
+	}
+	return c.excludeHeadersMap
+}
+
+// DefaultExcludedHeaders defines headers to exclude from fingerprinting as they are often volatile.
+// Keys MUST be in Canonical format (e.g., "Content-Length").
+// FIX: Exported (renamed from defaultExcludedHeaders) so it can be used explicitly in tests.
+var DefaultExcludedHeaders = map[string]bool{
+	"Date":            true,
+	"Set-Cookie":      true, // Often contains unique tokens per response.
+	"X-Request-Id":    true,
+	"X-Trace-Id":      true,
+	"X-Amzn-Trace-Id": true, // Common AWS trace ID
+	"Cf-Ray":          true,
+	"Cf-Cache-Status": true,
+	"Etag":            true, // Derived from content, which we hash separately.
+	"Last-Modified":   true,
+	"Expires":         true,
+	"Cache-Control":   true,
+	"Content-Length":  true, // Derived from body length.
+	"Connection":      true,
+	"Keep-Alive":      true,
+	"Server-Timing":   true,
+	"Age":             true,
+	"Via":             true,
+	"Vary":            true,
 }
 
 // RaceResponse is the result from a single operation within a race attempt.
@@ -89,7 +149,8 @@ type RaceResponse struct {
 	// Fingerprint is the composite hash (Status+Headers+Body) used for comparison.
 	Fingerprint string
 	Error       error
-	StreamID    uint32
+	// StreamID is relevant for H2 strategies.
+	StreamID uint32
 
 	// IsSuccess indicates whether the specific action succeeded (determined by the SuccessOracle).
 	IsSuccess bool
@@ -107,19 +168,22 @@ type RaceResult struct {
 
 // ResponseStatistics holds statistical data about the response times.
 type ResponseStatistics struct {
+	Count         int     `json:"count"` // Number of data points used in the calculation.
 	MinDurationMs int64   `json:"min_duration_ms"`
 	MaxDurationMs int64   `json:"max_duration_ms"`
 	AvgDurationMs float64 `json:"avg_duration_ms"`
+	// MedDurationMs (Median) is crucial for outlier detection.
 	MedDurationMs float64 `json:"med_duration_ms"`
+	// StdDevMs (Standard Deviation) measures the dispersion.
 	StdDevMs      float64 `json:"std_dev_ms"`
 	TimingDeltaMs int64   `json:"timing_delta_ms"`
 }
 
 // AnalysisResult is the final assessment of the race attempt.
 type AnalysisResult struct {
-	Vulnerable      bool
-	Strategy        RaceStrategy
-	Details         string
+	Vulnerable bool
+	Strategy   RaceStrategy
+	Details    string
 	// Confidence level (0.0 to 1.0).
 	Confidence      float64
 	SuccessCount    int
@@ -148,7 +212,8 @@ func getBuffer() *bytes.Buffer {
 	return bufferPool.Get().(*bytes.Buffer)
 }
 
-// putBuffer returns a buffer to the pool. The buffer is reset before being put back.
+// putBuffer returns a buffer to the pool.
+// The buffer is reset before being put back.
 func putBuffer(buf *bytes.Buffer) {
 	buf.Reset()
 	// Optimization: Avoid returning excessively large buffers to the pool if they grew significantly.

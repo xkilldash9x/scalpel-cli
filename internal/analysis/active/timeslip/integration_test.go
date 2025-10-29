@@ -1,13 +1,11 @@
-//go:build integration
-// +build integration
-
 package timeslip
 
 import (
 	"context"
 	"crypto/tls"
 	"encoding/json"
-	"errors"
+
+	// "errors" // Not currently used
 	"fmt"
 	"io"
 	"net/http"
@@ -56,7 +54,7 @@ func (rt *requestTracker) Count() int {
 
 // --- II. Integration Tests (Strategy Execution) ---
 
-// --- 2.1 & 2.2 H1 Concurrent Strategy Tests ---
+// --- 2.1 H1 Concurrent Strategy Tests ---
 
 func TestExecuteH1Concurrent_BasicExecutionAndMutation(t *testing.T) {
 	t.Parallel()
@@ -166,7 +164,61 @@ func TestExecuteH1Concurrent_ResourceLimits(t *testing.T) {
 	assert.Contains(t, resp.Error.Error(), "response body exceeded limit")
 }
 
-// --- 2.2 H2 Multiplexing Strategy Tests ---
+// --- 2.2 H1 Single Byte Send (Pipelining) Strategy Tests (Added) ---
+
+func TestExecuteH1SingleByteSend_BasicPipelining(t *testing.T) {
+	t.Parallel()
+
+	const concurrency = 5
+	tracker := &requestTracker{}
+
+	// Setup Mock Server (httptest supports pipelining by default)
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tracker.Track(r)
+		// Verify Connection: keep-alive is present, essential for pipelining
+		if !strings.Contains(strings.ToLower(r.Header.Get("Connection")), "keep-alive") {
+			http.Error(w, "Expected keep-alive", http.StatusBadRequest)
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"pipelined":true}`)
+	}))
+	defer server.Close()
+
+	// Setup Candidate and Config
+	config := &Config{
+		Concurrency: concurrency,
+		Timeout:     2 * time.Second,
+	}
+	oracle, _ := NewSuccessOracle(&Config{Success: SuccessCondition{BodyRegex: `"pipelined":true`}}, false)
+	candidate := &RaceCandidate{
+		Method: "POST",
+		URL:    server.URL,
+		Body:   []byte(`{"data":"{{UUID}}"}`),
+	}
+
+	// Execute Strategy
+	result, err := ExecuteH1SingleByteSend(context.Background(), candidate, config, oracle)
+
+	// Assertions
+	require.NoError(t, err)
+	// The server handler tracks requests sequentially as they are processed.
+	assert.Equal(t, concurrency, tracker.Count(), "Server should process N requests")
+	// The strategy should parse N responses from the single connection stream.
+	assert.Equal(t, concurrency, len(result.Responses))
+
+	// Verify mutations were unique (ensures preparePipelinedRequests worked)
+	uniqueUUIDs := make(map[string]bool)
+	for _, req := range tracker.requests {
+		var bodyData map[string]string
+		json.Unmarshal([]byte(req.Body), &bodyData)
+		uuid := bodyData["data"]
+		uniqueUUIDs[uuid] = true
+	}
+	assert.Equal(t, concurrency, len(uniqueUUIDs), "All UUIDs should be unique")
+}
+
+// --- 2.3 H2 Multiplexing Strategy Tests ---
 
 func TestExecuteH2Multiplexing_Basic(t *testing.T) {
 	t.Parallel()
@@ -239,7 +291,69 @@ func TestExecuteH2Multiplexing_Downgrade(t *testing.T) {
 	assert.ErrorIs(t, err, ErrH2Unsupported)
 }
 
-// --- 2.2 GraphQL Async Strategy Tests ---
+// --- 2.4 H2 Dependency Strategy Tests (Added) ---
+
+func TestExecuteH2Dependency_BasicExecution(t *testing.T) {
+	t.Parallel()
+
+	const concurrency = 5
+	tracker := &requestTracker{}
+
+	// Setup Mock H2 Server
+	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		tracker.Track(r)
+		if r.ProtoMajor != 2 {
+			http.Error(w, "Expected HTTP/2", http.StatusHTTPVersionNotSupported)
+			return
+		}
+		// Simulate some minor processing time
+		time.Sleep(5 * time.Millisecond)
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintf(w, `{"dependency_ok":true}`)
+	}))
+	defer server.Close()
+
+	// Setup Candidate and Config
+	config := &Config{
+		Concurrency:        concurrency,
+		Timeout:            3 * time.Second,
+		InsecureSkipVerify: true,
+	}
+	oracle, _ := NewSuccessOracle(&Config{Success: SuccessCondition{BodyRegex: `"dependency_ok":true`}}, false)
+	candidate := &RaceCandidate{
+		Method: "PATCH",
+		URL:    server.URL,
+		Body:   []byte(`{"id":"{{NONCE}}"}`),
+	}
+
+	// Execute Strategy
+	result, err := ExecuteH2Dependency(context.Background(), candidate, config, oracle)
+
+	// Assertions
+	require.NoError(t, err)
+	assert.Equal(t, concurrency, tracker.Count(), "Server should receive N requests")
+	require.Equal(t, concurrency, len(result.Responses), "Client should parse N responses")
+
+	// Verify success and mutation
+	successCount := 0
+	uniqueNonces := make(map[string]bool)
+	for _, resp := range result.Responses {
+		assert.Nil(t, resp.Error)
+		if resp.IsSuccess {
+			successCount++
+		}
+	}
+	assert.Equal(t, concurrency, successCount)
+
+	for _, req := range tracker.requests {
+		var bodyData map[string]string
+		json.Unmarshal([]byte(req.Body), &bodyData)
+		uniqueNonces[bodyData["id"]] = true
+	}
+	assert.Equal(t, concurrency, len(uniqueNonces), "All nonces should be unique")
+}
+
+// --- 2.5 GraphQL Async Strategy Tests ---
 
 func TestExecuteGraphQLAsync_BasicBatching(t *testing.T) {
 	t.Parallel()
@@ -254,10 +368,10 @@ func TestExecuteGraphQLAsync_BasicBatching(t *testing.T) {
 		w.Header().Set("Content-Type", "application/json")
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprint(w, `[
-			{"data": {"op": "success1"}},
-			{"errors": [{"message": "failure2"}]},
-			{"data": {"op": "success3"}}
-		]`)
+				{"data": {"op": "success1"}},
+				{"errors": [{"message": "failure2"}]},
+				{"data": {"op": "success3"}}
+			]`)
 	}))
 	defer server.Close()
 

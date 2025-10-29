@@ -41,6 +41,9 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 	initWg := sync.WaitGroup{}
 	startGate := make(chan struct{})
 
+	// Get the exclusion map once for use in all goroutines.
+	excludeMap := config.GetExcludedHeaders()
+
 	// 3. Initialize the request goroutines.
 	for i := 0; i < config.Concurrency; i++ {
 		wg.Add(1)
@@ -121,7 +124,8 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 			copy(body, buf.Bytes()[:n])
 
 			// Generate the composite fingerprint.
-			fingerprint := GenerateFingerprint(resp.StatusCode, resp.Header, body)
+			// Use the excludeMap.
+			fingerprint := GenerateFingerprint(resp.StatusCode, resp.Header, body, excludeMap)
 
 			parsedResponse := &ParsedResponse{
 				StatusCode: resp.StatusCode,

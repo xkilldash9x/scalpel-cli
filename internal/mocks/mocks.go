@@ -266,6 +266,11 @@ type MockSessionContext struct {
 	mutex            sync.Mutex
 }
 
+// DispatchStructuredKey implements schemas.SessionContext.
+func (m *MockSessionContext) DispatchStructuredKey(ctx context.Context, data schemas.KeyEventData) error {
+	panic("unimplemented")
+}
+
 func NewMockSessionContext() *MockSessionContext {
 	return &MockSessionContext{exposedFunctions: make(map[string]interface{})}
 }
@@ -518,4 +523,9 @@ func (m *MockHumanoidController) Type(ctx context.Context, selector string, text
 
 func (m *MockHumanoidController) CognitivePause(ctx context.Context, meanScale, stdDevScale float64) error {
 	return m.Called(ctx, meanScale, stdDevScale).Error(0)
+}
+
+// Shortcut provides a mock function with given fields: ctx, keysExpression
+func (m *MockHumanoidController) Shortcut(ctx context.Context, keysExpression string) error {
+	return m.Called(ctx, keysExpression).Error(0)
 }

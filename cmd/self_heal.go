@@ -10,8 +10,8 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/autofix/metalyst"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
-	"github.com/xkilldash9x/scalpel-cli/internal/llmclient"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/internal/service"
 	"go.uber.org/zap"
 )
 
@@ -34,10 +34,10 @@ func newSelfHealCmd() *cobra.Command {
 			panicLog, _ := cmd.Flags().GetString("panic-log")
 			originalArgs, _ := cmd.Flags().GetStringSlice("original-args")
 
-			llmClient, err := llmclient.NewClient(cfg.Agent(), logger)
+			// Initialize the LLM client using the centralized initializer.
+			llmClient, err := service.InitializeLLMClient(cfg.Agent(), logger)
 			if err != nil {
-				logger.Error("Failed to initialize LLM client. Self-healing requires a configured LLM.", zap.Error(err))
-				return fmt.Errorf("failed to initialize LLM client: %w", err)
+				return err // Error is already logged and formatted by the initializer
 			}
 
 			// The initializer for the real Metalyst runner.
