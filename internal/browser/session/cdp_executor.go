@@ -49,38 +49,52 @@ func (e *cdpExecutor) DispatchMouseEvent(ctx context.Context, data schemas.Mouse
 		p = p.WithDeltaX(data.DeltaX).WithDeltaY(data.DeltaY)
 	}
 
-	// Apply a short timeout appropriate for mouse events to the operational context.
-	timeout := 10 * time.Second // Was 5 * time.Second
-	opCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	// --- START FIX ---
+	// Do not create an internal timeout here. An action (like a click)
+	// that triggers a navigation must be allowed to run for the full
+	// duration of the 'ctx' passed in from the humanoid layer.
+	// The 'ctx' passed in manages the timeout for the *entire* logical operation.
+	//
+	// (Original code with internal timeout removed)
+	// timeout := 10 * time.Second
+	// opCtx, cancel := context.WithTimeout(ctx, timeout)
+	// defer cancel()
 
-	// Use the session's runActionsFunc (RunActions). It handles context combination.
-	err := e.runActionsFunc(opCtx, p)
+	// Use the session's runActionsFunc (RunActions) with the original context.
+	err := e.runActionsFunc(ctx, p) // Use ctx, not opCtx
 
-	// Check if the error is due to the specific timeout
-	if err != nil && opCtx.Err() == context.DeadlineExceeded {
-		e.logger.Debug("cdpExecutor DispatchMouseEvent timed out.", zap.Duration("timeout", timeout), zap.Error(opCtx.Err()))
-		return fmt.Errorf("cdpExecutor DispatchMouseEvent timed out after %v: %w", timeout, opCtx.Err())
+	// Check if the error is due to the context passed in
+	if err != nil && ctx.Err() == context.DeadlineExceeded {
+		e.logger.Debug("cdpExecutor DispatchMouseEvent timed out.", zap.Error(ctx.Err()))
+		// Return a generic error that respects the original context.
+		return fmt.Errorf("cdpExecutor DispatchMouseEvent timed out: %w", ctx.Err())
 	}
+	// --- END FIX ---
 	return err
 }
 
 // SendKeys dispatches keyboard events via CDP.
 // ctx here is the operational context.
 func (e *cdpExecutor) SendKeys(ctx context.Context, keys string) error {
-	// Apply a timeout suitable for sending keys to the operational context.
-	timeout := 10 * time.Second
-	opCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	// --- START FIX ---
+	// Do not create an internal timeout. A "SendKeys" action (like pressing Enter)
+	// might trigger a navigation and must be allowed to complete.
+	// The 'ctx' from the humanoid layer controls the overall operation timeout.
+	//
+	// (Original code with internal timeout removed)
+	// timeout := 10 * time.Second
+	// opCtx, cancel := context.WithTimeout(ctx, timeout)
+	// defer cancel()
 
 	// Use the session's runActionsFunc (RunActions).
-	err := e.runActionsFunc(opCtx, chromedp.KeyEvent(keys))
+	err := e.runActionsFunc(ctx, chromedp.KeyEvent(keys)) // Use ctx, not opCtx
 
-	// Check if the error is due to the specific timeout
-	if err != nil && opCtx.Err() == context.DeadlineExceeded {
-		e.logger.Debug("cdpExecutor SendKeys timed out.", zap.Duration("timeout", timeout), zap.Error(opCtx.Err()))
-		return fmt.Errorf("cdpExecutor SendKeys timed out after %v: %w", timeout, opCtx.Err())
+	// Check if the error is due to the context passed in
+	if err != nil && ctx.Err() == context.DeadlineExceeded {
+		e.logger.Debug("cdpExecutor SendKeys timed out.", zap.Error(ctx.Err()))
+		return fmt.Errorf("cdpExecutor SendKeys timed out: %w", ctx.Err())
 	}
+	// --- END FIX ---
 	return err
 }
 
@@ -194,6 +208,7 @@ func (e *cdpExecutor) GetElementGeometry(ctx context.Context, selector string) (
 	var res json.RawMessage
 
 	// Apply timeout for geometry retrieval to the operational context.
+	// This is correct, as geometry lookups should be fast.
 	timeout := 10 * time.Second
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
@@ -259,6 +274,7 @@ func (e *cdpExecutor) ExecuteScript(ctx context.Context, script string, args []i
 	var res json.RawMessage
 
 	// Apply a suitable timeout for script execution to the operational context.
+	// This is correct, as script execution should be relatively fast.
 	timeout := 20 * time.Second
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
