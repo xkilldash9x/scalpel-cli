@@ -178,7 +178,8 @@ describe('Scalpel Taint Shim (Advanced)', () => {
             setTimeout(() => {
                 expect(mockErrorCallback).toHaveBeenCalledWith(
                     expect.objectContaining({
-                        error: expect.stringContaining("CONFIG.Sinks.forEach is not a function"),
+                        // FIX: Updated expectation based on improved error handling in initialize()
+                        error: expect.stringContaining("CONFIG.Sinks is not a valid array."),
                         location: "Fatal error during IAST Shim initialization"
                     })
                 );

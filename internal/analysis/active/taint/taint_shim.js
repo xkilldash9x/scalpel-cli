@@ -104,7 +104,6 @@
             return false;
         }
 
-        // Cycle detection
         if (seen.has(value)) return false;
         seen.add(value);
 
@@ -239,77 +238,97 @@
 
     /**
      * Instruments a function call.
+     * FIX: Now accepts an array of sink definitions (sinkDefs) to handle multiple sinks on the same function (e.g., fetch URL and Body).
      */
-    function instrumentFunction(parent, key, sinkDef) {
+    function instrumentFunction(parent, key, sinkDefs) {
         const originalFunc = parent[key];
+        // The check remains the same: we only want to instrument a specific function implementation once.
         if (typeof originalFunc !== 'function' || instrumentedCache.has(originalFunc)) return;
 
+        // All sinkDefs in the array have the same Name.
+        const functionName = sinkDefs[0].Name;
+
         const wrapper = function(...args) {
-            try {
-                let valueToInspect = args[sinkDef.ArgIndex];
+            
+            // FIX: Iterate over all sink definitions for this function
+            for (const sinkDef of sinkDefs) {
+                // ROBUSTNESS: Use try-catch inside the loop to ensure one failing definition doesn't stop others.
+                try {
+                    // Default assignment
+                    let valueToInspect = args[sinkDef.ArgIndex];
 
-                // --- Specialized Argument Handlers (Pre-processing) ---
+                    // --- Specialized Argument Handlers (Pre-processing) ---
 
-                // 1. Fetch Handlers (fetch)
-                // We determine context based on ArgIndex because 'fetch'
-                // is overloaded for both URL (Arg 0) and Body (Arg 1) sinks.
-                if (sinkDef.Name === 'fetch') {
+                    // 1. Fetch Handlers (fetch)
+                    if (functionName === 'fetch') {
+                        
+                        // A. FETCH_BODY (ArgIndex 1)
+                        if (sinkDef.ArgIndex === 1) {
+                            // Check if options (arg 1) exists, is an object, and has a non-null/undefined body.
+                            if (args.length > 1 && args[1] && typeof args[1] === 'object' && args[1].body != null) {
+                                // Inspect the body property of the options object (arg 1).
+                                valueToInspect = args[1].body;
+                            } else {
+                                // Body is missing or options object is missing. Skip this specific sink check.
+                                continue;
+                            }
+                        } 
+                        // B. FETCH_URL (ArgIndex 0)
+                        else if (sinkDef.ArgIndex === 0) {
+                            if (args.length > 0) {
+                                // Inspect the URL (arg 0). Handle both string and Request object.
+                                // ROBUSTNESS: Use scope.Request.
+                                if (typeof scope.Request !== 'undefined' && args[0] instanceof scope.Request) {
+                                    valueToInspect = args[0].url;
+                                } else {
+                                    valueToInspect = args[0];
+                                }
+                            } else {
+                                 // fetch requires args, but defensively skip.
+                                 continue;
+                            }
+                        }
+                    }
+
+                    // 2. SendBeacon Data (ArgIndex 1)
+                    // ROBUSTNESS: Explicitly check if data exists, otherwise skip this sink definition.
+                    else if (sinkDef.Type === 'SEND_BEACON' && sinkDef.ArgIndex === 1) {
+                         if (args.length > 1 && args[1] != null) {
+                             valueToInspect = args[1];
+                         } else {
+                             // If checking the data argument but it's missing, skip.
+                             continue;
+                         }
+                    }
+
+                    // --- Taint Check and Reporting ---
                     
-                    // A. FETCH_BODY (ArgIndex 1)
-                    if (sinkDef.ArgIndex === 1) {
-                        if (args.length > 1 && args[1] && args[1].body) {
-                            // Inspect the body property of the options object (arg 1).
-                            valueToInspect = args[1].body;
-                        } else {
-                            // Prevent false positive taint check on the options object itself.
-                            valueToInspect = null;
-                        }
-                    } 
-                    // B. FETCH_URL (ArgIndex 0)
-                    else if (sinkDef.ArgIndex === 0) {
-                        if (args.length > 0) {
-                            // Inspect the URL (arg 0). Handle both string and Request object (if Request is defined).
-                            // ROBUSTNESS: Use scope.Request.
-                            if (typeof scope.Request !== 'undefined' && args[0] instanceof scope.Request) {
-                                valueToInspect = args[0].url;
-                            } else {
-                                valueToInspect = args[0];
+                    if (isTainted(valueToInspect)) {
+                        let conditionsMet = true;
+                        if (sinkDef.ConditionID) {
+                            try {
+                                const handler = ConditionHandlers[sinkDef.ConditionID];
+                                if (handler) {
+                                    conditionsMet = handler(args);
+                                } else {
+                                    reportShimError(`Unknown ConditionID: ${sinkDef.ConditionID}`, `instrumentFunction ${functionName}`);
+                                    conditionsMet = false; // Fail closed
+                                }
+                            } catch (e) {
+                                reportShimError(e, `Error evaluating condition for ${functionName}. ConditionID: ${sinkDef.ConditionID}`);
+                                conditionsMet = false; // Assume condition failed if evaluation errors.
                             }
                         }
-                    }
-                }
 
-                // 2. SendBeacon Data (ArgIndex 1)
-                else if (sinkDef.Type === 'SEND_BEACON' && sinkDef.ArgIndex === 1 && args.length > 1) {
-                    valueToInspect = args[1];
-                }
-
-                // --- Taint Check and Reporting ---
-
-                if (isTainted(valueToInspect)) {
-                    let conditionsMet = true;
-                    if (sinkDef.ConditionID) {
-                        try {
-                            const handler = ConditionHandlers[sinkDef.ConditionID];
-                            if (handler) {
-                                conditionsMet = handler(args);
-                            } else {
-                                reportShimError(`Unknown ConditionID: ${sinkDef.ConditionID}`, `instrumentFunction ${sinkDef.Name}`);
-                                conditionsMet = false; // Fail closed
-                            }
-                        } catch (e) {
-                            reportShimError(e, `Error evaluating condition for ${sinkDef.Name}. ConditionID: ${sinkDef.ConditionID}`);
-                            conditionsMet = false; // Assume condition failed if evaluation errors.
+                        if (conditionsMet) {
+                            reportSink(sinkDef.Type, valueToInspect, functionName);
                         }
                     }
-
-                    if (conditionsMet) {
-                        reportSink(sinkDef.Type, valueToInspect, sinkDef.Name);
-                    }
+                } catch (e) {
+                     // Report error specific to this sink definition.
+                    reportShimError(e, `Error during instrumentation wrapper of function ${functionName} (Type: ${sinkDef.Type})`);
                 }
-            } catch (e) {
-                reportShimError(e, `Error during instrumentation wrapper of function ${sinkDef.Name}`);
-            }
+            } // End of loop over sinkDefs
 
             // Call the original function using Reflect.apply for robustness.
             return Reflect.apply(originalFunc, this, args);
@@ -331,22 +350,22 @@
                     }
                 }
             });
-
+ 
             // Replace the original function with the wrapper.
             parent[key] = wrapper;
             instrumentedCache.add(wrapper);
             instrumentedCache.add(originalFunc); // Also add original to cache for safety
-
         } catch (e) {
-            reportShimError(e, `Could not fully restore prototype chain or define property for ${sinkDef.Name}`);
+            reportShimError(e, `Could not fully restore prototype chain or define property for ${functionName}`);
         }
     }
 
 
     /**
      * Instruments a property setter.
+     * FIX: Now accepts an array of sink definitions (sinkDefs).
      */
-    function instrumentSetter(parent, key, sinkDef) {
+    function instrumentSetter(parent, key, sinkDefs) {
         let descriptor = Object.getOwnPropertyDescriptor(parent, key);
         let target = parent;
 
@@ -369,44 +388,81 @@
         }
 
         const originalSet = descriptor.set;
+        const setterName = sinkDefs[0].Name;
 
         descriptor.set = function(value) {
+            let tainted = false;
             try {
-                if (isTainted(value)) {
-                    reportSink(sinkDef.Type, value, sinkDef.Name);
-                }
+                tainted = isTainted(value);
             } catch (e) {
-                reportShimError(e, `Error during instrumentation wrapper of setter ${sinkDef.Name}`);
+                reportShimError(e, `Error during taint check for setter ${setterName}`);
+                // Proceed to call original setter even if taint check fails.
             }
+
+            if (tainted) {
+                // Report for every matching sink definition.
+                for (const sinkDef of sinkDefs) {
+                    // ROBUSTNESS: Use try-catch inside the loop.
+                    try {
+                        // Add condition checking for completeness, although rare for setters.
+                        let conditionsMet = true;
+                        if (sinkDef.ConditionID) {
+                             try {
+                                const handler = ConditionHandlers[sinkDef.ConditionID];
+                                if (handler) {
+                                    // Pass the setter value as the arguments array.
+                                    conditionsMet = handler([value]);
+                                } else {
+                                    reportShimError(`Unknown ConditionID: ${sinkDef.ConditionID}`, `instrumentSetter ${setterName}`);
+                                    conditionsMet = false;
+                                }
+                            } catch (e) {
+                                reportShimError(e, `Error evaluating condition for ${setterName}. ConditionID: ${sinkDef.ConditionID}`);
+                                conditionsMet = false;
+                            }
+                        }
+
+                        if (conditionsMet) {
+                             reportSink(sinkDef.Type, value, setterName);
+                        }
+                    } catch (e) {
+                        reportShimError(e, `Error during reporting wrapper of setter ${setterName} (Type: ${sinkDef.Type})`);
+                    }
+                }
+            }
+            
             // Call the original setter with the correct context ('this').
             return originalSet.call(this, value);
         };
 
         instrumentedCache.add(descriptor.set);
-
+        
         try {
             // Redefine the property on the target (object or prototype).
             Object.defineProperty(target, key, descriptor);
         } catch (e) {
             // This can fail if the property is non-configurable.
-            reportShimError(e, `Failed to define property for setter ${sinkDef.Name}. Property might be non-configurable.`);
+            reportShimError(e, `Failed to define property for setter ${setterName}. Property might be non-configurable.`);
         }
     }
 
     /**
      * Applies instrumentation for all defined sinks to a specific root object (e.g., Global Scope, Prototype).
+     * FIX: Now takes the groupedSinks Map.
      */
-    function applyInstrumentation(root) {
+    function applyInstrumentation(root, groupedSinks) {
         // Safety check to prevent redundant instrumentation on the same object/prototype.
-        if (!root || instrumentedCache.has(root)) return;
+        // Also check if groupedSinks map is valid.
+        if (!root || instrumentedCache.has(root) || !groupedSinks) return;
 
         // Mark the root as processed early to prevent recursion issues if sinks reference the root itself.
         instrumentedCache.add(root);
 
-        CONFIG.Sinks.forEach(sinkDef => {
+        // FIX: Iterate over the grouped sinks map.
+        groupedSinks.forEach((sinkDefs, sinkName) => {
             try {
                 // Resolve the path relative to the root.
-                const resolved = resolvePath(sinkDef.Name, root);
+                const resolved = resolvePath(sinkName, root);
 
                 if (!resolved || !resolved.parent) {
                     // Expected for APIs not present (e.g., jQuery not loaded, API not supported in Worker).
@@ -421,16 +477,19 @@
                 // Check if the resolved parent matches the intended root context.
                 // This is complex, especially with prototypes. We rely on resolvePath finding the correct prototype chain.
 
-                if (sinkDef.Setter) {
-                    instrumentSetter(parent, key, sinkDef);
-                } else {
-                    instrumentFunction(parent, key, sinkDef);
-                }
+                // We assume all definitions for the same name have the same 'Setter' value.
+                // Check ensures sinkDefs is not empty (it shouldn't be if grouped correctly).
+                const isSetter = sinkDefs.length > 0 && sinkDefs[0].Setter;
 
+                if (isSetter) {
+                    instrumentSetter(parent, key, sinkDefs);
+                } else {
+                    instrumentFunction(parent, key, sinkDefs);
+                }
             } catch (e) {
                 // Use a generic name if root.constructor.name is unavailable
                 const rootName = root.constructor ? root.constructor.name : "UnknownRoot";
-                reportShimError(e, `Failed to instrument sink ${sinkDef.Name} on root ${rootName}`);
+                reportShimError(e, `Failed to instrument sink ${sinkName} on root ${rootName}`);
             }
         });
     }
@@ -576,20 +635,37 @@
     function initialize() {
         // Wrap the entire initialization in a try-catch block for maximum robustness.
         try {
-            // 1. Set up the execution proof callback wrapper.
+            // FIX: 1. Pre-process Sinks Configuration: Group sinks by Name.
+            const GroupedSinks = new Map();
+            
+            // Robustness: Check if CONFIG.Sinks is actually an array before processing.
+            if (Array.isArray(CONFIG.Sinks)) {
+                CONFIG.Sinks.forEach(sinkDef => {
+                    if (!GroupedSinks.has(sinkDef.Name)) {
+                        GroupedSinks.set(sinkDef.Name, []);
+                    }
+                    GroupedSinks.get(sinkDef.Name).push(sinkDef);
+                });
+            } else if (CONFIG.Sinks && (typeof CONFIG.Sinks === 'object' || (typeof CONFIG.Sinks === 'string' && CONFIG.Sinks.length > 0))) {
+                 // Report error if SinksJSON was provided but invalid (e.g., a string or object instead of an array).
+                 // The original code relied on the global try/catch catching "forEach is not a function". Explicit checking is better.
+                 throw new Error("CONFIG.Sinks is not a valid array.");
+            }
+            // If CONFIG.Sinks is null, undefined, or an empty string, we proceed with an empty GroupedSinks map.
+
+            // 2. Set up the execution proof callback wrapper.
             initializeExecutionProofCallback();
 
-            // 2. Apply instrumentation based on the configuration.
+            // 3. Apply instrumentation based on the configuration.
             // We assume configuration paths (sinkDef.Name) are absolute (relative to the global scope).
-            applyInstrumentation(scope);
+            applyInstrumentation(scope, GroupedSinks); // FIX: Pass the grouped sinks map.
 
             // NOTE: Removed redundant calls to applyInstrumentation on specific prototypes (e.g. Element.prototype).
             // If prototypes need instrumentation, they should be specified in the config (e.g., "Element.prototype.innerHTML").
             
-            // 3. Instrument advanced features.
+            // 4. Instrument advanced features.
             instrumentWebWorkers();
-
-            // 4. Check for Prototype Pollution.
+            // 5. Check for Prototype Pollution.
             // We delay this check slightly to allow the application code that causes the pollution (e.g., JSON parsing on load) to execute.
             setTimeout(checkPrototypePollution, 1500);
             // Also check again later.

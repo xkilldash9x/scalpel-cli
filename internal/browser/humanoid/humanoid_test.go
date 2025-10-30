@@ -6,6 +6,7 @@ import (
 	"encoding/json"
 	"errors"
 	"math/rand"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -159,7 +160,9 @@ func TestEnsureVisibleOptions(t *testing.T) {
 	// Helper to check if scroll JS was executed
 	scrollExecuted := false
 	mock.MockExecuteScript = func(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
-		if script == scrollIterationJS {
+		// FIX: The script executed is a wrapper, not the raw JS.
+		// We check for a unique part of that wrapper script.
+		if strings.Contains(script, "window.__scalpel_scrollFunction") {
 			scrollExecuted = true
 		}
 		// Call the default implementation to allow intelligentScroll to proceed.
@@ -167,11 +170,12 @@ func TestEnsureVisibleOptions(t *testing.T) {
 	}
 
 	// 1. Nil options (Default: True)
+	scrollExecuted = false // Reset for test
 	// Must lock h because ensureVisible calls intelligentScroll which requires the lock.
 	h.mu.Lock()
 	h.ensureVisible(ctx, "#target", nil)
 	h.mu.Unlock()
-	assert.True(t, scrollExecuted)
+	assert.True(t, scrollExecuted, "Should execute scroll logic when options are nil")
 
 	// 2. Explicitly False
 	scrollExecuted = false
@@ -180,7 +184,7 @@ func TestEnsureVisibleOptions(t *testing.T) {
 	h.mu.Lock()
 	h.ensureVisible(ctx, "#target", opts)
 	h.mu.Unlock()
-	assert.False(t, scrollExecuted)
+	assert.False(t, scrollExecuted, "Should NOT execute scroll logic when EnsureVisible is false")
 
 	// 3. Explicitly True
 	scrollExecuted = false
@@ -189,7 +193,7 @@ func TestEnsureVisibleOptions(t *testing.T) {
 	h.mu.Lock()
 	h.ensureVisible(ctx, "#target", opts)
 	h.mu.Unlock()
-	assert.True(t, scrollExecuted)
+	assert.True(t, scrollExecuted, "Should execute scroll logic when EnsureVisible is true")
 }
 
 func TestReleaseMouse(t *testing.T) {

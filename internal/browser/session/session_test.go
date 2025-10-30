@@ -61,8 +61,7 @@ func TestSession(t *testing.T) {
 
 		require.NoError(t, session.Navigate(ctx, server.URL), "Navigation failed")
 
-		// FIX: Wait deterministically for logs instead of fixed sleep (TestSession/NavigateAndCollectArtifacts failure).
-		// We need to check the harvester's internal state periodically.
+		// FIX: Wait deterministically for logs instead of fixed sleep.
 		assert.Eventually(t, func() bool {
 			// harvester might be nil if initialization failed, check first.
 			if session.harvester == nil {
@@ -82,7 +81,7 @@ func TestSession(t *testing.T) {
 				}
 			}
 			return hasLog && hasWarn
-			// FIX: Increased timeout from 20s to 45s for stability (TestSession/NavigateAndCollectArtifacts failure).
+			// FIX: Increased timeout from 20s to 45s for stability.
 		}, 45*time.Second, 100*time.Millisecond, "Timed out waiting for console logs to propagate")
 
 		artifacts, err := session.CollectArtifacts(ctx)
@@ -170,6 +169,37 @@ func TestSession(t *testing.T) {
 		assert.False(t, foundCookie2, "Session 2 should not have cookies from session 1")
 	})
 
+	t.Run("InjectScriptPersistently", func(t *testing.T) {
+		fixture := newTestFixture(t)
+		session := fixture.Session
+
+		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+		defer cancel()
+
+		// The session is already initialized by the fixture.
+		// We can directly call InjectScriptPersistently.
+
+		script1 := `console.log('Persistent script test 1'); window.persistentTest1 = true;`
+		err := session.InjectScriptPersistently(ctx, script1)
+		require.NoError(t, err, "Injecting first script failed")
+
+		script2 := `console.log('Persistent script test 2'); window.persistentTest2 = true;`
+		err = session.InjectScriptPersistently(ctx, script2)
+		require.NoError(t, err, "Injecting second script failed")
+
+		// To verify, we can navigate and then check if the scripts were executed.
+		server := createStaticTestServer(t, `<html><body>Verification Page</body></html>`)
+		require.NoError(t, session.Navigate(ctx, server.URL))
+
+		// Check if the scripts ran by looking for the global variables they set.
+		var test1, test2 bool
+		require.NoError(t, session.RunActions(ctx, chromedp.Evaluate(`window.persistentTest1`, &test1)))
+		require.NoError(t, session.RunActions(ctx, chromedp.Evaluate(`window.persistentTest2`, &test2)))
+
+		assert.True(t, test1, "First persistent script did not execute on navigation")
+		assert.True(t, test2, "Second persistent script did not execute on navigation")
+	})
+
 	t.Run("Interaction_BasicClickAndType", func(t *testing.T) {
 		fixture := newTestFixture(t)
 		require.NotNil(t, fixture.Session.humanoid, "Humanoid should be initialized for this test")
@@ -189,12 +219,12 @@ func TestSession(t *testing.T) {
 		require.NoError(t, session.Type(ctx, "#inputField", "typed_value"), "Typing failed")
 
 		var typedValue string
-		// FIX: Update ExecuteScript call: pass nil args, handle result/error, unmarshal manually.
+		// FIX: Update ExecuteScript call (signature change and manual unmarshal).
 		res, err := session.ExecuteScript(ctx, `document.querySelector("#inputField").value`, nil)
 		require.NoError(t, err, "Getting input value failed")
 		// Since ExecuteScript returns json.RawMessage, we need to unmarshal it.
 		require.NoError(t, json.Unmarshal(res, &typedValue), "Unmarshalling input value failed")
-		// FIX: Changed assertion from Contains to Equal, as the field should now be cleared before typing.
+		// FIX: Changed assertion from Contains to Equal (field is now cleared before typing).
 		assert.Equal(t, "typed_value", typedValue, "Typed value mismatch (field likely not cleared)")
 
 		// Test Click - Pass context to Click
@@ -250,7 +280,7 @@ func TestSession(t *testing.T) {
 		select {
 		case res := <-callbackChan:
 			assert.Equal(t, "hello_123", res)
-		// FIX: Increased timeout (from 5s) for stability under load/race conditions (TestSession/ExposeFunction* Failures).
+		// FIX: Increased timeout (from 5s) for stability.
 		case <-time.After(10 * time.Second):
 			mu.Lock()
 			called := goFuncCalled
@@ -300,7 +330,7 @@ func TestSession(t *testing.T) {
 				t.Fatal("Callback channel closed unexpectedly (likely type error in callback)")
 			}
 			assert.Equal(t, "map_value", res)
-		// FIX: Increased timeout (from 5s) for stability under load/race conditions (TestSession/ExposeFunction* Failures).
+		// FIX: Increased timeout (from 5s) for stability.
 		case <-time.After(10 * time.Second):
 			t.Fatal("Timed out waiting for exposed function (map signature)")
 		}
@@ -623,19 +653,18 @@ func TestSession(t *testing.T) {
 		err := session.Navigate(ctx, "about:blank")
 		require.Error(t, err, "Navigate should fail after session is closed")
 
-		// FIX: Broaden assertion to include common CDP connection errors (TestSession/CloseIdempotency failure).
+		// FIX: Broaden assertion to include common CDP connection errors.
 		// The exact error string can vary depending on timing and CDP implementation.
-		// If the connection is severed, we might get "context canceled", "Target closed", "session closed", or "connection closed".
 		isExpectedError := strings.Contains(err.Error(), "session is closed") ||
 			strings.Contains(err.Error(), "context canceled") ||
 			strings.Contains(err.Error(), "Target closed") ||
 			strings.Contains(err.Error(), "connection closed") ||
-			strings.Contains(err.Error(), "cannot run actions") // Added based on analysis
+			strings.Contains(err.Error(), "cannot run actions")
 		assert.True(t, isExpectedError, "Error should indicate closure or cancellation. Got: "+err.Error())
 
 		_, err = session.CollectArtifacts(ctx)
 		require.Error(t, err, "CollectArtifacts should fail after session is closed")
-		// FIX: Broaded assertion to make it less brittle against dynamic Session IDs.
+		// FIX: Broaden assertion to be less brittle.
 		assert.Contains(t, err.Error(), "is closed")
 	})
 
@@ -703,10 +732,10 @@ func TestSession(t *testing.T) {
 		require.NoError(t, session.Navigate(ctx, server.URL))
 
 		// 1. Verify the shim was loaded (check console logs).
-		// FIX: Update expected log message to match the actual embedded shim (TestSession/IAST_TaintShimIntegration failure).
-		expectedLogMessage := "Scalpel Taint Shim" // Prefix used by the actual shim
+		// FIX: Update expected log message to match the mock shim defined in session_helpers_test.go.
+		expectedLogMessage := "Scalpel Taint Shim Initialized (Test)"
 
-		// FIX: Wait deterministically for logs instead of fixed sleep (TestSession/IAST_TaintShimIntegration failure).
+		// FIX: Wait deterministically for logs.
 		assert.Eventually(t, func() bool {
 			if session.harvester == nil {
 				return false
@@ -720,7 +749,7 @@ func TestSession(t *testing.T) {
 				}
 			}
 			return false
-			// FIX: Increased timeout from 20s to 45s for stability (TestSession/IAST_TaintShimIntegration failure).
+			// FIX: Increased timeout from 20s to 45s for stability.
 		}, 45*time.Second, 100*time.Millisecond, "Timed out waiting for IAST Shim Loaded log ("+expectedLogMessage+")")
 
 		// 2. Trigger the event from JS. The handler (__scalpel_sink_event) is exposed during Initialize.
@@ -876,15 +905,15 @@ func assertLogPresent(t *testing.T, logs []schemas.ConsoleLog, level, substring 
 // findHAREntry is a helper to find a specific entry in the HAR log.
 // FIX: Use current schemas.HAR structure
 func findHAREntry(harData *schemas.HAR, urlSubstring string) *schemas.Entry {
-	// FIX: Removed harData.Log == nil check (MismatchedTypes error). Log is a struct.
+	// FIX: Removed harData.Log == nil check. Log is a struct.
 	if harData == nil {
 		return nil
 	}
 	for i := range harData.Log.Entries { // Iterate by index to take address
 		entry := &harData.Log.Entries[i] // Get pointer to entry
-		// FIX: Removed entry.Request != nil check (MismatchedTypes error). Request is a struct.
+		// FIX: Removed entry.Request != nil check. Request is a struct.
 		if strings.Contains(entry.Request.URL, urlSubstring) {
-			return entry // Return pointer
+			return entry
 		}
 	}
 	return nil

@@ -160,13 +160,13 @@ func TestHarvesterIntegration(t *testing.T) {
                 <script>
                     // Trigger form submission via JS
                     // FIX: Increased delay (from 150ms to 300ms) to robustly mitigate race condition with Harvester fetching PostData.
-                    setTimeout(() => document.getElementById('myForm').submit(), 300);
+                    setTimeout(() => document.getElementById('myForm').submit(), 300); 
                 </script>
             </body></html>
         `)
 	}))
 
-	// FIX: Increased timeout from 30s to 60s for stability, especially under -race. (TestHarvesterIntegration timeout)
+	// FIX: Increased timeout from 30s to 60s for stability.
 	ctx, cancel := context.WithTimeout(context.Background(), 60*time.Second)
 	defer cancel()
 
@@ -176,7 +176,8 @@ func TestHarvesterIntegration(t *testing.T) {
 
 	// Wait for stabilization (Navigate already does this, but ensure post-submit navigation finishes)
 	// Use a short stabilization period here.
-	err = session.stabilize(ctx, 500*time.Millisecond)
+	// FIX: Increased stabilization quiet period (from 500ms to 1500ms) to allow background body fetching to complete.
+	err = session.stabilize(ctx, 1500*time.Millisecond)
 	// Stabilization might fail if the network is very slow, but we proceed to collect artifacts anyway.
 	if err != nil {
 		t.Logf("Warning: Stabilization failed after navigation/submit: %v", err)
@@ -314,7 +315,7 @@ func TestHarvesterHelpers(t *testing.T) {
 		assert.Equal(t, 15.0, harTimings.Wait)
 		assert.Equal(t, 0.0, harTimings.Receive) // Receive is default 0
 
-		// FIX: Updated assertion for Blocked time based on the corrected calculation (time until first event).
+		// FIX: Updated assertion for Blocked time.
 		// The first event is DNSStart at 10.0ms.
 		assert.Equal(t, 10.0, harTimings.Blocked)
 

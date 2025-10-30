@@ -45,13 +45,12 @@ type Humanoid struct {
 // New creates and initializes a new Humanoid instance.
 func New(humanoidCfg config.HumanoidConfig, logger *zap.Logger, executor Executor) *Humanoid {
 
-	h := &Humanoid{
-		logger:   logger,
-		executor: executor,
-	}
+	// FIX: Refactor New() initialization. The previous implementation used an unnecessary lock
+	// (as the object is not yet shared) and partially initialized the struct.
+	// We now perform calculations first and initialize the struct atomically.
 
-	h.mu.Lock()
-	defer h.mu.Unlock()
+	// humanoidCfg is passed by value, so we use a local copy for modifications.
+	cfg := humanoidCfg
 
 	seed := time.Now().UnixNano()
 	source := rand.NewSource(seed)
@@ -59,27 +58,31 @@ func New(humanoidCfg config.HumanoidConfig, logger *zap.Logger, executor Executo
 
 	// Calculate the SkillFactor first as it influences the persona finalization.
 	// Skill is normally distributed around 1.0, clamped between 0.5 and 1.5.
-	skillJitter := humanoidCfg.PersonaJitterSkill
-	h.skillFactor = 1.0 + rng.NormFloat64()*skillJitter
-	h.skillFactor = math.Max(0.5, math.Min(1.5, h.skillFactor))
+	skillJitter := cfg.PersonaJitterSkill
+	skillFactor := 1.0 + rng.NormFloat64()*skillJitter
+	skillFactor = math.Max(0.5, math.Min(1.5, skillFactor))
 
-	normalizeTypoRates(&humanoidCfg)
+	normalizeTypoRates(&cfg)
 	// Randomize the configuration slightly to create a unique session persona.
-	finalizeSessionPersona(&humanoidCfg, rng, h.skillFactor)
+	finalizeSessionPersona(&cfg, rng, skillFactor)
 
 	// Pink noise parameters (12 oscillators is standard).
 	nOscillators := 12
 
-	// Assign all values within the locked context.
-	h.baseConfig = humanoidCfg
-	h.dynamicConfig = humanoidCfg
-	h.rng = rng
-	h.currentButtonState = schemas.ButtonNone
-	h.lastActionType = ActionTypeNone
-	// Initialize Pink Noise generators with separate seeds.
-	h.noiseX = NewPinkNoiseGenerator(rand.New(rand.NewSource(seed)), nOscillators)
-	h.noiseY = NewPinkNoiseGenerator(rand.New(rand.NewSource(seed+1)), nOscillators)
-
+	// Initialize the struct fully.
+	h := &Humanoid{
+		logger:             logger,
+		executor:           executor,
+		baseConfig:         cfg,
+		dynamicConfig:      cfg, // Dynamic starts the same as base.
+		rng:                rng,
+		skillFactor:        skillFactor,
+		currentButtonState: schemas.ButtonNone,
+		lastActionType:     ActionTypeNone,
+		// Initialize Pink Noise generators with separate seeds.
+		noiseX: NewPinkNoiseGenerator(rand.New(rand.NewSource(seed)), nOscillators),
+		noiseY: NewPinkNoiseGenerator(rand.New(rand.NewSource(seed+1)), nOscillators),
+	}
 	return h
 }
 
@@ -206,6 +209,16 @@ func normalizeTypoRates(c *config.HumanoidConfig) {
 	}
 }
 
+// Define constants for performance clamping (FIX: TestInteractor/FormInteraction_VariousTypes Timeout)
+// These ensure that randomized personas maintain a minimum level of responsiveness, preventing
+// excessively slow behavior (especially cognitive pauses during typing) from causing context timeouts.
+const (
+	MaxFittsA          = 300.0 // ms (Maximum intercept time for movement)
+	MaxFittsB          = 400.0 // ms/bit (Maximum slope for movement speed)
+	MaxExGaussianMu    = 500.0 // ms (Maximum average cognitive reaction time)
+	MaxExGaussianSigma = 150.0 // ms (Maximum standard deviation of reaction time)
+)
+
 // finalizeSessionPersona slightly randomizes the configuration parameters
 // and applies the correlated SkillFactor to simulate a unique user persona.
 func finalizeSessionPersona(c *config.HumanoidConfig, rng *rand.Rand, skillFactor float64) {
@@ -246,4 +259,10 @@ func finalizeSessionPersona(c *config.HumanoidConfig, rng *rand.Rand, skillFacto
 	c.GaussianStrength *= (1.0 + (inverseSkill-1.0)*0.5)
 	c.PinkNoiseAmplitude *= (1.0 + (inverseSkill-1.0)*0.5)
 	c.SDNFactor *= (1.0 + (inverseSkill-1.0)*0.5)
+
+	// 3. Clamp performance parameters to ensure minimum responsiveness.
+	c.FittsA = math.Min(c.FittsA, MaxFittsA)
+	c.FittsB = math.Min(c.FittsB, MaxFittsB)
+	c.ExGaussianMu = math.Min(c.ExGaussianMu, MaxExGaussianMu)
+	c.ExGaussianSigma = math.Min(c.ExGaussianSigma, MaxExGaussianSigma)
 }

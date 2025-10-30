@@ -4,6 +4,7 @@ package session
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"time"
 
@@ -28,12 +29,17 @@ type cdpExecutor struct {
 // ensure cdpExecutor implements the interface
 var _ humanoid.Executor = (*cdpExecutor)(nil)
 
-// FIX: Implemented Sleep method to satisfy humanoid.Executor interface (InvalidIfaceAssign error).
 // Sleep pauses execution for the specified duration, respecting the context.
 func (e *cdpExecutor) Sleep(ctx context.Context, d time.Duration) error {
 	// Use the provided runActionsFunc (Session.RunActions) to execute the sleep.
 	// This centralizes context combination (combining ctx and e.ctx) within RunActions.
 	return e.runActionsFunc(ctx, chromedp.Sleep(d))
+}
+
+// RunActions implements the humanoid.Executor interface.
+func (e *cdpExecutor) RunActions(ctx context.Context, actions ...chromedp.Action) error {
+	// Pass the actions directly to the underlying session's RunActions function.
+	return e.runActionsFunc(ctx, actions...)
 }
 
 // DispatchMouseEvent dispatches a single mouse event via CDP.
@@ -49,19 +55,19 @@ func (e *cdpExecutor) DispatchMouseEvent(ctx context.Context, data schemas.Mouse
 		p = p.WithDeltaX(data.DeltaX).WithDeltaY(data.DeltaY)
 	}
 
-	// --- START FIX ---
+	// --- START FIX (Removed internal timeout) ---
 	// Do not create an internal timeout here. An action (like a click)
 	// that triggers a navigation must be allowed to run for the full
 	// duration of the 'ctx' passed in from the humanoid layer.
 	// The 'ctx' passed in manages the timeout for the *entire* logical operation.
-	//
+
 	// (Original code with internal timeout removed)
 	// timeout := 10 * time.Second
 	// opCtx, cancel := context.WithTimeout(ctx, timeout)
 	// defer cancel()
 
 	// Use the session's runActionsFunc (RunActions) with the original context.
-	err := e.runActionsFunc(ctx, p) // Use ctx, not opCtx
+	err := e.runActionsFunc(ctx, p)
 
 	// Check if the error is due to the context passed in
 	if err != nil && ctx.Err() == context.DeadlineExceeded {
@@ -69,32 +75,30 @@ func (e *cdpExecutor) DispatchMouseEvent(ctx context.Context, data schemas.Mouse
 		// Return a generic error that respects the original context.
 		return fmt.Errorf("cdpExecutor DispatchMouseEvent timed out: %w", ctx.Err())
 	}
-	// --- END FIX ---
 	return err
 }
 
 // SendKeys dispatches keyboard events via CDP.
 // ctx here is the operational context.
 func (e *cdpExecutor) SendKeys(ctx context.Context, keys string) error {
-	// --- START FIX ---
+	// --- START FIX (Removed internal timeout) ---
 	// Do not create an internal timeout. A "SendKeys" action (like pressing Enter)
 	// might trigger a navigation and must be allowed to complete.
 	// The 'ctx' from the humanoid layer controls the overall operation timeout.
-	//
+
 	// (Original code with internal timeout removed)
 	// timeout := 10 * time.Second
 	// opCtx, cancel := context.WithTimeout(ctx, timeout)
 	// defer cancel()
 
 	// Use the session's runActionsFunc (RunActions).
-	err := e.runActionsFunc(ctx, chromedp.KeyEvent(keys)) // Use ctx, not opCtx
+	err := e.runActionsFunc(ctx, chromedp.KeyEvent(keys))
 
 	// Check if the error is due to the context passed in
 	if err != nil && ctx.Err() == context.DeadlineExceeded {
 		e.logger.Debug("cdpExecutor SendKeys timed out.", zap.Error(ctx.Err()))
 		return fmt.Errorf("cdpExecutor SendKeys timed out: %w", ctx.Err())
 	}
-	// --- END FIX ---
 	return err
 }
 
@@ -259,7 +263,6 @@ func (e *cdpExecutor) GetElementGeometry(ctx context.Context, selector string) (
 }
 
 // ExecuteScript executes JavaScript within the browser context.
-// FIX: Implement ExecuteScript to satisfy the humanoid.Executor interface
 // ctx here is used to derive the timeout context for this specific operation.
 func (e *cdpExecutor) ExecuteScript(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
 	// Note: chromedp.Evaluate doesn't directly support passing arguments like Playwright.
@@ -289,8 +292,8 @@ func (e *cdpExecutor) ExecuteScript(ctx context.Context, script string, args []i
 
 	if err != nil {
 		// Check for specific timeout error
-		if opCtx.Err() == context.DeadlineExceeded {
-			return nil, fmt.Errorf("timeout during ExecuteScript: %w", opCtx.Err())
+		if errors.Is(err, context.DeadlineExceeded) {
+			return nil, fmt.Errorf("timeout during ExecuteScript: %w", err)
 		}
 		// Check if the error is a context cancellation (from ctx or e.ctx)
 		if ctx.Err() != nil || e.ctx.Err() != nil {

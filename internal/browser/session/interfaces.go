@@ -14,4 +14,7 @@ type ActionExecutor interface {
 	// It should handle context combination (operational context vs session lifetime context)
 	// and error prioritization.
 	RunActions(ctx context.Context, actions ...chromedp.Action) error
+	// RunBackgroundActions executes actions in a detached context, ensuring they are not
+	// cancelled when the parent operational context finishes.
+	RunBackgroundActions(ctx context.Context, actions ...chromedp.Action) error
 }

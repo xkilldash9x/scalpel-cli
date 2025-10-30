@@ -70,16 +70,17 @@ func (s *Session) Navigate(ctx context.Context, url string) error {
 	// 3. Add a cognitive pause after stabilization (if humanoid enabled).
 	if s.humanoid != nil {
 		// Apply timeout based on the operational context (ctx).
-		// FIX: Increased cognitive pause timeout from 15s to 45s to accommodate -race overhead.
+		// FIX: Increased cognitive pause timeout from 15s to 45s to accommodate overhead.
 		// While the pause itself is short (300-450ms), the implementation involves
 		// task switching delays and potentially mouse movements. Under -race,
 		// these operations (especially CDP commands) can be significantly slower.
-		pauseCtx, pauseCancel := context.WithTimeout(ctx, 45*time.Second) // Was 15*time.Second
+		pauseCtx, pauseCancel := context.WithTimeout(ctx, 45*time.Second)
 		defer pauseCancel()
 		s.logger.Debug("Applying post-stabilization cognitive pause.")
-		// Pass the timed pauseCtx to the humanoid action via RunActions
-		// FIX: Correctly call CognitivePause (assuming it now takes context)
-		if err := s.humanoid.CognitivePause(pauseCtx, 300, 150); err != nil {
+		// FIX: Reduced cognitive pause scaling factors significantly.
+		// Previous high values caused excessive pauses and test timeouts.
+		// We use scales appropriate for a post-load pause (e.g., 3x to 5x the base cognitive delay).
+		if err := s.humanoid.CognitivePause(pauseCtx, 4.0, 2.0); err != nil {
 			// Return error if pause was cancelled, otherwise just log
 			if pauseCtx.Err() != nil || ctx.Err() != nil || s.ctx.Err() != nil {
 				return err // Return context error
@@ -154,12 +155,12 @@ func (s *Session) Type(ctx context.Context, selector string, text string) error 
 	// 3. Type the new value (Humanoid or SendKeys).
 
 	// Steps 1 & 2: Prepare and Clear
-	// FIX: Explicitly clear the field before typing (TestSession/Interaction_BasicClickAndType failure).
+	// FIX: Explicitly clear the field before typing.
 	// Humanoid typing simulates keypresses and doesn't inherently clear content.
 	err := s.RunActions(opCtx,
 		chromedp.ScrollIntoView(selector, chromedp.ByQuery),
 		chromedp.WaitVisible(selector, chromedp.ByQuery),
-		// Use Clear (or SetValue("")) to reset the field.
+		// Use Clear to reset the field.
 		chromedp.Clear(selector, chromedp.ByQuery),
 	)
 
@@ -237,7 +238,7 @@ func (s *Session) Submit(ctx context.Context, selector string) error {
 		// Apply timeout based on the operational context (ctx).
 		pauseCtx, pauseCancel := context.WithTimeout(ctx, 5*time.Second)
 		defer pauseCancel()
-		// FIX: Pass context to CognitivePause
+		// FIX: Pass context
 		if pauseErr := s.humanoid.CognitivePause(pauseCtx, 100, 50); pauseErr != nil && pauseCtx.Err() == nil && ctx.Err() == nil && s.ctx.Err() == nil {
 			s.logger.Debug("Post-submit cognitive pause failed/interrupted.", zap.Error(pauseErr))
 		}
@@ -274,7 +275,7 @@ func (s *Session) ScrollPage(ctx context.Context, direction string) error {
 
 	// Execute scroll script using RunActions
 	// FIX: Pass nil for args, handle result and error (updated for ExecuteScript signature change)
-	_, err := s.ExecuteScript(opCtx, script, nil) // Use ExecuteScript method
+	_, err := s.ExecuteScript(opCtx, script, nil)
 	if err != nil {
 		// Check context errors
 		if ctx.Err() != nil {
@@ -297,7 +298,7 @@ func (s *Session) ScrollPage(ctx context.Context, direction string) error {
 		// Apply timeout based on the operational context (ctx).
 		pauseCtx, pauseCancel := context.WithTimeout(ctx, 2*time.Second)
 		defer pauseCancel()
-		// FIX: Pass context to Hesitate
+		// FIX: Pass context
 		if pauseErr := s.humanoid.Hesitate(pauseCtx, pauseDuration); pauseErr != nil && pauseCtx.Err() == nil && ctx.Err() == nil && s.ctx.Err() == nil {
 			s.logger.Debug("Post-scroll hesitation failed/interrupted.", zap.Error(pauseErr))
 		}
@@ -327,7 +328,7 @@ func (s *Session) WaitForAsync(ctx context.Context, milliseconds int) error {
 		// Apply a timeout slightly longer than the duration for the operation itself
 		waitCtx, waitCancel := context.WithTimeout(ctx, duration+5*time.Second)
 		defer waitCancel()
-		// Pass context to Hesitate
+		// Pass context
 		err := s.humanoid.Hesitate(waitCtx, duration)
 		if err != nil {
 			// Check if error is due to context cancellation

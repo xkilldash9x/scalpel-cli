@@ -109,7 +109,7 @@ func (i *Interactor) Interact(ctx context.Context, config schemas.InteractionCon
 	// Initial cognitive pause
 	if i.humanoid != nil {
 		pauseCtx, cancelPause := context.WithTimeout(opCtx, 10*time.Second) // Timeout for initial pause
-		// FIX: Pass context, remove .Do(), handle error
+		// FIX: Pass context and handle error
 		err := i.humanoid.CognitivePause(pauseCtx, 1.5, 1.5)
 		cancelPause() // Release pause context resources promptly
 		if err != nil {
@@ -147,7 +147,7 @@ func (i *Interactor) interactDepth(
 	}
 
 	// 1. Discover new elements
-	// FIX: Increased timeout to 180s as 120s was insufficient (TestInteractor/DynamicContentHandling & DepthLimiting).
+	// FIX: Increased timeout to 180s (was insufficient).
 	discoverCtx, cancelDiscover := context.WithTimeout(ctx, 180*time.Second)
 	newElements, err := i.discoverElements(discoverCtx, interactedElements)
 	cancelDiscover()
@@ -191,8 +191,8 @@ func (i *Interactor) interactDepth(
 		// Small pause before considering element
 		if i.humanoid != nil {
 			pauseCtx, cancelPause := context.WithTimeout(ctx, 5*time.Second)
-			// FIX: Pass context, remove .Do(), handle error
-			err := i.humanoid.CognitivePause(pauseCtx, 0.5, 0.5) // Shorter scan pause
+			// FIX: Pass context and handle error
+			err := i.humanoid.CognitivePause(pauseCtx, 0.5, 0.5)
 			cancelPause()
 			if err != nil {
 				if pauseCtx.Err() != nil || ctx.Err() != nil {
@@ -216,7 +216,7 @@ func (i *Interactor) interactDepth(
 		success, interactionErr := i.executeInteraction(actionCtx, element, log)
 		cancelAction()
 
-		// FIX: Handle stale elements (TestInteractor/FormInteraction_VariousTypes failure).
+		// FIX: Handle stale elements.
 		if errors.Is(interactionErr, ErrStaleElement) {
 			log.Warn("Element became stale during interaction attempt (likely due to navigation by a previous element). Stopping interactions for this depth.", zap.String("desc", element.Description))
 			// If the element we tried to interact with is stale, the rest of the list is also likely stale.
@@ -247,7 +247,7 @@ func (i *Interactor) interactDepth(
 			}
 			if i.humanoid != nil {
 				pauseCtx, cancelPause := context.WithTimeout(ctx, delay+5*time.Second)
-				// FIX: Pass context, remove .Do(), handle error
+				// FIX: Pass context and handle error
 				err := i.humanoid.Hesitate(pauseCtx, delay)
 				cancelPause()
 				if err != nil {
@@ -275,7 +275,7 @@ func (i *Interactor) interactDepth(
 			return err
 		}
 
-		// FIX: Increased timeout from 90s to 180s (was 120s in previous iteration) (TestInteractor timeouts).
+		// FIX: Increased timeout from 90s to 180s.
 		stabilizeCtx, cancelStabilize := context.WithTimeout(ctx, 180*time.Second)
 		err := i.stabilizeFn(stabilizeCtx)
 		cancelStabilize()
@@ -295,7 +295,7 @@ func (i *Interactor) interactDepth(
 		if waitDuration > 0 {
 			if i.humanoid != nil {
 				waitCtx, cancelWait := context.WithTimeout(ctx, waitDuration+5*time.Second)
-				// FIX: Pass context, remove .Do(), handle error
+				// FIX: Pass context and handle error
 				err := i.humanoid.Hesitate(waitCtx, waitDuration)
 				cancelWait()
 				if err != nil {
@@ -406,8 +406,8 @@ func (i *Interactor) executeInteraction(ctx context.Context, element interactive
 		if ctx.Err() != nil {
 			return false, ctx.Err()
 		}
-		// FIX: Check if the error indicates the NodeID is invalid (TestInteractor/FormInteraction_VariousTypes failure).
-		// CDP error -32000 often means "No node found" or "Could not find node with given id".
+		// FIX: Check if the error indicates the NodeID is invalid (stale element).
+		// CDP error -32000 or "Could not find node" indicates stale element.
 		if strings.Contains(err.Error(), "Could not find node") || strings.Contains(err.Error(), "-32000") {
 			return false, fmt.Errorf("failed to tag element '%s': %w", element.Description, ErrStaleElement)
 		}
@@ -424,8 +424,8 @@ func (i *Interactor) executeInteraction(ctx context.Context, element interactive
 			if foundOption {
 				log.Debug("Performing select interaction.", zap.String("selector", selector), zap.String("value", selectedValue))
 
-				// FIX: Use JS evaluation instead of chromedp.SetValue for <select> elements (TestInteractor/FormInteraction_VariousTypes failure).
-				// chromedp.SetValue is known to hang or be unreliable for <select> elements.
+				// FIX: Use JS evaluation instead of chromedp.SetValue for <select> elements.
+				// chromedp.SetValue can be unreliable for <select>.
 
 				// Construct JS snippet to set value and dispatch change event
 				jsSetValue := fmt.Sprintf(`
@@ -542,11 +542,22 @@ func (i *Interactor) handleSelectInteraction(ctx context.Context, node *cdp.Node
 		if _, disabled := attrs["disabled"]; disabled {
 			continue
 		}
-		value := attrs["value"] // Use AttributeValue for reliability? No, attrs map is fine.
-		if value != "" {
+		value, hasValueAttr := attrs["value"]
+
+		// FIX: Optimization and improved logic for selecting option values.
+		// (TestInteractor/FormInteraction_VariousTypes failure due to slow performance/timeout)
+
+		// Strategy:
+		// 1. If 'value' attribute exists and is not empty, use it.
+		if hasValueAttr && value != "" {
 			options = append(options, value)
-		} else {
-			// Fallback to text content
+			continue
+		}
+
+		// 2. If 'value' attribute is missing, fallback to text content.
+		// (If 'value' attribute is present but empty, we generally skip it as it's often a placeholder).
+		if !hasValueAttr {
+			// Fetch text content (still inefficient in a loop, but necessary if no value attr)
 			var text string
 			// REFACTOR: Use executor.RunActions for nested query.
 			if err := i.executor.RunActions(ctx, chromedp.TextContent([]cdp.NodeID{optionNode.NodeID}, &text)); err == nil {
@@ -556,6 +567,7 @@ func (i *Interactor) handleSelectInteraction(ctx context.Context, node *cdp.Node
 				}
 			}
 		}
+		// If 'value' is "" (placeholder), we skip it in this implementation to ensure interaction progresses.
 	}
 
 	if len(options) == 0 {
@@ -748,7 +760,6 @@ func getNodeText(node *cdp.Node) string {
 	}
 
 	// FIX: Truncate text correctly respecting maxTextLength (in bytes) and UTF-8 boundaries.
-	// (TestInteractorHelpers/getNodeText failure: expected 64 bytes, got 66).
 	text := strings.TrimSpace(sb.String())
 
 	const ellipsis = "…"

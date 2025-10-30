@@ -108,14 +108,14 @@ func TestCDPExecutor(t *testing.T) {
 		assert.Equal(t, data.DeltaY, action.DeltaY)
 	})
 
-	// Test the internal timeout (10s for mouse events)
+	// Test that the *calling* context is respected (no internal 10s timeout).
 	t.Run("DispatchMouseEvent_Timeout", func(t *testing.T) {
 		mockFunc := func(ctx context.Context, actions ...chromedp.Action) error {
 			// Simulate a long-running action that respects the context timeout
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(15 * time.Second): // Longer than the 10s internal timeout
+			case <-time.After(15 * time.Second): // Longer than the old 10s internal timeout
 				return errors.New("action took too long (mock error)")
 			}
 		}
@@ -128,7 +128,7 @@ func TestCDPExecutor(t *testing.T) {
 
 		data := schemas.MouseEventData{Type: schemas.MouseMove, X: 1, Y: 1}
 
-		// Use a context that won't time out before the internal timeout
+		// Use a context that won't time out before the mock action (30s)
 		opCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 
@@ -137,12 +137,18 @@ func TestCDPExecutor(t *testing.T) {
 		duration := time.Since(startTime)
 
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "timed out after 10s")
-		// Check that it actually timed out around 10s (allow buffer for test execution)
-		assert.InDelta(t, float64(10*time.Second), float64(duration), float64(1*time.Second))
+
+		// --- START FIX ---
+		// The internal 10s timeout was removed from cdp_executor.go.
+		// The test should now check that the mock's 15s duration completed
+		// and returned its specific error.
+		assert.Contains(t, err.Error(), "action took too long (mock error)")
+		// Check that it actually timed out around 15s (the mock's duration)
+		assert.InDelta(t, float64(15*time.Second), float64(duration), float64(1*time.Second))
+		// --- END FIX ---
 	})
 
-	// Test the internal timeout (10s for send keys)
+	// Test that the *calling* context is respected (no internal 10s timeout).
 	t.Run("SendKeys_Timeout", func(t *testing.T) {
 		mockFunc := func(ctx context.Context, actions ...chromedp.Action) error {
 			select {
@@ -160,12 +166,22 @@ func TestCDPExecutor(t *testing.T) {
 		}
 
 		startTime := time.Now()
-		err := executor.SendKeys(context.Background(), "test")
+		// Use a 30s context to allow the mock to finish
+		opCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		err := executor.SendKeys(opCtx, "test")
 		duration := time.Since(startTime)
 
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "timed out after 10s")
-		assert.InDelta(t, float64(10*time.Second), float64(duration), float64(1*time.Second))
+
+		// --- START FIX ---
+		// The internal 10s timeout was removed from cdp_executor.go.
+		// The test should now check that the mock's 15s duration completed
+		// and returned its specific error.
+		assert.Contains(t, err.Error(), "mock error")
+		assert.InDelta(t, float64(15*time.Second), float64(duration), float64(1*time.Second))
+		// --- END FIX ---
 	})
 
 	// Test the internal timeout (10s for geometry)
@@ -191,6 +207,7 @@ func TestCDPExecutor(t *testing.T) {
 
 		require.Error(t, err)
 		// Check the specific error message format used in GetElementGeometry
+		// This internal timeout is still correct, as geometry lookups should be fast.
 		assert.Contains(t, err.Error(), "timeout getting geometry for '#test'")
 		assert.InDelta(t, float64(10*time.Second), float64(duration), float64(1*time.Second))
 	})
@@ -217,6 +234,7 @@ func TestCDPExecutor(t *testing.T) {
 		duration := time.Since(startTime)
 
 		require.Error(t, err)
+		// This internal timeout is also correct.
 		assert.Contains(t, err.Error(), "timeout during ExecuteScript")
 		assert.InDelta(t, float64(20*time.Second), float64(duration), float64(1*time.Second))
 	})

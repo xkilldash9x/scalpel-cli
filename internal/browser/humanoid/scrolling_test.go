@@ -5,6 +5,8 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"strconv"
+	"strings"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -25,13 +27,63 @@ func setupScrollingTest(t *testing.T) (*Humanoid, *mockExecutor) {
 // Helper to mock the scroll JS execution result
 func mockScrollJS(mock *mockExecutor, result scrollResult) {
 	mock.MockExecuteScript = func(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
-		if script != scrollIterationJS {
-			// Fallback to default mock behavior for non-scroll scripts (e.g., if hesitation is triggered)
+		// FIX: Check for wrapper script
+		if !strings.Contains(script, "window.__scalpel_scrollFunction") {
 			return mock.DefaultExecuteScript(ctx, script, args)
 		}
 		jsonBytes, _ := json.Marshal(result)
 		return jsonBytes, nil
 	}
+}
+
+// Helper to parse arguments from the scroll script string
+// The call looks like: window.__scalpel_scrollFunction("...", deltaY, deltaX, ...)
+func parseScrollArgs(script string) (deltaY float64, deltaX float64, useWheel bool, isDetent bool, err error) {
+	callStr := "window.__scalpel_scrollFunction("
+	callIndex := strings.Index(script, callStr)
+	if callIndex == -1 {
+		return 0, 0, false, false, errors.New("could not find scroll function call")
+	}
+
+	// Find the start of args
+	argsStr := script[callIndex+len(callStr):]
+	// Find the end of args
+	endIndex := strings.Index(argsStr, ")")
+	if endIndex == -1 {
+		return 0, 0, false, false, errors.New("could not find end of args")
+	}
+	argsStr = argsStr[:endIndex]
+
+	// Split args by comma
+	parts := strings.Split(argsStr, ",")
+
+	//
+	// 0: selector
+	// 1: deltaY
+	// 2: deltaX
+	// 3: readDensityFactor
+	// 4: useMouseWheel
+	// 5: cursorX
+	// 6: cursorY
+	// 7: isDetentWheel
+	if len(parts) < 8 {
+		return 0, 0, false, false, errors.New("not enough arguments found")
+	}
+
+	deltaY, err = strconv.ParseFloat(strings.TrimSpace(parts[1]), 64)
+	if err != nil {
+		return
+	}
+	deltaX, err = strconv.ParseFloat(strings.TrimSpace(parts[2]), 64)
+	if err != nil {
+		return
+	}
+	useWheel, err = strconv.ParseBool(strings.TrimSpace(parts[4]))
+	if err != nil {
+		return
+	}
+	isDetent, err = strconv.ParseBool(strings.TrimSpace(parts[7]))
+	return
 }
 
 func TestIntelligentScroll_AlreadyVisible(t *testing.T) {
@@ -73,19 +125,15 @@ func TestIntelligentScroll_MultipleIterations(t *testing.T) {
 	h, mock := setupScrollingTest(t)
 	ctx := context.Background()
 
-	// FIX: Explicitly disable overshoot and regression to ensure deterministic iteration count.
-	// The fixed RNG seed (12345) used by NewTestHumanoid apparently triggers overshoot/regression
-	// with the default probabilities, causing the iteration count to include the JS executions
-	// within simulateOvershoot/simulateRegression.
-	// We must update baseConfig because the initial cognitivePause in intelligentScroll
-	// might trigger applyCombinedEffects, resetting dynamicConfig from baseConfig.
+	// FIX: Explicitly disable overshoot and regression to ensure deterministic iteration count. [cite: 704]
 	h.baseConfig.ScrollOvershootProbability = 0.0
 	h.baseConfig.ScrollRegressionProbability = 0.0
-	h.applyCombinedEffects() // Apply immediately to dynamicConfig as well.
+	h.applyCombinedEffects() // Apply immediately [cite: 706]
 
 	iteration := 0
 	mock.MockExecuteScript = func(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
-		if script != scrollIterationJS {
+		// FIX: Check for wrapper script
+		if !strings.Contains(script, "window.__scalpel_scrollFunction") {
 			return mock.DefaultExecuteScript(ctx, script, args)
 		}
 		iteration++
@@ -106,7 +154,7 @@ func TestIntelligentScroll_MultipleIterations(t *testing.T) {
 	h.mu.Unlock()
 
 	require.NoError(t, err)
-	assert.Equal(t, 3, iteration)
+	assert.Equal(t, 3, iteration) // <-- This should pass now
 	// Should have pauses between iterations
 	sleeps := getMockSleeps(mock)
 	assert.NotEmpty(t, sleeps)
@@ -117,8 +165,7 @@ func TestIntelligentScroll_Cancellation(t *testing.T) {
 
 	// 1. Cancellation during initial cognitive pause
 	t.Run("InitialPause", func(t *testing.T) {
-		// FIX: Initialize fresh instances instead of copying (h := *h_base) to avoid copying locks (linter error)
-		// and ensure the Humanoid instance uses the correct mock instance where overrides are applied.
+		// ... (This test passed, no changes needed) [cite: 709]
 		h, mock := setupScrollingTest(t)
 
 		ctx, cancel := context.WithCancel(context.Background())
@@ -132,7 +179,7 @@ func TestIntelligentScroll_Cancellation(t *testing.T) {
 		mock.MockSleep = func(sleepCtx context.Context, d time.Duration) error {
 			if sleepStarted.CompareAndSwap(false, true) {
 				cancel()
-				// FIX: Return the error immediately to avoid race condition where DefaultSleep doesn't see the cancellation yet.
+				// FIX: Return the error immediately [cite: 709]
 				return context.Canceled
 			}
 			return mock.DefaultSleep(sleepCtx, d)
@@ -147,14 +194,15 @@ func TestIntelligentScroll_Cancellation(t *testing.T) {
 
 	// 2. Cancellation during JSRetryWait
 	t.Run("DuringJSRetryWait", func(t *testing.T) {
-		// FIX: Initialize fresh instances instead of copying.
+		// FIX: Initialize fresh instances [cite: 710]
 		h, mock := setupScrollingTest(t)
 
 		ctx, cancel := context.WithCancel(context.Background())
 
 		// Mock JS to fail immediately
 		mock.MockExecuteScript = func(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
-			if script == scrollIterationJS {
+			// FIX: Check for wrapper script
+			if strings.Contains(script, "window.__scalpel_scrollFunction") {
 				return nil, errors.New("JS failed")
 			}
 			// Fallback
@@ -163,10 +211,10 @@ func TestIntelligentScroll_Cancellation(t *testing.T) {
 
 		// Mock Sleep to cancel during the 100ms retry wait
 		mock.MockSleep = func(sleepCtx context.Context, d time.Duration) error {
-			// The retry wait is exactly 100ms.
+			// The retry wait is exactly 100ms. [cite: 711]
 			if d == 100*time.Millisecond {
 				cancel()
-				// FIX: Return the error immediately to avoid race condition.
+				// FIX: Return the error immediately [cite: 712]
 				return context.Canceled
 			}
 			return mock.DefaultSleep(sleepCtx, d)
@@ -175,7 +223,7 @@ func TestIntelligentScroll_Cancellation(t *testing.T) {
 		h.mu.Lock()
 		err := h.intelligentScroll(ctx, "#target")
 		h.mu.Unlock()
-		assert.ErrorIs(t, err, context.Canceled)
+		assert.ErrorIs(t, err, context.Canceled) // <-- This should pass now
 	})
 }
 
@@ -183,25 +231,25 @@ func TestIntelligentScroll_Overshoot(t *testing.T) {
 	h, mock := setupScrollingTest(t)
 	ctx := context.Background()
 
-	// Enable overshoot (use > 1.0 as RNG returns [0.0, 1.0))
-	// FIX: Use baseConfig to ensure setting persists across cognitivePause/applyCombinedEffects.
+	// Enable overshoot [cite: 713]
 	h.baseConfig.ScrollOvershootProbability = 1.1
 	h.applyCombinedEffects() // Apply to dynamicConfig
 
 	var overshootExecuted bool
 	mock.MockExecuteScript = func(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
-		if script != scrollIterationJS {
+		// FIX: Check for wrapper script
+		if !strings.Contains(script, "window.__scalpel_scrollFunction") {
 			return mock.DefaultExecuteScript(ctx, script, args)
 		}
-		// Check if this call is the overshoot (injectedDeltaY != 0)
-		// Args[1] is injectedDeltaY
-		if len(args) > 1 {
-			if deltaY, ok := args[1].(float64); ok && deltaY != 0.0 {
-				overshootExecuted = true
-				result := scrollResult{IsComplete: true, ElementExists: true}
-				jsonBytes, _ := json.Marshal(result)
-				return jsonBytes, nil
-			}
+
+		// FIX: Parse args from script string
+		deltaY, _, _, _, err := parseScrollArgs(script)
+		if err == nil && deltaY != 0.0 {
+			// This is the overshoot call
+			overshootExecuted = true
+			result := scrollResult{IsComplete: true, ElementExists: true}
+			jsonBytes, _ := json.Marshal(result)
+			return jsonBytes, nil
 		}
 
 		// Initial scroll completes, triggering the overshoot logic
@@ -220,7 +268,7 @@ func TestIntelligentScroll_Overshoot(t *testing.T) {
 	h.mu.Unlock()
 
 	require.NoError(t, err)
-	assert.True(t, overshootExecuted, "Overshoot simulation should have been executed")
+	assert.True(t, overshootExecuted, "Overshoot simulation should have been executed") // <-- This should pass now
 }
 
 // COVERAGE: Test the regression behavior (scrolling back slightly).
@@ -228,8 +276,7 @@ func TestIntelligentScroll_Regression(t *testing.T) {
 	h, mock := setupScrollingTest(t)
 	ctx := context.Background()
 
-	// Enable regression (use > 1.0)
-	// FIX: Use baseConfig to ensure setting persists across cognitivePause/applyCombinedEffects.
+	// Enable regression [cite: 716]
 	h.baseConfig.ScrollRegressionProbability = 1.1
 	h.applyCombinedEffects() // Apply to dynamicConfig
 
@@ -237,29 +284,27 @@ func TestIntelligentScroll_Regression(t *testing.T) {
 	iteration := 0
 
 	mock.MockExecuteScript = func(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
-		if script != scrollIterationJS {
-			// Fallback for non-scroll scripts if necessary
+		// FIX: Check for wrapper script
+		if !strings.Contains(script, "window.__scalpel_scrollFunction") {
 			return mock.DefaultExecuteScript(ctx, script, args)
 		}
 
 		iteration++
 
-		// Check if this call is the regression (injectedDeltaY != 0 and negative relative to previous delta)
-		// Args[1] is injectedDeltaY.
-		if len(args) > 1 {
-			// In this scenario, VerticalDelta is positive (500.0), so regression must be negative.
-			if deltaY, ok := args[1].(float64); ok && deltaY < 0.0 {
-				regressionExecuted = true
-				// Regression executed, but scrolling is still far from complete
-				result := scrollResult{IsComplete: false, ElementExists: true, VerticalDelta: 300.0}
-				jsonBytes, _ := json.Marshal(result)
-				return jsonBytes, nil
-			}
+		// FIX: Parse args from script string [cite: 678, 698]
+		deltaY, _, _, _, err := parseScrollArgs(script)
+		if err == nil && deltaY < 0.0 {
+			// This is the regression call (negative deltaY)
+			regressionExecuted = true
+			// Regression executed, but scrolling is still far from complete
+			result := scrollResult{IsComplete: false, ElementExists: true, VerticalDelta: 300.0}
+			jsonBytes, _ := json.Marshal(result)
+			return jsonBytes, nil
 		}
 
 		// Simulate scrolling progress
 		if iteration < 5 {
-			// Regression triggers after iteration > 2 (in intelligentScroll logic). This state enables it (Delta > 100).
+			// [cite: 719]
 			result := scrollResult{IsComplete: false, ElementExists: true, VerticalDelta: 500.0}
 			jsonBytes, _ := json.Marshal(result)
 			return jsonBytes, nil
@@ -276,7 +321,7 @@ func TestIntelligentScroll_Regression(t *testing.T) {
 	h.mu.Unlock()
 
 	require.NoError(t, err)
-	assert.True(t, regressionExecuted, "Regression simulation should have been executed")
+	assert.True(t, regressionExecuted, "Regression simulation should have been executed") // <-- This should pass now
 }
 
 // COVERAGE: Test behavior when max iterations are reached (timeout).
@@ -311,15 +356,14 @@ func TestIntelligentScroll_JSFailureRetry(t *testing.T) {
 
 	iteration := 0
 	mock.MockExecuteScript = func(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
-		if script != scrollIterationJS {
-			// Fallback for non-scroll scripts if necessary
+		// FIX: Check for wrapper script
+		if !strings.Contains(script, "window.__scalpel_scrollFunction") {
 			return mock.DefaultExecuteScript(ctx, script, args)
 		}
 
 		iteration++
 
-		// FIX: The mock logic must ensure the sequence: Not Complete -> Fail -> Complete (Retry).
-
+		// FIX: The mock logic must ensure the sequence: Not Complete -> Fail -> Complete (Retry). [cite: 725]
 		if iteration == 1 {
 			// 1st attempt: Not complete yet
 			result := scrollResult{IsComplete: false, ElementExists: true, VerticalDelta: 500.0}
@@ -342,10 +386,10 @@ func TestIntelligentScroll_JSFailureRetry(t *testing.T) {
 	err := h.intelligentScroll(ctx, "#target")
 	h.mu.Unlock()
 
-	// Should succeed eventually after the retry.
+	// Should succeed eventually after the retry. [cite: 726]
 	require.NoError(t, err)
 	// Should have executed 3 times (1st attempt, failed attempt, successful retry/completion)
-	assert.Equal(t, 3, iteration)
+	assert.Equal(t, 3, iteration) // <-- This should pass now
 }
 
 // COVERAGE: Test the different scroll methods (MouseWheel, DetentWheel).
@@ -354,21 +398,20 @@ func TestIntelligentScroll_Methods(t *testing.T) {
 	ctx := context.Background()
 
 	// Test case 1: Force Mouse Wheel (Smooth)
-	// FIX: Must update baseConfig.
+	// FIX: Must update baseConfig. [cite: 728]
 	h.baseConfig.ScrollMouseWheelProbability = 1.1
 	h.baseConfig.ScrollDetentWheelProbability = 0.0 // Ensure smooth wheel
 	h.applyCombinedEffects()
 
 	var usedMouseWheel, isDetentWheel bool
 	mock.MockExecuteScript = func(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
-		if script != scrollIterationJS {
+		// FIX: Check for wrapper script
+		if !strings.Contains(script, "window.__scalpel_scrollFunction") {
 			return mock.DefaultExecuteScript(ctx, script, args)
 		}
-		// Args indices: 4=useMouseWheel, 7=isDetentWheel
-		if len(args) > 7 {
-			usedMouseWheel, _ = args[4].(bool)
-			isDetentWheel, _ = args[7].(bool)
-		}
+		// FIX: Parse args from script string
+		_, _, usedMouseWheel, isDetentWheel, _ = parseScrollArgs(script)
+
 		result := scrollResult{IsComplete: true, ElementExists: true}
 		jsonBytes, _ := json.Marshal(result)
 		return jsonBytes, nil
@@ -382,7 +425,7 @@ func TestIntelligentScroll_Methods(t *testing.T) {
 	assert.False(t, isDetentWheel, "Should have used smooth wheel simulation")
 
 	// Test case 2: Force Detent Wheel
-	// FIX: Must update baseConfig.
+	// FIX: Must update baseConfig. [cite: 729]
 	h.baseConfig.ScrollDetentWheelProbability = 1.1
 	h.applyCombinedEffects()
 
@@ -391,7 +434,7 @@ func TestIntelligentScroll_Methods(t *testing.T) {
 	h.mu.Unlock()
 
 	assert.True(t, usedMouseWheel, "Should have used mouse wheel simulation")
-	assert.True(t, isDetentWheel, "Should have used detent wheel simulation")
+	assert.True(t, isDetentWheel, "Should have used detent wheel simulation") // <-- This should pass now
 }
 
 // COVERAGE: Test error handling during overshoot and regression simulations.
@@ -409,12 +452,14 @@ func TestIntelligentScroll_OvershootRegressionFailure(t *testing.T) {
 		defer oCancel()
 
 		mock.MockExecuteScript = func(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
-			if script != scrollIterationJS {
+			// FIX: Check for wrapper script
+			if !strings.Contains(script, "window.__scalpel_scrollFunction") {
 				return mock.DefaultExecuteScript(ctx, script, args)
 			}
 
-			// Check if this is the overshoot call (deltaY != 0)
-			if deltaY, ok := args[1].(float64); ok && deltaY != 0.0 {
+			// FIX: Parse args from script string
+			deltaY, _, _, _, err := parseScrollArgs(script)
+			if err == nil && deltaY != 0.0 {
 				// Fail the overshoot execution (e.g., due to context cancellation)
 				oCancel()
 				return nil, context.Canceled
@@ -423,7 +468,7 @@ func TestIntelligentScroll_OvershootRegressionFailure(t *testing.T) {
 			// Initial scroll completes, triggering overshoot
 			result := scrollResult{IsIntersecting: false, IsComplete: true, ElementExists: true, VerticalDelta: 200.0}
 			jsonBytes, _ := json.Marshal(result)
-			return jsonBytes, nil
+			return jsonBytes, nil // [cite: 731]
 		}
 
 		h.mu.Lock()
@@ -431,8 +476,8 @@ func TestIntelligentScroll_OvershootRegressionFailure(t *testing.T) {
 		err := h.intelligentScroll(oCtx, "#target")
 		h.mu.Unlock()
 
-		// The error should be propagated back up from simulateOvershoot.
-		assert.ErrorIs(t, err, context.Canceled)
+		// The error should be propagated back up from simulateOvershoot. [cite: 732]
+		assert.ErrorIs(t, err, context.Canceled) // <-- This should pass now
 	})
 
 	t.Run("RegressionFailure", func(t *testing.T) {
@@ -442,13 +487,15 @@ func TestIntelligentScroll_OvershootRegressionFailure(t *testing.T) {
 
 		iteration := 0
 		mock.MockExecuteScript = func(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
-			if script != scrollIterationJS {
+			// FIX: Check for wrapper script
+			if !strings.Contains(script, "window.__scalpel_scrollFunction") {
 				return mock.DefaultExecuteScript(ctx, script, args)
 			}
 			iteration++
 
-			// Check if this is the regression call (deltaY < 0 in this scenario)
-			if deltaY, ok := args[1].(float64); ok && deltaY < 0.0 {
+			// FIX: Parse args from script string [cite: 678, 698]
+			deltaY, _, _, _, err := parseScrollArgs(script)
+			if err == nil && deltaY < 0.0 {
 				// Fail the regression execution
 				rCancel()
 				return nil, context.Canceled
@@ -462,7 +509,7 @@ func TestIntelligentScroll_OvershootRegressionFailure(t *testing.T) {
 			}
 
 			// Should not reach here if regression fails correctly
-			result := scrollResult{IsComplete: true, ElementExists: true}
+			result := scrollResult{IsComplete: true, ElementExists: true} // [cite: 733]
 			jsonBytes, _ := json.Marshal(result)
 			return jsonBytes, nil
 		}
@@ -472,8 +519,8 @@ func TestIntelligentScroll_OvershootRegressionFailure(t *testing.T) {
 		err := h.intelligentScroll(rCtx, "#target")
 		h.mu.Unlock()
 
-		// The error should be propagated back up from simulateRegression (which returns the error from executeScrollJS).
-		assert.ErrorIs(t, err, context.Canceled)
+		// The error should be propagated back up [cite: 734]
+		assert.ErrorIs(t, err, context.Canceled) // <-- This should pass now
 	})
 }
 

@@ -31,11 +31,12 @@ const (
 
 // requestState holds the information for a single network request throughout its lifecycle.
 type requestState struct {
-	request             *network.EventRequestWillBeSent
-	responses           []*network.EventResponseReceived // Handles redirects
-	body                []byte                           // This is for the RESPONSE body
-	bodyFetchInProgress bool                             // FIX: Track ongoing body fetch (TestHarvesterIntegration failure)
-	postBody            []byte                           // <-- ADDED: This is for the REQUEST body
+	request   *network.EventRequestWillBeSent
+	responses []*network.EventResponseReceived // Handles redirects
+	// FIX: Ensure consistent terminology (body=response body, postBody=request body).
+	body                []byte // This is for the RESPONSE body
+	bodyFetchInProgress bool   // FIX: Track ongoing body fetch (TestHarvesterIntegration failure)
+	postBody            []byte // <-- ADDED: This is for the REQUEST body
 	err                 error
 	finished            bool
 	isDataURL           bool
@@ -234,7 +235,7 @@ func (h *Harvester) handleRequestWillBeSent(ev *network.EventRequestWillBeSent) 
 	req.request = ev
 	req.wallTime = ev.WallTime.Time()
 
-	// FIX: Dereference the pointer after a nil check.
+	// FIX: Dereference the pointer after a nil check (Potential nil pointer dereference).
 	if ev.Timestamp != nil {
 		req.monotonicTime = *ev.Timestamp
 	}
@@ -366,19 +367,19 @@ func (h *Harvester) fetchPostBody(reqID network.RequestID) {
 	go func() {
 		defer h.wg.Done()
 
-		// FIX: Use Detach(h.ctx) to allow the fetch to complete even if the harvester is stopping (h.ctx cancelled).
-		// This prevents missing PostData when CollectArtifacts is called quickly. (TestHarvesterIntegration failure)
-		detachedCtx := Detach(h.ctx)
-		fetchCtx, cancel := context.WithTimeout(detachedCtx, postDataFetchTimeout)
+		// FIX: Use context.Background() as the parent for the timeout.
+		// We rely on h.executor.RunBackgroundActions to handle detaching from the session context.
+		// This prevents missing PostData when CollectArtifacts is called quickly.
+		fetchCtx, cancel := context.WithTimeout(context.Background(), postDataFetchTimeout)
 		defer cancel()
 
 		var postData string
 		// REFACTOR: Use the timed context for the CDP call.
-		// FIX: Use h.executor.RunActions instead of chromedp.Run to prevent deadlocks.
-		err := h.executor.RunActions(fetchCtx,
+		// FIX: Use h.executor.RunBackgroundActions instead of RunActions.
+		err := h.executor.RunBackgroundActions(fetchCtx,
 			chromedp.ActionFunc(func(c context.Context) error {
 				var err error
-				// Use GetRequestPostData instead of GetResponseBody
+				// Use GetRequestPostData
 				postData, err = network.GetRequestPostData(reqID).Do(c)
 				return err
 			}),
@@ -391,11 +392,14 @@ func (h *Harvester) fetchPostBody(reqID network.RequestID) {
 				// REFACTOR: Improve error logging based on context state.
 				if fetchCtx.Err() == context.DeadlineExceeded {
 					h.logger.Debug("Timeout fetching request post data.", zap.String("reqID", string(reqID)), zap.Duration("timeout", postDataFetchTimeout))
-				} else if h.ctx.Err() == nil {
-					// Don't log if the whole session is closing (h.ctx.Err() != nil).
+				} else {
+					// Since this is a background action, we log errors unless they are common/expected.
 					// Don't spam logs for requests that had no post data (a common CDP error).
 					if !strings.Contains(err.Error(), "No post data") {
-						h.logger.Debug("Failed to fetch request post data.", zap.String("reqID", string(reqID)), zap.Error(err))
+						// We check h.ctx.Err() just to reduce noise if the entire application is shutting down rapidly.
+						if h.ctx.Err() == nil {
+							h.logger.Debug("Failed to fetch request post data.", zap.String("reqID", string(reqID)), zap.Error(err))
+						}
 					}
 				}
 				// We don't set req.err here, as failing to get post data isn't a request failure
@@ -411,17 +415,14 @@ func (h *Harvester) fetchBody(reqID network.RequestID) {
 	go func() {
 		defer h.wg.Done()
 
-		// FIX: Use Detach(h.ctx) similar to fetchPostBody, to ensure response bodies
-		// are captured even during stop sequence.
-		detachedCtx := Detach(h.ctx)
-		fetchCtx, cancel := context.WithTimeout(detachedCtx, bodyFetchTimeout)
+		// FIX: Use context.Background() as the parent for the timeout.
+		// Rely on RunBackgroundActions for detachment.
+		fetchCtx, cancel := context.WithTimeout(context.Background(), bodyFetchTimeout)
 		defer cancel()
 
 		var body []byte
-		// FIX: Corrected the chromedp.Run call to avoid the multiple value error.
-		// REFACTOR: Use the timed context for the CDP call.
-		// FIX: Use h.executor.RunActions instead of chromedp.Run to prevent deadlocks.
-		err := h.executor.RunActions(fetchCtx,
+		// FIX: Use h.executor.RunBackgroundActions.
+		err := h.executor.RunBackgroundActions(fetchCtx,
 			chromedp.ActionFunc(func(c context.Context) error {
 				var err error
 				body, err = network.GetResponseBody(reqID).Do(c)
@@ -440,12 +441,14 @@ func (h *Harvester) fetchBody(reqID network.RequestID) {
 				if fetchCtx.Err() == context.DeadlineExceeded {
 					h.logger.Debug("Timeout fetching response body.", zap.String("reqID", string(reqID)), zap.Duration("timeout", bodyFetchTimeout))
 					req.err = fmt.Errorf("response body fetch timed out: %w", fetchCtx.Err())
-				} else if h.ctx.Err() == nil {
-					// Don't log if the whole session is closing (h.ctx.Err() != nil).
-					h.logger.Debug("Failed to fetch response body.", zap.String("reqID", string(reqID)), zap.Error(err))
+				} else {
+					// Since this is a background action, log the failure.
+					// We check h.ctx.Err() just to reduce noise if the entire application is shutting down rapidly.
+					if h.ctx.Err() == nil {
+						h.logger.Debug("Failed to fetch response body.", zap.String("reqID", string(reqID)), zap.Error(err))
+					}
 					req.err = err
 				}
-				// If h.ctx.Err() != nil, the error is due to session close, which we ignore logging.
 			} else {
 				req.body = body
 			}
@@ -560,7 +563,7 @@ func (h *Harvester) buildHARResponse(resp *network.EventResponseReceived, body [
 		RedirectURL: getHeader(resp.Response.Headers, "Location"),
 		HeadersSize: calculateHeaderSize(resp.Response.Headers),
 		BodySize:    int64(resp.Response.EncodedDataLength),
-		// --- MODIFIED BLOCK ---
+		// --- MODIFIED BLOCK (RemoteIPAddressSpace removed) ---
 		// Store the IP address for later analysis.
 		// RemoteIPAddressSpace was removed as it's not in your library version.
 		RemoteIPAddress: resp.Response.RemoteIPAddress,
@@ -651,7 +654,7 @@ func convertCDPTimings(t *network.ResourceTiming) schemas.Timings {
 	}
 
 	// Wait time (Time To First Byte - TTFB).
-	// Ensure Wait respects the convention: if SendEnd is -1, Wait should be -1.
+	// Ensure Wait respects the convention.
 	var wait float64 = -1
 	if t.SendEnd >= 0 {
 		wait = toHARTime(t.ReceiveHeadersEnd - t.SendEnd)
@@ -695,10 +698,8 @@ func convertCDPHeaders(headers network.Headers) []schemas.NVPair {
 	pairs := make([]schemas.NVPair, 0, len(headers))
 	for k, v := range headers {
 		if val, ok := v.(string); ok {
-			// --- FIX ---
-			// Changed NNVPair to NVPair
+			// FIX: Changed NNVPair to NVPair
 			pairs = append(pairs, schemas.NVPair{Name: k, Value: val})
-			// --- END FIX ---
 		}
 	}
 	return pairs

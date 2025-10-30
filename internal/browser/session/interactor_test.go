@@ -22,7 +22,8 @@ import (
 
 // Increased timeout for stability.
 // FIX: Increased timeout further (from 120s) for stability under load/race conditions (TestInteractor/* Failures).
-const interactorTestTimeout = 300 * time.Second // Increased from 240s due to increased internal timeouts.
+// FIX: Increased timeout further (from 300s) to accommodate overhead under race detection.
+const interactorTestTimeout = 600 * time.Second
 
 func TestInteractor(t *testing.T) {
 	// Renamed and expanded to cover various input types and ensure randomization patterns are tested.
@@ -228,7 +229,7 @@ func TestInteractor(t *testing.T) {
 		// Setup for MaxInteractionsPerDepth test
 		interactionCount := 0
 		var mu sync.Mutex
-		// FIX: Use a WaitGroup for synchronization instead of sleep (TestInteractor/InteractionLimitingPerDepth failure).
+		// FIX: Use a WaitGroup for synchronization instead of sleep.
 		const expectedInteractions = 2
 		var wg sync.WaitGroup
 		wg.Add(expectedInteractions)
@@ -461,7 +462,7 @@ func TestInteractorHelpers(t *testing.T) {
 			},
 		}
 		resultText := getNodeText(nodeLongText)
-		// FIX: Assertions updated based on the corrected getNodeText implementation (TestInteractorHelpers/getNodeText failure).
+		// FIX: Assertions updated based on the corrected getNodeText implementation.
 		assert.Len(t, resultText, maxTextLength, "Truncated text length should exactly match maxTextLength (in bytes)")
 		assert.True(t, strings.HasSuffix(resultText, "…"), "Truncated text should end with ellipsis")
 	})

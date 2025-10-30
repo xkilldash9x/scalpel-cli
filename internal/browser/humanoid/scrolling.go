@@ -7,6 +7,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"strings"
+	"sync"
 	"time"
 
 	"go.uber.org/zap"
@@ -18,6 +20,51 @@ import (
 //
 //go:embed scrolling.js
 var scrollIterationJS string
+
+// Variable to hold the transformed script content.
+var transformedScrollIterationJS string
+var transformOnce sync.Once // Ensure transformation happens only once
+
+// transformScrollJS manually converts the CommonJS module (module.exports = ...) to an IIFE
+// that assigns the function to window.__scalpel_scrollFunction.
+// FIX: Replaced runtime esbuild transformation with manual string manipulation.
+// This avoids relying on esbuild at runtime, resolving "ReferenceError: module is not defined"
+// seen in tests (TestInteractor/DepthLimiting failure) and improves stability.
+func transformScrollJS() (string, error) {
+	transformOnce.Do(func() {
+		// Manual transformation.
+		// The embedded script is expected to start with "module.exports = "
+		prefix := "module.exports = "
+
+		// FIX: Use strings.TrimSpace before checking prefix to handle potential leading whitespace/comments.
+		trimmedJS := strings.TrimSpace(scrollIterationJS)
+
+		if !strings.HasPrefix(trimmedJS, prefix) {
+			// If the prefix is missing, the format might have changed or it might be already transformed (e.g. by build process).
+			// We fallback to the raw JS, but this might cause "module is not defined" errors if not bundled.
+			// We treat this as a potential issue but proceed with the original content as a fallback.
+			transformedScrollIterationJS = scrollIterationJS
+			return
+		}
+
+		// Extract the function definition
+		functionBody := strings.TrimPrefix(trimmedJS, prefix)
+
+		// Wrap it in a simple IIFE that assigns it to the global variable.
+		// The definition script itself ensures it only runs once.
+		transformedScrollIterationJS = fmt.Sprintf(`
+			(function() {
+				if (typeof window.__scalpel_scrollFunction === 'function') {
+					return; // Already defined in this context
+				}
+				// Define the function globally
+				window.__scalpel_scrollFunction = %s;
+			})();
+		`, functionBody)
+	})
+	// Error is always nil as we perform manual transformation or fallback.
+	return transformedScrollIterationJS, nil
+}
 
 type scrollResult struct {
 	IsIntersecting  bool    `json:"isIntersecting"`
@@ -126,35 +173,81 @@ func (h *Humanoid) intelligentScroll(ctx context.Context, selector string) error
 // executeScrollJS handles the preparation and execution of the scrollIterationJS via the executor.
 // Updated parameter list to include cursor position and wheel type.
 func (h *Humanoid) executeScrollJS(ctx context.Context, selector string, deltaY, deltaX, readDensityFactor float64, useMouseWheel bool, cursorPos Vector2D, isDetentWheel bool) (*scrollResult, error) {
-	// Prepare the arguments for the JS function.
-	args := []interface{}{
-		selector,
+	// 1. Get the transformed script content (runs esbuild only once).
+	scriptToDefineFunc, err := transformScrollJS()
+	if err != nil {
+		h.logger.Error("Failed to transform scrolling.js", zap.Error(err))
+		return nil, fmt.Errorf("failed to get transformed scroll script: %w", err)
+	}
+
+	// 2. Prepare the arguments for the JS function call.
+	// Use json.Marshal for safer JS string escaping.
+	selectorJSON, _ := json.Marshal(selector)
+	// Ensure cursor coordinates are rounded integers for JS compatibility.
+	argsJS := fmt.Sprintf(`%s, %f, %f, %f, %t, %d, %d, %t`,
+		string(selectorJSON),
 		deltaY,
 		deltaX,
 		readDensityFactor,
 		useMouseWheel,
-		math.Round(cursorPos.X), // Pass rounded coordinates.
-		math.Round(cursorPos.Y),
+		int64(math.Round(cursorPos.X)),
+		int64(math.Round(cursorPos.Y)),
 		isDetentWheel,
-	}
+	)
 
-	// Execute via the agnostic executor.
-	resultJSON, err := h.executor.ExecuteScript(ctx, scrollIterationJS, args)
+	// 3. Prepare the script to define (if needed) and call the function.
+	// We combine definition and execution in one script evaluation to ensure atomicity and context consistency.
+	// FIX: Ensure the bundled JS function definition is executed before being called. (TestInteractor/DepthLimiting failure)
+	scriptToExecute := fmt.Sprintf(`
+		(async () => {
+			try {
+				// Execute the definition script (IIFE).
+				// It checks internally if the function is already defined.
+				%s;
+
+				// Check if definition succeeded.
+				if (typeof window.__scalpel_scrollFunction !== 'function') {
+					throw new Error('__scalpel_scrollFunction failed to define after executing bundle.');
+				}
+
+				// Now call the function.
+				const result = await window.__scalpel_scrollFunction(%s);
+				// Do NOT delete window.__scalpel_scrollFunction; it might be needed again.
+				return result;
+			} catch (e) {
+				console.error("Error during scroll iteration JS:", e);
+				// Return error details for better diagnostics in Go
+				return { error: e.message + (e.stack ? "\n" + e.stack : "") };
+			}
+		})()
+	`, scriptToDefineFunc, argsJS) // Inject the definition script and the arguments.
+
+	// 4. Execute the script via the executor.
+	// Pass nil for args as arguments are embedded in the script string.
+	rawResult, err := h.executor.ExecuteScript(ctx, scriptToExecute, nil)
 
 	if err != nil {
 		return nil, fmt.Errorf("javascript execution error during scroll: %w", err)
 	}
 
-	// Check for null or empty results.
-	// S1009 Fix: Omit nil check; len() for nil slices is defined as zero.
-	if len(resultJSON) == 0 || string(resultJSON) == "null" || string(resultJSON) == "undefined" {
+	// 5. Check for null or empty results or JS errors.
+	if len(rawResult) == 0 || string(rawResult) == "null" || string(rawResult) == "undefined" {
 		return nil, fmt.Errorf("javascript execution returned null or empty result during scroll")
 	}
 
-	// Unmarshal the JSON into the scrollResult struct.
+	// Check if the result indicates an error from within the JS try/catch
+	var jsErrorCheck map[string]interface{}
+	if json.Unmarshal(rawResult, &jsErrorCheck) == nil {
+		if errStr, ok := jsErrorCheck["error"].(string); ok {
+			h.logger.Error("JavaScript error during scroll function execution.", zap.String("js_error", errStr))
+			return nil, fmt.Errorf("javascript error during scroll: %s", errStr)
+		}
+	}
+
+	// 6. Unmarshal the actual JSON result into the scrollResult struct.
 	var result scrollResult
-	if err := json.Unmarshal(resultJSON, &result); err != nil {
-		h.logger.Error("Humanoid: Failed to unmarshal scroll result JSON", zap.Error(err), zap.String("json", string(resultJSON)))
+	if err := json.Unmarshal(rawResult, &result); err != nil {
+		h.logger.Error("Humanoid: Failed to unmarshal scroll result JSON", zap.Error(err), zap.String("json", string(rawResult)))
 		return nil, fmt.Errorf("failed to unmarshal scroll result JSON: %w", err)
 	}
 

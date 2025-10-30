@@ -115,7 +115,9 @@ func TestManager(t *testing.T) {
 		expectedHrefs := []string{
 			base.ResolveReference(&url.URL{Path: "/page1"}).String(),
 			"http://sub.example.com/page2",
-			base.ResolveReference(&url.URL{Fragment: "fragment"}).String(),
+			// FIX: Add Path: "/" to correctly resolve the fragment against the
+			// root, matching the browser's resolution of `http://.../` + `#fragment`.
+			base.ResolveReference(&url.URL{Path: "/", Fragment: "fragment"}).String(),
 			base.ResolveReference(&url.URL{Path: "/page1"}).String(), // The duplicate
 		}
 
