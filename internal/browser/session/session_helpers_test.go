@@ -86,30 +86,34 @@ func newTestFixture(t *testing.T, opts ...configOption) *testFixture {
 	// --- General Cognitive Pauses ---
 	// Shorten general cognitive pauses (e.g., before moving/clicking)
 	// FIX: Reduced further to speed up tests (TestInteractor/* timeouts).
-	cfg.BrowserCfg.Humanoid.ExGaussianMu = 5.0 // Was 10.0
-	cfg.BrowserCfg.Humanoid.ExGaussianSigma = 0.5
-	cfg.BrowserCfg.Humanoid.ExGaussianTau = 1.0 // Was 5.0
+	// FIX: Increased timings (from 5ms Mu) to improve stability under race detector (TestInteractor "could not set value" failure).
+	cfg.BrowserCfg.Humanoid.ExGaussianMu = 20.0
+	cfg.BrowserCfg.Humanoid.ExGaussianSigma = 5.0
+	cfg.BrowserCfg.Humanoid.ExGaussianTau = 10.0
 
 	// --- Task Switching ---
 	// Drastically reduce task switch delays
 	// FIX: Reduced further.
-	cfg.BrowserCfg.Humanoid.TaskSwitchMu = 2.0 // Was 5.0
-	cfg.BrowserCfg.Humanoid.TaskSwitchSigma = 0.5
-	cfg.BrowserCfg.Humanoid.TaskSwitchTau = 1.0
+	// FIX: Increased timings (from 2ms Mu) for stability.
+	cfg.BrowserCfg.Humanoid.TaskSwitchMu = 15.0
+	cfg.BrowserCfg.Humanoid.TaskSwitchSigma = 4.0
+	cfg.BrowserCfg.Humanoid.TaskSwitchTau = 8.0
 
 	// --- Typing Speed ---
 	// Drastically reduce inter-key delays (IKD)
 	// FIX: Reduced further.
-	cfg.BrowserCfg.Humanoid.IKDMu = 2.0 // Was 5.0
-	cfg.BrowserCfg.Humanoid.IKDSigma = 0.5
-	cfg.BrowserCfg.Humanoid.IKDTau = 1.0
-	cfg.BrowserCfg.Humanoid.KeyPauseMin = 0.5
+	// FIX: Increased timings (from 2ms Mu) for stability.
+	cfg.BrowserCfg.Humanoid.IKDMu = 15.0
+	cfg.BrowserCfg.Humanoid.IKDSigma = 4.0
+	cfg.BrowserCfg.Humanoid.IKDTau = 8.0
+	cfg.BrowserCfg.Humanoid.KeyPauseMin = 5.0
 	// Reduce key hold time
 	// FIX: Increased hold time slightly (from 10ms Mu). Very low values can cause missed keys (TestSession/Interaction_BasicClickAndType failure).
 	// FIX: Reduced slightly from previous iteration (25ms) while remaining reliable.
-	cfg.BrowserCfg.Humanoid.KeyHoldMu = 20.0   // Was 25.0
-	cfg.BrowserCfg.Humanoid.KeyHoldSigma = 4.0 // Was 5.0
-	cfg.BrowserCfg.Humanoid.KeyHoldTau = 4.0   // Was 5.0
+	// FIX: Increased timings (from 20ms Mu) for stability.
+	cfg.BrowserCfg.Humanoid.KeyHoldMu = 30.0
+	cfg.BrowserCfg.Humanoid.KeyHoldSigma = 8.0
+	cfg.BrowserCfg.Humanoid.KeyHoldTau = 8.0
 
 	// Disable random pauses during typing
 	cfg.BrowserCfg.Humanoid.KeyBurstPauseProbability = 0.0
@@ -127,14 +131,16 @@ func newTestFixture(t *testing.T, opts ...configOption) *testFixture {
 	// Shorten click holds (these fields *did* exist and were correct)
 	// FIX: Increased click hold times slightly (from 5-15ms). Very low values can cause missed clicks.
 	// FIX: Reduced slightly from previous iteration (40-80ms) while remaining reliable.
-	cfg.BrowserCfg.Humanoid.ClickHoldMinMs = 30 // Was 40
-	cfg.BrowserCfg.Humanoid.ClickHoldMaxMs = 60 // Was 80
+	// FIX: Increased timings (from 30/60ms) for stability.
+	cfg.BrowserCfg.Humanoid.ClickHoldMinMs = 50
+	cfg.BrowserCfg.Humanoid.ClickHoldMaxMs = 100
 	// Disable anticipatory movement delays
 	cfg.BrowserCfg.Humanoid.AnticipatoryMovementDuration = 0 * time.Millisecond
 	// Make hesitation/idling very short (for terminal pauses)
 	cfg.BrowserCfg.Humanoid.AntiPeriodicityMinPause = 1 * time.Millisecond
 	// Shorten the simulation time step
-	cfg.BrowserCfg.Humanoid.TimeStep = 5 * time.Millisecond // Was likely 10-20ms
+	// FIX: Increased TimeStep (from 5ms) for stability.
+	cfg.BrowserCfg.Humanoid.TimeStep = 10 * time.Millisecond
 	allocOpts := append(chromedp.DefaultExecAllocatorOptions[:],
 		// Ensure consistent flags for testing
 		chromedp.NoSandbox,
