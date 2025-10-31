@@ -307,13 +307,3 @@ func (e *cdpExecutor) ExecuteScript(ctx context.Context, script string, args []i
 	// Return the raw JSON message result (can be "null", "true", number, string, object, array)
 	return res, nil
 }
-
-// jsonEncode is a helper to safely encode a value (especially strings) for JS injection.
-func jsonEncode(v interface{}) string {
-	b, err := json.Marshal(v)
-	if err != nil {
-		// Fallback for safety, although Marshal shouldn't fail often for simple types
-		return `""` // Empty string literal
-	}
-	return string(b)
-}

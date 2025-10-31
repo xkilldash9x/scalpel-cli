@@ -1,4 +1,4 @@
-// internal/browser/interaction.go
+// internal/browser/session/interaction.go
 package session
 
 import (
@@ -7,6 +7,7 @@ import (
 	"strings"
 	"time"
 
+	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"go.uber.org/zap"
@@ -154,14 +155,44 @@ func (s *Session) Type(ctx context.Context, selector string, text string) error 
 	// 2. Clear the existing value.
 	// 3. Type the new value (Humanoid or SendKeys).
 
+	// FIX: Use JS evaluation instead of chromedp.SetValue/Clear for robust clearing.
+	// SetValue can fail with "could not set value on node X" if the element is transiently non-interactable.
+	jsClear := fmt.Sprintf(`(function(selector) {
+		const el = document.querySelector(selector);
+		// If element not found, WaitVisible should ideally catch it, but we check here too.
+		if (!el) {
+			console.debug("Scalpel clear: element not found during JS execution", selector);
+			return false;
+		}
+		// Check if element is disabled/readonly before attempting to clear
+		if (el.disabled || el.readOnly) {
+			 console.debug("Scalpel clear: element is disabled or readonly", selector);
+			 return false; // Cannot clear
+		}
+        try {
+		    el.value = "";
+		    // Dispatch events to ensure reactivity frameworks update
+		    el.dispatchEvent(new Event('input', { bubbles: true }));
+		    el.dispatchEvent(new Event('change', { bubbles: true }));
+        } catch (e) {
+            console.error("Scalpel clear: JS error during value set", selector, e);
+            return false;
+        }
+		return true;
+	})(%s)`, jsonEncode(selector))
+
+	var clearSuccess bool
+
 	// Steps 1 & 2: Prepare and Clear
 	// FIX: Explicitly clear the field before typing.
 	// Humanoid typing simulates keypresses and doesn't inherently clear content.
 	err := s.RunActions(opCtx,
 		chromedp.ScrollIntoView(selector, chromedp.ByQuery),
 		chromedp.WaitVisible(selector, chromedp.ByQuery),
-		// Use Clear to reset the field.
-		chromedp.Clear(selector, chromedp.ByQuery),
+		// Use JS evaluation for clearing
+		chromedp.Evaluate(jsClear, &clearSuccess, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+			return p.WithReturnByValue(true).WithAwaitPromise(true).WithSilent(true)
+		}),
 	)
 
 	if err != nil {
@@ -176,6 +207,12 @@ func (s *Session) Type(ctx context.Context, selector string, text string) error 
 			return fmt.Errorf("preparation (clear) timed out (%v) for selector '%s': %w", timeout, selector, opCtx.Err())
 		}
 		return fmt.Errorf("preparation (clear) failed for selector '%s': %w", selector, err)
+	}
+
+	// Check if JS evaluation succeeded (err == nil) but returned false
+	if !clearSuccess {
+		// If WaitVisible passed but JS failed to find/clear the element, it's likely stale or non-interactable.
+		return fmt.Errorf("preparation (clear) failed for selector '%s': JS evaluation indicated failure (stale or non-interactable)", selector)
 	}
 
 	// Step 3: Type the value
