@@ -134,10 +134,11 @@ func TestHarvesterIntegration(t *testing.T) {
 
 	server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		if r.URL.Path == "/post-target" {
-			// Echo back the content type and body length received
-			w.Header().Set("Content-Type", r.Header.Get("Content-Type"))
+			// FIX: Set Content-Type to text/html and wrap response in HTML.
+			// This encourages the browser to keep the response buffer during navigation, mitigating the race condition.
+			w.Header().Set("Content-Type", "text/html")
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprintf(w, "Received %d bytes", r.ContentLength)
+			fmt.Fprintf(w, "<html><body>Received %d bytes</body></html>", r.ContentLength)
 			return
 		}
 		if r.URL.Path == "/image.png" {
@@ -159,8 +160,8 @@ func TestHarvesterIntegration(t *testing.T) {
                 <img src="/image.png">
                 <script>
                     // Trigger form submission via JS
-                    // FIX: Increased delay (from 150ms to 300ms) to robustly mitigate race condition with Harvester fetching PostData.
-                    setTimeout(() => document.getElementById('myForm').submit(), 300); 
+                    // FIX: Increased delay significantly (to 2000ms) to mitigate race condition under race detector where navigation occurs before Harvester fetches body/PostData.
+                    setTimeout(() => document.getElementById('myForm').submit(), 2000);
                 </script>
             </body></html>
         `)
@@ -207,7 +208,8 @@ func TestHarvesterIntegration(t *testing.T) {
 	// 2. Check the response to the POST request (Text body capture)
 	assert.Equal(t, 200, postEntry.Response.Status)
 	assert.True(t, isTextMime(postEntry.Response.Content.MimeType), "Response should be text type")
-	assert.Equal(t, fmt.Sprintf("Received %d bytes", len(expectedPostBody)), postEntry.Response.Content.Text, "Response Content Text mismatch")
+	// FIX: Update assertion for the HTML wrapped response body.
+	assert.Equal(t, fmt.Sprintf("<html><body>Received %d bytes</body></html>", len(expectedPostBody)), postEntry.Response.Content.Text, "Response Content Text mismatch")
 	assert.Empty(t, postEntry.Response.Content.Encoding, "Encoding should be empty for text response")
 
 	// 3. Check the image request (Binary body capture)

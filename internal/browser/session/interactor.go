@@ -14,10 +14,7 @@ import (
 	"strings"
 	"sync"
 	"time"
-	"unicode/utf8"
 
-	"github.com/chromedp/cdproto/cdp"
-	"github.com/chromedp/cdproto/dom" // Needed for ExecutionContextID
 	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
@@ -49,9 +46,19 @@ type Interactor struct {
 	sessionCtx context.Context
 }
 
+// elementSnapshot holds the extracted data from the DOM element at the time of discovery.
+// P0 FIX: This is used instead of *cdp.Node to prevent data races with the chromedp event loop.
+type elementSnapshot struct {
+	NodeName    string            `json:"nodeName"`
+	Attributes  map[string]string `json:"attributes"`
+	TextContent string            `json:"textContent"`
+}
+
 // interactiveElement bundles a node with its unique fingerprint.
 type interactiveElement struct {
-	Node        *cdp.Node
+	// P0 FIX: Replaced *cdp.Node with an atomic snapshot and a unique selector.
+	Snapshot    elementSnapshot `json:"-"` // Data used for filtering/fingerprinting
+	Selector    string          `json:"-"` // Unique selector for interaction
 	Fingerprint string
 	Description string
 	IsInput     bool
@@ -216,7 +223,7 @@ func (i *Interactor) interactDepth(
 		success, interactionErr := i.executeInteraction(actionCtx, element, log)
 		cancelAction()
 
-		// FIX: Handle stale elements.
+		// P1 FIX: Handle stale elements. executeInteraction now reliably returns ErrStaleElement.
 		if errors.Is(interactionErr, ErrStaleElement) {
 			log.Warn("Element became stale during interaction attempt (likely due to navigation by a previous element). Stopping interactions for this depth.", zap.String("desc", element.Description))
 			// If the element we tried to interact with is stale, the rest of the list is also likely stale.
@@ -323,36 +330,156 @@ func (i *Interactor) interactDepth(
 
 // -- Element Discovery Logic --
 
+// P0 FIX: discoveryScript is the JavaScript code used to discover, snapshot, and tag elements atomically.
+// This approach avoids data races by performing data extraction within the browser's main thread
+// rather than relying on the volatile Go *cdp.Node cache.
+const discoveryScript = `(function(selectors) {
+    const results = [];
+    const attributeName = 'data-scalpel-discovery-id';
+    const maxTextLength = 64; // Must match the constant used in Go fingerprinting
+
+    /* Helper functions */
+    function getAttributes(el) {
+        const attrs = {};
+        // Include all attributes for comprehensive fingerprinting
+        for (const attr of el.attributes) {
+            attrs[attr.name] = attr.value;
+        }
+        return attrs;
+    }
+
+    function isVisible(el) {
+         // Basic visibility check required for interaction.
+         // This must be synchronized with the visibility check used in cdp_executor.GetElementGeometry.
+         const rect = el.getBoundingClientRect();
+         const style = window.getComputedStyle(el);
+         // Check dimensions and CSS visibility properties
+         const isVisible = rect.width > 0 && rect.height > 0 && style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0';
+         return isVisible;
+    }
+
+    function getTextContent(el, attrs) {
+        // Strategy similar to previous Go implementation (getNodeText): prioritize direct text content, then aria-label/title.
+        // Use textContent for potentially better performance than iterating children in JS.
+        let text = (el.textContent || '').trim();
+
+        if (text === '') {
+            // Fallback to aria-label or title if present and non-empty
+            if (attrs['aria-label'] && attrs['aria-label'].trim() !== '') {
+                text = attrs['aria-label'].trim();
+            } else if (attrs['title'] && attrs['title'].trim() !== '') {
+                text = attrs['title'].trim();
+            }
+        }
+
+        // Truncate text (handling unicode correctly is default in JS strings)
+        if (text.length > maxTextLength) {
+            // Truncate to maxTextLength including the ellipsis (which is 1 char in JS)
+            // Note: This truncation logic differs slightly from the Go implementation (byte-based vs char-based),
+            // but it's sufficient for fingerprinting consistency within the JS context.
+            text = text.substring(0, maxTextLength - 1) + '…';
+        }
+        return text;
+    }
+
+    /* Main logic */
+    let elements;
+    try {
+        // Execute the query
+        elements = document.querySelectorAll(selectors);
+    } catch (e) {
+        console.error("Scalpel discovery: Invalid selector syntax provided", selectors, e);
+        return []; // Return empty if selector itself is invalid
+    }
+
+
+    elements.forEach((el, index) => {
+        try {
+            // 1. Check visibility (Optimization: skip invisible elements early)
+            if (!isVisible(el)) return;
+
+            // 2. Generate unique ID and tag the element
+            // Use a robust randomization suffix to minimize collision risk in highly dynamic pages
+            const randSuffix = Math.random().toString(36).substring(2, 10);
+            // Shortened prefix 'sd-' for efficiency
+            const tempId = 'sd-' + index + '-' + Date.now() + '-' + randSuffix;
+            el.setAttribute(attributeName, tempId);
+            // Create the unique selector (we trust tempId doesn't contain quotes here)
+            const selector = '[' + attributeName + '="' + tempId + '"]';
+
+            // 3. Extract data (Snapshot)
+            const attrs = getAttributes(el);
+            const text = getTextContent(el, attrs);
+            const nodeName = el.tagName;
+
+            const snapshot = {
+                nodeName: nodeName,
+                attributes: attrs,
+                textContent: text
+            };
+
+            results.push({
+                selector: selector,
+                snapshot: snapshot
+            });
+        } catch (e) {
+            // Log errors during processing but continue with other elements
+            console.error("Scalpel discovery: Error processing element", el, e);
+        }
+    });
+
+    return results;
+})(%s)` // Selector is injected here via fmt.Sprintf and jsonEncode
+
+// P0 FIX: Define the structure to capture the result from the discovery JS script.
+type discoveryResult struct {
+	Selector string          `json:"selector"`
+	Snapshot elementSnapshot `json:"snapshot"`
+}
+
 func (i *Interactor) discoverElements(ctx context.Context, interacted map[string]bool) ([]interactiveElement, error) {
 	selectors := "a[href], button:not([disabled]), [onclick], [role=button], [role=link], input:not([disabled]):not([readonly]):not([type=hidden]), textarea:not([disabled]):not([readonly]), select:not([disabled]):not([readonly]), summary, details, [tabindex]"
-	var nodes []*cdp.Node
 
-	// Use executor.RunActions for context safety.
+	// P0 FIX: Replaced racy chromedp.Nodes + Go-side deep copy with atomic JS evaluation.
+
+	var results []discoveryResult
+
+	// Inject the selector safely into the discovery script.
+	script := fmt.Sprintf(discoveryScript, jsonEncode(selectors))
+
+	// Use executor.RunActions to execute the script and capture the results.
 	err := i.executor.RunActions(ctx,
-		chromedp.Nodes(selectors, &nodes, chromedp.ByQueryAll),
+		chromedp.Evaluate(script, &results, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+			return p.WithReturnByValue(true).WithAwaitPromise(true).WithSilent(true)
+		}),
 	)
+
 	if err != nil {
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		return nil, fmt.Errorf("failed to query interactive nodes: %w", err)
+		// P0 FIX: Updated error message.
+		return nil, fmt.Errorf("failed to execute discovery script: %w", err)
 	}
 
-	return i.filterAndFingerprint(nodes, interacted), nil
+	// P0 FIX: Process the stable results from JS.
+	return i.filterAndFingerprint(results, interacted), nil
 }
 
-func (i *Interactor) filterAndFingerprint(nodes []*cdp.Node, interacted map[string]bool) []interactiveElement {
-	newElements := make([]interactiveElement, 0, len(nodes))
+// P0 FIX: Updated signature to accept discoveryResult.
+func (i *Interactor) filterAndFingerprint(results []discoveryResult, interacted map[string]bool) []interactiveElement {
+	newElements := make([]interactiveElement, 0, len(results))
 	seenFingerprints := make(map[string]bool)
 
-	for _, node := range nodes {
-		if node == nil {
-			continue
-		}
-		attrs := attributeMap(node)
+	// P0 FIX: Iterate over the stable results.
+	for _, result := range results {
+		// Use the snapshot data.
+		snapshot := result.Snapshot
+		attrs := snapshot.Attributes
 
 		// Explicitly skip disabled/readonly based on function
-		if isDisabled(node, attrs) {
+		// P0 FIX: Updated isDisabled signature.
+		if isDisabled(&snapshot, attrs) {
 			continue
 		}
 
@@ -364,18 +491,23 @@ func (i *Interactor) filterAndFingerprint(nodes []*cdp.Node, interacted map[stri
 			}
 		}
 
-		fingerprint, description := generateNodeFingerprint(node, attrs)
+		// P0 FIX: Updated generateNodeFingerprint signature.
+		fingerprint, description := generateNodeFingerprint(&snapshot, attrs)
 		if fingerprint == "" {
-			i.logger.Debug("Skipping element with empty fingerprint.", zap.String("nodeName", node.NodeName))
+			// P0 FIX: Updated logging field.
+			i.logger.Debug("Skipping element with empty fingerprint.", zap.String("nodeName", snapshot.NodeName))
 			continue
 		}
 
 		if !interacted[fingerprint] && !seenFingerprints[fingerprint] {
 			newElements = append(newElements, interactiveElement{
-				Node:        node,
+				// P0 FIX: Store snapshot and selector.
+				Snapshot:    snapshot,
+				Selector:    result.Selector,
 				Fingerprint: fingerprint,
 				Description: description,
-				IsInput:     isInputElement(node),
+				// P0 FIX: Updated isInputElement signature.
+				IsInput: isInputElement(&snapshot),
 			})
 			seenFingerprints[fingerprint] = true
 		}
@@ -391,36 +523,26 @@ func (i *Interactor) executeInteraction(ctx context.Context, element interactive
 		return false, nil
 	}
 
-	tempID := fmt.Sprintf("scalpel-interaction-%d-%d", time.Now().UnixNano(), i.rng.Int63())
-	attributeName := "data-scalpel-id"
-	selector := fmt.Sprintf(`[%s="%s"]`, attributeName, tempID)
+	// P0 FIX: Use the unique selector generated during discovery.
+	selector := element.Selector
+	// The attribute name must match the one used in the discoveryScript.
+	attributeName := "data-scalpel-discovery-id"
 
 	// REFACTOR: Use the stored session context (i.sessionCtx) for cleanup.
+	// We must clean up the attribute set during discovery so the element can be rediscovered later if needed.
 	defer i.cleanupInteractionAttribute(i.sessionCtx, selector, attributeName, log)
 
-	// Use executor.RunActions for context safety
-	err := i.executor.RunActions(ctx,
-		dom.SetAttributeValue(element.Node.NodeID, attributeName, tempID),
-	)
-	if err != nil {
-		if ctx.Err() != nil {
-			return false, ctx.Err()
-		}
-		// FIX: Check if the error indicates the NodeID is invalid (stale element).
-		// CDP error -32000 or "Could not find node" indicates stale element.
-		if strings.Contains(err.Error(), "Could not find node") || strings.Contains(err.Error(), "-32000") {
-			return false, fmt.Errorf("failed to tag element '%s': %w", element.Description, ErrStaleElement)
-		}
-		return false, fmt.Errorf("failed to tag element '%s' for interaction: %w", element.Description, err)
-	}
-	log.Debug("Tagged element for interaction.", zap.String("selector", selector))
+	// P0 FIX: The element is already tagged during discovery (dom.SetAttributeValue is no longer needed).
+	// We proceed directly to interaction.
+	log.Debug("Targeting element for interaction.", zap.String("selector", selector))
 
 	var interactionErr error
 	actionTaken := false
 
 	if element.IsInput {
-		if strings.ToUpper(element.Node.NodeName) == "SELECT" {
-			selectedValue, foundOption := i.handleSelectInteraction(ctx, element.Node) // Pass context
+		// P0 FIX: Updated NodeName access and handleSelectInteraction call.
+		if strings.ToUpper(element.Snapshot.NodeName) == "SELECT" {
+			selectedValue, foundOption := i.handleSelectInteraction(ctx, selector) // Pass context and selector
 			if foundOption {
 				log.Debug("Performing select interaction.", zap.String("selector", selector), zap.String("value", selectedValue))
 
@@ -447,7 +569,8 @@ func (i *Interactor) executeInteraction(ctx context.Context, element interactive
 
 				if interactionErr == nil && !success {
 					// If JS ran without CDP error but returned false (e.g. element disappeared)
-					interactionErr = fmt.Errorf("JS evaluation failed to set value (element likely not found during execution)")
+					// P1 FIX: Treat this specific JS failure as a stale element error.
+					interactionErr = fmt.Errorf("JS evaluation failed to set value (element likely not found during execution): %w", ErrStaleElement)
 				}
 
 				actionTaken = true
@@ -455,7 +578,8 @@ func (i *Interactor) executeInteraction(ctx context.Context, element interactive
 				log.Debug("Skipping select interaction: no valid options found.", zap.String("selector", selector))
 			}
 		} else {
-			payload := i.generateInputPayload(element.Node)
+			// P0 FIX: Updated generateInputPayload call.
+			payload := i.generateInputPayload(&element.Snapshot)
 			log.Debug("Performing type interaction.", zap.String("selector", selector), zap.Int("payload_len", len(payload)))
 			// REFACTOR: Use internal helper method which handles humanoid/fallback logic.
 			interactionErr = i.typeIntoElement(ctx, selector, payload)
@@ -472,11 +596,20 @@ func (i *Interactor) executeInteraction(ctx context.Context, element interactive
 		if ctx.Err() != nil {
 			return false, ctx.Err() // Propagate cancellation
 		}
+
+		// P1 FIX: The action helpers (clickElement, typeIntoElement) and select handling now wrap stale errors.
+		// We check if it is ErrStaleElement and return it immediately so interactDepth can handle it gracefully.
+		if errors.Is(interactionErr, ErrStaleElement) {
+			// Log at debug level as this is handled by the caller.
+			log.Debug("Session action failed due to stale element.", zap.String("selector", selector), zap.Error(interactionErr))
+			return false, interactionErr
+		}
+
 		actionType := "click"
 		if element.IsInput {
 			actionType = "type/select"
 		}
-		log.Warn("Session action failed.", zap.String("action", actionType), zap.String("selector", selector), zap.Error(interactionErr))
+		log.Warn("Session action failed (non-stale error).", zap.String("action", actionType), zap.String("selector", selector), zap.Error(interactionErr))
 		// Don't wrap the error here, return the original from session action
 		return false, interactionErr
 	}
@@ -523,53 +656,69 @@ func (i *Interactor) cleanupInteractionAttribute(sessionCtx context.Context, sel
 	}
 }
 
+// P0 FIX: extractOptionsScript is the JavaScript code used to extract available options from a <select> element.
+const extractOptionsScript = `(function(selector) {
+        const selectElement = document.querySelector(selector);
+        // Return specific string if element not found or not a select, to distinguish from JS error.
+        if (!selectElement) return "__SCALPEL_ELEMENT_NOT_FOUND__";
+
+        // Check tagName in a case-insensitive manner for robustness.
+        if (!/^select$/i.test(selectElement.tagName)) return [];
+
+        const options = [];
+        for (const option of selectElement.options) {
+            if (option.disabled) continue;
+
+            // Strategy (matching previous implementation):
+            // 1. If 'value' attribute exists and is not empty, use it.
+            // 2. If 'value' attribute is missing, fallback to text content.
+            // (If 'value' is present but empty, it's often a placeholder, skip it).
+
+            const hasValueAttr = option.hasAttribute('value');
+            const value = option.value; // JS option.value reflects attribute or text content based on spec
+
+            if (hasValueAttr && value !== "") {
+                options.push(value);
+            } else if (!hasValueAttr) {
+                // Explicitly check text content if no value attribute, though option.value often covers this.
+                const text = option.textContent.trim();
+                if (text !== "") {
+                    options.push(text);
+                }
+            }
+        }
+        return options;
+    })(%s)`
+
 // handleSelectInteraction finds a valid option value. Pass context for Run actions.
-func (i *Interactor) handleSelectInteraction(ctx context.Context, node *cdp.Node) (selectedValue string, found bool) {
+// P0 FIX: Updated signature to use selector instead of *cdp.Node.
+func (i *Interactor) handleSelectInteraction(ctx context.Context, selector string) (selectedValue string, found bool) {
 	var options []string
-	// Query options relative to the node using NodeID for robustness
-	var optionNodes []*cdp.Node
-	// REFACTOR: Use executor.RunActions.
+
+	// P0 FIX: Use JS evaluation to extract options atomically, avoiding data races.
+	script := fmt.Sprintf(extractOptionsScript, jsonEncode(selector))
+
+	// Use executor.RunActions to execute the script.
 	err := i.executor.RunActions(ctx,
-		chromedp.Nodes("option", &optionNodes, chromedp.ByQueryAll, chromedp.FromNode(node)),
+		chromedp.Evaluate(script, &options, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+			return p.WithReturnByValue(true).WithAwaitPromise(true).WithSilent(true)
+		}),
 	)
+
 	if err != nil {
-		i.logger.Warn("Failed to query options for select element", zap.Error(err))
+		// Check if the script returned the specific "not found" marker (options will contain just that string)
+		// This handles the case where the element disappeared between discovery and interaction attempt.
+		if len(options) == 1 && options[0] == "__SCALPEL_ELEMENT_NOT_FOUND__" {
+			i.logger.Debug("Select element not found during option extraction (likely stale).", zap.String("selector", selector))
+			// Treat as stale/not found. The caller (executeInteraction) will handle the failure.
+			return "", false
+		}
+
+		i.logger.Warn("Failed to execute script for select options.", zap.Error(err), zap.String("selector", selector))
 		return "", false
 	}
 
-	for _, optionNode := range optionNodes {
-		attrs := attributeMap(optionNode)
-		if _, disabled := attrs["disabled"]; disabled {
-			continue
-		}
-		value, hasValueAttr := attrs["value"]
-
-		// FIX: Optimization and improved logic for selecting option values.
-		// (TestInteractor/FormInteraction_VariousTypes failure due to slow performance/timeout)
-
-		// Strategy:
-		// 1. If 'value' attribute exists and is not empty, use it.
-		if hasValueAttr && value != "" {
-			options = append(options, value)
-			continue
-		}
-
-		// 2. If 'value' attribute is missing, fallback to text content.
-		// (If 'value' attribute is present but empty, we generally skip it as it's often a placeholder).
-		if !hasValueAttr {
-			// Fetch text content (still inefficient in a loop, but necessary if no value attr)
-			var text string
-			// REFACTOR: Use executor.RunActions for nested query.
-			if err := i.executor.RunActions(ctx, chromedp.TextContent([]cdp.NodeID{optionNode.NodeID}, &text)); err == nil {
-				trimmedText := strings.TrimSpace(text)
-				if trimmedText != "" {
-					options = append(options, trimmedText)
-				}
-			}
-		}
-		// If 'value' is "" (placeholder), we skip it in this implementation to ensure interaction progresses.
-	}
-
+	// Logic for selecting an option remains the same
 	if len(options) == 0 {
 		return "", false
 	}
@@ -578,8 +727,10 @@ func (i *Interactor) handleSelectInteraction(ctx context.Context, node *cdp.Node
 }
 
 // generateInputPayload creates realistic dummy data.
-func (i *Interactor) generateInputPayload(node *cdp.Node) string {
-	attrs := attributeMap(node)
+// P0 FIX: Updated signature to use elementSnapshot.
+func (i *Interactor) generateInputPayload(snapshot *elementSnapshot) string {
+	// P0 FIX: Use the attributes from the snapshot.
+	attrs := snapshot.Attributes
 	inputType := strings.ToLower(attrs["type"])
 	inputName := strings.ToLower(attrs["name"])
 	inputId := strings.ToLower(attrs["id"])
@@ -633,6 +784,13 @@ func (i *Interactor) clickElement(ctx context.Context, selector string) error {
 		if opCtx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("interactor click timed out for selector '%s': %w", selector, opCtx.Err())
 		}
+
+		// P1 FIX: Check if the error indicates the element is gone (stale).
+		// This error string originates from cdp_executor.GetElementGeometry (if humanoid) or chromedp actions (if fallback).
+		if strings.Contains(err.Error(), "not found or not visible") {
+			return fmt.Errorf("interactor click failed for selector '%s': %w", selector, ErrStaleElement)
+		}
+
 		// If ctx is cancelled, RunActions/humanoid should return that error.
 		return fmt.Errorf("interactor click failed for selector '%s': %w", selector, err)
 	}
@@ -653,14 +811,72 @@ func (i *Interactor) typeIntoElement(ctx context.Context, selector string, text 
 	opCtx, opCancel := context.WithTimeout(ctx, timeout)
 	defer opCancel()
 
-	var err error
+	// Strategy: Clear field before typing, whether humanoid or fallback.
+	// This ensures idempotency and mirrors the logic in session.Type.
+
+	// FIX: Use JS evaluation instead of chromedp.SetValue/Clear for robust clearing.
+	// SetValue can fail with "could not set value on node X" if the element is transiently non-interactable.
+	jsClear := fmt.Sprintf(`(function(selector) {
+		const el = document.querySelector(selector);
+		// If element not found, WaitVisible should ideally catch it, but we check here too.
+		if (!el) {
+			console.debug("Scalpel clear: element not found during JS execution", selector);
+			return false;
+		}
+		// Check if element is disabled/readonly (discovery should filter, but we double-check).
+		if (el.disabled || el.readOnly) {
+			 console.debug("Scalpel clear: element is disabled or readonly", selector);
+			 return false; // Cannot clear
+		}
+        try {
+		    el.value = "";
+		    // Dispatch events to ensure reactivity frameworks update
+		    el.dispatchEvent(new Event('input', { bubbles: true }));
+		    el.dispatchEvent(new Event('change', { bubbles: true }));
+        } catch (e) {
+            console.error("Scalpel clear: JS error during value set", selector, e);
+            return false;
+        }
+		return true;
+	})(%s)`, jsonEncode(selector))
+
+	var clearSuccess bool
+
+	// 1. Prepare and Clear
+	err := i.executor.RunActions(opCtx,
+		chromedp.ScrollIntoView(selector, chromedp.ByQuery),
+		chromedp.WaitVisible(selector, chromedp.ByQuery),
+		// Use JS evaluation for clearing
+		chromedp.Evaluate(jsClear, &clearSuccess, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+			return p.WithReturnByValue(true).WithAwaitPromise(true).WithSilent(true)
+		}),
+	)
+
+	if err != nil {
+		if opCtx.Err() == context.DeadlineExceeded {
+			return fmt.Errorf("interactor preparation (clear) timed out (%v) for selector '%s': %w", timeout, selector, opCtx.Err())
+		}
+		// P1 FIX: If Clear fails because the element is stale, we identify it here.
+		if strings.Contains(err.Error(), "not found or not visible") {
+			return fmt.Errorf("interactor preparation (clear) failed for selector '%s': %w", selector, ErrStaleElement)
+		}
+		return fmt.Errorf("interactor preparation (clear) failed for selector '%s': %w", selector, err)
+	}
+
+	// Check if JS evaluation succeeded (err == nil) but returned false
+	if !clearSuccess {
+		// If WaitVisible passed but JS failed to find/clear the element, it's likely stale or non-interactable.
+		// P1 FIX: We must classify this as ErrStaleElement so the interactor loop handles it gracefully.
+		return fmt.Errorf("interactor preparation (clear) failed for selector '%s': JS evaluation indicated failure: %w", selector, ErrStaleElement)
+	}
+
+	// 2. Type the value
 	if i.humanoid != nil {
 		err = i.humanoid.Type(opCtx, selector, text, nil)
 	} else {
-		// Fallback: Ensure visibility and use SendKeys via executor.RunActions.
+		// Fallback: Use SendKeys now that the field is clear.
 		err = i.executor.RunActions(opCtx,
-			chromedp.ScrollIntoView(selector, chromedp.ByQuery),
-			chromedp.WaitVisible(selector, chromedp.ByQuery),
+			// Visibility and Scroll are already handled above.
 			chromedp.SendKeys(selector, text, chromedp.ByQuery),
 		)
 	}
@@ -668,6 +884,10 @@ func (i *Interactor) typeIntoElement(ctx context.Context, selector string, text 
 	if err != nil {
 		if opCtx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("interactor type timed out (%v) for selector '%s': %w", timeout, selector, opCtx.Err())
+		}
+		// P1 FIX: Check if the error indicates the element is gone (stale) during typing.
+		if strings.Contains(err.Error(), "not found or not visible") {
+			return fmt.Errorf("interactor type failed for selector '%s': %w", selector, ErrStaleElement)
 		}
 		return fmt.Errorf("interactor type failed for selector '%s': %w", selector, err)
 	}
@@ -680,14 +900,14 @@ var hasherPool = sync.Pool{
 	New: func() interface{} { return fnv.New64a() },
 }
 
-const maxTextLength = 64
-
-func generateNodeFingerprint(node *cdp.Node, attrs map[string]string) (string, string) {
-	if node == nil {
+// P0 FIX: Updated signature to use elementSnapshot.
+func generateNodeFingerprint(snapshot *elementSnapshot, attrs map[string]string) (string, string) {
+	if snapshot == nil {
 		return "", ""
 	}
 	var sb strings.Builder
-	sb.WriteString(strings.ToLower(node.NodeName))
+	nodeName := strings.ToLower(snapshot.NodeName)
+	sb.WriteString(nodeName)
 
 	if id, ok := attrs["id"]; ok && id != "" {
 		sb.WriteString("#" + id)
@@ -713,7 +933,8 @@ func generateNodeFingerprint(node *cdp.Node, attrs map[string]string) (string, s
 		}
 	}
 
-	textContent := getNodeText(node)
+	// P0 FIX: Use the text content from the snapshot (already truncated in JS).
+	textContent := snapshot.TextContent
 	hasText := textContent != ""
 	if hasText {
 		escapedText := strings.ReplaceAll(textContent, `"`, `\"`)
@@ -722,8 +943,9 @@ func generateNodeFingerprint(node *cdp.Node, attrs map[string]string) (string, s
 
 	description := sb.String()
 
-	if strings.ToLower(node.NodeName) == description && !hasOtherAttrs && !hasText {
-		if node.NodeName != "BODY" && node.NodeName != "HTML" {
+	if nodeName == description && !hasOtherAttrs && !hasText {
+		// Check normalized names
+		if nodeName != "body" && nodeName != "html" {
 			return "", description
 		}
 	}
@@ -737,47 +959,9 @@ func generateNodeFingerprint(node *cdp.Node, attrs map[string]string) (string, s
 	return fingerprint, description
 }
 
-func getNodeText(node *cdp.Node) string {
-	if node == nil {
-		return ""
-	}
-	var sb strings.Builder
-	for _, child := range node.Children {
-		if child != nil && child.NodeType == cdp.NodeTypeText {
-			sb.WriteString(child.NodeValue)
-		}
-		if sb.Len() >= maxTextLength {
-			break
-		}
-	}
-	if sb.Len() == 0 {
-		attrs := attributeMap(node)
-		if label, ok := attrs["aria-label"]; ok && label != "" {
-			sb.WriteString(label)
-		} else if title, ok := attrs["title"]; ok && title != "" {
-			sb.WriteString(title)
-		}
-	}
-
-	// FIX: Truncate text correctly respecting maxTextLength (in bytes) and UTF-8 boundaries.
-	text := strings.TrimSpace(sb.String())
-
-	const ellipsis = "…"
-	const ellipsisLen = len(ellipsis) // 3 bytes
-
-	if len(text) > maxTextLength {
-		if maxTextLength < ellipsisLen {
-			// If less than 3 bytes available, just truncate without ellipsis
-			return truncateBytes(text, maxTextLength)
-		}
-		// Truncate text to fit content + ellipsis
-		return truncateBytes(text, maxTextLength-ellipsisLen) + ellipsis
-	}
-	return text
-}
-
-func isDisabled(node *cdp.Node, attrs map[string]string) bool {
-	if node == nil {
+// P0 FIX: Updated signature to use elementSnapshot.
+func isDisabled(snapshot *elementSnapshot, attrs map[string]string) bool {
+	if snapshot == nil {
 		return true
 	}
 	if _, disabled := attrs["disabled"]; disabled {
@@ -786,7 +970,8 @@ func isDisabled(node *cdp.Node, attrs map[string]string) bool {
 	if ariaDisabled, ok := attrs["aria-disabled"]; ok && strings.ToLower(ariaDisabled) == "true" {
 		return true
 	}
-	if isInputElement(node) {
+	// P0 FIX: Updated isInputElement call.
+	if isInputElement(snapshot) {
 		if _, readonly := attrs["readonly"]; readonly {
 			return true
 		}
@@ -794,12 +979,14 @@ func isDisabled(node *cdp.Node, attrs map[string]string) bool {
 	return false
 }
 
-func isInputElement(node *cdp.Node) bool {
-	if node == nil {
+// P0 FIX: Updated signature to use elementSnapshot.
+func isInputElement(snapshot *elementSnapshot) bool {
+	if snapshot == nil {
 		return false
 	}
-	name := strings.ToUpper(node.NodeName)
-	attrs := attributeMap(node)
+	name := strings.ToUpper(snapshot.NodeName)
+	// P0 FIX: Use attributes from the snapshot.
+	attrs := snapshot.Attributes
 
 	if name == "INPUT" {
 		inputType := strings.ToLower(attrs["type"])
@@ -819,27 +1006,16 @@ func isInputElement(node *cdp.Node) bool {
 	return false
 }
 
-func attributeMap(node *cdp.Node) map[string]string {
-	attrs := make(map[string]string)
-	if node == nil || len(node.Attributes) == 0 { // REVISION: Corrected F0 to 0
-		return attrs
-	}
-	for i := 0; i < len(node.Attributes); i += 2 {
-		if i+1 < len(node.Attributes) {
-			attrs[node.Attributes[i]] = node.Attributes[i+1]
-		}
-	}
-	return attrs
-}
+// P0 FIX: Removed attributeMap (no longer needed as elementSnapshot contains the map).
+// P0 FIX: Removed getNodeText and truncateBytes (logic moved to JS).
 
-// Helper function to truncate string to max bytes, respecting UTF8 boundaries.
-func truncateBytes(s string, n int) string {
-	if len(s) <= n {
-		return s
+// P0 FIX: jsonEncode is a helper to safely encode a value (especially strings) for JS injection.
+// (Duplicated from cdp_executor.go as required by interactor JS calls).
+func jsonEncode(v interface{}) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		// Fallback for safety
+		return `""`
 	}
-	// Iterate backwards from the desired byte length until a valid UTF-8 boundary (RuneStart) is found.
-	for n > 0 && !utf8.RuneStart(s[n]) {
-		n--
-	}
-	return s[:n]
+	return string(b)
 }
