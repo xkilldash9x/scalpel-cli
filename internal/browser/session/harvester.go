@@ -622,8 +622,7 @@ func convertCDPTimings(t *network.ResourceTiming) schemas.Timings {
 	// Blocked time approximation.
 	// FIX: The original calculation (t.RequestTime*1000 - t.ProxyEnd) was incorrect.
 	// Blocked time is the time until the first network event (Proxy/DNS/Connect/Send).
-	var blocked float64 = -1
-	firstEventStart := -1.0
+	var firstEventStart float64 = -1.0
 
 	// Helper to find the minimum positive value
 	minPos := func(a, b float64) float64 {
@@ -644,12 +643,10 @@ func convertCDPTimings(t *network.ResourceTiming) schemas.Timings {
 	firstEventStart = minPos(firstEventStart, t.ConnectStart)
 	firstEventStart = minPos(firstEventStart, t.SendStart)
 
+	var blocked float64
 	if firstEventStart >= 0 {
-		blocked = firstEventStart
-	}
-
-	// Ensure blocked is -1 if not determined.
-	if blocked < 0 {
+		blocked = toHARTime(firstEventStart)
+	} else {
 		blocked = -1
 	}
 
@@ -680,7 +677,7 @@ func isTextMime(mimeType string) bool {
 		strings.Contains(lowerMime, "javascript") ||
 		strings.Contains(lowerMime, "json") ||
 		strings.Contains(lowerMime, "xml") ||
-		strings.Contains(lowerMime, "x-www-form-urlencoded") // FIX: Include form-urlencoded as text (TestHarvesterIntegration failure)
+		strings.Contains(lowerMime, "x-www-form-urlencoded")
 }
 
 func calculateHeaderSize(headers network.Headers) int64 {

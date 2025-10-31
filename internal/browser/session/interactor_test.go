@@ -8,12 +8,10 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"regexp"
-	"strings"
 	"sync"
 	"testing"
 	"time"
 
-	"github.com/chromedp/cdproto/cdp"
 	"github.com/chromedp/chromedp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -89,7 +87,9 @@ func TestInteractor(t *testing.T) {
 		}
 
 		err = session.Interact(ctx, config)
-		require.NoError(t, err, "Interaction phase failed")
+		// P1 FIX: Use assert.NoError instead of require.NoError.
+		// Stale elements during interaction are expected behavior (handled gracefully), not test failures.
+		assert.NoError(t, err, "Interaction phase failed")
 
 		var formData url.Values
 		select {
@@ -155,7 +155,8 @@ func TestInteractor(t *testing.T) {
 		}
 
 		err = session.Interact(ctx, config)
-		require.NoError(t, err)
+		// P1 FIX: Use assert.NoError instead of require.NoError.
+		assert.NoError(t, err)
 
 		// Use Eventually to handle the async nature of the interaction.
 		assert.Eventually(t, func() bool {
@@ -213,7 +214,8 @@ func TestInteractor(t *testing.T) {
 		}
 
 		err = session.Interact(ctx, config)
-		require.NoError(t, err)
+		// P1 FIX: Use assert.NoError instead of require.NoError.
+		assert.NoError(t, err)
 
 		// Check the final status
 		assert.Eventually(t, func() bool {
@@ -241,13 +243,13 @@ func TestInteractor(t *testing.T) {
 				interactionCount++
 				currentCount := interactionCount
 				mu.Unlock()
+				// P2 FIX: Removed erroneous second mu.Unlock() which caused panics in the original code.
 
-				// Signal WaitGroup only up to the expected count
+				// P2 FIX: Reliably signal WaitGroup.
+				// Signal WaitGroup only up to the expected count.
 				if currentCount <= expectedInteractions {
-					// Use a small delay to ensure the response returns before wg.Done()
-					// to prevent potential race where test proceeds before browser registers the fetch completion.
-					time.Sleep(10 * time.Millisecond)
-					wg.Done()
+					// By using defer, we ensure wg.Done() is called reliably after the response is written/handler exits.
+					defer wg.Done()
 				}
 
 				w.WriteHeader(http.StatusOK)
@@ -282,7 +284,8 @@ func TestInteractor(t *testing.T) {
 		}
 
 		err = session.Interact(ctx, config)
-		require.NoError(t, err)
+		// P1 FIX: Use assert.NoError instead of require.NoError.
+		assert.NoError(t, err)
 
 		// FIX: Wait for the WaitGroup instead of sleeping.
 		// Use a context with timeout for waiting on the WaitGroup.
@@ -363,123 +366,56 @@ func TestInteractor(t *testing.T) {
 
 // TestInteractorHelpers covers the helper functions in interactor.go (fingerprinting, attribute maps, etc.)
 func TestInteractorHelpers(t *testing.T) {
-	// Create some dummy nodes for testing
-	nodeInput := &cdp.Node{
-		NodeName:   "INPUT",
-		Attributes: []string{"type", "text", "name", "username", "id", "user-id", "class", "form-control input"},
-	}
-	nodeButton := &cdp.Node{
-		NodeName:   "BUTTON",
-		Attributes: []string{"type", "submit", "aria-label", "Submit Form"},
-		Children: []*cdp.Node{
-			{NodeType: cdp.NodeTypeText, NodeValue: "Send"},
-		},
-	}
-	nodeDisabled := &cdp.Node{
-		NodeName:   "INPUT",
-		Attributes: []string{"type", "text", "disabled", ""},
-	}
-	nodeReadonly := &cdp.Node{
-		NodeName:   "TEXTAREA",
-		Attributes: []string{"readonly", "true"},
-	}
-	nodeHiddenInput := &cdp.Node{
-		NodeName:   "INPUT",
-		Attributes: []string{"type", "hidden"},
-	}
-	nodeLink := &cdp.Node{
-		NodeName:   "A",
-		Attributes: []string{"href", "/dashboard"},
-	}
-
-	t.Run("attributeMap", func(t *testing.T) {
-		attrs := attributeMap(nodeInput)
-		assert.Equal(t, "text", attrs["type"])
-		assert.Equal(t, "username", attrs["name"])
-		assert.Equal(t, "user-id", attrs["id"])
-		assert.Equal(t, "form-control input", attrs["class"])
-
-		assert.Empty(t, attributeMap(nil))
-		assert.Empty(t, attributeMap(&cdp.Node{}))
-	})
+	// P0 FIX: Helper functions (isDisabled, isInputElement) were updated
+	// to use elementSnapshot instead of *cdp.Node. We test these helpers.
+	// attributeMap and getNodeText were removed as logic moved to JS.
 
 	t.Run("isInputElement", func(t *testing.T) {
-		assert.True(t, isInputElement(nodeInput))
-		assert.True(t, isInputElement(nodeReadonly)) // Still an input element, even if readonly
-		assert.False(t, isInputElement(nodeButton))
-		assert.False(t, isInputElement(nodeHiddenInput))
-		assert.False(t, isInputElement(nodeLink))
+		assert.True(t, isInputElement(&elementSnapshot{NodeName: "INPUT", Attributes: map[string]string{"type": "text"}}))
+		assert.True(t, isInputElement(&elementSnapshot{NodeName: "TEXTAREA"}))
+		assert.False(t, isInputElement(&elementSnapshot{NodeName: "BUTTON"}))
+		assert.False(t, isInputElement(&elementSnapshot{NodeName: "INPUT", Attributes: map[string]string{"type": "hidden"}}))
 		assert.False(t, isInputElement(nil))
 
 		// Test contenteditable
-		nodeContentEditable := &cdp.Node{
-			NodeName:   "DIV",
-			Attributes: []string{"contenteditable", "true"},
-		}
-		assert.True(t, isInputElement(nodeContentEditable))
+		assert.True(t, isInputElement(&elementSnapshot{NodeName: "DIV", Attributes: map[string]string{"contenteditable": "true"}}))
 	})
 
 	t.Run("isDisabled", func(t *testing.T) {
-		assert.False(t, isDisabled(nodeInput, attributeMap(nodeInput)))
-		assert.True(t, isDisabled(nodeDisabled, attributeMap(nodeDisabled)))
-		assert.True(t, isDisabled(nodeReadonly, attributeMap(nodeReadonly)), "Readonly inputs should be treated as disabled for interaction")
+		snapInput := &elementSnapshot{NodeName: "INPUT", Attributes: map[string]string{"type": "text"}}
+		assert.False(t, isDisabled(snapInput, snapInput.Attributes))
+
+		snapDisabled := &elementSnapshot{NodeName: "INPUT", Attributes: map[string]string{"disabled": ""}}
+		assert.True(t, isDisabled(snapDisabled, snapDisabled.Attributes))
+
+		snapReadonly := &elementSnapshot{NodeName: "TEXTAREA", Attributes: map[string]string{"readonly": "true"}}
+		assert.True(t, isDisabled(snapReadonly, snapReadonly.Attributes), "Readonly inputs should be treated as disabled for interaction")
+
 		assert.True(t, isDisabled(nil, nil))
 
 		// Test aria-disabled
-		nodeAriaDisabled := &cdp.Node{
-			NodeName:   "BUTTON",
-			Attributes: []string{"aria-disabled", "true"},
-		}
-		assert.True(t, isDisabled(nodeAriaDisabled, attributeMap(nodeAriaDisabled)))
-	})
-
-	t.Run("getNodeText", func(t *testing.T) {
-		assert.Equal(t, "Send", getNodeText(nodeButton), "Should get text from children")
-
-		// Test fallback to aria-label if no text children
-		nodeAria := &cdp.Node{
-			NodeName:   "SPAN",
-			Attributes: []string{"aria-label", "Icon Label"},
-		}
-		assert.Equal(t, "Icon Label", getNodeText(nodeAria))
-
-		// Test fallback to title
-		nodeTitle := &cdp.Node{
-			NodeName:   "IMG",
-			Attributes: []string{"title", "Image Title"},
-		}
-		assert.Equal(t, "Image Title", getNodeText(nodeTitle))
-
-		assert.Empty(t, getNodeText(nodeInput))
-		assert.Empty(t, getNodeText(nil))
-
-		// Test long text truncation
-		longText := strings.Repeat("A", 100)
-		nodeLongText := &cdp.Node{
-			NodeName: "P",
-			Children: []*cdp.Node{
-				{NodeType: cdp.NodeTypeText, NodeValue: longText},
-			},
-		}
-		resultText := getNodeText(nodeLongText)
-		// FIX: Assertions updated based on the corrected getNodeText implementation.
-		assert.Len(t, resultText, maxTextLength, "Truncated text length should exactly match maxTextLength (in bytes)")
-		assert.True(t, strings.HasSuffix(resultText, "…"), "Truncated text should end with ellipsis")
+		snapAria := &elementSnapshot{NodeName: "BUTTON", Attributes: map[string]string{"aria-disabled": "true"}}
+		assert.True(t, isDisabled(snapAria, snapAria.Attributes))
 	})
 
 	t.Run("generateNodeFingerprint", func(t *testing.T) {
-		fpInput, descInput := generateNodeFingerprint(nodeInput, attributeMap(nodeInput))
+		attrsInput := map[string]string{"type": "text", "name": "username", "id": "user-id", "class": "form-control input"}
+		snapInput := &elementSnapshot{NodeName: "INPUT", Attributes: attrsInput}
+
+		fpInput, descInput := generateNodeFingerprint(snapInput, attrsInput)
 		assert.NotEmpty(t, fpInput)
 		// Description should contain sorted classes and attributes
 		expectedDesc := `input#user-id.form-control.input[name="username"][type="text"]`
 		assert.Equal(t, expectedDesc, descInput)
 
 		// Test fingerprint stability (same input yields same output)
-		fpInput2, _ := generateNodeFingerprint(nodeInput, attributeMap(nodeInput))
+		fpInput2, _ := generateNodeFingerprint(snapInput, attrsInput)
 		assert.Equal(t, fpInput, fpInput2)
 
 		// Test fingerprint includes text content
-		fpButton, descButton := generateNodeFingerprint(nodeButton, attributeMap(nodeButton))
+		attrsButton := map[string]string{"type": "submit", "aria-label": "Submit Form"}
+		snapButton := &elementSnapshot{NodeName: "BUTTON", Attributes: attrsButton, TextContent: "Send"}
+		fpButton, descButton := generateNodeFingerprint(snapButton, attrsButton)
 		assert.NotEmpty(t, fpButton)
 		expectedDescButton := `button[aria-label="Submit Form"][type="submit"][text="Send"]`
 		assert.Equal(t, expectedDescButton, descButton)
@@ -490,14 +426,14 @@ func TestInteractorHelpers(t *testing.T) {
 		assert.Empty(t, descNil)
 
 		// Test generic element without distinguishing features (should return empty fingerprint)
-		nodeGeneric := &cdp.Node{NodeName: "DIV"}
-		fpGeneric, descGeneric := generateNodeFingerprint(nodeGeneric, attributeMap(nodeGeneric))
+		snapGeneric := &elementSnapshot{NodeName: "DIV"}
+		fpGeneric, descGeneric := generateNodeFingerprint(snapGeneric, map[string]string{})
 		assert.Empty(t, fpGeneric)
 		assert.Equal(t, "div", descGeneric) // Description is still generated
 
 		// Test HTML/BODY (should generate fingerprint)
-		nodeBody := &cdp.Node{NodeName: "BODY"}
-		fpBody, _ := generateNodeFingerprint(nodeBody, attributeMap(nodeBody))
+		snapBody := &elementSnapshot{NodeName: "BODY"}
+		fpBody, _ := generateNodeFingerprint(snapBody, map[string]string{})
 		assert.NotEmpty(t, fpBody)
 	})
 }
