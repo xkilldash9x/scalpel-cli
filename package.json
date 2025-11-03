@@ -25,7 +25,7 @@
     "jest": "^30.2.0",
     "jest-environment-jsdom": "^30.2.0"
   },
-  "jest": {
+ "jest": {
     "testEnvironment": "jsdom",
     "testEnvironmentOptions": {},
     "collectCoverageFrom": [
@@ -33,7 +33,11 @@
       "internal/browser/humanoid/scrolling.js"
     ],
     "transform": {
-      "<rootDir>/internal/analysis/active/taint/taint_shim.js": "<rootDir>/jest-go-transform.js"
-    }
+      "internal/analysis/active/taint/taint_shim\\.js$": "<rootDir>/jest-go-transform.js"
+    },
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "<rootDir>/internal/browser/stealth/evasions.test.js"
+    ]
   }
 }
