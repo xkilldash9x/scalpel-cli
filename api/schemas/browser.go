@@ -1,3 +1,4 @@
+// schemas/browser.go
 package schemas
 
 import (
@@ -38,7 +39,10 @@ type Persona struct {
 	Timezone        string       `json:"timezoneId"`
 	Locale          string       `json:"locale"`
 	ClientHintsData *ClientHints `json:"clientHintsData,omitempty"`
-	NoiseSeed       int64        `json:"noiseSeed"`
+	// WebGL properties used for spoofing canvas fingerprints.
+	WebGLVendor   string `json:"webGLVendor,omitempty"`
+	WebGLRenderer string `json:"webGLRenderer,omitempty"`
+	NoiseSeed     int64  `json:"noiseSeed"`
 }
 
 // DefaultPersona provides a fallback persona if none is specified.

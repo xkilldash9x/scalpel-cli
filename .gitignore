@@ -24,12 +24,28 @@ logs/
 # but ignore local versions with secrets.
 config.local.yaml
 *.local.yaml
+.credentials.json
 .env
 .env.*
 
 # Corrected path based on project structure
 internal/browser/testing/
 test_imports.go
+
+# Node.js dependencies
+node_modules/
+
+# Build artifacts
+build/
+dist/
+
+# Test coverage reports
+coverage/
+.nyc_output/
+.eslintcache
+
+# Jest cache
+.jest-cache/
 
 # ## Common ##
 # IDE and editor directories

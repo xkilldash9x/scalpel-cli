@@ -67,7 +67,8 @@ type ClientConfig struct {
 	// This is useful for specific testing scenarios like race condition "dogpiling".
 	DisableKeepAlives bool
 
-	// Proxy
+	// ProxyURL specifies the primary proxy server to use.
+	// If nil, it may fall back to DialerConfig.ProxyURL if set.
 	ProxyURL *url.URL
 
 	// State Management
@@ -97,6 +98,7 @@ func NewBrowserClientConfig() *ClientConfig {
 		IdleConnTimeout:     DefaultIdleConnTimeout,
 		CookieJar:           jar,
 		Logger:              &NopLogger{},
+		ProxyURL:            nil,
 	}
 }
 
@@ -117,14 +119,27 @@ func NewHTTPTransport(config *ClientConfig) *http.Transport {
 
 	// Prepare the dialer config for the transport's DialContext.
 	// We must set TLSConfig to nil here, as http.Transport manages the TLS handshake separately using TLSClientConfig.
-	// Create a copy to avoid mutating the original config.DialerConfig.
-	transportDialerConfig := *config.DialerConfig
+	// Use Clone() for a deep copy to avoid mutating the original config.DialerConfig and ensure thread safety.
+	transportDialerConfig := config.DialerConfig.Clone()
 	transportDialerConfig.TLSConfig = nil
 
+	// Determine the primary proxy configuration source.
+	proxyURL := config.ProxyURL
+	if proxyURL == nil && config.DialerConfig.ProxyURL != nil {
+		proxyURL = config.DialerConfig.ProxyURL
+	}
+
+	// CRITICAL: If http.Transport.Proxy is used, the DialContext is responsible for the TCP connection *to* the proxy.
+	// We must ensure the DialerConfig used by DialContext does not also attempt to proxy the connection, preventing loops or double-proxying.
+	if proxyURL != nil {
+		// Assume the connection to the proxy itself should be direct.
+		transportDialerConfig.ProxyURL = nil
+	}
+
 	transport := &http.Transport{
-		// Use our custom low-level TCP dialer.
+		// Use our custom low-level TCP dialer with the prepared configuration.
 		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			return DialTCPContext(ctx, network, addr, &transportDialerConfig)
+			return DialTCPContext(ctx, network, addr, transportDialerConfig)
 		},
 		TLSClientConfig:       tlsConfig,
 		TLSHandshakeTimeout:   DefaultTLSHandshakeTimeout,
@@ -140,8 +155,9 @@ func NewHTTPTransport(config *ClientConfig) *http.Transport {
 		ForceAttemptHTTP2:  true, // Always prefer H2
 	}
 
-	if config.ProxyURL != nil {
-		transport.Proxy = http.ProxyURL(config.ProxyURL)
+	// Apply the determined proxy configuration to the transport.
+	if proxyURL != nil {
+		transport.Proxy = http.ProxyURL(proxyURL)
 	}
 
 	return transport
@@ -202,18 +218,20 @@ func configureTLS(config *ClientConfig) *tls.Config {
 	}
 
 	// 4. Apply security hardening and verification.
-	// If the user didn't specify a MinVersion (MinVersion == 0), set the secure default.
-	if tlsConfig.MinVersion == 0 {
+	// FIX: Enforce the secure minimum version if the configured version is lower (including unset/0).
+	// The previous logic failed to override explicitly insecure settings (e.g., setting TLS 1.0).
+	if tlsConfig.MinVersion < SecureMinTLSVersion {
+		// Log if we are overriding an explicit (non-zero) user configuration.
+		if tlsConfig.MinVersion != 0 {
+			config.Logger.Warn("Security Hardening: Overriding insecure TLS configuration. Minimum TLS version upgraded to secure minimum.",
+				"configured_version", tlsConfig.MinVersion, "enforced_version", SecureMinTLSVersion)
+		}
+		// Enforce the secure version.
 		tlsConfig.MinVersion = SecureMinTLSVersion
 	}
 
-	// Warn if the resulting configuration uses an insecure TLS version.
-	if tlsConfig.MinVersion < SecureMinTLSVersion {
-		config.Logger.Warn("Insecure TLS configuration detected: Minimum TLS version is set below TLS 1.2. Connections may be vulnerable.",
-			"configured_version", tlsConfig.MinVersion)
-	}
-
 	// 5. Apply the final override for ignoring TLS errors.
+	// This overrides any setting potentially present in the base TLSConfig.
 	tlsConfig.InsecureSkipVerify = config.InsecureSkipVerify
 
 	return tlsConfig

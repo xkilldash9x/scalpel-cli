@@ -132,19 +132,24 @@ func (e *cdpExecutor) DispatchStructuredKey(ctx context.Context, data schemas.Ke
 		WithKey(data.Key)
 
 	// 4. Execute the sequence (KeyDown, then KeyUp).
-	// Apply a short timeout appropriate for key events.
-	timeout := 5 * time.Second
-	opCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	// R9 FIX: Removed internal timeout (5s). A structured key press (e.g., Enter, shortcuts)
+	// might trigger navigation or long-running JS. The operation must respect the full
+	// duration of the incoming operational context (ctx).
 
-	// Send KeyDown and KeyUp sequentially in one batch.
-	err := e.runActionsFunc(opCtx, keyDown, keyUp)
+	// (Original code with internal timeout removed)
+	// timeout := 5 * time.Second
+	// opCtx, cancel := context.WithTimeout(ctx, timeout)
+	// defer cancel()
+
+	// Send KeyDown and KeyUp sequentially in one batch using the operational context (ctx).
+	err := e.runActionsFunc(ctx, keyDown, keyUp)
 
 	if err != nil {
-		// Check for timeout specifically
-		if opCtx.Err() == context.DeadlineExceeded {
-			e.logger.Debug("cdpExecutor DispatchStructuredKey timed out.", zap.Duration("timeout", timeout), zap.Error(opCtx.Err()))
-			return fmt.Errorf("cdpExecutor: timeout dispatching shortcut sequence after %v: %w", timeout, opCtx.Err())
+		// Check if the error is due to the context passed in
+		if ctx.Err() == context.DeadlineExceeded {
+			e.logger.Debug("cdpExecutor DispatchStructuredKey timed out.", zap.Error(ctx.Err()))
+			// Return a generic error that respects the original context.
+			return fmt.Errorf("cdpExecutor: timeout dispatching shortcut sequence: %w", ctx.Err())
 		}
 		return fmt.Errorf("cdpExecutor: failed to dispatch shortcut sequence: %w", err)
 	}
@@ -306,4 +311,15 @@ func (e *cdpExecutor) ExecuteScript(ctx context.Context, script string, args []i
 
 	// Return the raw JSON message result (can be "null", "true", number, string, object, array)
 	return res, nil
+}
+
+// jsonEncode is a helper to safely encode a value (especially strings) for JS injection.
+// Moved here as it is used by interaction.go and cdp_executor.go
+func jsonEncode(v interface{}) string {
+	b, err := json.Marshal(v)
+	if err != nil {
+		// Fallback for safety
+		return `""`
+	}
+	return string(b)
 }

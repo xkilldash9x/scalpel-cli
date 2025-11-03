@@ -192,8 +192,13 @@ func TestParsePipelinedResponses_Compressed(t *testing.T) {
 	compressedBodyBytes := buf.Bytes()
 
 	// 2. Generate Response with Gzip encoding
-	resp1 := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n%s", len(compressedBodyBytes), string(compressedBodyBytes))
-	reader := strings.NewReader(resp1)
+	// FIX: We must construct the response by writing headers and then the binary body, not using Sprintf("%s") on bytes.
+	resp1Headers := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n", len(compressedBodyBytes))
+
+	var requestBuf bytes.Buffer
+	requestBuf.WriteString(resp1Headers)
+	requestBuf.Write(compressedBodyBytes)
+	reader := bytes.NewReader(requestBuf.Bytes())
 
 	// 3. Parse
 	responses, err := parser.ParsePipelinedResponses(reader, 1)
@@ -209,6 +214,33 @@ func TestParsePipelinedResponses_Compressed(t *testing.T) {
 	body, err := io.ReadAll(responses[0].Body)
 	require.NoError(t, err)
 	assert.Equal(t, originalBody, string(body), "Expected body to be fully decompressed and readable")
+}
+
+// TestParsePipelinedResponses_DecompressionFailure verifies that parsing aborts if decompression initialization fails, preventing pipeline corruption.
+func TestParsePipelinedResponses_DecompressionFailure(t *testing.T) {
+	parser := newTestParser()
+
+	// 1. Generate Response 1 (Claims Gzip but body is invalid/missing header)
+	invalidBody := "not gzip data"
+	// The Content-Length must match the length of the invalid body for ReadResponse to succeed initially.
+	resp1 := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Encoding: gzip\r\nContent-Length: %d\r\n\r\n%s", len(invalidBody), invalidBody)
+
+	// 2. Generate Response 2 (Valid)
+	resp2Body := "Response Body 2"
+	resp2 := fmt.Sprintf("HTTP/1.1 200 OK\r\nContent-Length: %d\r\n\r\n%s", len(resp2Body), resp2Body)
+
+	pipelinedData := resp1 + resp2
+	reader := strings.NewReader(pipelinedData)
+
+	// 3. Parse the responses
+	// We expect the parser to fail when trying to initialize gzip decompression for the first response.
+	responses, err := parser.ParsePipelinedResponses(reader, 2)
+
+	// 4. Verify results
+	assert.Error(t, err, "Expected an error due to failed decompression initialization")
+	assert.Contains(t, err.Error(), "failed to initialize decompression")
+	// It should return 0 responses because the first one failed during the processing steps (after ReadResponse succeeded).
+	assert.Len(t, responses, 0, "Should not return the response if decompression failed during parsing")
 }
 
 // TestParsePipelinedResponses_Malformed verifies robustness against bad responses in the pipeline.

@@ -40,14 +40,15 @@ type Interactor struct {
 	stabilizeFn StabilizationFunc
 	rng         *rand.Rand
 	// executor is used to run browser actions.
-	// REFACTOR: Changed from *Session to ActionExecutor interface.
+	//  Changed from *Session to ActionExecutor interface.
 	executor ActionExecutor
 	// sessionCtx is the master context for the session lifetime, needed for cleanup tasks.
 	sessionCtx context.Context
 }
 
 // elementSnapshot holds the extracted data from the DOM element at the time of discovery.
-// P0 FIX: This is used instead of *cdp.Node to prevent data races with the chromedp event loop.
+//
+//	This is used instead of *cdp.Node to prevent data races with the chromedp event loop.
 type elementSnapshot struct {
 	NodeName    string            `json:"nodeName"`
 	Attributes  map[string]string `json:"attributes"`
@@ -56,7 +57,7 @@ type elementSnapshot struct {
 
 // interactiveElement bundles a node with its unique fingerprint.
 type interactiveElement struct {
-	// P0 FIX: Replaced *cdp.Node with an atomic snapshot and a unique selector.
+	//  Replaced *cdp.Node with an atomic snapshot and a unique selector.
 	Snapshot    elementSnapshot `json:"-"` // Data used for filtering/fingerprinting
 	Selector    string          `json:"-"` // Unique selector for interaction
 	Fingerprint string
@@ -65,7 +66,8 @@ type interactiveElement struct {
 }
 
 // NewInteractor creates a new interactor instance.
-// REFACTOR: Updated signature to accept ActionExecutor and session context.
+//
+//	Updated signature to accept ActionExecutor and session context.
 func NewInteractor(logger *zap.Logger, h *humanoid.Humanoid, stabilizeFn StabilizationFunc, executor ActionExecutor, sessionCtx context.Context) *Interactor {
 	source := rand.NewSource(time.Now().UnixNano())
 	// Fallback stabilization function if none provided.
@@ -80,7 +82,7 @@ func NewInteractor(logger *zap.Logger, h *humanoid.Humanoid, stabilizeFn Stabili
 			}
 		}
 	}
-	// REFACTOR: Validate executor and sessionCtx.
+	//  Validate executor and sessionCtx.
 	if executor == nil {
 		panic("Interactor created with nil ActionExecutor reference")
 	}
@@ -116,7 +118,7 @@ func (i *Interactor) Interact(ctx context.Context, config schemas.InteractionCon
 	// Initial cognitive pause
 	if i.humanoid != nil {
 		pauseCtx, cancelPause := context.WithTimeout(opCtx, 10*time.Second) // Timeout for initial pause
-		// FIX: Pass context and handle error
+		// : Pass context and handle error
 		err := i.humanoid.CognitivePause(pauseCtx, 1.5, 1.5)
 		cancelPause() // Release pause context resources promptly
 		if err != nil {
@@ -132,6 +134,13 @@ func (i *Interactor) Interact(ctx context.Context, config schemas.InteractionCon
 
 	// Start recursion from depth 0
 	return i.interactDepth(opCtx, config, 0, interactedElements)
+}
+
+// R1: Helper function to shuffle elements in place (Used for prioritization)
+func (i *Interactor) shuffleElements(elements []interactiveElement) {
+	i.rng.Shuffle(len(elements), func(j, k int) {
+		elements[j], elements[k] = elements[k], elements[j]
+	})
 }
 
 // interactDepth handles the interaction logic for a specific depth.
@@ -154,7 +163,7 @@ func (i *Interactor) interactDepth(
 	}
 
 	// 1. Discover new elements
-	// FIX: Increased timeout to 180s (was insufficient).
+	// : Increased timeout to 180s (was insufficient).
 	discoverCtx, cancelDiscover := context.WithTimeout(ctx, 180*time.Second)
 	newElements, err := i.discoverElements(discoverCtx, interactedElements)
 	cancelDiscover()
@@ -173,10 +182,34 @@ func (i *Interactor) interactDepth(
 	}
 	log.Debug("Discovered new interactive elements.", zap.Int("count", len(newElements)))
 
-	// 2. Shuffle elements
-	i.rng.Shuffle(len(newElements), func(j, k int) {
-		newElements[j], newElements[k] = newElements[k], newElements[j]
-	})
+	// R1: 2. Prioritize and Shuffle elements
+	// We must prioritize inputs and deprioritize submit buttons to prevent premature form submission.
+
+	// Categorize elements
+	var inputs, standard, submits []interactiveElement
+	for _, el := range newElements {
+		// Use the robust helper to check if it's a submit element.
+		if isSubmitElement(&el.Snapshot) {
+			submits = append(submits, el)
+		} else if el.IsInput {
+			// IsInput covers text inputs, selects, textareas (and correctly excludes submit/button type inputs).
+			inputs = append(inputs, el)
+		} else {
+			// Standard covers links, non-submit buttons, clickable divs etc.
+			standard = append(standard, el)
+		}
+	}
+
+	// Shuffle each category independently
+	i.shuffleElements(inputs)
+	i.shuffleElements(standard)
+	i.shuffleElements(submits)
+
+	// Combine them in the desired order: Inputs first, then Standard, then Submits.
+	prioritizedElements := append(inputs, standard...)
+	prioritizedElements = append(prioritizedElements, submits...)
+
+	log.Debug("Prioritized interaction order.", zap.Int("inputs", len(inputs)), zap.Int("standard", len(standard)), zap.Int("submits", len(submits)))
 
 	// 3. Interact with elements
 	interactionsThisDepth := 0
@@ -185,7 +218,8 @@ func (i *Interactor) interactDepth(
 		maxInteractions = 3 // Default
 	}
 
-	for _, element := range newElements {
+	// R1: Iterate over the prioritized list instead of the original newElements
+	for _, element := range prioritizedElements {
 		if err := ctx.Err(); err != nil {
 			log.Debug("Interaction loop cancelled before next element.", zap.Error(err))
 			return err
@@ -198,7 +232,7 @@ func (i *Interactor) interactDepth(
 		// Small pause before considering element
 		if i.humanoid != nil {
 			pauseCtx, cancelPause := context.WithTimeout(ctx, 5*time.Second)
-			// FIX: Pass context and handle error
+			// : Pass context and handle error
 			err := i.humanoid.CognitivePause(pauseCtx, 0.5, 0.5)
 			cancelPause()
 			if err != nil {
@@ -217,23 +251,29 @@ func (i *Interactor) interactDepth(
 		}
 
 		// Execute interaction with timeout
-		// FIX: Increased timeout to 180s.
+		// : Increased timeout to 180s.
 		actionCtx, cancelAction := context.WithTimeout(ctx, 180*time.Second)
 		log.Debug("Attempting interaction.", zap.String("desc", element.Description), zap.String("fingerprint", element.Fingerprint))
 		success, interactionErr := i.executeInteraction(actionCtx, element, log)
 		cancelAction()
 
-		// P1 FIX: Handle stale elements. executeInteraction now reliably returns ErrStaleElement.
+		// P1/R: Handle stale elements, including navigation detection.
 		if errors.Is(interactionErr, ErrStaleElement) {
-			log.Warn("Element became stale during interaction attempt (likely due to navigation by a previous element). Stopping interactions for this depth.", zap.String("desc", element.Description))
-			// If the element we tried to interact with is stale, the rest of the list is also likely stale.
-			// We must stop this loop and rely on the next recursion (if depth allows) to rediscover elements.
-			// We treat this as a successful depth transition (interactionsThisDepth might be > 0 from previous elements).
+			if success {
+				// Interaction succeeded but caused navigation/staleness (e.g. clicking a link).
+				log.Debug("Interaction successful but induced navigation/staleness. Stopping interactions for this depth.", zap.String("desc", element.Description))
+				interactionsThisDepth++
+				// CRITICAL: Mark as interacted even if it navigated, to prevent infinite loops if the link exists on the next page.
+				interactedElements[element.Fingerprint] = true
+			} else {
+				// Element was stale before interaction completed (likely due to previous navigation).
+				log.Warn("Element became stale during interaction attempt. Stopping interactions for this depth.", zap.String("desc", element.Description))
+			}
+			// In either stale case, the remaining elements in the list are likely stale. Break the loop.
 			break
 		}
 
-		interactedElements[element.Fingerprint] = true // Mark interacted
-
+		// Handle other (non-stale) errors
 		if interactionErr != nil {
 			if actionCtx.Err() == nil && ctx.Err() == nil {
 				log.Warn("Interaction failed.", zap.String("desc", element.Description), zap.Error(interactionErr))
@@ -241,12 +281,16 @@ func (i *Interactor) interactDepth(
 				log.Debug("Interaction cancelled.", zap.String("desc", element.Description), zap.Error(interactionErr)) // Log the actual error (likely context error)
 				return interactionErr                                                                                   // Propagate cancellation
 			}
-			continue // Try next element
+			interactedElements[element.Fingerprint] = true // Mark as attempted even if failed (non-stale error)
+			continue                                       // Try next element
 		}
 
+		// Handle successful, non-navigational interaction
 		if success {
-			log.Debug("Interaction successful.", zap.String("desc", element.Description))
+			log.Debug("Interaction successful (non-navigational).", zap.String("desc", element.Description))
 			interactionsThisDepth++
+			interactedElements[element.Fingerprint] = true
+
 			// Pause after successful interaction
 			delay := time.Duration(config.InteractionDelayMs) * time.Millisecond
 			if delay <= 0 {
@@ -254,7 +298,7 @@ func (i *Interactor) interactDepth(
 			}
 			if i.humanoid != nil {
 				pauseCtx, cancelPause := context.WithTimeout(ctx, delay+5*time.Second)
-				// FIX: Pass context and handle error
+				// : Pass context and handle error
 				err := i.humanoid.Hesitate(pauseCtx, delay)
 				cancelPause()
 				if err != nil {
@@ -271,7 +315,10 @@ func (i *Interactor) interactDepth(
 				}
 			}
 		} else {
+			// Interaction yielded no action (e.g. empty select box)
 			log.Debug("Interaction yielded no action.", zap.String("desc", element.Description))
+			// Mark as interacted to avoid checking it again.
+			interactedElements[element.Fingerprint] = true
 		}
 	} // End element loop
 
@@ -282,7 +329,7 @@ func (i *Interactor) interactDepth(
 			return err
 		}
 
-		// FIX: Increased timeout from 90s to 180s.
+		// : Increased timeout from 90s to 180s.
 		stabilizeCtx, cancelStabilize := context.WithTimeout(ctx, 180*time.Second)
 		err := i.stabilizeFn(stabilizeCtx)
 		cancelStabilize()
@@ -302,7 +349,7 @@ func (i *Interactor) interactDepth(
 		if waitDuration > 0 {
 			if i.humanoid != nil {
 				waitCtx, cancelWait := context.WithTimeout(ctx, waitDuration+5*time.Second)
-				// FIX: Pass context and handle error
+				// : Pass context and handle error
 				err := i.humanoid.Hesitate(waitCtx, waitDuration)
 				cancelWait()
 				if err != nil {
@@ -330,7 +377,8 @@ func (i *Interactor) interactDepth(
 
 // -- Element Discovery Logic --
 
-// P0 FIX: discoveryScript is the JavaScript code used to discover, snapshot, and tag elements atomically.
+//	discoveryScript is the JavaScript code used to discover, snapshot, and tag elements atomically.
+//
 // This approach avoids data races by performing data extraction within the browser's main thread
 // rather than relying on the volatile Go *cdp.Node cache.
 const discoveryScript = `(function(selectors) {
@@ -431,7 +479,7 @@ const discoveryScript = `(function(selectors) {
     return results;
 })(%s)` // Selector is injected here via fmt.Sprintf and jsonEncode
 
-// P0 FIX: Define the structure to capture the result from the discovery JS script.
+// Define the structure to capture the result from the discovery JS script.
 type discoveryResult struct {
 	Selector string          `json:"selector"`
 	Snapshot elementSnapshot `json:"snapshot"`
@@ -440,7 +488,7 @@ type discoveryResult struct {
 func (i *Interactor) discoverElements(ctx context.Context, interacted map[string]bool) ([]interactiveElement, error) {
 	selectors := "a[href], button:not([disabled]), [onclick], [role=button], [role=link], input:not([disabled]):not([readonly]):not([type=hidden]), textarea:not([disabled]):not([readonly]), select:not([disabled]):not([readonly]), summary, details, [tabindex]"
 
-	// P0 FIX: Replaced racy chromedp.Nodes + Go-side deep copy with atomic JS evaluation.
+	//  Replaced racy chromedp.Nodes + Go-side deep copy with atomic JS evaluation.
 
 	var results []discoveryResult
 
@@ -458,27 +506,27 @@ func (i *Interactor) discoverElements(ctx context.Context, interacted map[string
 		if ctx.Err() != nil {
 			return nil, ctx.Err()
 		}
-		// P0 FIX: Updated error message.
+		//  Updated error message.
 		return nil, fmt.Errorf("failed to execute discovery script: %w", err)
 	}
 
-	// P0 FIX: Process the stable results from JS.
+	//  Process the stable results from JS.
 	return i.filterAndFingerprint(results, interacted), nil
 }
 
-// P0 FIX: Updated signature to accept discoveryResult.
+// Updated signature to accept discoveryResult.
 func (i *Interactor) filterAndFingerprint(results []discoveryResult, interacted map[string]bool) []interactiveElement {
 	newElements := make([]interactiveElement, 0, len(results))
 	seenFingerprints := make(map[string]bool)
 
-	// P0 FIX: Iterate over the stable results.
+	//  Iterate over the stable results.
 	for _, result := range results {
 		// Use the snapshot data.
 		snapshot := result.Snapshot
 		attrs := snapshot.Attributes
 
 		// Explicitly skip disabled/readonly based on function
-		// P0 FIX: Updated isDisabled signature.
+		//  Updated isDisabled signature.
 		if isDisabled(&snapshot, attrs) {
 			continue
 		}
@@ -491,22 +539,22 @@ func (i *Interactor) filterAndFingerprint(results []discoveryResult, interacted 
 			}
 		}
 
-		// P0 FIX: Updated generateNodeFingerprint signature.
+		//  Updated generateNodeFingerprint signature.
 		fingerprint, description := generateNodeFingerprint(&snapshot, attrs)
 		if fingerprint == "" {
-			// P0 FIX: Updated logging field.
+			//  Updated logging field.
 			i.logger.Debug("Skipping element with empty fingerprint.", zap.String("nodeName", snapshot.NodeName))
 			continue
 		}
 
 		if !interacted[fingerprint] && !seenFingerprints[fingerprint] {
 			newElements = append(newElements, interactiveElement{
-				// P0 FIX: Store snapshot and selector.
+				//  Store snapshot and selector.
 				Snapshot:    snapshot,
 				Selector:    result.Selector,
 				Fingerprint: fingerprint,
 				Description: description,
-				// P0 FIX: Updated isInputElement signature.
+				//  Updated isInputElement signature.
 				IsInput: isInputElement(&snapshot),
 			})
 			seenFingerprints[fingerprint] = true
@@ -523,16 +571,16 @@ func (i *Interactor) executeInteraction(ctx context.Context, element interactive
 		return false, nil
 	}
 
-	// P0 FIX: Use the unique selector generated during discovery.
+	//  Use the unique selector generated during discovery.
 	selector := element.Selector
 	// The attribute name must match the one used in the discoveryScript.
 	attributeName := "data-scalpel-discovery-id"
 
-	// REFACTOR: Use the stored session context (i.sessionCtx) for cleanup.
+	//  Use the stored session context (i.sessionCtx) for cleanup.
 	// We must clean up the attribute set during discovery so the element can be rediscovered later if needed.
 	defer i.cleanupInteractionAttribute(i.sessionCtx, selector, attributeName, log)
 
-	// P0 FIX: The element is already tagged during discovery (dom.SetAttributeValue is no longer needed).
+	//  The element is already tagged during discovery (dom.SetAttributeValue is no longer needed).
 	// We proceed directly to interaction.
 	log.Debug("Targeting element for interaction.", zap.String("selector", selector))
 
@@ -540,13 +588,18 @@ func (i *Interactor) executeInteraction(ctx context.Context, element interactive
 	actionTaken := false
 
 	if element.IsInput {
-		// P0 FIX: Updated NodeName access and handleSelectInteraction call.
+		//  Updated NodeName access and handleSelectInteraction call.
 		if strings.ToUpper(element.Snapshot.NodeName) == "SELECT" {
-			selectedValue, foundOption := i.handleSelectInteraction(ctx, selector) // Pass context and selector
-			if foundOption {
+			// P2 : Updated handleSelectInteraction call to handle the new error return value.
+			selectedValue, foundOption, err := i.handleSelectInteraction(ctx, selector) // Pass context and selector
+			if err != nil {
+				// If option extraction failed (e.g., stale element or unexpected error), return the error.
+				// This ensures ErrStaleElement is propagated correctly.
+				interactionErr = err
+			} else if foundOption {
 				log.Debug("Performing select interaction.", zap.String("selector", selector), zap.String("value", selectedValue))
 
-				// FIX: Use JS evaluation instead of chromedp.SetValue for <select> elements.
+				// : Use JS evaluation instead of chromedp.SetValue for <select> elements.
 				// chromedp.SetValue can be unreliable for <select>.
 
 				// Construct JS snippet to set value and dispatch change event
@@ -569,7 +622,7 @@ func (i *Interactor) executeInteraction(ctx context.Context, element interactive
 
 				if interactionErr == nil && !success {
 					// If JS ran without CDP error but returned false (e.g. element disappeared)
-					// P1 FIX: Treat this specific JS failure as a stale element error.
+					// P1 : Treat this specific JS failure as a stale element error.
 					interactionErr = fmt.Errorf("JS evaluation failed to set value (element likely not found during execution): %w", ErrStaleElement)
 				}
 
@@ -578,31 +631,38 @@ func (i *Interactor) executeInteraction(ctx context.Context, element interactive
 				log.Debug("Skipping select interaction: no valid options found.", zap.String("selector", selector))
 			}
 		} else {
-			// P0 FIX: Updated generateInputPayload call.
+			//  Updated generateInputPayload call.
 			payload := i.generateInputPayload(&element.Snapshot)
 			log.Debug("Performing type interaction.", zap.String("selector", selector), zap.Int("payload_len", len(payload)))
-			// REFACTOR: Use internal helper method which handles humanoid/fallback logic.
+			//  Use internal helper method which handles humanoid/fallback logic.
 			interactionErr = i.typeIntoElement(ctx, selector, payload)
 			actionTaken = true
 		}
 	} else {
 		log.Debug("Performing click interaction.", zap.String("selector", selector))
-		// REFACTOR: Use internal helper method which handles humanoid/fallback logic.
+		//  Use internal helper method which handles humanoid/fallback logic.
 		interactionErr = i.clickElement(ctx, selector)
-		actionTaken = true
+
+		// R: clickElement might return ErrStaleElement proactively if it detected a navigation-inducing click.
+		// We must consider the action taken if the click succeeded (err == nil) OR if it returned ErrStaleElement proactively.
+		if interactionErr == nil || errors.Is(interactionErr, ErrStaleElement) {
+			actionTaken = true
+		}
 	}
 
 	if interactionErr != nil {
 		if ctx.Err() != nil {
-			return false, ctx.Err() // Propagate cancellation
+			// R: Return actionTaken status even on cancellation, though interactDepth primarily uses the error.
+			return actionTaken, ctx.Err() // Propagate cancellation
 		}
 
-		// P1 FIX: The action helpers (clickElement, typeIntoElement) and select handling now wrap stale errors.
+		// P1/R: The action helpers now wrap stale errors or return them proactively (for navigation).
 		// We check if it is ErrStaleElement and return it immediately so interactDepth can handle it gracefully.
 		if errors.Is(interactionErr, ErrStaleElement) {
 			// Log at debug level as this is handled by the caller.
-			log.Debug("Session action failed due to stale element.", zap.String("selector", selector), zap.Error(interactionErr))
-			return false, interactionErr
+			log.Debug("Session action resulted in stale element or navigation.", zap.String("selector", selector), zap.Error(interactionErr))
+			// R: Return the actual actionTaken status along with ErrStaleElement.
+			return actionTaken, interactionErr
 		}
 
 		actionType := "click"
@@ -611,16 +671,17 @@ func (i *Interactor) executeInteraction(ctx context.Context, element interactive
 		}
 		log.Warn("Session action failed (non-stale error).", zap.String("action", actionType), zap.String("selector", selector), zap.Error(interactionErr))
 		// Don't wrap the error here, return the original from session action
-		return false, interactionErr
+		return actionTaken, interactionErr
 	}
 
 	return actionTaken, nil
 }
 
 // cleanupInteractionAttribute removes the temporary attribute.
-// REFACTOR: sessionCtx should be the session context, not the operational context.
+//
+//	sessionCtx should be the session context, not the operational context.
 func (i *Interactor) cleanupInteractionAttribute(sessionCtx context.Context, selector, attributeName string, log *zap.Logger) {
-	// REFACTOR: Use Detach(sessionCtx) to create a context for cleanup.
+	//  Use Detach(sessionCtx) to create a context for cleanup.
 	// This preserves CDP values (required by chromedp) but ensures cleanup runs even if the session is closing (Context Best Practices 3.3).
 	detachedCtx := Detach(sessionCtx)
 
@@ -632,7 +693,7 @@ func (i *Interactor) cleanupInteractionAttribute(sessionCtx context.Context, sel
 		strings.ReplaceAll(selector, `'`, `\'`), // Basic JS escaping
 		attributeName)
 
-	// REFACTOR: Use executor.RunActions(Evaluate(...)) as ActionExecutor doesn't expose ExecuteScript.
+	//  Use executor.RunActions(Evaluate(...)) as ActionExecutor doesn't expose ExecuteScript.
 	var res json.RawMessage // Result not used but needed for Evaluate
 	err := i.executor.RunActions(taskCtx,
 		chromedp.Evaluate(jsCleanup, &res, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
@@ -640,7 +701,7 @@ func (i *Interactor) cleanupInteractionAttribute(sessionCtx context.Context, sel
 		}),
 	)
 
-	// REFACTOR: Improved logging to distinguish between timeout, session closure, and actual error.
+	//  Improved logging to distinguish between timeout, session closure, and actual error.
 	if err != nil {
 		if taskCtx.Err() != nil {
 			log.Debug("Cleanup JS timed out.", zap.String("selector", selector), zap.Error(taskCtx.Err()))
@@ -656,11 +717,14 @@ func (i *Interactor) cleanupInteractionAttribute(sessionCtx context.Context, sel
 	}
 }
 
-// P0 FIX: extractOptionsScript is the JavaScript code used to extract available options from a <select> element.
+// Define the marker string used in JS to indicate element not found.
+const notFoundMarker = "__SCALPEL_ELEMENT_NOT_FOUND__"
+
+// extractOptionsScript is the JavaScript code used to extract available options from a <select> element.
 const extractOptionsScript = `(function(selector) {
         const selectElement = document.querySelector(selector);
         // Return specific string if element not found or not a select, to distinguish from JS error.
-        if (!selectElement) return "__SCALPEL_ELEMENT_NOT_FOUND__";
+        if (!selectElement) return "` + notFoundMarker + `";
 
         // Check tagName in a case-insensitive manner for robustness.
         if (!/^select$/i.test(selectElement.tagName)) return [];
@@ -690,46 +754,102 @@ const extractOptionsScript = `(function(selector) {
         return options;
     })(%s)`
 
-// handleSelectInteraction finds a valid option value. Pass context for Run actions.
-// P0 FIX: Updated signature to use selector instead of *cdp.Node.
-func (i *Interactor) handleSelectInteraction(ctx context.Context, selector string) (selectedValue string, found bool) {
-	var options []string
+// R: checkNavigationInducingScript is JavaScript used to check if an element, immediately after being clicked,
+// is likely to cause navigation (e.g., <a> tag or form submission).
+const checkNavigationInducingScript = `(function(selector) {
+    try {
+        const element = document.querySelector(selector);
+        // If element is null/undefined immediately after click, it might already be detached.
+        if (!element) return 'DETACHED';
 
-	// P0 FIX: Use JS evaluation to extract options atomically, avoiding data races.
+        const tagName = element.tagName.toUpperCase();
+
+        // 1. <a> tags (links)
+        if (tagName === 'A' && element.hasAttribute('href')) {
+            // We assume most <a> tags might navigate or trigger JS navigation.
+            // Checking target=_blank is complex, safer to assume navigation.
+            return 'NAVIGATION';
+        }
+
+        // 2. Submit buttons/inputs within a form
+        if (tagName === 'BUTTON' || tagName === 'INPUT') {
+            // element.type reflects the effective type (e.g., 'submit' for buttons by default in forms)
+            const type = element.type.toUpperCase();
+
+            if (type === 'SUBMIT' || type === 'IMAGE') {
+                // Check if it's associated with a form using element.form property.
+                if (element.form) {
+                     return 'NAVIGATION';
+                }
+                // Submit buttons without forms don't typically cause navigation.
+            }
+        }
+
+        // 3. Other elements (e.g. div with onclick) are harder to detect statically.
+        // We rely on the stabilization function to handle JS-induced navigations for these.
+
+        return 'STANDARD';
+    } catch (e) {
+        console.error("Scalpel navigation check error:", e);
+        return 'ERROR';
+    }
+})(%s)`
+
+// handleSelectInteraction finds a valid option value. Pass context for Run actions.
+//
+//	Updated signature to use selector instead of *cdp.Node.
+//
+// P2 : Updated return signature to include error, addressing the JSON unmarshal bug and improving stale handling.
+func (i *Interactor) handleSelectInteraction(ctx context.Context, selector string) (selectedValue string, found bool, err error) {
+	// P2 : Use json.RawMessage to capture the result flexibly.
+	var rawResult json.RawMessage
+
+	//  Use JS evaluation to extract options atomically, avoiding data races.
 	script := fmt.Sprintf(extractOptionsScript, jsonEncode(selector))
 
 	// Use executor.RunActions to execute the script.
-	err := i.executor.RunActions(ctx,
-		chromedp.Evaluate(script, &options, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+	err = i.executor.RunActions(ctx,
+		chromedp.Evaluate(script, &rawResult, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
 			return p.WithReturnByValue(true).WithAwaitPromise(true).WithSilent(true)
 		}),
 	)
 
 	if err != nil {
-		// Check if the script returned the specific "not found" marker (options will contain just that string)
-		// This handles the case where the element disappeared between discovery and interaction attempt.
-		if len(options) == 1 && options[0] == "__SCALPEL_ELEMENT_NOT_FOUND__" {
-			i.logger.Debug("Select element not found during option extraction (likely stale).", zap.String("selector", selector))
-			// Treat as stale/not found. The caller (executeInteraction) will handle the failure.
-			return "", false
-		}
+		// This handles CDP errors or context cancellation.
+		i.logger.Warn("Failed to execute script for select options (CDP error).", zap.Error(err), zap.String("selector", selector))
+		return "", false, err
+	}
 
-		i.logger.Warn("Failed to execute script for select options.", zap.Error(err), zap.String("selector", selector))
-		return "", false
+	// P2 : Check for the "not found" marker string. It will be JSON-encoded (e.g., "__MARKER__").
+	// We use the constant defined in Go for comparison.
+	if string(rawResult) == `"`+notFoundMarker+`"` {
+		i.logger.Debug("Select element not found during option extraction (stale).", zap.String("selector", selector))
+		// P1 : Return ErrStaleElement so the caller handles it gracefully.
+		return "", false, ErrStaleElement
+	}
+
+	// P2 : Now attempt to unmarshal into the expected slice of strings.
+	var options []string
+	if err := json.Unmarshal(rawResult, &options); err != nil {
+		// This addresses the specific bug: json: cannot unmarshal string into Go value of type []string
+		// This occurs if the JS returns something unexpected that isn't the marker and isn't an array of strings.
+		i.logger.Error("Failed to unmarshal select options result (unexpected format).", zap.Error(err), zap.String("selector", selector), zap.ByteString("raw_result", rawResult))
+		return "", false, fmt.Errorf("failed to unmarshal select options: %w", err)
 	}
 
 	// Logic for selecting an option remains the same
 	if len(options) == 0 {
-		return "", false
+		return "", false, nil
 	}
 	selectedValue = options[i.rng.Intn(len(options))]
-	return selectedValue, true
+	return selectedValue, true, nil
 }
 
 // generateInputPayload creates realistic dummy data.
-// P0 FIX: Updated signature to use elementSnapshot.
+//
+//	Updated signature to use elementSnapshot.
 func (i *Interactor) generateInputPayload(snapshot *elementSnapshot) string {
-	// P0 FIX: Use the attributes from the snapshot.
+	//  Use the attributes from the snapshot.
 	attrs := snapshot.Attributes
 	inputType := strings.ToLower(attrs["type"])
 	inputName := strings.ToLower(attrs["name"])
@@ -762,13 +882,16 @@ func (i *Interactor) generateInputPayload(snapshot *elementSnapshot) string {
 // -- Action Helpers --
 
 // clickElement handles clicking, using humanoid if available, otherwise falling back to CDP actions via the executor.
-// This logic is extracted from the original session.Click implementation.
+// It also includes logic to detect navigation-inducing clicks.
 func (i *Interactor) clickElement(ctx context.Context, selector string) error {
 	// Apply standard timeout for the click operation.
-	opCtx, opCancel := context.WithTimeout(ctx, 30*time.Second)
+	// R: Increased timeout slightly (to 45s) to accommodate the post-click check.
+	opCtx, opCancel := context.WithTimeout(ctx, 45*time.Second)
 	defer opCancel()
 
 	var err error
+
+	// --- 1. Perform the click action ---
 	if i.humanoid != nil {
 		err = i.humanoid.IntelligentClick(opCtx, selector, nil)
 	} else {
@@ -780,12 +903,13 @@ func (i *Interactor) clickElement(ctx context.Context, selector string) error {
 		)
 	}
 
+	// Handle click errors (Timeout, Stale before click, Cancellation, Other)
 	if err != nil {
 		if opCtx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("interactor click timed out for selector '%s': %w", selector, opCtx.Err())
 		}
 
-		// P1 FIX: Check if the error indicates the element is gone (stale).
+		// P1 : Check if the error indicates the element is gone (stale).
 		// This error string originates from cdp_executor.GetElementGeometry (if humanoid) or chromedp actions (if fallback).
 		if strings.Contains(err.Error(), "not found or not visible") {
 			return fmt.Errorf("interactor click failed for selector '%s': %w", selector, ErrStaleElement)
@@ -794,16 +918,61 @@ func (i *Interactor) clickElement(ctx context.Context, selector string) error {
 		// If ctx is cancelled, RunActions/humanoid should return that error.
 		return fmt.Errorf("interactor click failed for selector '%s': %w", selector, err)
 	}
-	return nil
+
+	// --- 2. Post-click navigation check ---
+	// R: If the click was successful, immediately check if the element is navigation-inducing (<a>, submit button).
+
+	// Use a very short timeout for this check, as it should be immediate.
+	checkCtx, checkCancel := context.WithTimeout(opCtx, 2*time.Second)
+	defer checkCancel()
+
+	script := fmt.Sprintf(checkNavigationInducingScript, jsonEncode(selector))
+	var checkResult string
+
+	// Execute the check script.
+	checkErr := i.executor.RunActions(checkCtx,
+		chromedp.Evaluate(script, &checkResult, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+			return p.WithReturnByValue(true).WithAwaitPromise(true).WithSilent(true)
+		}),
+	)
+
+	if checkErr != nil {
+		// If the check fails (e.g., CDP error, timeout, or context cancelled/destroyed during check),
+		// it strongly suggests the page context is invalid due to navigation starting.
+		i.logger.Debug("Post-click navigation check failed. Assuming navigation started.", zap.Error(checkErr), zap.String("selector", selector))
+		// We must return ErrStaleElement to force the interactor loop to break and stabilize.
+		return ErrStaleElement
+	}
+
+	// Analyze the result from the JS check.
+	switch checkResult {
+	case "NAVIGATION":
+		i.logger.Debug("Navigation-inducing element detected (link or submit button). Returning ErrStaleElement.", zap.String("selector", selector))
+		// Immediately return ErrStaleElement. This forces the interactor loop to break and stabilize.
+		return ErrStaleElement
+	case "DETACHED":
+		// If the element is already detached, the page state is unstable.
+		i.logger.Debug("Element detached immediately after click. Returning ErrStaleElement.", zap.String("selector", selector))
+		return ErrStaleElement
+	case "STANDARD", "ERROR":
+		// Standard interaction or error during check (but CDP succeeded).
+		// We proceed normally and rely on stabilization later if needed.
+		return nil
+	default:
+		i.logger.Warn("Unknown result from navigation check script.", zap.String("result", checkResult), zap.String("selector", selector))
+		return nil
+	}
 }
 
 // typeIntoElement handles typing, using humanoid if available, otherwise falling back to CDP actions via the executor.
 // This logic is extracted from the original session.Type implementation.
 func (i *Interactor) typeIntoElement(ctx context.Context, selector string, text string) error {
 	// Calculate dynamic timeout based on text length.
-	timeout := 15*time.Second + time.Duration(float64(len(text))/5.0)*time.Second
-	if timeout < 15*time.Second {
-		timeout = 15 * time.Second
+	// : Increased base timeout (from 15s) to accommodate overhead during preparation (clear/focus) under load/race detection.
+	baseTimeout := 45 * time.Second
+	timeout := baseTimeout + time.Duration(float64(len(text))/5.0)*time.Second
+	if timeout < baseTimeout {
+		timeout = baseTimeout
 	} else if timeout > 3*time.Minute {
 		timeout = 3 * time.Minute
 	}
@@ -814,7 +983,7 @@ func (i *Interactor) typeIntoElement(ctx context.Context, selector string, text 
 	// Strategy: Clear field before typing, whether humanoid or fallback.
 	// This ensures idempotency and mirrors the logic in session.Type.
 
-	// FIX: Use JS evaluation instead of chromedp.SetValue/Clear for robust clearing.
+	// : Use JS evaluation instead of chromedp.SetValue/Clear for robust clearing.
 	// SetValue can fail with "could not set value on node X" if the element is transiently non-interactable.
 	jsClear := fmt.Sprintf(`(function(selector) {
 		const el = document.querySelector(selector);
@@ -856,7 +1025,7 @@ func (i *Interactor) typeIntoElement(ctx context.Context, selector string, text 
 		if opCtx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("interactor preparation (clear) timed out (%v) for selector '%s': %w", timeout, selector, opCtx.Err())
 		}
-		// P1 FIX: If Clear fails because the element is stale, we identify it here.
+		// P1 : If Clear fails because the element is stale, we identify it here.
 		if strings.Contains(err.Error(), "not found or not visible") {
 			return fmt.Errorf("interactor preparation (clear) failed for selector '%s': %w", selector, ErrStaleElement)
 		}
@@ -866,7 +1035,7 @@ func (i *Interactor) typeIntoElement(ctx context.Context, selector string, text 
 	// Check if JS evaluation succeeded (err == nil) but returned false
 	if !clearSuccess {
 		// If WaitVisible passed but JS failed to find/clear the element, it's likely stale or non-interactable.
-		// P1 FIX: We must classify this as ErrStaleElement so the interactor loop handles it gracefully.
+		// P1 : We must classify this as ErrStaleElement so the interactor loop handles it gracefully.
 		return fmt.Errorf("interactor preparation (clear) failed for selector '%s': JS evaluation indicated failure: %w", selector, ErrStaleElement)
 	}
 
@@ -885,7 +1054,7 @@ func (i *Interactor) typeIntoElement(ctx context.Context, selector string, text 
 		if opCtx.Err() == context.DeadlineExceeded {
 			return fmt.Errorf("interactor type timed out (%v) for selector '%s': %w", timeout, selector, opCtx.Err())
 		}
-		// P1 FIX: Check if the error indicates the element is gone (stale) during typing.
+		// P1 : Check if the error indicates the element is gone (stale) during typing.
 		if strings.Contains(err.Error(), "not found or not visible") {
 			return fmt.Errorf("interactor type failed for selector '%s': %w", selector, ErrStaleElement)
 		}
@@ -900,7 +1069,7 @@ var hasherPool = sync.Pool{
 	New: func() interface{} { return fnv.New64a() },
 }
 
-// P0 FIX: Updated signature to use elementSnapshot.
+// Updated signature to use elementSnapshot.
 func generateNodeFingerprint(snapshot *elementSnapshot, attrs map[string]string) (string, string) {
 	if snapshot == nil {
 		return "", ""
@@ -933,7 +1102,7 @@ func generateNodeFingerprint(snapshot *elementSnapshot, attrs map[string]string)
 		}
 	}
 
-	// P0 FIX: Use the text content from the snapshot (already truncated in JS).
+	//  Use the text content from the snapshot (already truncated in JS).
 	textContent := snapshot.TextContent
 	hasText := textContent != ""
 	if hasText {
@@ -959,7 +1128,7 @@ func generateNodeFingerprint(snapshot *elementSnapshot, attrs map[string]string)
 	return fingerprint, description
 }
 
-// P0 FIX: Updated signature to use elementSnapshot.
+// Updated signature to use elementSnapshot.
 func isDisabled(snapshot *elementSnapshot, attrs map[string]string) bool {
 	if snapshot == nil {
 		return true
@@ -970,7 +1139,7 @@ func isDisabled(snapshot *elementSnapshot, attrs map[string]string) bool {
 	if ariaDisabled, ok := attrs["aria-disabled"]; ok && strings.ToLower(ariaDisabled) == "true" {
 		return true
 	}
-	// P0 FIX: Updated isInputElement call.
+	//  Updated isInputElement call.
 	if isInputElement(snapshot) {
 		if _, readonly := attrs["readonly"]; readonly {
 			return true
@@ -979,18 +1148,19 @@ func isDisabled(snapshot *elementSnapshot, attrs map[string]string) bool {
 	return false
 }
 
-// P0 FIX: Updated signature to use elementSnapshot.
+// Updated signature to use elementSnapshot.
 func isInputElement(snapshot *elementSnapshot) bool {
 	if snapshot == nil {
 		return false
 	}
 	name := strings.ToUpper(snapshot.NodeName)
-	// P0 FIX: Use attributes from the snapshot.
+	//  Use attributes from the snapshot.
 	attrs := snapshot.Attributes
 
 	if name == "INPUT" {
 		inputType := strings.ToLower(attrs["type"])
 		switch inputType {
+		// R1: Ensure submit/button types are excluded, as they are handled by click logic/prioritization.
 		case "hidden", "submit", "button", "reset", "image":
 			return false
 		default:
@@ -1006,16 +1176,37 @@ func isInputElement(snapshot *elementSnapshot) bool {
 	return false
 }
 
-// P0 FIX: Removed attributeMap (no longer needed as elementSnapshot contains the map).
-// P0 FIX: Removed getNodeText and truncateBytes (logic moved to JS).
-
-// P0 FIX: jsonEncode is a helper to safely encode a value (especially strings) for JS injection.
-// (Duplicated from cdp_executor.go as required by interactor JS calls).
-func jsonEncode(v interface{}) string {
-	b, err := json.Marshal(v)
-	if err != nil {
-		// Fallback for safety
-		return `""`
+// R1: isSubmitElement checks if the snapshot represents a form submission element (robustly).
+func isSubmitElement(snapshot *elementSnapshot) bool {
+	if snapshot == nil {
+		return false
 	}
-	return string(b)
+	name := strings.ToUpper(snapshot.NodeName)
+	attrs := snapshot.Attributes
+
+	// 1. INPUT elements (submit or image types)
+	if name == "INPUT" {
+		inputType := strings.ToLower(attrs["type"])
+		if inputType == "submit" || inputType == "image" {
+			return true
+		}
+		return false
+	}
+
+	// 2. BUTTON elements
+	if name == "BUTTON" {
+		// HTML Spec: A button's type defaults to "submit" if the attribute is missing or invalid.
+		buttonType, exists := attrs["type"]
+		normalizedType := strings.ToLower(buttonType)
+
+		// Explicitly NOT submit
+		if exists && (normalizedType == "button" || normalizedType == "reset" || normalizedType == "menu") {
+			return false
+		}
+
+		// Explicitly submit OR default behavior (missing/invalid type).
+		// We treat defaults as potentially submissive to prioritize filling inputs first.
+		return true
+	}
+	return false
 }

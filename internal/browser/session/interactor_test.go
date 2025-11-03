@@ -12,6 +12,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/chromedp/cdproto/runtime" // R: Added import for runtime.EvaluateParams
 	"github.com/chromedp/chromedp"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -19,8 +20,6 @@ import (
 )
 
 // Increased timeout for stability.
-// FIX: Increased timeout further (from 120s) for stability under load/race conditions (TestInteractor/* Failures).
-// FIX: Increased timeout further (from 300s) to accommodate overhead under race detection.
 const interactorTestTimeout = 600 * time.Second
 
 func TestInteractor(t *testing.T) {
@@ -29,6 +28,7 @@ func TestInteractor(t *testing.T) {
 		fixture := newTestFixture(t)
 		session := fixture.Session
 
+		// The channel is buffered, which is crucial for the fix.
 		submissionChan := make(chan url.Values, 1)
 
 		server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -41,10 +41,20 @@ func TestInteractor(t *testing.T) {
 					copy(newVal, v)
 					copiedForm[k] = newVal
 				}
+
+				// FIX: Removed the 'default' case in the select block.
+				// The race condition occurred because the test goroutine (T) was often still busy
+				// inside session.Interact() (waiting for stabilization) when the server handler (S)
+				// tried to send the form data. The non-blocking send (due to 'default') would fail,
+				// the data would be dropped, and the test would later hang waiting for data that never arrives.
+				// By removing 'default', we ensure the data is sent. Since the channel is buffered,
+				// the send succeeds immediately, allowing the handler to respond and stabilization to complete.
 				select {
 				case submissionChan <- copiedForm:
-				default:
-					t.Log("Form submission received but channel was full or closed.")
+					// Data sent successfully (into the buffer)
+					// Removed the 'default:' case that logged and dropped the data.
+					// default:
+					// 	t.Log("Form submission received but channel was full or closed.")
 				}
 				fmt.Fprintln(w, `<html><body>Form processed</body></html>`)
 				return
@@ -82,14 +92,18 @@ func TestInteractor(t *testing.T) {
 		config := schemas.InteractionConfig{
 			MaxDepth:                2,
 			MaxInteractionsPerDepth: 15, // Increased limit to ensure all fields are filled
-			InteractionDelayMs:      50,
-			PostInteractionWaitMs:   200,
+			// R7: Increased InteractionDelayMs (from 50ms). 50ms is insufficient for the browser
+			// (under -race detector load) to process input/change events before the next interaction starts.
+			InteractionDelayMs:    250,
+			PostInteractionWaitMs: 200,
 		}
 
+		// R1: This test now relies on the interactor prioritizing inputs over the submit button.
 		err = session.Interact(ctx, config)
-		// P1 FIX: Use assert.NoError instead of require.NoError.
-		// Stale elements during interaction are expected behavior (handled gracefully), not test failures.
-		assert.NoError(t, err, "Interaction phase failed")
+		// If Interact fails (e.g., due to context cancellation), assert.NoError logs the error but allows the test to continue.
+		// The test then hangs in the select block waiting for a submission that never arrives, until the global test timeout (10m).
+		// We must use require.NoError to fail the test immediately.
+		require.NoError(t, err, "Interaction phase failed")
 
 		var formData url.Values
 		select {
@@ -100,6 +114,7 @@ func TestInteractor(t *testing.T) {
 		}
 
 		// Verify that the interactor filled the form with expected data patterns.
+		// R1: These assertions confirm that the prioritization logic worked (all fields filled before submit).
 		assert.Regexp(t, regexp.MustCompile(`^Test User \d+$`), formData.Get("username"))
 		assert.Regexp(t, regexp.MustCompile(`^ScalpelPass\d+!$`), formData.Get("password"))
 		assert.Regexp(t, regexp.MustCompile(`^testuser\d+@example.com$`), formData.Get("email_addr"))
@@ -150,22 +165,30 @@ func TestInteractor(t *testing.T) {
 		config := schemas.InteractionConfig{
 			MaxDepth:                3,
 			MaxInteractionsPerDepth: 2,
-			InteractionDelayMs:      50,
-			PostInteractionWaitMs:   250,
+			// R7: Increased InteractionDelayMs (from 50ms) for stability under -race detector.
+			InteractionDelayMs:    250,
+			PostInteractionWaitMs: 250,
 		}
 
 		err = session.Interact(ctx, config)
-		// P1 FIX: Use assert.NoError instead of require.NoError.
-		assert.NoError(t, err)
+		// Use require.NoError to ensure fail-fast behavior if interaction fails.
+		require.NoError(t, err)
 
 		// Use Eventually to handle the async nature of the interaction.
 		assert.Eventually(t, func() bool {
 			var finalStatus string
+			// R: Replaced chromedp.Text with JS evaluation (Evaluate) to fetch innerText robustly.
+			// chromedp.Text can sometimes race with DOM updates or stabilization logic.
+			script := `document.querySelector('#status')?.innerText || ''`
+
 			// We must use the session's context for the actual chromedp.Run command.
-			// The short-lived context approach used previously was unnecessary complexity.
-			err := chromedp.Run(session.GetContext(), chromedp.Text("#status", &finalStatus, chromedp.ByQuery))
+			err := chromedp.Run(session.GetContext(), chromedp.Evaluate(script, &finalStatus, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+				return p.WithReturnByValue(true).WithSilent(true)
+			}))
+			// Original: err := chromedp.Run(session.GetContext(), chromedp.Text("#status", &finalStatus, chromedp.ByQuery))
 			return err == nil && finalStatus == "Dynamic Success"
-		}, 10*time.Second, 100*time.Millisecond, "Interactor failed to interact with dynamic content")
+			// R2: Increased timeout from 10s to 30s to accommodate slowdown under race detector.
+		}, 30*time.Second, 100*time.Millisecond, "Interactor failed to interact with dynamic content")
 	})
 
 	t.Run("DepthLimiting", func(t *testing.T) {
@@ -209,48 +232,55 @@ func TestInteractor(t *testing.T) {
 		config := schemas.InteractionConfig{
 			MaxDepth:                2,
 			MaxInteractionsPerDepth: 1,
-			InteractionDelayMs:      50,
-			PostInteractionWaitMs:   100,
+			// R7: Increased InteractionDelayMs (from 50ms) for stability under -race detector.
+			InteractionDelayMs:    250,
+			PostInteractionWaitMs: 100,
 		}
 
 		err = session.Interact(ctx, config)
-		// P1 FIX: Use assert.NoError instead of require.NoError.
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
 		// Check the final status
 		assert.Eventually(t, func() bool {
 			var finalStatus string
-			err := chromedp.Run(session.GetContext(), chromedp.Text("#status", &finalStatus, chromedp.ByQuery))
+
+			// R: Replaced chromedp.Text with JS evaluation (Evaluate) for robustness.
+			script := `document.querySelector('#status')?.innerText || ''`
+			err := chromedp.Run(session.GetContext(), chromedp.Evaluate(script, &finalStatus, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+				return p.WithReturnByValue(true).WithSilent(true)
+			}))
+
+			// Original: err := chromedp.Run(session.GetContext(), chromedp.Text("#status", &finalStatus, chromedp.ByQuery))
 			// It should reach Depth 2 (interaction at depth 0 reveals L1, interaction at depth 1 reveals L2).
 			// When it enters interactDepth(depth=2), it stops because depth >= MaxDepth.
 			return err == nil && finalStatus == "Depth 2"
-		}, 10*time.Second, 100*time.Millisecond, "Interactor did not respect MaxDepth limit")
+			// R2: Increased timeout from 10s to 30s for stability.
+		}, 30*time.Second, 100*time.Millisecond, "Interactor did not respect MaxDepth limit")
 	})
 
 	t.Run("InteractionLimitingPerDepth", func(t *testing.T) {
 		// Setup for MaxInteractionsPerDepth test
 		interactionCount := 0
 		var mu sync.Mutex
-		// FIX: Use a WaitGroup for synchronization instead of sleep.
 		const expectedInteractions = 2
-		var wg sync.WaitGroup
-		wg.Add(expectedInteractions)
+		// R3: Removed WaitGroup as it causes race conditions with async browser requests.
+		// var wg sync.WaitGroup
+		// wg.Add(expectedInteractions)
 
 		// Create a server instance specifically for this test case to track interactions
 		observableServer := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.URL.Path == "/interact" {
 				mu.Lock()
 				interactionCount++
-				currentCount := interactionCount
+				// currentCount := interactionCount // R3: Unused now
 				mu.Unlock()
-				// P2 FIX: Removed erroneous second mu.Unlock() which caused panics in the original code.
 
-				// P2 FIX: Reliably signal WaitGroup.
+				// R3: Removed WaitGroup signalling.
 				// Signal WaitGroup only up to the expected count.
-				if currentCount <= expectedInteractions {
-					// By using defer, we ensure wg.Done() is called reliably after the response is written/handler exits.
-					defer wg.Done()
-				}
+				// if currentCount <= expectedInteractions {
+				// 	// By using defer, we ensure wg.Done() is called reliably after the response is written/handler exits.
+				// 	defer wg.Done()
+				// }
 
 				w.WriteHeader(http.StatusOK)
 				fmt.Fprintln(w, "Interacted")
@@ -279,32 +309,29 @@ func TestInteractor(t *testing.T) {
 		config := schemas.InteractionConfig{
 			MaxDepth:                1,                    // Only interact at depth 0
 			MaxInteractionsPerDepth: expectedInteractions, // Limit interactions
-			InteractionDelayMs:      50,
-			PostInteractionWaitMs:   100,
+			// R7: Increased InteractionDelayMs (from 50ms). 50ms was too short for the browser
+			// (under -race load) to process the onclick event and dispatch the async fetch request
+			// before the next interaction started.
+			InteractionDelayMs:    250,
+			PostInteractionWaitMs: 100,
 		}
 
 		err = session.Interact(ctx, config)
-		// P1 FIX: Use assert.NoError instead of require.NoError.
-		assert.NoError(t, err)
+		require.NoError(t, err)
 
-		// FIX: Wait for the WaitGroup instead of sleeping.
-		// Use a context with timeout for waiting on the WaitGroup.
-		waitCtx, waitCancel := context.WithTimeout(ctx, 10*time.Second)
-		defer waitCancel()
+		// R3: Replaced WaitGroup waiting logic with assert.Eventually.
+		// This allows time for the asynchronous fetch() requests triggered by the clicks
+		// to reach the server and update the interactionCount, fixing the test race condition.
 
-		done := make(chan struct{})
-		go func() {
-			wg.Wait()
-			close(done)
-		}()
+		assert.Eventually(t, func() bool {
+			mu.Lock()
+			count := interactionCount
+			mu.Unlock()
+			// We expect exactly MaxInteractionsPerDepth interactions at depth 0, as the interactor loop breaks immediately after reaching the limit.
+			return count == expectedInteractions
+		}, 10*time.Second, 100*time.Millisecond, "Timed out waiting for server to process interactions")
 
-		select {
-		case <-done:
-			// All expected interactions processed by the server.
-		case <-waitCtx.Done():
-			t.Fatal("Timed out waiting for server to process interactions")
-		}
-
+		// R3: Final assertion (redundant with Eventually but kept for clarity)
 		mu.Lock()
 		count := interactionCount
 		mu.Unlock()
@@ -366,7 +393,7 @@ func TestInteractor(t *testing.T) {
 
 // TestInteractorHelpers covers the helper functions in interactor.go (fingerprinting, attribute maps, etc.)
 func TestInteractorHelpers(t *testing.T) {
-	// P0 FIX: Helper functions (isDisabled, isInputElement) were updated
+	//  Helper functions (isDisabled, isInputElement) were updated
 	// to use elementSnapshot instead of *cdp.Node. We test these helpers.
 	// attributeMap and getNodeText were removed as logic moved to JS.
 
@@ -435,5 +462,27 @@ func TestInteractorHelpers(t *testing.T) {
 		snapBody := &elementSnapshot{NodeName: "BODY"}
 		fpBody, _ := generateNodeFingerprint(snapBody, map[string]string{})
 		assert.NotEmpty(t, fpBody)
+	})
+
+	// R1: Added tests for the new isSubmitElement helper.
+	t.Run("isSubmitElement", func(t *testing.T) {
+		// Explicit submit types
+		assert.True(t, isSubmitElement(&elementSnapshot{NodeName: "INPUT", Attributes: map[string]string{"type": "submit"}}))
+		assert.True(t, isSubmitElement(&elementSnapshot{NodeName: "INPUT", Attributes: map[string]string{"type": "image"}}))
+		assert.True(t, isSubmitElement(&elementSnapshot{NodeName: "BUTTON", Attributes: map[string]string{"type": "submit"}}))
+
+		// Default button type (missing type attribute)
+		assert.True(t, isSubmitElement(&elementSnapshot{NodeName: "BUTTON", Attributes: map[string]string{}}), "Button without type should be treated as submit")
+
+		// Invalid button type (defaults to submit)
+		assert.True(t, isSubmitElement(&elementSnapshot{NodeName: "BUTTON", Attributes: map[string]string{"type": "invalid"}}), "Button with invalid type should default to submit")
+
+		// Explicit non-submit types
+		assert.False(t, isSubmitElement(&elementSnapshot{NodeName: "INPUT", Attributes: map[string]string{"type": "text"}}))
+		assert.False(t, isSubmitElement(&elementSnapshot{NodeName: "BUTTON", Attributes: map[string]string{"type": "button"}}))
+		assert.False(t, isSubmitElement(&elementSnapshot{NodeName: "BUTTON", Attributes: map[string]string{"type": "reset"}}))
+		assert.False(t, isSubmitElement(&elementSnapshot{NodeName: "A", Attributes: map[string]string{"href": "#"}})) // Links are not submits
+
+		assert.False(t, isSubmitElement(nil))
 	})
 }

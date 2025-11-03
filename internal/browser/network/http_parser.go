@@ -53,21 +53,28 @@ func (p *HTTPParser) ParsePipelinedResponses(conn io.Reader, expectedTotal int) 
 		}
 
 		// CRITICAL STEP 1: Initialize decompression BEFORE reading the body (Wrap-then-Read strategy).
-		// This wraps the underlying reader (which respects HTTP boundaries like Content-Length/Chunking)
-		// with the decompression stream (e.g., gzip.Reader), utilizing pooling and multi-layer support.
 		if err := DecompressResponse(resp); err != nil {
-			// Log the error but continue. The body will be read as compressed data if initialization fails.
-			// DecompressResponse ensures cleanup internally upon failure.
-			p.logger.Warn("Failed to initialize decompression for pipelined response. Body remains compressed.",
+			// FIX: If DecompressResponse fails, resp.Body might be partially consumed during initialization attempts (e.g., reading headers).
+			// We cannot continue reading the pipeline, as the stream position is lost. We must abort.
+
+			// Log the error and abort the pipeline processing.
+			p.logger.Error("Failed to initialize decompression for pipelined response. Aborting pipeline.",
 				zap.Int("response_index", i),
 				zap.Error(err))
+
+			// Ensure the (potentially partially initialized/wrapped) body is closed.
+			if resp.Body != nil {
+				_ = resp.Body.Close()
+			}
+
+			return responses, fmt.Errorf("failed to initialize decompression for response %d: %w", i, err)
 		}
 
 		// CRITICAL STEP 2: The body MUST be fully read here to advance the bufReader to the start of the next response.
 		// Reading from the (potentially wrapped) resp.Body consumes the correct amount of data from the wire.
 		var bodyBytes []byte
 		if resp.Body != nil {
-			// Read the body (decompressed or compressed).
+			// Read the body (decompressed).
 			bodyBytes, err = io.ReadAll(resp.Body)
 			// Ensure the body is closed. This closes the wrapper(s) and returns pooled readers.
 			resp.Body.Close()

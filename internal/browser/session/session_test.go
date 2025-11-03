@@ -81,8 +81,9 @@ func TestSession(t *testing.T) {
 				}
 			}
 			return hasLog && hasWarn
-			// FIX: Increased timeout from 20s to 45s for stability.
-		}, 45*time.Second, 100*time.Millisecond, "Timed out waiting for console logs to propagate")
+			// R4: Reduced timeout from 45s to 30s. 45s races with the main test timeout (testTimeout=45s),
+			// causing spurious context deadline exceeded errors.
+		}, 30*time.Second, 100*time.Millisecond, "Timed out waiting for console logs to propagate")
 
 		artifacts, err := session.CollectArtifacts(ctx)
 		require.NoError(t, err)
@@ -455,14 +456,21 @@ func TestSession(t *testing.T) {
 		fixture := newTestFixture(t)
 		session := fixture.Session
 
+		// The channel is buffered, which is crucial for the fix.
 		submissionChan := make(chan string, 1)
 
 		server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 			if r.Method == http.MethodPost && r.URL.Path == "/submit" {
 				r.ParseForm()
+				// FIX: Removed the 'default' case in the select block (similar to interactor_test.go fix).
+				// This prevents the race condition where the server handler drops the submission data
+				// if the main test goroutine is not immediately ready to receive (e.g., still waiting
+				// for session.Submit() stabilization). Since the channel is buffered, this send succeeds immediately.
 				select {
 				case submissionChan <- r.Form.Get("data"):
-				default:
+					// Success
+					// Removed the 'default:' case
+					// default:
 				}
 				fmt.Fprintln(w, "<html><body>Processed</body></html>")
 				return
@@ -749,8 +757,8 @@ func TestSession(t *testing.T) {
 				}
 			}
 			return false
-			// FIX: Increased timeout from 20s to 45s for stability.
-		}, 45*time.Second, 100*time.Millisecond, "Timed out waiting for IAST Shim Loaded log ("+expectedLogMessage+")")
+			// R4: Reduced timeout from 45s to 30s to prevent racing the global test timeout.
+		}, 30*time.Second, 100*time.Millisecond, "Timed out waiting for IAST Shim Loaded log ("+expectedLogMessage+")")
 
 		// 2. Trigger the event from JS. The handler (__scalpel_sink_event) is exposed during Initialize.
 		jsTrigger := `

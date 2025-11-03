@@ -5,6 +5,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"strings"
@@ -12,9 +13,9 @@ import (
 	"time"
 
 	"github.com/chromedp/cdproto/cdp"
-	"github.com/chromedp/cdproto/log"
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
+	"github.com/chromedp/cdproto/runtime"
 	"github.com/chromedp/chromedp"
 	"go.uber.org/zap"
 
@@ -33,9 +34,9 @@ const (
 type requestState struct {
 	request   *network.EventRequestWillBeSent
 	responses []*network.EventResponseReceived // Handles redirects
-	// FIX: Ensure consistent terminology (body=response body, postBody=request body).
+	//  Ensure consistent terminology (body=response body, postBody=request body).
 	body                []byte // This is for the RESPONSE body
-	bodyFetchInProgress bool   // FIX: Track ongoing body fetch (TestHarvesterIntegration failure)
+	bodyFetchInProgress bool   //  Track ongoing body fetch (TestHarvesterIntegration failure)
 	postBody            []byte // <-- ADDED: This is for the REQUEST body
 	err                 error
 	finished            bool
@@ -51,7 +52,7 @@ type Harvester struct {
 	logger        *zap.Logger
 	captureBodies bool
 
-	// FIX: Add ActionExecutor to synchronize CDP calls (e.g., fetching bodies) and prevent deadlocks.
+	//  Add ActionExecutor to synchronize CDP calls (e.g., fetching bodies) and prevent deadlocks.
 	executor ActionExecutor
 
 	mu            sync.RWMutex
@@ -68,7 +69,8 @@ type Harvester struct {
 }
 
 // NewHarvester creates a new network harvester instance.
-// FIX: Updated signature to accept ActionExecutor.
+//
+//	Updated signature to accept ActionExecutor.
 func NewHarvester(ctx context.Context, logger *zap.Logger, captureBodies bool, executor ActionExecutor) *Harvester {
 	hCtx, hCancel := context.WithCancel(ctx)
 	if executor == nil {
@@ -145,14 +147,16 @@ func (h *Harvester) listen(ctx context.Context) {
 		case *page.EventLifecycleEvent:
 			h.handlePageLifecycleEvent(ev)
 		// -- Console Events --
-		case *log.EventEntryAdded:
-			h.handleConsoleLog(ev)
+		case *runtime.EventConsoleAPICalled:
+			h.handleConsoleAPICalled(ev)
 		}
 	})
 }
 
 // WaitNetworkIdle blocks until the network has been quiet for a specified duration.
-// FIX: Rewritten logic to correctly implement network idle detection.
+//
+//	Rewritten logic to correctly implement network idle detection.
+//
 // The previous implementation incorrectly reset the timer every tick when idle, causing timeouts.
 func (h *Harvester) WaitNetworkIdle(ctx context.Context, quietPeriod time.Duration) error {
 	h.logger.Debug("Waiting for network to become idle.")
@@ -235,14 +239,14 @@ func (h *Harvester) handleRequestWillBeSent(ev *network.EventRequestWillBeSent) 
 	req.request = ev
 	req.wallTime = ev.WallTime.Time()
 
-	// FIX: Dereference the pointer after a nil check (Potential nil pointer dereference).
+	//  Dereference the pointer after a nil check (Potential nil pointer dereference).
 	if ev.Timestamp != nil {
 		req.monotonicTime = *ev.Timestamp
 	}
 
 	// Check if the request has post data and fetch it
 	if ev.Request.HasPostData && req.postBody == nil {
-		// FIX: Prioritize capturing PostData synchronously if available in the event (TestHarvesterIntegration failure).
+		//  Prioritize capturing PostData synchronously if available in the event (TestHarvesterIntegration failure).
 		// The field is PostDataEntries, not PostData.
 		if len(ev.Request.PostDataEntries) > 0 {
 			var postBody bytes.Buffer
@@ -276,7 +280,7 @@ func (h *Harvester) handleResponseReceived(ev *network.EventResponseReceived) {
 
 	if req, ok := h.requests[ev.RequestID]; ok {
 		req.responses = append(req.responses, ev)
-		// FIX: Attempt to fetch body immediately upon receiving response headers and track progress (TestHarvesterIntegration failure).
+		//  Attempt to fetch body immediately upon receiving response headers and track progress (TestHarvesterIntegration failure).
 		// Waiting for LoadingFinished or relying solely on HasExtraInfo increases the chance the browser garbage collects the body buffer.
 		if h.captureBodies && req.body == nil && !req.isDataURL && !req.bodyFetchInProgress {
 			req.bodyFetchInProgress = true // Mark fetch as started
@@ -345,21 +349,108 @@ func (h *Harvester) handlePageLifecycleEvent(ev *page.EventLifecycleEvent) {
 	}
 }
 
-func (h *Harvester) handleConsoleLog(ev *log.EventEntryAdded) {
+func (h *Harvester) handleConsoleAPICalled(ev *runtime.EventConsoleAPICalled) {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 
+	// Build the log text by intelligently joining all arguments.
+	var textParts []string
+	for _, arg := range ev.Args {
+		// Use the new helper to correctly format the argument
+		// based on its type, subtype, and value.
+		textParts = append(textParts, formatRemoteObject(arg))
+	}
+	logText := strings.Join(textParts, " ")
+
+	var logURL string
+	var logLine int64
+	// Get URL and Line from the stack trace if available
+	if ev.StackTrace != nil && len(ev.StackTrace.CallFrames) > 0 {
+		frame := ev.StackTrace.CallFrames[0]
+		logURL = frame.URL
+		logLine = frame.LineNumber
+	}
+
 	h.consoleLogs = append(h.consoleLogs, schemas.ConsoleLog{
-		Type:      string(ev.Entry.Level),
-		Timestamp: ev.Entry.Timestamp.Time(),
-		Text:      ev.Entry.Text,
-		Source:    string(ev.Entry.Source),
-		URL:       ev.Entry.URL,
-		Line:      ev.Entry.LineNumber,
+		Type:      string(ev.Type), // 'log', 'warn', 'error', etc.
+		Timestamp: ev.Timestamp.Time(),
+		Text:      logText,
+		Source:    "javascript", // 'runtime' domain implies JS source
+		URL:       logURL,
+		Line:      logLine,
 	})
 }
 
 // -- Body Fetching Logic --
+
+// --- START REFACTORED HELPER FUNCTION ---
+
+// formatRemoteObject converts a CDP runtime.RemoteObject into a human readable string.
+// This is far more reliable than just trusting arg.Description, which is
+// often empty for simple types like strings or numbers, leading to logs like "[string]".
+func formatRemoteObject(arg *runtime.RemoteObject) string {
+	if arg == nil {
+		return "[nil]"
+	}
+
+	// Use string literals to match the cdproto version used by chromedp v0.14.2
+	switch arg.Type {
+	case "string":
+		var s string
+		// The value is a json.RawMessage containing a JSON string (e.g., "\"hello\"").
+		// We must unmarshal it to get the raw string content (e.g., "hello").
+		if err := json.Unmarshal(arg.Value, &s); err != nil {
+			// This really shouldn't fail if the type is "string", but safety first.
+			return "[string unmarshal error]"
+		}
+		return s
+
+	case "number", "boolean":
+		// For primitives like 123 or true, the raw JSON value is exactly what we want.
+		return string(arg.Value)
+
+	case "undefined":
+		return "undefined"
+
+	case "object":
+		// Check for null, which is an 'object' type with a 'null' subtype.
+		if arg.Subtype == "null" {
+			return "null"
+		}
+		// For complex objects (arrays, maps, nodes), the description
+		// is a much better summary (e.g., "Array(3)", "Node", "Object")
+		// than dumping the raw value, which could be massive.
+		if arg.Description != "" {
+			return arg.Description
+		}
+		// Fallback if no description.
+		return "[Object]"
+
+	case "function":
+		// Description is usually "function() { ... }" or "async function() { ... }"
+		if arg.Description != "" {
+			return arg.Description
+		}
+		return "[Function]"
+
+	case "symbol", "bigint":
+		// Description is the best we have here, e.g., "Symbol(foo)" or "123n"
+		if arg.Description != "" {
+			return arg.Description
+		}
+		return fmt.Sprintf("[%s]", arg.Type)
+
+	default:
+		// A catch all for anything else.
+		// The description is usually the most useful thing.
+		if arg.Description != "" {
+			return arg.Description
+		}
+		return fmt.Sprintf("[%s]", arg.Type)
+	}
+}
+
+// --- END REFACTORED HELPER FUNCTION ---
 
 // fetchPostBody retrieves the request body (post data) for a given request.
 func (h *Harvester) fetchPostBody(reqID network.RequestID) {
@@ -367,15 +458,15 @@ func (h *Harvester) fetchPostBody(reqID network.RequestID) {
 	go func() {
 		defer h.wg.Done()
 
-		// FIX: Use context.Background() as the parent for the timeout.
+		//  Use context.Background() as the parent for the timeout.
 		// We rely on h.executor.RunBackgroundActions to handle detaching from the session context.
 		// This prevents missing PostData when CollectArtifacts is called quickly.
-		fetchCtx, cancel := context.WithTimeout(context.Background(), postDataFetchTimeout)
+		fetchCtx, cancel := context.WithTimeout(context.Background(), postDataFetchTimeout) // <-- FIX
 		defer cancel()
 
 		var postData string
 		// REFACTOR: Use the timed context for the CDP call.
-		// FIX: Use h.executor.RunBackgroundActions instead of RunActions.
+		//  Use h.executor.RunBackgroundActions instead of RunActions.
 		err := h.executor.RunBackgroundActions(fetchCtx,
 			chromedp.ActionFunc(func(c context.Context) error {
 				var err error
@@ -415,13 +506,13 @@ func (h *Harvester) fetchBody(reqID network.RequestID) {
 	go func() {
 		defer h.wg.Done()
 
-		// FIX: Use context.Background() as the parent for the timeout.
+		//  Use context.Background() as the parent for the timeout.
 		// Rely on RunBackgroundActions for detachment.
-		fetchCtx, cancel := context.WithTimeout(context.Background(), bodyFetchTimeout)
+		fetchCtx, cancel := context.WithTimeout(context.Background(), bodyFetchTimeout) // <-- FIX
 		defer cancel()
 
 		var body []byte
-		// FIX: Use h.executor.RunBackgroundActions.
+		//  Use h.executor.RunBackgroundActions.
 		err := h.executor.RunBackgroundActions(fetchCtx,
 			chromedp.ActionFunc(func(c context.Context) error {
 				var err error
@@ -433,7 +524,7 @@ func (h *Harvester) fetchBody(reqID network.RequestID) {
 		h.mu.Lock()
 		defer h.mu.Unlock()
 		if req, ok := h.requests[reqID]; ok {
-			// FIX: Mark fetch as finished (success or failure)
+			//  Mark fetch as finished (success or failure)
 			req.bodyFetchInProgress = false
 
 			if err != nil {
@@ -491,8 +582,7 @@ func (h *Harvester) generateHAR() *schemas.HAR {
 			Request:  h.buildHARRequest(reqState.request, reqState.postBody),
 			Response: h.buildHARResponse(finalResp, reqState.body),
 			Cache:    struct{}{},
-			// FIX: Access the Timing field via the nested Response struct.
-			Timings: convertCDPTimings(finalResp.Response.Timing),
+			Timings:  ConvertCDPTimings(finalResp.Response.Timing),
 		}
 		har.Log.Entries = append(har.Log.Entries, entry)
 	}
@@ -514,11 +604,11 @@ func (h *Harvester) buildHARRequest(req *network.EventRequestWillBeSent, postBod
 	harReq := schemas.Request{
 		Method:      req.Request.Method,
 		URL:         req.Request.URL,
-		HTTPVersion: "HTTP/1.1", // Often a guess
-		Cookies:     convertCDPCookies(getHeader(req.Request.Headers, "Cookie")),
-		Headers:     convertCDPHeaders(req.Request.Headers),
+		HTTPVersion: "HTTP/1.1", // Often a guess,
+		Cookies:     ConvertCDPCookies(GetHeader(req.Request.Headers, "Cookie")),
+		Headers:     ConvertCDPHeaders(req.Request.Headers),
 		QueryString: qs,
-		HeadersSize: calculateHeaderSize(req.Request.Headers),
+		HeadersSize: CalculateHeaderSize(req.Request.Headers),
 		// --- START FIX ---
 		// Use the length of the postBody we fetched
 		BodySize: int64(len(postBody)),
@@ -527,7 +617,7 @@ func (h *Harvester) buildHARRequest(req *network.EventRequestWillBeSent, postBod
 	// Use the postBody we fetched
 	if len(postBody) > 0 {
 		harReq.PostData = &schemas.PostData{
-			MimeType: getHeader(req.Request.Headers, "Content-Type"),
+			MimeType: GetHeader(req.Request.Headers, "Content-Type"),
 			// Convert the bytes to a string for the HAR
 			Text: string(postBody),
 		}
@@ -546,7 +636,7 @@ func (h *Harvester) buildHARResponse(resp *network.EventResponseReceived, body [
 		MimeType: resp.Response.MimeType,
 	}
 
-	if isTextMime(resp.Response.MimeType) {
+	if IsTextMime(resp.Response.MimeType) {
 		content.Text = string(body)
 	} else if len(body) > 0 {
 		content.Encoding = "base64"
@@ -557,11 +647,11 @@ func (h *Harvester) buildHARResponse(resp *network.EventResponseReceived, body [
 		Status:      int(resp.Response.Status),
 		StatusText:  resp.Response.StatusText,
 		HTTPVersion: resp.Response.Protocol,
-		Cookies:     convertCDPCookies(getHeader(resp.Response.Headers, "Set-Cookie")),
-		Headers:     convertCDPHeaders(resp.Response.Headers),
+		Cookies:     ConvertCDPCookies(GetHeader(resp.Response.Headers, "Set-Cookie")),
+		Headers:     ConvertCDPHeaders(resp.Response.Headers),
 		Content:     content,
-		RedirectURL: getHeader(resp.Response.Headers, "Location"),
-		HeadersSize: calculateHeaderSize(resp.Response.Headers),
+		RedirectURL: GetHeader(resp.Response.Headers, "Location"),
+		HeadersSize: CalculateHeaderSize(resp.Response.Headers),
 		BodySize:    int64(resp.Response.EncodedDataLength),
 		// --- MODIFIED BLOCK (RemoteIPAddressSpace removed) ---
 		// Store the IP address for later analysis.
@@ -573,8 +663,8 @@ func (h *Harvester) buildHARResponse(resp *network.EventResponseReceived, body [
 
 // -- Helpers --
 
-// getHeader performs a case insensitive search for a header and returns its string value.
-func getHeader(headers network.Headers, key string) string {
+// GetHeader performs a case insensitive search for a header and returns its string value.
+func GetHeader(headers network.Headers, key string) string {
 	for h, v := range headers {
 		if strings.EqualFold(h, key) {
 			if s, ok := v.(string); ok {
@@ -585,8 +675,8 @@ func getHeader(headers network.Headers, key string) string {
 	return ""
 }
 
-// convertCDPTimings converts network.ResourceTiming to HAR Timings format.
-func convertCDPTimings(t *network.ResourceTiming) schemas.Timings {
+// ConvertCDPTimings converts network.ResourceTiming to HAR Timings format.
+func ConvertCDPTimings(t *network.ResourceTiming) schemas.Timings {
 	if t == nil {
 		return schemas.Timings{}
 	}
@@ -599,7 +689,7 @@ func convertCDPTimings(t *network.ResourceTiming) schemas.Timings {
 	}
 
 	// Calculate HAR timings based on the CDP structure.
-	// FIX: Check if the phase started (>= 0) before calculating duration.
+	//  Check if the phase started (>= 0) before calculating duration.
 	// If start time is -1 (not available), the duration should be -1.
 	// This resolves the issue where (-1) - (-1) resulted in 0 (Test failure: expected -1, actual 0).
 	var dns float64 = -1
@@ -620,7 +710,7 @@ func convertCDPTimings(t *network.ResourceTiming) schemas.Timings {
 	send := toHARTime(t.SendEnd - t.SendStart)
 
 	// Blocked time approximation.
-	// FIX: The original calculation (t.RequestTime*1000 - t.ProxyEnd) was incorrect.
+	//  The original calculation (t.RequestTime*1000 - t.ProxyEnd) was incorrect.
 	// Blocked time is the time until the first network event (Proxy/DNS/Connect/Send).
 	var firstEventStart float64 = -1.0
 
@@ -658,7 +748,7 @@ func convertCDPTimings(t *network.ResourceTiming) schemas.Timings {
 	}
 
 	// Receive time is complex to calculate perfectly without the total duration event, defaulting to 0.
-	// FIX: Defaulting to 0.0 to match the comment and test expectation (was returning -1). (Test failure: expected 0, actual -1)
+	//  Defaulting to 0.0 to match the comment and test expectation (was returning -1). (Test failure: expected 0, actual -1)
 	receive := 0.0
 	return schemas.Timings{
 		Blocked: blocked,
@@ -671,7 +761,7 @@ func convertCDPTimings(t *network.ResourceTiming) schemas.Timings {
 	}
 }
 
-func isTextMime(mimeType string) bool {
+func IsTextMime(mimeType string) bool {
 	lowerMime := strings.ToLower(mimeType)
 	return strings.HasPrefix(lowerMime, "text/") ||
 		strings.Contains(lowerMime, "javascript") ||
@@ -680,7 +770,7 @@ func isTextMime(mimeType string) bool {
 		strings.Contains(lowerMime, "x-www-form-urlencoded")
 }
 
-func calculateHeaderSize(headers network.Headers) int64 {
+func CalculateHeaderSize(headers network.Headers) int64 {
 	var size int64
 	for k, v := range headers {
 		if val, ok := v.(string); ok {
@@ -691,19 +781,19 @@ func calculateHeaderSize(headers network.Headers) int64 {
 	return size
 }
 
-func convertCDPHeaders(headers network.Headers) []schemas.NVPair {
+func ConvertCDPHeaders(headers network.Headers) []schemas.NVPair {
 	pairs := make([]schemas.NVPair, 0, len(headers))
 	for k, v := range headers {
 		if val, ok := v.(string); ok {
-			// FIX: Changed NNVPair to NVPair
+			//  Changed NNVPair to NVPair
 			pairs = append(pairs, schemas.NVPair{Name: k, Value: val})
 		}
 	}
 	return pairs
 }
 
-// FIX: Updated return type to []schemas.HARCookie to match the HAR schema requirements.
-func convertCDPCookies(cookieHeader string) []schemas.HARCookie {
+// Updated return type to []schemas.HARCookie to match the HAR schema requirements.
+func ConvertCDPCookies(cookieHeader string) []schemas.HARCookie {
 	// A simple parser; a more robust one might be needed for complex cases.
 	if cookieHeader == "" {
 		return []schemas.HARCookie{}

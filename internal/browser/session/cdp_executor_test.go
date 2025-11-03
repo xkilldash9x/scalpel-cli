@@ -184,6 +184,47 @@ func TestCDPExecutor(t *testing.T) {
 		// --- END FIX ---
 	})
 
+	// R9: Test that the *calling* context is respected (no internal 5s timeout).
+	t.Run("DispatchStructuredKey_Timeout", func(t *testing.T) {
+		mockFunc := func(ctx context.Context, actions ...chromedp.Action) error {
+			// Simulate a long-running action
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(10 * time.Second): // Longer than the old 5s internal timeout
+				return errors.New("mock structured key error")
+			}
+		}
+
+		executor := &cdpExecutor{
+			ctx:            masterCtx,
+			logger:         logger,
+			runActionsFunc: mockFunc,
+		}
+
+		data := schemas.KeyEventData{
+			Key:       "Enter",
+			Modifiers: schemas.ModCtrl,
+		}
+
+		// Use a context that won't time out before the mock action (30s)
+		opCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+
+		startTime := time.Now()
+		err := executor.DispatchStructuredKey(opCtx, data)
+		duration := time.Since(startTime)
+
+		require.Error(t, err)
+
+		// FIX: The internal 5s timeout was removed.
+		// The test should now check that the mock's 10s duration completed
+		// and returned its specific error.
+		assert.Contains(t, err.Error(), "mock structured key error")
+		// Check that it actually timed out around 10s (the mock's duration)
+		assert.InDelta(t, float64(10*time.Second), float64(duration), float64(1*time.Second))
+	})
+
 	// Test the internal timeout (10s for geometry)
 	t.Run("GetElementGeometry_Timeout", func(t *testing.T) {
 		mockFunc := func(ctx context.Context, actions ...chromedp.Action) error {

@@ -84,6 +84,31 @@ func getKeyInfo(r rune) KeyInfo {
 	return info
 }
 
+// calculatePhysicalFactor determines the IKD multiplier based on physical effort.
+// It considers hand alternation, finger switching, and same-finger repetition.
+func calculatePhysicalFactor(cfg config.HumanoidConfig, prevKey, currentKey KeyInfo) float64 {
+	// Determine hand usage, handling the spacebar (Hand 2).
+	prevHand := prevKey.Hand
+	currentHand := currentKey.Hand
+
+	// Simple model: if either is spacebar, treat it as the opposite hand of the other key.
+	if prevHand == 2 && currentHand != 2 {
+		prevHand = 1 - currentHand
+	} else if currentHand == 2 && prevHand != 2 {
+		currentHand = 1 - prevHand
+	}
+
+	if prevHand != currentHand {
+		// Hand alternation (faster)
+		return cfg.IKDHandAlternationBonus
+	} else if prevKey.Finger != currentKey.Finger {
+		// Different finger, same hand (neutral speed)
+		return 1.0
+	}
+	// Same finger repetition (slowest)
+	return cfg.IKDSameFingerPenalty
+}
+
 // parseKeyExpression parses a string like "ctrl+shift+a" into KeyEventData.
 func parseKeyExpression(expression string) (schemas.KeyEventData, error) {
 	parts := strings.Split(expression, "+")
@@ -423,29 +448,7 @@ func (h *Humanoid) keyPause(ctx context.Context, meanScale, stdDevScale float64,
 		prevKey := getKeyInfo(runes[index-1])
 		currentKey := getKeyInfo(runes[index])
 
-		physicalFactor := 1.0
-
-		// Determine hand usage, handling the spacebar (Hand 2).
-		prevHand := prevKey.Hand
-		currentHand := currentKey.Hand
-
-		// Simple model: if either is spacebar, treat it as the opposite hand of the other key.
-		if prevHand == 2 && currentHand != 2 {
-			prevHand = 1 - currentHand
-		} else if currentHand == 2 && prevHand != 2 {
-			currentHand = 1 - prevHand
-		}
-
-		if prevHand != currentHand {
-			// Hand alternation (faster)
-			physicalFactor = cfg.IKDHandAlternationBonus
-		} else if prevKey.Finger != currentKey.Finger {
-			// Different finger, same hand (neutral speed)
-			physicalFactor = 1.0
-		} else {
-			// Same finger repetition (slowest)
-			physicalFactor = cfg.IKDSameFingerPenalty
-		}
+		physicalFactor := calculatePhysicalFactor(cfg, prevKey, currentKey)
 
 		// Distance calculation (Euclidean distance on the layout)
 		dist := math.Sqrt(math.Pow(prevKey.Col-currentKey.Col, 2) + math.Pow(float64(prevKey.Row-currentKey.Row), 2))
