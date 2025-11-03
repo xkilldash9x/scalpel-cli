@@ -1,3 +1,4 @@
+// File: internal/config/config_test.go
 package config
 
 import (
@@ -118,13 +119,37 @@ func TestConfigValidation(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "settle_time must be a positive duration")
 	})
+
+	// Add LTM Validation test for completeness
+	t.Run("LTM Validation", func(t *testing.T) {
+		validLTM := LTMConfig{
+			CacheTTLSeconds:             300,
+			CacheJanitorIntervalSeconds: 60,
+		}
+		assert.NoError(t, validLTM.Validate())
+
+		invalidTTL := validLTM
+		invalidTTL.CacheTTLSeconds = 0
+		err := invalidTTL.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "agent.ltm.cache_ttl_seconds must be a positive integer")
+
+		invalidJanitor := validLTM
+		invalidJanitor.CacheJanitorIntervalSeconds = -1
+		err = invalidJanitor.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "agent.ltm.cache_janitor_interval_seconds must be a positive integer")
+	})
 }
 
 // -- Factory Function Tests --
 
 func TestNewConfigFromViper(t *testing.T) {
-	t.Run("Successful Load", func(t *testing.T) {
-		// Renaming this variable to avoid any potential linter confusion or hidden name collisions.
+	t.Run("Successful Load from YAML", func(t *testing.T) {
+		// This test now *only* checks loading from a YAML buffer,
+		// *without* calling NewConfigFromViper, which binds env vars.
+		// This is similar to TestConfigStructureMapping but ensures
+		// the values are what we expect and not from the env.
 		yamlBytes := []byte(`
 database:
   url: "postgres://test:test@localhost/test"
@@ -139,14 +164,23 @@ browser:
 		err := v.ReadConfig(bytes.NewBuffer(yamlBytes))
 		require.NoError(t, err)
 
-		cfg, err := NewConfigFromViper(v)
+		// We unmarshal directly into a Config struct
+		var cfg Config
+		err = v.Unmarshal(&cfg)
 		require.NoError(t, err)
-		require.NotNil(t, cfg)
+
+		// We *don't* call cfg.Validate() here because the YAML is incomplete
+		// and doesn't contain autofix, etc. This test is just for
+		// checking the YAML unmarshal precedence.
 		assert.Equal(t, "postgres://test:test@localhost/test", cfg.Database().URL)
 		assert.Equal(t, 4, cfg.Engine().WorkerConcurrency)
+		// Check a default value was also loaded
+		assert.Equal(t, "info", cfg.Logger().Level)
 	})
 
 	t.Run("Validation Failure", func(t *testing.T) {
+		// This test *does* use NewConfigFromViper to test its
+		// *validation* step.
 		v := viper.New()
 		SetDefaults(v)
 		v.Set("engine.worker_concurrency", 0) // Intentionally invalid
@@ -159,26 +193,48 @@ browser:
 	})
 
 	t.Run("Environment Variable Binding", func(t *testing.T) {
+		// This test confirms that NewConfigFromViper *correctly*
+		// binds and loads from environment variables, *overriding*
+		// values from a config file.
 		v := viper.New()
 		SetDefaults(v)
 
+		// Set values that are required for validation
 		v.Set("autofix.enabled", true)
 		v.Set("autofix.github.repo_owner", "owner")
 		v.Set("autofix.github.repo_name", "repo")
 		v.Set("autofix.github.base_branch", "main")
-		v.Set("database.url", "postgres://localhost/db")
 
+		// --- Simulate loading from a config file ---
+		// Set a "config file" value for database.url
+		// We use a config buffer to simulate a lower-precedence source.
+		yamlConfig := []byte(`
+database:
+  url: "postgres://configfile/db"
+`)
+		v.SetConfigType("yaml")
+		err := v.ReadConfig(bytes.NewBuffer(yamlConfig))
+		require.NoError(t, err, "Failed to read mock config buffer")
+		// ------------------------------------------
+
+		// Set environment variables
 		testToken := "ghp_env_var_token_456"
 		t.Setenv("SCALPEL_AUTOFIX_GH_TOKEN", testToken)
 		testKGPassword := "securepassword123"
 		t.Setenv("SCALPEL_KG_PASSWORD", testKGPassword)
+		testDBURL := "postgres://envvar/db"
+		t.Setenv("SCALPEL_DATABASE_URL", testDBURL)
 
+		// Now call the function that binds them
 		cfg, err := NewConfigFromViper(v)
 		require.NoError(t, err)
 		require.NotNil(t, cfg)
 
+		// Check that env vars were loaded
 		assert.Equal(t, testToken, cfg.Autofix().GitHub.Token)
 		assert.Equal(t, testKGPassword, cfg.Agent().KnowledgeGraph.Postgres.Password)
+		// CRITICAL: Check that the env var *overrode* the value from the config buffer
+		assert.Equal(t, testDBURL, cfg.Database().URL)
 	})
 }
 

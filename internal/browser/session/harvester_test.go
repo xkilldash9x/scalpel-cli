@@ -52,7 +52,7 @@ func TestWaitNetworkIdle(t *testing.T) {
 	harvester.mu.Unlock()
 
 	// Start waiting in a goroutine, as it will block until idle
-	doneChan := make(chan error)
+	doneChan := make(chan error, 1)
 	go func() {
 		doneChan <- harvester.WaitNetworkIdle(ctx, quietPeriod)
 	}()
@@ -207,7 +207,7 @@ func TestHarvesterIntegration(t *testing.T) {
 
 	// 2. Check the response to the POST request (Text body capture)
 	assert.Equal(t, 200, postEntry.Response.Status)
-	assert.True(t, isTextMime(postEntry.Response.Content.MimeType), "Response should be text type")
+	assert.True(t, IsTextMime(postEntry.Response.Content.MimeType), "Response should be text type")
 	// FIX: Update assertion for the HTML wrapped response body.
 	assert.Equal(t, fmt.Sprintf("<html><body>Received %d bytes</body></html>", len(expectedPostBody)), postEntry.Response.Content.Text, "Response Content Text mismatch")
 	assert.Empty(t, postEntry.Response.Content.Encoding, "Encoding should be empty for text response")
@@ -225,32 +225,32 @@ func TestHarvesterIntegration(t *testing.T) {
 
 // TestHarvesterHelpers covers the helper functions in harvester.go.
 func TestHarvesterHelpers(t *testing.T) {
-	t.Run("isTextMime", func(t *testing.T) {
-		assert.True(t, isTextMime("text/html"))
-		assert.True(t, isTextMime("application/json"))
-		assert.True(t, isTextMime("application/javascript; charset=utf-8"))
-		assert.True(t, isTextMime("text/xml"))
-		assert.False(t, isTextMime("image/png"))
-		assert.True(t, isTextMime("application/x-www-form-urlencoded"))
-		assert.False(t, isTextMime("application/octet-stream"))
+	t.Run("IsTextMime", func(t *testing.T) {
+		assert.True(t, IsTextMime("text/html"))
+		assert.True(t, IsTextMime("application/json"))
+		assert.True(t, IsTextMime("application/javascript; charset=utf-8"))
+		assert.True(t, IsTextMime("text/xml"))
+		assert.False(t, IsTextMime("image/png"))
+		assert.True(t, IsTextMime("application/x-www-form-urlencoded"))
+		assert.False(t, IsTextMime("application/octet-stream"))
 	})
 
-	t.Run("getHeader", func(t *testing.T) {
+	t.Run("GetHeader", func(t *testing.T) {
 		headers := network.Headers{
 			"Content-Type":    "text/html",
 			"X-Custom-Header": "Value123",
 		}
-		assert.Equal(t, "text/html", getHeader(headers, "Content-Type"))
-		assert.Equal(t, "text/html", getHeader(headers, "content-type"), "Should be case-insensitive")
-		assert.Equal(t, "", getHeader(headers, "NonExistent"))
+		assert.Equal(t, "text/html", GetHeader(headers, "Content-Type"))
+		assert.Equal(t, "text/html", GetHeader(headers, "content-type"), "Should be case-insensitive")
+		assert.Equal(t, "", GetHeader(headers, "NonExistent"))
 	})
 
-	t.Run("convertCDPHeaders", func(t *testing.T) {
+	t.Run("ConvertCDPHeaders", func(t *testing.T) {
 		headers := network.Headers{
 			"Header1": "Value1",
 			"Header2": "Value2",
 		}
-		pairs := convertCDPHeaders(headers)
+		pairs := ConvertCDPHeaders(headers)
 		require.Len(t, pairs, 2)
 		// Order is not guaranteed
 		found1 := false
@@ -266,31 +266,30 @@ func TestHarvesterHelpers(t *testing.T) {
 		assert.True(t, found1 && found2)
 	})
 
-	t.Run("calculateHeaderSize", func(t *testing.T) {
+	t.Run("CalculateHeaderSize", func(t *testing.T) {
 		headers := network.Headers{
 			"A":            "B",         // A: B\r\n (1+1+4 = 6 bytes)
 			"Content-Type": "text/html", // (12+9+4 = 25 bytes)
 		}
-		size := calculateHeaderSize(headers)
+		size := CalculateHeaderSize(headers)
 		assert.Equal(t, int64(6+25), size)
 	})
 
-	t.Run("convertCDPCookies", func(t *testing.T) {
+	t.Run("ConvertCDPCookies", func(t *testing.T) {
 		cookieHeader := "session=abc; user=test; invalid_format"
-		cookies := convertCDPCookies(cookieHeader)
+		cookies := ConvertCDPCookies(cookieHeader)
 		require.Len(t, cookies, 2)
 
 		assert.Equal(t, "session", cookies[0].Name)
 		assert.Equal(t, "abc", cookies[0].Value)
 		assert.Equal(t, "user", cookies[1].Name)
 		assert.Equal(t, "test", cookies[1].Value)
-
-		assert.Empty(t, convertCDPCookies(""))
+		assert.Empty(t, ConvertCDPCookies(""))
 	})
 
-	t.Run("convertCDPTimings", func(t *testing.T) {
+	t.Run("ConvertCDPTimings", func(t *testing.T) {
 		// Test nil input
-		assert.Equal(t, schemas.Timings{}, convertCDPTimings(nil))
+		assert.Equal(t, schemas.Timings{}, ConvertCDPTimings(nil))
 
 		// Test typical timings
 		timing := &network.ResourceTiming{
@@ -308,7 +307,7 @@ func TestHarvesterHelpers(t *testing.T) {
 			ReceiveHeadersEnd: 60.0, // Wait = 15ms
 		}
 
-		harTimings := convertCDPTimings(timing)
+		harTimings := ConvertCDPTimings(timing)
 
 		assert.Equal(t, 10.0, harTimings.DNS)
 		assert.Equal(t, 20.0, harTimings.Connect)
@@ -330,7 +329,7 @@ func TestHarvesterHelpers(t *testing.T) {
 			ConnectStart: 20.0,
 			ConnectEnd:   10.0, // End before Start
 		}
-		harTimingsNegative := convertCDPTimings(timingNegative)
+		harTimingsNegative := ConvertCDPTimings(timingNegative)
 		assert.Equal(t, -1.0, harTimingsNegative.DNS)
 		assert.Equal(t, -1.0, harTimingsNegative.Connect)
 	})

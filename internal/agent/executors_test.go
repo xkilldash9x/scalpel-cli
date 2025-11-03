@@ -139,7 +139,7 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 		mockGlobalCtx.Adapters[schemas.TaskAnalyzeHeaders] = mockAnalyzer
 
 		analysisAction := Action{Type: ActionAnalyzeHeaders}
-
+		mockSession.On("CollectArtifacts", mock.Anything).Return((*schemas.Artifacts)(nil), nil).Once()
 		// The analysis executor expects the Analyze method to be called.
 		mockAnalyzer.On("Name").Return("MockHeaderAnalyzer")
 		mockAnalyzer.On("Type").Return(core.TypePassive)

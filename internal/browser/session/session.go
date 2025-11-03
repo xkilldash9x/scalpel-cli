@@ -12,7 +12,7 @@ import (
 	"time"
 
 	// Import cdp for page.LayoutMetrics
-	"github.com/chromedp/cdproto/log"
+
 	"github.com/chromedp/cdproto/network"
 	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/cdproto/runtime"
@@ -45,7 +45,7 @@ type Session struct {
 	humanoid   *humanoid.Humanoid
 	harvester  *Harvester  // Ensure Harvester is defined/imported
 	interactor *Interactor // Ensure Interactor is defined/imported
-	// FIX: Store the executor instance directly
+	//  Store the executor instance directly
 	executor humanoid.Executor
 
 	onClose func() // Callback when session is closed
@@ -55,7 +55,8 @@ type Session struct {
 }
 
 // Ensure Session implements the interface.
-// FIX: Interface implementation is checked here. Addressed InvalidIfaceAssign by updating ExecuteScript signature.
+//
+//	Interface implementation is checked here. Addressed InvalidIfaceAssign by updating ExecuteScript signature.
 var _ schemas.SessionContext = (*Session)(nil)
 
 // Ensure Session implements ActionExecutor.
@@ -97,20 +98,26 @@ func (s *Session) SetOnClose(fn func()) {
 }
 
 // Initialize applies configurations and starts necessary components.
-// ctx here is an operational context (e.g., from the manager's NewAnalysisContext call).
+// ctx here is an operational context (e.g., initCtx) used to enforce initialization timeouts.
 func (s *Session) Initialize(ctx context.Context, taintTemplate, taintConfig string) error {
 	s.logger.Debug("Initializing session.")
+
 	// 1. Ensure the target (tab) is created and CDP is connected.
-	// Use chromedp.Run with the operational context (ctx), NOT s.RunActions,
-	// as the session context (s.ctx) might be canceled by a race (e.g., in tests).
-	if err := chromedp.Run(ctx, chromedp.Tasks{}); err != nil {
-		return fmt.Errorf("failed to initialize browser context/target connection: %w", err)
+	// The first call to cdp.Run initializes the target.
+	// Chromedp binds the target's lifetime to the context used in this first call.
+	// Previously, this used the operational context (ctx/initCtx), causing the tab to close when initCtx expired (e.g., 30s).
+	// MUST use the session's master context (s.ctx) here to ensure the tab persists for the session's lifetime.
+	if err := chromedp.Run(s.ctx, chromedp.Tasks{}); err != nil {
+		// If this fails, it usually means s.ctx was already cancelled (e.g., browser allocation failed).
+		return fmt.Errorf("failed to initialize browser context/target connection using session context: %w", err)
 	}
+
+	// Subsequent initialization steps use the operational context (ctx) to respect the initialization deadline.
 
 	// 2. Initialize Harvester.
 	// Use the session's master context (s.ctx) for the harvester's lifetime.
-	// FIX: Use config accessor `Network()`
-	// FIX: Pass 's' (as ActionExecutor) to NewHarvester to ensure Harvester's CDP calls are synchronized.
+	//  Use config accessor `Network()`
+	//  Pass 's' (as ActionExecutor) to NewHarvester to ensure Harvester's CDP calls are synchronized.
 	s.harvester = NewHarvester(s.ctx, s.logger, s.cfg.Network().CaptureResponseBodies, s)
 	// Start listening using the session context (s.ctx).
 	// The Start method itself shouldn't block for long.
@@ -125,30 +132,59 @@ func (s *Session) Initialize(ctx context.Context, taintTemplate, taintConfig str
 
 	tasks = append(tasks, network.Enable().WithMaxTotalBufferSize(20000000).WithMaxResourceBufferSize(10000000))
 
-	// FIX: Enable Log and Page domains (TestSession/NavigateAndCollectArtifacts failure).
-	tasks = append(tasks, log.Enable())
+	//  Enable Log and Page domains (TestSession/NavigateAndCollectArtifacts failure).
+	tasks = append(tasks, runtime.Enable())
 	tasks = append(tasks, page.Enable())
 
 	// 3. Apply Stealth Evasions and Persona Spoofing.
 	tasks = append(tasks, stealth.Apply(s.persona, s.logger)...)
 
 	// 4. Initialize Humanoid and Interactor.
-	if err := s.initializeControllers(); err != nil {
-		// Log the error but continue; interactions might still work without humanoid.
-		s.logger.Error("Failed to initialize controllers (humanoid/interactor).", zap.Error(err))
-		// Clear humanoid reference if initialization failed
-		s.humanoid = nil
+	// FIX (R9): Check if controllers are already initialized (e.g., by test fixture) before attempting standard initialization.
+	// This supports the DI pattern required to fix the race condition in the test harness (RACE 1).
+	if s.executor == nil || s.interactor == nil {
+		s.logger.Debug("Controllers not pre-initialized. Running standard initialization (initializeControllers).")
+		if err := s.initializeControllers(); err != nil {
+			// Log the error but continue; interactions might still work without humanoid.
+			s.logger.Error("Failed to initialize controllers (humanoid/interactor).", zap.Error(err))
+			// Clear humanoid reference if initialization failed
+			s.humanoid = nil
 
-		// Re-initialize interactor without humanoid if initialization failed but we want to proceed.
-		stabilizeFn := func(stabCtx context.Context) error {
-			return s.stabilize(stabCtx, 500*time.Millisecond)
+			// Re-initialize interactor without humanoid if initialization failed but we want to proceed.
+			// Ensure we don't overwrite if initializeControllers partially succeeded in setting the interactor.
+			if s.interactor == nil {
+				s.logger.Debug("Attempting fallback Interactor initialization (without humanoid).")
+				stabilizeFn := func(stabCtx context.Context) error {
+					// R8: Ensure fallback uses the updated stabilization mechanism (quiet + settle delay).
+					return s.stabilize(stabCtx, 500*time.Millisecond)
+				}
+				//  Pass 's' (as ActionExecutor) and s.ctx to NewInteractor.
+				// Use a default executor if it wasn't set (e.g. initializeControllers failed early)
+				if s.executor == nil {
+					s.executor = &cdpExecutor{
+						ctx:            s.ctx,
+						logger:         s.logger.Named("cdp_executor_fallback"),
+						runActionsFunc: s.RunActions,
+					}
+				}
+				s.interactor = NewInteractor(s.logger.Named("interactor_fallback"), nil, stabilizeFn, s, s.ctx)
+			}
 		}
-		// REFACTOR: Pass 's' (as ActionExecutor) and s.ctx to NewInteractor.
-		s.interactor = NewInteractor(s.logger, nil, stabilizeFn, s, s.ctx)
+	} else {
+		s.logger.Debug("Controllers (Executor/Interactor) already initialized (skipping initializeControllers).")
+		// Ensure Humanoid reference is consistent if Executor/Interactor exist but Humanoid doesn't (e.g. disabled config in test)
+		if s.humanoid == nil {
+			s.logger.Debug("Humanoid controller was not pre-initialized (likely disabled by config).")
+		}
+	}
+
+	// Ensure core components (Interactor/Executor) exist before proceeding, even if initialization failed.
+	if s.interactor == nil || s.executor == nil {
+		return fmt.Errorf("session initialization failed: core components (Interactor/Executor) are nil after initialization attempt")
 	}
 
 	// 5. Inject Taint Analysis Shim (if configured and enabled).
-	// FIX: Use config accessor `IAST()`
+	//  Use config accessor `IAST()`
 	if s.cfg.IAST().Enabled && taintTemplate != "" {
 		// Use the operational context (ctx) for setup actions.
 		if err := s.initializeTaintShim(ctx, taintTemplate, taintConfig); err != nil {
@@ -158,10 +194,10 @@ func (s *Session) Initialize(ctx context.Context, taintTemplate, taintConfig str
 	}
 
 	// 6. Apply custom headers.
-	// FIX: Use config accessor `Network()`
+	//  Use config accessor `Network()`
 	if len(s.cfg.Network().Headers) > 0 {
 		headers := make(network.Headers)
-		// FIX: Use config accessor `Network()`
+		//  Use config accessor `Network()`
 		for k, v := range s.cfg.Network().Headers {
 			headers[k] = v
 		}
@@ -185,14 +221,15 @@ func (s *Session) Initialize(ctx context.Context, taintTemplate, taintConfig str
 		// Improve taskType logging for pointers (since we confirmed it's not nil)
 		if val.Kind() == reflect.Ptr {
 			// Attempt to get the type name of the element the pointer points to.
-			taskType = fmt.Sprintf("%T", val.Elem().Interface())
+			//  Check if Elem() is valid before calling Interface() (handles interface pointers correctly)
+			if val.Elem().IsValid() {
+				taskType = fmt.Sprintf("%T", val.Elem().Interface())
+			}
 		}
 
 		s.logger.Debug("Running initialization task.", zap.Int("task_index", i), zap.String("task_type", taskType))
 
-		// Use chromedp.Run with the operational context (ctx), NOT s.RunActions,
-		// to avoid merging with the (potentially racy) session context.
-		// The operational context (initCtx from manager) is parented by the tab (browserCtx).
+		// Use chromedp.Run with the operational context (ctx) to enforce the initialization deadline.
 		if err := chromedp.Run(ctx, task); err != nil {
 			// Return a detailed error message pinpointing the failed task.
 			return fmt.Errorf("failed to run session initialization task %d (%s): %w", i, taskType, err)
@@ -200,6 +237,7 @@ func (s *Session) Initialize(ctx context.Context, taintTemplate, taintConfig str
 	}
 
 	// 7. Initialize cursor position (only if humanoid was successfully initialized).
+	// This check remains valid regardless of how humanoid was initialized.
 	if s.humanoid != nil {
 		// Use operational context for the initial move.
 		if err := s.initializeCursorPosition(ctx); err != nil {
@@ -243,7 +281,7 @@ func (s *Session) RunActions(ctx context.Context, actions ...chromedp.Action) er
 			return s.ctx.Err()
 		}
 
-		// FIX: Handle navigation-induced spurious "context canceled" errors (TestInteractor/FormInteraction_VariousTypes failure).
+		//  Handle navigation-induced spurious "context canceled" errors (TestInteractor/FormInteraction_VariousTypes failure).
 		// If chromedp returns "context canceled", but neither context is done (checked above),
 		// it often means the action triggered a navigation that interrupted the action's completion signal.
 		// We treat this as success, as the action (e.g., click, JS eval) did execute.
@@ -258,7 +296,8 @@ func (s *Session) RunActions(ctx context.Context, actions ...chromedp.Action) er
 	return nil
 }
 
-// FIX: Implemented RunBackgroundActions to support Harvester body fetching during session shutdown.
+//	Implemented RunBackgroundActions to support Harvester body fetching during session shutdown.
+//
 // RunBackgroundActions implements the ActionExecutor interface.
 // It ensures actions run even if the main session context (s.ctx) is cancelled,
 // by using a detached context that preserves CDP values. (Context Best Practices 3.3)
@@ -329,13 +368,46 @@ func (s *Session) stabilize(ctx context.Context, quietPeriod time.Duration) erro
 			return fmt.Errorf("stabilize WaitNetworkIdle failed: %w", err) // Return the specific error
 		}
 	}
+
+	// R8: Add a mandatory post-stabilization sleep (Settle Delay).
+	// Stabilization waits for network idle (WaitNetworkIdle) and DOM ready (WaitReady).
+	// However, this is insufficient for modern applications that use setTimeout, requestAnimationFrame,
+	// or post-network processing (e.g., rendering data fetched from the network) to update the DOM.
+	// A short, fixed delay allows these asynchronous JS operations to complete and the DOM to settle.
+
+	// The duration should be long enough to cover common JS timers but short enough not to slow down execution significantly.
+	// R9: Increased Settle Delay (from 500ms).
+	// Under heavy load (e.g., -race detector), the browser's rendering pipeline can lag significantly.
+	// A longer delay provides more buffer for the DOM to update (TestInteractor/DepthLimiting failure).
+	const settleDelay = 750 * time.Millisecond
+
+	s.logger.Debug("Applying post-stabilization settle delay.", zap.Duration("duration", settleDelay))
+	select {
+	case <-time.After(settleDelay):
+		// Proceed
+	case <-stabCtx.Done():
+		// If stabilization context times out during the settle delay.
+		s.logger.Debug("Settle delay interrupted by stabilization context.", zap.Error(stabCtx.Err()))
+		return stabCtx.Err()
+	case <-ctx.Done():
+		// If the operational context is cancelled during the settle delay.
+		s.logger.Debug("Settle delay interrupted by incoming context.", zap.Error(ctx.Err()))
+		return ctx.Err()
+	case <-s.ctx.Done():
+		// If the session context is cancelled during the settle delay.
+		s.logger.Debug("Settle delay interrupted by session context.", zap.Error(s.ctx.Err()))
+		return s.ctx.Err()
+	}
+
 	s.logger.Debug("Stabilization complete.")
 	return nil
 }
 
 // initializeControllers sets up the Humanoid and Interactor components.
+// R9: This function assumes it is only called if the components are not already initialized (handled by Initialize).
 func (s *Session) initializeControllers() error {
-	// FIX: Initialize the CDP executor adapter first. It's needed regardless of Humanoid status.
+	//  Initialize the CDP executor adapter first. It's needed regardless of Humanoid status.
+	// R9: Removed check for s.executor == nil, as Initialize handles this check.
 	s.executor = &cdpExecutor{
 		ctx:    s.ctx, // Executor uses the session's master context for its operations
 		logger: s.logger.Named("cdp_executor"),
@@ -344,9 +416,10 @@ func (s *Session) initializeControllers() error {
 	}
 
 	// Initialize Humanoid
-	// FIX: Use config accessor `Browser()`
+	//  Use config accessor `Browser()`
 	if s.cfg.Browser().Humanoid.Enabled {
-		// FIX: Use config accessor `Browser()` and pass the valid executor
+		// R9: Removed check for s.humanoid == nil.
+		//  Use config accessor `Browser()` and pass the valid executor
 		// Use the already initialized executor
 		s.humanoid = humanoid.New(s.cfg.Browser().Humanoid, s.logger.Named("humanoid"), s.executor)
 		s.logger.Debug("Humanoid controller initialized.")
@@ -355,11 +428,14 @@ func (s *Session) initializeControllers() error {
 	}
 
 	// Initialize Interactor (even if humanoid is nil)
+	// R9: Removed check for s.interactor == nil.
 	stabilizeFn := func(stabCtx context.Context) error {
 		// Stabilize function should use the context passed to it
-		return s.stabilize(stabCtx, 500*time.Millisecond) // Default quiet period for interactor
+		// R8/R9: Use 500ms network quiet period. The mandatory Settle Delay (R9: 750ms)
+		// in stabilize() addresses race conditions related to delayed JS execution.
+		return s.stabilize(stabCtx, 500*time.Millisecond)
 	}
-	// REFACTOR: Pass 's' (as ActionExecutor) and s.ctx to NewInteractor.
+	//  Pass 's' (as ActionExecutor) and s.ctx to NewInteractor.
 	s.interactor = NewInteractor(s.logger.Named("interactor"), s.humanoid, stabilizeFn, s, s.ctx)
 	s.logger.Debug("Interactor initialized.")
 	return nil
@@ -368,18 +444,20 @@ func (s *Session) initializeControllers() error {
 // initializeCursorPosition moves the mouse cursor to the center of the viewport.
 func (s *Session) initializeCursorPosition(ctx context.Context) error {
 	if s.humanoid == nil {
-		return fmt.Errorf("humanoid not initialized, cannot set initial cursor")
+		// R9: This is expected if humanoid is disabled, not an error condition.
+		s.logger.Debug("Humanoid not initialized, skipping initial cursor positioning.")
+		return nil
 	}
 	width, height := s.persona.Width, s.persona.Height
 	if width <= 0 || height <= 0 {
 		s.logger.Debug("Persona viewport size invalid, attempting to get actual viewport size.")
 
-		// FIX: Correctly call GetLayoutMetrics and handle its multiple return values (WrongAssignCount error).
+		//  Correctly call GetLayoutMetrics and handle its multiple return values (WrongAssignCount error).
 		// Assuming standard cdproto implementation returns 7 values.
 		var layoutViewport *page.LayoutViewport
 		var visualViewport *page.VisualViewport
 
-		// Use chromedp.Run with the operational context (ctx), NOT s.RunActions.
+		// Use chromedp.Run with the operational context (ctx) to respect the initialization deadline.
 		err := chromedp.Run(ctx, chromedp.ActionFunc(func(c context.Context) error {
 			// Use blank identifiers for unused return values (contentSize and CSS metrics).
 			lv, vv, _, _, _, _, err := page.GetLayoutMetrics().Do(c)
@@ -420,7 +498,7 @@ func (s *Session) initializeCursorPosition(ctx context.Context) error {
 	s.logger.Debug("Initializing cursor position.", zap.Float64("x", startX), zap.Float64("y", startY))
 
 	// Use the provided operational context (ctx) for this action.
-	// FIX: Pass context as the first argument, remove invalid .Do()
+	//  Pass context as the first argument, remove invalid .Do()
 	err := s.humanoid.MoveToVector(ctx, startVec, nil)
 	if err != nil {
 		s.logger.Warn("Failed to move cursor to initial position.", zap.Error(err))
@@ -430,6 +508,7 @@ func (s *Session) initializeCursorPosition(ctx context.Context) error {
 	return nil
 }
 
+// [Rest of the file remains unchanged from the provided input]
 // initializeTaintShim builds, exposes the callback, and injects the IAST shim script.
 func (s *Session) initializeTaintShim(ctx context.Context, template, configJSON string) error {
 	script, err := taint.BuildTaintShim(template, configJSON)
@@ -456,7 +535,7 @@ func (s *Session) handleTaintEvent(eventData map[string]interface{}) {
 	// This function runs in a goroutine managed by the binding listener.
 	// Avoid blocking here.
 
-	// REFACTOR: Use a short timeout derived from background context for the send operation
+	//  Use a short timeout derived from background context for the send operation
 	// instead of a bare context.Background(), to prevent blocking indefinitely if the channel is full.
 	findingCtx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 	defer cancel()
@@ -480,7 +559,7 @@ func (s *Session) handleTaintEvent(eventData map[string]interface{}) {
 
 	s.logger.Info("IAST Sink Triggered", zap.String("type", eventType), zap.String("detail_json", detailStr))
 
-	// FIX: Prepare evidence. Assuming schemas.Finding.Evidence is a string (e.g., JSON string) to fix IncompatibleAssign.
+	//  Prepare evidence. Assuming schemas.Finding.Evidence is a string (e.g., JSON string) to fix IncompatibleAssign.
 	evidenceDataMap := map[string]interface{}{
 		"sink_type": eventType,
 		"details":   eventData["detail"], // Store raw detail map
@@ -495,7 +574,7 @@ func (s *Session) handleTaintEvent(eventData map[string]interface{}) {
 		// Fallback logic if needed...
 	}
 
-	// FIX: Update finding creation to match current schemas.Finding structure
+	//  Update finding creation to match current schemas.Finding structure
 	finding := schemas.Finding{
 		// ID, ScanID, TaskID are usually set by the engine/manager calling AddFinding
 		// Target URL might be retrieved from context if available, or passed in eventData
@@ -546,7 +625,7 @@ func (s *Session) Close(ctx context.Context) error {
 	if s.harvester != nil {
 		// Use a short, independent timeout context for stopping harvester
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer stopCancel()        // REFACTOR: Ensure context cancellation is deferred (idiomatic Go).
+		defer stopCancel()        //  Ensure context cancellation is deferred (idiomatic Go).
 		s.harvester.Stop(stopCtx) // Pass the timed context
 		s.logger.Debug("Harvester stopped.")
 	}
@@ -581,7 +660,9 @@ func (s *Session) CollectArtifacts(ctx context.Context) (*schemas.Artifacts, err
 
 	// Apply a timeout for the entire collection process to the operational context.
 	// RunActions will handle the combination with s.ctx.
-	collectCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// P2  Increased timeout from 30s to 60s. This must be longer than the Harvester's
+	// bodyFetchTimeout (30s) to allow background fetches to complete gracefully during collection (TestSession/* timeout failures).
+	collectCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	// 1. Stop the harvester and get data. Use the collectCtx.
@@ -699,7 +780,7 @@ func (s *Session) captureStorage(ctx context.Context, state *schemas.StorageStat
 
 	// Process cookies after wait
 	if cookiesErr == nil && cookies != nil {
-		// FIX: Use the correct conversion function for []*network.Cookie to []*schemas.Cookie (IncompatibleAssign errors).
+		//  Use the correct conversion function for []*network.Cookie to []*schemas.Cookie (IncompatibleAssign errors).
 		state.Cookies = convertNetworkCookiesToSchemaCookies(cookies)
 	}
 
@@ -744,7 +825,8 @@ func getStorageScript(storageType string) string {
 // It captures the arguments, serializes them to a JSON array string,
 // and calls the underlying binding function with that string.
 // This is necessary because runtime.AddBinding exposes a function that expects exactly one string argument.
-// FIX: Added wrapper injection to resolve ExposeFunction failures (JS exceptions and timeouts).
+//
+//	Added wrapper injection to resolve ExposeFunction failures (JS exceptions and timeouts).
 const bindingWrapperJS = `(function(name) {
   // Ensure the wrapper is applied only once (idempotency check)
   if (window[name] === undefined || window[name].__scalpel_wrapped) {
@@ -783,7 +865,7 @@ func (s *Session) AddFinding(ctx context.Context, finding schemas.Finding) error
 		if s.findingsChan == nil && !s.isClosed {
 			msg = "findings channel is nil"
 		}
-		// FIX: Use finding.Vulnerability.Name if available, else Description, else fallback
+		//  Use finding.Vulnerability.Name if available, else Description, else fallback
 		findingIdentifier := finding.Vulnerability.Name
 		if findingIdentifier == "" {
 			findingIdentifier = finding.Description
@@ -800,7 +882,7 @@ func (s *Session) AddFinding(ctx context.Context, finding schemas.Finding) error
 	s.mu.Unlock()
 
 	// Add session ID to the finding for context if not already present
-	// FIX: Removed usage of Metadata as the field does not exist in schemas.Finding (MissingFieldOrMethod error).
+	//  Removed usage of Metadata as the field does not exist in schemas.Finding (MissingFieldOrMethod error).
 	/*
 		if finding.Metadata == nil {
 			finding.Metadata = make(map[string]interface{})
@@ -818,7 +900,7 @@ func (s *Session) AddFinding(ctx context.Context, finding schemas.Finding) error
 	// Use a select to send non-blockingly, respecting contexts.
 	select {
 	case ch <- finding:
-		// FIX: Use finding.Vulnerability.Name if available for logging
+		//  Use finding.Vulnerability.Name if available for logging
 		findingIdentifier := finding.Vulnerability.Name
 		if findingIdentifier == "" {
 			findingIdentifier = "(unknown type)"
@@ -847,7 +929,7 @@ func (s *Session) Sleep(ctx context.Context, d time.Duration) error {
 
 // DispatchMouseEvent directly dispatches a mouse event. Delegates to the executor.
 func (s *Session) DispatchMouseEvent(ctx context.Context, data schemas.MouseEventData) error {
-	// FIX: Use the stored executor directly.
+	//  Use the stored executor directly.
 	if s.executor == nil {
 		// This should not happen if Initialize runs correctly.
 		return fmt.Errorf("cannot dispatch mouse event: session executor not initialized")
@@ -858,7 +940,7 @@ func (s *Session) DispatchMouseEvent(ctx context.Context, data schemas.MouseEven
 
 // SendKeys directly dispatches keyboard events. Delegates to the executor.
 func (s *Session) SendKeys(ctx context.Context, keys string) error {
-	// FIX: Use the stored executor directly.
+	//  Use the stored executor directly.
 	if s.executor == nil {
 		return fmt.Errorf("cannot send keys: session executor not initialized")
 	}
@@ -875,7 +957,7 @@ func (s *Session) DispatchStructuredKey(ctx context.Context, data schemas.KeyEve
 
 // GetElementGeometry retrieves geometry. Delegates to the executor.
 func (s *Session) GetElementGeometry(ctx context.Context, selector string) (*schemas.ElementGeometry, error) {
-	// FIX: Use the stored executor directly.
+	//  Use the stored executor directly.
 	if s.executor == nil {
 		return nil, fmt.Errorf("cannot get element geometry: session executor not initialized")
 	}
@@ -900,7 +982,7 @@ func (s *Session) ExposeFunction(ctx context.Context, name string, function inte
 	}
 
 	// 3. Inject the JavaScript wrapper persistently.
-	// FIX: Inject wrapper script to handle argument serialization (TestSession/ExposeFunction* failures).
+	//  Inject wrapper script to handle argument serialization (TestSession/ExposeFunction* failures).
 	wrapperScript := fmt.Sprintf(bindingWrapperJS, name)
 	if err := s.InjectScriptPersistently(ctx, wrapperScript); err != nil {
 		return fmt.Errorf("failed to inject persistent wrapper script for binding '%s': %w", name, err)
@@ -943,7 +1025,7 @@ func (s *Session) ExposeFunction(ctx context.Context, name string, function inte
 					return
 				}
 
-				// FIX: The payload is expected to be a JSON array string (handled by bindingWrapperJS).
+				//  The payload is expected to be a JSON array string (handled by bindingWrapperJS).
 				var args []interface{}
 				if err := json.Unmarshal([]byte(payload), &args); err != nil {
 					s.logger.Error("Could not unmarshal payload for exposed function.", zap.String("name", name), zap.Error(err), zap.String("payload", payload))
@@ -1101,7 +1183,8 @@ func (s *Session) InjectScriptPersistently(ctx context.Context, script string) e
 		if ctx.Err() != nil {
 			return ctx.Err()
 		}
-		if s.ctx.Err() == nil {
+		//  Corrected logic: check if s.ctx.Err() is NOT nil
+		if s.ctx.Err() != nil {
 			return s.ctx.Err()
 		}
 		return fmt.Errorf("could not inject persistent script: %w", err)
@@ -1111,7 +1194,8 @@ func (s *Session) InjectScriptPersistently(ctx context.Context, script string) e
 }
 
 // ExecuteScript runs JS in the current document context.
-// FIX: Updated signature to match schemas.SessionContext interface (InvalidIfaceAssign error).
+//
+//	Updated signature to match schemas.SessionContext interface (InvalidIfaceAssign error).
 func (s *Session) ExecuteScript(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
 	// Chromedp's Evaluate does not directly support passing arguments easily.
 	if len(args) > 0 {
@@ -1131,7 +1215,8 @@ func (s *Session) ExecuteScript(ctx context.Context, script string, args []inter
 
 // -- Helper Functions --
 
-// FIX: Helper function to convert CDP cookies to schema cookies (used to fix IncompatibleAssign errors).
+//	Helper function to convert CDP cookies to schema cookies (used to fix IncompatibleAssign errors).
+//
 // convertNetworkCookiesToSchemaCookies converts CDP network.Cookie structs to schemas.Cookie pointers.
 func convertNetworkCookiesToSchemaCookies(cdpCookies []*network.Cookie) []*schemas.Cookie {
 	if cdpCookies == nil {

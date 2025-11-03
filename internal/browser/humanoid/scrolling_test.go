@@ -567,28 +567,28 @@ func TestCalculateScrollPause(t *testing.T) {
 
 	// 1. Low Density (0.2)
 	// 100 + (0.2 * 1000 * 0.5) = 100 + 100 = 200ms
-	pauseLow := h.calculateScrollPause(0.2)
+	pauseLow := h.CalculateScrollPause(0.2)
 	assert.Equal(t, 200*time.Millisecond, pauseLow)
 
 	// 2. High Density (1.5)
 	// 100 + (1.5 * 1000 * 0.5) = 100 + 750 = 850ms
-	pauseHigh := h.calculateScrollPause(1.5)
+	pauseHigh := h.CalculateScrollPause(1.5)
 	assert.Equal(t, 850*time.Millisecond, pauseHigh)
 
 	// 3. Fatigue Impact (Fatigue 1.0)
 	h.fatigueLevel = 1.0
 	// Fatigue factor: (1.0 + fatigueLevel*0.5) = 1.5
 	// 200ms * 1.5 = 300ms
-	pauseFatigued := h.calculateScrollPause(0.2)
+	pauseFatigued := h.CalculateScrollPause(0.2)
 	assert.Equal(t, 300*time.Millisecond, pauseFatigued)
 
 	// 4. Clamping (Max 2000ms, Min 50ms)
 	h.fatigueLevel = 0.0
 	// Density 10.0 -> 100 + (10 * 1000 * 0.5) = 5100ms. Clamped to 2000ms.
-	pauseMax := h.calculateScrollPause(10.0)
+	pauseMax := h.CalculateScrollPause(10.0)
 	assert.Equal(t, 2000*time.Millisecond, pauseMax)
 
 	// Density -1.0 -> 100 + (-1 * 1000 * 0.5) = -400ms. Clamped to 50ms.
-	pauseMin := h.calculateScrollPause(-1.0)
+	pauseMin := h.CalculateScrollPause(-1.0)
 	assert.Equal(t, 50*time.Millisecond, pauseMin)
 }

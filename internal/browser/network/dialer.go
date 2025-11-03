@@ -291,23 +291,22 @@ func wrapTLS(ctx context.Context, conn net.Conn, address string, config *DialerC
 	// Clone the TLS config to ensure modifications (like ServerName) don't leak back to the DialerConfig.
 	tlsConfig := config.TLSConfig.Clone()
 
-	// Ensure ServerName is set for SNI (Server Name Indication).
+	// FIX: Ensure ServerName is set if not explicitly provided.
+	// ServerName is required by Go's crypto/tls for certificate verification (unless InsecureSkipVerify is true),
+	// even when dialing an IP address. The original logic incorrectly omitted it for IPs.
+	// The crypto/tls library automatically omits the SNI extension if ServerName parses as an IP address.
 	if tlsConfig.ServerName == "" {
 		host, _, err := net.SplitHostPort(address)
 		if err != nil {
-			// Handle cases where address might not have a port.
+			// Handle cases where address might not have a port (e.g., "example.com").
 			host = address
 		}
 
-		// Basic validation: SNI should not be an IP address.
-		// Handle potential brackets for IPv6 literals before parsing IP.
-		sniHost := host
+		// Clean up potential IPv6 literals (e.g., "[::1]").
 		if len(host) > 0 && host[0] == '[' && host[len(host)-1] == ']' {
-			sniHost = host[1 : len(host)-1]
-		}
-
-		if net.ParseIP(sniHost) == nil {
-			tlsConfig.ServerName = sniHost
+			tlsConfig.ServerName = host[1 : len(host)-1]
+		} else {
+			tlsConfig.ServerName = host
 		}
 	}
 

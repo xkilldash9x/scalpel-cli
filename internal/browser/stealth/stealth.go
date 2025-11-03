@@ -8,105 +8,160 @@ import (
 	"strings"
 
 	"github.com/chromedp/cdproto/emulation"
+	"github.com/chromedp/cdproto/page"
 	"github.com/chromedp/chromedp"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"go.uber.org/zap"
 )
 
-// The ClientHints and Persona structs have been moved to api/schemas.
-
 // EvasionsJS holds the embedded JavaScript used for browser fingerprint evasion.
+//
 //go:embed evasions.js
 var EvasionsJS string
 
-// The DefaultPersona var has been moved to api/schemas.
+// Constants for default values and limits
+const (
+	DefaultUserAgent = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	DefaultPlatform  = "Win32"
+	DefaultDPR       = 1.0
+	MaxDPR           = 5.0 // Maximum reasonable DPR to prevent browser instability.
+)
+
+var DefaultLanguages = []string{"en-US", "en"}
 
 // Apply returns a chromedp.Tasks action that applies the stealth configurations.
+// Note: The returned tasks must be executed using chromedp.Run(ctx, tasks) rather than tasks.Do(ctx).
 func Apply(persona schemas.Persona, logger *zap.Logger) chromedp.Tasks {
-	if logger != nil {
-		logger.Debug("Applying stealth persona and evasions.")
+	if logger == nil {
+		// Use a Nop logger if none is provided to avoid nil pointer dereferences.
+		logger = zap.NewNop()
 	}
-	if EvasionsJS == "" && logger != nil {
-		logger.Warn("EvasionsJS is empty. Stealth capabilities may be reduced.")
-	}
+	logger.Debug("Applying stealth persona and evasions.")
 
-	jsPersona := map[string]interface{}{
-		"userAgent":  persona.UserAgent,
-		"platform":   persona.Platform,
-		"languages":  persona.Languages,
-		"timezoneId": persona.Timezone,
-		"locale":     persona.Locale,
-		"noiseSeed":  persona.NoiseSeed,
-		"screen": map[string]interface{}{
-			"width":       persona.Width,
-			"height":      persona.Height,
-			"availWidth":  persona.AvailWidth,
-			"availHeight": persona.AvailHeight,
-			"colorDepth":  persona.ColorDepth,
-			"pixelDepth":  persona.PixelDepth,
-		},
-	}
-	if persona.ClientHintsData != nil {
-		jsPersona["clientHintsData"] = persona.ClientHintsData
-	}
-
-	_, err := json.Marshal(jsPersona)
+	// 1. Prepare Persona data for injection
+	jsPersona, err := json.Marshal(persona)
 	if err != nil {
-		if logger != nil {
-			logger.Error("failed to marshal persona for stealth injection", zap.Error(err))
-		}
-		return chromedp.Tasks{}
+		logger.Error("failed to marshal persona for stealth injection", zap.Error(err))
+		// Return an error action if critical data preparation fails
+		return chromedp.Tasks{chromedp.ActionFunc(func(ctx context.Context) error {
+			return fmt.Errorf("failed to marshal persona: %w", err)
+		})}
+	}
+
+	// 2. Construct the full injection script
+	// Inject the persona data into window.SCALPEL_PERSONA and make it immutable.
+	injectionScript := fmt.Sprintf(
+		"Object.defineProperty(window, 'SCALPEL_PERSONA', {value: %s, writable: false, configurable: false});\n",
+		string(jsPersona),
+	)
+
+	// Append the evasion logic
+	if EvasionsJS != "" {
+		injectionScript += EvasionsJS
+	} else {
+		logger.Error("EvasionsJS is empty. Stealth capabilities are severely reduced.")
 	}
 
 	var tasks chromedp.Tasks
 
-	// -- Temporarily disable JS-based evasions to isolate the problem --
-	// This is the likely source of the incompatibility with the older chromedp version.
-	if EvasionsJS != "" {
-		tasks = append(tasks, chromedp.ActionFunc(func(c context.Context) error {
-			logger.Debug("JavaScript evasion script injection is currently disabled for testing.")
-			return nil
+	// 3. Inject the script using Page.addScriptToEvaluateOnNewDocument
+	// This ensures the script runs before any page scripts in every new frame/document.
+	if injectionScript != "" {
+		// Use the low-level CDP command wrapped in an ActionFunc.
+		tasks = append(tasks, chromedp.ActionFunc(func(ctx context.Context) error {
+			_, err := page.AddScriptToEvaluateOnNewDocument(injectionScript).Do(ctx)
+			return err
 		}))
 	}
 
+	// 4. Apply CDP Overrides (Defense in depth)
+	// Merge persona with defaults.
+	userAgent := persona.UserAgent
+	if userAgent == "" {
+		userAgent = DefaultUserAgent
+	}
+	platform := persona.Platform
+	if platform == "" {
+		platform = DefaultPlatform
+	}
+	languages := persona.Languages
+	if len(languages) == 0 {
+		languages = DefaultLanguages
+	}
+
 	tasks = append(tasks,
-		emulation.SetUserAgentOverride(persona.UserAgent).
-			WithAcceptLanguage(strings.Join(persona.Languages, ",")).
-			WithPlatform(persona.Platform),
+		emulation.SetUserAgentOverride(userAgent).
+			WithAcceptLanguage(strings.Join(languages, ",")).
+			WithPlatform(platform),
 	)
 
+	// 5. Apply environment overrides (Timezone, Locale, Device Metrics)
 	if persona.Timezone != "" {
 		tasks = append(tasks, emulation.SetTimezoneOverride(persona.Timezone))
 	}
 
-	if persona.Locale != "" {
-		tasks = append(tasks, emulation.SetLocaleOverride().WithLocale(persona.Locale))
+	// Locale handling: Use persona locale, fallback to primary language if locale is empty.
+	locale := persona.Locale
+	if locale == "" && len(languages) > 0 {
+		locale = languages[0]
+	}
+	if locale != "" {
+		tasks = append(tasks, emulation.SetLocaleOverride().WithLocale(locale))
 	}
 
 	if persona.Width > 0 && persona.Height > 0 {
-		orientationType := emulation.OrientationTypeLandscapePrimary
-		angle := int64(0)
-		if persona.Height > persona.Width {
-			orientationType = emulation.OrientationTypePortraitPrimary
-		}
-
-		metrics := emulation.SetDeviceMetricsOverride(persona.Width, persona.Height, 1.0, persona.Mobile).
-			WithScreenOrientation(&emulation.ScreenOrientation{
-				Type:  orientationType,
-				Angle: angle,
-			}).
-			WithScreenWidth(persona.Width).
-			WithScreenHeight(persona.Height)
-
-		tasks = append(tasks, metrics)
+		// Pass logger to allow warnings about metric adjustments.
+		tasks = append(tasks, createDeviceMetricsAction(persona, logger))
 	}
 
 	return tasks
 }
 
-// ApplyStealthEvasions is a convenience function that runs the Apply tasks.
+// createDeviceMetricsAction creates the appropriate emulation action for device metrics.
+func createDeviceMetricsAction(persona schemas.Persona, logger *zap.Logger) chromedp.Action {
+	orientationType := emulation.OrientationTypeLandscapePrimary
+	angle := int64(0)
+	// Determine orientation based on dimensions
+	if persona.Height > persona.Width {
+		orientationType = emulation.OrientationTypePortraitPrimary
+	}
+
+	// Determine DPR (Device Pixel Ratio).
+	// We use Persona.PixelDepth for DPR, distinct from ColorDepth.
+	dpr := DefaultDPR
+	if persona.PixelDepth > 0 {
+		dpr = float64(persona.PixelDepth)
+	}
+
+	// Robustness: Clamp DPR to a reasonable range.
+	if dpr > MaxDPR {
+		if logger != nil {
+			logger.Warn("Persona DPR (PixelDepth) exceeds maximum. Clamping.",
+				zap.Float64("provided_dpr", dpr),
+				zap.Float64("clamped_dpr", MaxDPR),
+			)
+		}
+		dpr = MaxDPR
+	} else if dpr < 0.5 {
+		// Prevent extremely low or negative DPR.
+		dpr = DefaultDPR
+	}
+
+	metrics := emulation.SetDeviceMetricsOverride(persona.Width, persona.Height, dpr, persona.Mobile).
+		WithScreenOrientation(&emulation.ScreenOrientation{
+			Type:  orientationType,
+			Angle: angle,
+		}).
+		WithScreenWidth(persona.Width).
+		WithScreenHeight(persona.Height)
+
+	return metrics
+}
+
+// ApplyStealthEvasions is a convenience function that runs the Apply tasks using chromedp.Run.
 func ApplyStealthEvasions(ctx context.Context, persona schemas.Persona, logger *zap.Logger) error {
 	tasks := Apply(persona, logger)
+	// Must use chromedp.Run as Apply generates low-level CDP actions.
 	if err := chromedp.Run(ctx, tasks); err != nil {
 		return fmt.Errorf("failed to apply stealth evasions: %w", err)
 	}

@@ -6,6 +6,7 @@ import (
 	"compress/flate"
 	"compress/gzip"
 	"compress/zlib"
+	"errors"
 	"fmt"
 	"io"
 	"net/http"
@@ -19,29 +20,72 @@ import (
 var (
 	gzipReaderPool = sync.Pool{
 		New: func() interface{} {
-			// Initialize with a dummy reader; relies on Reset() before use.
-			r, _ := gzip.NewReader(strings.NewReader(""))
-			return r
+			// Initialize by allocating the struct. We rely on Reset() before use.
+			// We must return a non-nil struct.
+			return new(gzip.Reader)
+		},
+	}
+
+	// Optimization: Add Brotli reader pool.
+	brotliReaderPool = sync.Pool{
+		New: func() interface{} {
+			// brotli.NewReader(nil) is the idiomatic way to create a reusable reader ready for Reset().
+			return brotli.NewReader(nil)
 		},
 	}
 )
+
+// Shared empty reader used for safely resetting pooled readers.
+// Using a shared instance avoids allocations on every put operation.
+var emptyReader = strings.NewReader("")
 
 // getGzipReader retrieves a gzip reader from the pool and resets it with the new source.
 func getGzipReader(r io.Reader) (*gzip.Reader, error) {
 	zr := gzipReaderPool.Get().(*gzip.Reader)
 	if err := zr.Reset(r); err != nil {
-		// If reset fails (e.g., invalid header in the new stream), the reader might be unusable.
-		// Discard it (by not putting it back) and create a fresh one if NewReader also fails.
-		return gzip.NewReader(r)
+		// If Reset fails (e.g., invalid header), r may be partially consumed.
+		// However, the allocation (zr) is still valid for reuse because Reset re-initializes the state.
+		// Put it back in the pool and return the error. Do not attempt NewReader(r).
+		// We rely on the next call to Reset() in getGzipReader to clean it up fully.
+		gzipReaderPool.Put(zr)
+		return nil, err
 	}
 	return zr, nil
 }
 
 // putGzipReader returns a gzip reader to the pool.
 func putGzipReader(zr *gzip.Reader) {
+	if zr == nil {
+		return
+	}
 	// Resetting helps release references to the previous reader/data sooner.
-	zr.Reset(strings.NewReader(""))
+	// FIX: We use an empty reader instead of nil. In some Go versions (e.g., < 1.16),
+	// gzip.Reset(nil) could panic because it unconditionally tries to read a header.
+	// Resetting with an empty reader causes Reset() to return io.EOF, which we safely ignore here.
+	_ = zr.Reset(emptyReader)
 	gzipReaderPool.Put(zr)
+}
+
+// getBrotliReader retrieves a Brotli reader from the pool and resets it.
+func getBrotliReader(r io.Reader) (*brotli.Reader, error) {
+	br := brotliReaderPool.Get().(*brotli.Reader)
+	if err := br.Reset(r); err != nil {
+		// If Reset fails, put it back in the pool and return the error.
+		brotliReaderPool.Put(br)
+		return nil, err
+	}
+	return br, nil
+}
+
+// putBrotliReader returns a Brotli reader to the pool.
+func putBrotliReader(br *brotli.Reader) {
+	if br == nil {
+		return
+	}
+	// While brotli.Reader handles Reset(nil) safely, we use an empty reader
+	// for consistency with gzip handling and maximum robustness.
+	_ = br.Reset(emptyReader)
+	brotliReaderPool.Put(br)
 }
 
 // CompressionMiddleware wraps an http.RoundTripper to handle response decompression transparently.
@@ -63,7 +107,8 @@ func NewCompressionMiddleware(transport http.RoundTripper) *CompressionMiddlewar
 func (cm *CompressionMiddleware) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Advertise support for modern compression algorithms if the caller hasn't already.
 	if req.Header.Get("Accept-Encoding") == "" {
-		req.Header.Set("Accept-Encoding", "gzip, deflate, br, identity")
+		// Prioritize Brotli (br) as it generally offers better compression.
+		req.Header.Set("Accept-Encoding", "br, gzip, deflate, identity")
 	}
 
 	resp, err := cm.Transport.RoundTrip(req)
@@ -73,7 +118,8 @@ func (cm *CompressionMiddleware) RoundTrip(req *http.Request) (*http.Response, e
 
 	// Decompress the response body based on the Content-Encoding header.
 	if err := DecompressResponse(resp); err != nil {
-		// Ensure the body (including any partially initialized layers) is closed if decompression fails
+		// If decompression initialization fails, the body stream (resp.Body) might be partially consumed.
+		// We must close the body and discard the response to prevent corruption.
 		_ = resp.Body.Close()
 		return nil, fmt.Errorf("failed to initialize response decompression: %w", err)
 	}
@@ -94,20 +140,24 @@ func (w *closeWrapper) Close() error {
 	// Return the reader to the pool if applicable.
 	if w.poolCallback != nil {
 		w.poolCallback()
+		w.poolCallback = nil // Prevent double-callback
 	}
 
 	// Close the decompression reader itself.
+	// Note: For readers that don't implement Close (like Brotli wrapped in NopCloser), this is a no-op.
+	// For others (like Gzip, Deflate), this closes the decompressor stream.
 	err1 := w.ReadCloser.Close()
-	// Close the original underlying body.
+	// Close the original underlying body (e.g., the TCP connection managed by http.Transport).
 	err2 := w.originalBody.Close()
-	if err1 != nil {
-		return err1
-	}
-	return err2
+
+	// Use errors.Join (Go 1.20+) to robustly report errors if multiple close operations fail.
+	return errors.Join(err1, err2)
 }
 
 // DecompressResponse checks the Content-Encoding header and wraps the response body.
 // It handles multi-layer encoding, uses pooling, and supports robust deflate detection.
+// NOTE: If this function returns an error, the state of resp.Body is undefined (may be partially consumed).
+// The caller must close resp.Body and discard the response.
 func DecompressResponse(resp *http.Response) error {
 	if resp == nil || resp.Body == nil {
 		return nil
@@ -133,6 +183,7 @@ func DecompressResponse(resp *http.Response) error {
 			// Use pooled gzip reader.
 			gzipReader, err := getGzipReader(resp.Body)
 			if err != nil {
+				// If initialization fails, we must abort the chain.
 				return fmt.Errorf("gzip initialization error: %w", err)
 			}
 			reader = gzipReader
@@ -143,15 +194,23 @@ func DecompressResponse(resp *http.Response) error {
 
 		case "deflate":
 			// Use robust deflate handling (Zlib or Raw).
+			// tryDeflate is safe regarding stream consumption on failure due to resettableReader.
 			reader, err = tryDeflate(resp.Body)
 			if err != nil {
 				return fmt.Errorf("deflate initialization error: %w", err)
 			}
 
 		case "br":
-			// Brotli reader does not implement io.ReadCloser.
-			brReader := brotli.NewReader(resp.Body)
+			// Use pooled Brotli reader.
+			brReader, err := getBrotliReader(resp.Body)
+			if err != nil {
+				return fmt.Errorf("brotli initialization error: %w", err)
+			}
+			// Brotli reader does not implement io.Closer.
 			reader = io.NopCloser(brReader)
+			poolCallback = func() {
+				putBrotliReader(brReader)
+			}
 
 		case "identity", "":
 			// No compression or explicitly identity. Skip this layer.
@@ -190,7 +249,8 @@ type resettableReader struct {
 }
 
 func newResettableReader(r io.Reader) *resettableReader {
-	buf := new(bytes.Buffer)
+	// Use a small buffer, enough for headers (e.g., 2 bytes for Zlib).
+	buf := bytes.NewBuffer(make([]byte, 0, 128))
 	// Tee the reads into the buffer while reading from the source.
 	tee := io.TeeReader(r, buf)
 	return &resettableReader{

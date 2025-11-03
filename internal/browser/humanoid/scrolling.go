@@ -138,7 +138,7 @@ func (h *Humanoid) intelligentScroll(ctx context.Context, selector string) error
 		}
 
 		// 4. Pause between scrolls (Cognitive processing / Reading)
-		pauseDuration := h.calculateScrollPause(result.ContentDensity)
+		pauseDuration := h.CalculateScrollPause(result.ContentDensity)
 
 		// Use internal cognitivePause as lock is held.
 		meanMs := float64(pauseDuration.Milliseconds())
@@ -231,31 +231,37 @@ func (h *Humanoid) executeScrollJS(ctx context.Context, selector string, deltaY,
 	}
 
 	// 5. Check for null or empty results or JS errors.
+	// 5. Check for null or empty results.
 	if len(rawResult) == 0 || string(rawResult) == "null" || string(rawResult) == "undefined" {
 		return nil, fmt.Errorf("javascript execution returned null or empty result during scroll")
 	}
 
-	// Check if the result indicates an error from within the JS try/catch
-	var jsErrorCheck map[string]interface{}
-	if json.Unmarshal(rawResult, &jsErrorCheck) == nil {
-		if errStr, ok := jsErrorCheck["error"].(string); ok {
-			h.logger.Error("JavaScript error during scroll function execution.", zap.String("js_error", errStr))
-			return nil, fmt.Errorf("javascript error during scroll: %s", errStr)
-		}
+	// 6. Unmarshal the JSON response ONCE.
+	// Define a temporary struct that can hold EITHER a valid result OR a JS error.
+	var combinedResult struct {
+		scrollResult        // Embed the scrollResult fields directly
+		Error        string `json:"error"`
 	}
 
-	// 6. Unmarshal the actual JSON result into the scrollResult struct.
-	var result scrollResult
-	if err := json.Unmarshal(rawResult, &result); err != nil {
+	if err := json.Unmarshal(rawResult, &combinedResult); err != nil {
+		// The JSON was malformed (neither a valid result nor a JS error object).
 		h.logger.Error("Humanoid: Failed to unmarshal scroll result JSON", zap.Error(err), zap.String("json", string(rawResult)))
 		return nil, fmt.Errorf("failed to unmarshal scroll result JSON: %w", err)
 	}
 
-	return &result, nil
+	// 7. Check if the JS-side error was populated.
+	if combinedResult.Error != "" {
+		h.logger.Error("JavaScript error during scroll function execution.", zap.String("js_error", combinedResult.Error))
+		return nil, fmt.Errorf("javascript error during scroll: %s", combinedResult.Error)
+	}
+
+	// 8. It's a valid scroll result.
+	// Return the embedded scrollResult.
+	return &combinedResult.scrollResult, nil
 }
 
-// calculateScrollPause is an internal helper. It assumes the caller holds the lock.
-func (h *Humanoid) calculateScrollPause(contentDensity float64) time.Duration {
+// CalculateScrollPause is an internal helper. It assumes the caller holds the lock.
+func (h *Humanoid) CalculateScrollPause(contentDensity float64) time.Duration {
 	// Base pause + pause based on content density. Random variation is handled by cognitivePause.
 	pauseMs := 100 + (contentDensity * 1000 * h.dynamicConfig.ScrollReadDensityFactor)
 	// Apply fatigue

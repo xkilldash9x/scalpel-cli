@@ -19,7 +19,7 @@ import (
 )
 
 // Note: This file implements an Interception (MITM) Proxy Server.
-// The configuration for a client to *use* a forward proxy is handled in dialer.go.
+// The configuration for a client to *use* a forward proxy is handled in dialer.go and httpclient.go.
 
 var (
 	// Ensures configureMITM initialization logic runs exactly once.
@@ -79,25 +79,42 @@ func NewInterceptionProxy(caCert, caKey []byte, transportConfig *ProxyTransportC
 		}
 	}
 
-	// Configure the HTTP transport for upstream connections.
-	// We use the standard http.Transport here, configured with our custom dialer.
-	// This ensures that the proxy respects the DialerConfig (including potential upstream proxy chaining).
-	proxy.Tr = &http.Transport{
-		// We do not set http.Transport.Proxy here, as DialTCPContext handles proxying based on DialerConfig.
-		DialContext: func(ctx context.Context, network, addr string) (net.Conn, error) {
-			// Use DialTCPContext to handle the connection establishment (direct or proxied).
-			return DialTCPContext(ctx, network, addr, cfgCopy.DialerConfig)
-		},
+	// Configure the HTTP transport (proxy.Tr) for upstream connections made by goproxy.
+	transport := &http.Transport{
 		TLSClientConfig:       cfgCopy.DialerConfig.TLSConfig.Clone(),
 		MaxIdleConns:          100,
 		IdleConnTimeout:       90 * time.Second,
 		TLSHandshakeTimeout:   DefaultTLSHandshakeTimeout,
 		ExpectContinueTimeout: 1 * time.Second,
+		// Disable compression in the proxy's transport to simplify interception logic.
+		DisableCompression: true,
 	}
 
-	// Configure the dialer specifically for CONNECT requests (tunneling/MITM setup).
+	// Prepare the DialerConfig for the transport's DialContext.
+	dialerConfigForTransport := cfgCopy.DialerConfig.Clone()
+
+	if cfgCopy.DialerConfig.ProxyURL != nil {
+		// If an upstream proxy is configured (proxy chaining), use http.Transport.Proxy.
+		transport.Proxy = http.ProxyURL(cfgCopy.DialerConfig.ProxyURL)
+
+		// CRITICAL: When Transport.Proxy is used, the DialContext must connect directly to the proxy.
+		// We must clear the ProxyURL from the config used by DialContext to prevent loops.
+		dialerConfigForTransport.ProxyURL = nil
+		log.Info("Configured upstream proxy chaining.", zap.String("upstream_proxy", cfgCopy.DialerConfig.ProxyURL.String()))
+	}
+
+	transport.DialContext = func(ctx context.Context, network, addr string) (net.Conn, error) {
+		// Use DialTCPContext with the prepared config (ensuring direct connection if upstream proxy is set via Transport.Proxy).
+		return DialTCPContext(ctx, network, addr, dialerConfigForTransport)
+	}
+
+	proxy.Tr = transport
+
+	// Configure the dialer specifically for CONNECT requests handled manually by goproxy (e.g., tunneling when MITM is disabled).
+	// This dialer needs to establish the connection to the target, potentially through the upstream proxy using CONNECT.
+	// We use the original config here, as DialTCPContext correctly implements CONNECT tunneling if ProxyURL is set.
 	proxy.ConnectDial = func(network, addr string) (net.Conn, error) {
-		// Use the custom dialer. Use context.Background() as goproxy manages the lifecycle for these connections.
+		// Use context.Background() as goproxy manages the lifecycle for these connections independently.
 		return DialTCPContext(context.Background(), network, addr, cfgCopy.DialerConfig)
 	}
 
@@ -145,7 +162,7 @@ func (ip *InterceptionProxy) setupHandlers() {
 			// MITM is configured and ready.
 			return goproxy.MitmConnect, host
 		}
-		// MITM is not configured, fall back to tunneling.
+		// MITM is not configured, fall back to tunneling (using proxy.ConnectDial).
 		return goproxy.OkConnect, host
 	}))
 

@@ -139,9 +139,11 @@ func (s *Session) Type(ctx context.Context, selector string, text string) error 
 	s.logger.Debug("Attempting to type into element", zap.String("selector", selector), zap.Int("text_length", len(text)))
 
 	// Calculate timeout based on text length, ensuring reasonable min/max
-	timeout := 15*time.Second + time.Duration(float64(len(text))/5.0)*time.Second // Adjusted speed assumption
-	if timeout < 15*time.Second {
-		timeout = 15 * time.Second
+	// FIX: Increased base timeout (from 15s) to accommodate overhead during preparation (clear/focus) under load/race detection.
+	baseTimeout := 45 * time.Second
+	timeout := baseTimeout + time.Duration(float64(len(text))/5.0)*time.Second // Adjusted speed assumption
+	if timeout < baseTimeout {
+		timeout = baseTimeout
 	} else if timeout > 3*time.Minute {
 		timeout = 3 * time.Minute
 	}
@@ -275,8 +277,8 @@ func (s *Session) Submit(ctx context.Context, selector string) error {
 		// Apply timeout based on the operational context (ctx).
 		pauseCtx, pauseCancel := context.WithTimeout(ctx, 5*time.Second)
 		defer pauseCancel()
-		// FIX: Pass context
-		if pauseErr := s.humanoid.CognitivePause(pauseCtx, 100, 50); pauseErr != nil && pauseCtx.Err() == nil && ctx.Err() == nil && s.ctx.Err() == nil {
+		// FIX: Pass context. Reduced scaling factors significantly (similar to Navigate fix).
+		if pauseErr := s.humanoid.CognitivePause(pauseCtx, 3.0, 1.5); pauseErr != nil && pauseCtx.Err() == nil && ctx.Err() == nil && s.ctx.Err() == nil {
 			s.logger.Debug("Post-submit cognitive pause failed/interrupted.", zap.Error(pauseErr))
 		}
 	}

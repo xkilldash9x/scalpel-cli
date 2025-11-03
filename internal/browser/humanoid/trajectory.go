@@ -3,232 +3,327 @@ package humanoid
 
 import (
 	"context"
+	"math"
 	"time"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"go.uber.org/zap"
 )
 
-// simulateTrajectory simulates mouse movement using a spring-damped system influenced by potential fields,
-// incorporating advanced models like Signal-Dependent Noise and PID-controlled micro-corrections.
-// It assumes the caller holds the lock.
+// R6: Reference parameters.
+// The previous implementation used flawed scaling logic (RefKp, RefKi, RefKd, RefOmega)
+// where gains were incorrectly proportional to the plant's stiffness.
+// This has been replaced by a physics-based Gain Scheduling approach derived from control theory.
+const (
+	// RefTimeStep is kept for historical context but is not used for PID scaling,
+	// as gain scheduling uses continuous-time gains. The simulation loop uses the dynamic TimeStep from configuration.
+	RefTimeStep = 0.005 // 5ms
+)
+
+// --- Gain Scheduling Constants (Derived from Analysis Report) ---
+//
+// This system implements Gain Scheduling to maintain consistent closed-loop (CL)
+// performance despite variations in the plant's (P) dynamics (omega_p, zeta_p).
+// The approach calculates PID *acceleration* gains (Kp/m, Ki/m, Kd/m), making
+// the controller mass-independent.
+//
+// The formulas are derived by matching the closed-loop characteristic equation
+// to the desired standard second-order form:
+// Kp_a = Kp/m = omega_cl^2 - omega_p^2
+// Kd_a = Kd/m = (2 * zeta_cl * omega_cl) - (2 * zeta_p * omega_p)
+// Ki_a = Kp_a * KI_KP_RATIO
+//
+// These constants define the *desired* closed-loop performance. They are tuned
+// based on system requirements (e.g., robust disturbance rejection < 15.0) and stability analysis.
+const (
+	// TARGET_OMEGA_CL_SQUARED (omega_cl^2): Defines the desired closed-loop stiffness.
+	// This is the primary tuning knob for the controller's aggressiveness.
+	// Tuned value: 2200.0. This ensures sufficient gain to meet the <15.0 deviation requirement.
+	TARGET_OMEGA_CL_SQUARED = 2200.0
+
+	// TARGET_OMEGA_CL (omega_cl): The desired closed-loop natural frequency (rad/s).
+	// sqrt(2200.0) = 46.9041...
+	TARGET_OMEGA_CL = 46.9041575982343
+
+	// TARGET_DAMPING_TERM (2 * zeta_cl * omega_cl): Defines the desired closed-loop damping.
+	// Tuned value: 100.0 (Increased from 98.0). Increased damping ensures consistency across the active range (addressing the variance failure > 5.0).
+	TARGET_DAMPING_TERM = 100.0
+
+	// TARGET_ZETA_CL (zeta_cl): The resulting desired closed-loop damping ratio (dimensionless).
+	// Derived: 100.0 / (2 * 46.9041...) = 1.0659...
+	// This ensures a stable, overdamped response, maximizing consistency.
+	TARGET_ZETA_CL = 1.0659003262322052
+
+	// KI_KP_RATIO: Ratio of Integral gain to Proportional gain.
+	// Maintained at a standard stable ratio (0.1) to ensure steady-state error elimination without excessive oscillation.
+	KI_KP_RATIO = 0.1
+)
+
+// calculateScheduledAccelerationGains computes the PID acceleration gains
+// (Kp_a, Ki_a, Kd_a) required to achieve the desired closed-loop performance,
+// given the plant's current dynamics (omega_p, zeta_p).
+//
+// This function implements the core Gain Scheduling logic. It ensures controller gains
+// are inversely related to the plant's stiffness, providing strong control when the plant
+// is compliant and reducing it when the plant is inherently stiff.
+func calculateScheduledAccelerationGains(current_omega_p, current_zeta_p float64) (kp_a, ki_a, kd_a float64) {
+
+	// Input validation: Physical dynamics (ω_p and ζ_p) must be non-negative.
+	// Negative frequencies are non-physical, and negative damping implies an unstable plant.
+	// Handle NaN inputs defensively.
+	omega_p := current_omega_p
+	if omega_p < 0.0 || math.IsNaN(omega_p) {
+		omega_p = 0.0
+	}
+	zeta_p := current_zeta_p
+	if zeta_p < 0.0 || math.IsNaN(zeta_p) {
+		zeta_p = 0.0
+	}
+
+	// 1. Calculate the plant's inherent acceleration damping (c_p/m).
+	// c_p/m = 2 * ζ_p * ω_p
+	c_a_plant := 2.0 * zeta_p * omega_p
+
+	// 2. Calculate Proportional acceleration gain (Kp_a).
+	// Kp_a = ω_cl^2 - ω_p^2
+	// This ensures the combined stiffness (plant + controller) meets the target ω_cl^2.
+	kp_a = TARGET_OMEGA_CL_SQUARED - (omega_p * omega_p)
+
+	// 3. Calculate Derivative acceleration gain (Kd_a).
+	// Kd_a = (2ζ_clω_cl) - (c_p/m)
+	// This ensures the combined damping meets the target damping term.
+	kd_a = TARGET_DAMPING_TERM - c_a_plant
+
+	// 4. Safety Clamps: Prevent negative gains.
+	// Negative gains result in positive feedback and catastrophic instability.
+	// This occurs if the plant's dynamics already exceed the desired targets (e.g., ω_p > ω_cl).
+	if kp_a < 0.0 {
+		kp_a = 0.0
+	}
+	if kd_a < 0.0 {
+		kd_a = 0.0
+	}
+
+	// 5. Calculate Integral acceleration gain (Ki_a).
+	// Ki_a is scaled proportionally to Kp_a. Must be done after clamping Kp_a.
+	ki_a = kp_a * KI_KP_RATIO
+
+	return kp_a, ki_a, kd_a
+}
+
+// simulateTrajectory simulates mouse movement using a second-order mass-spring-damper (MSD) system
+// influenced by external potential fields and stabilized by a Gain-Scheduled PID controller.
+// It also incorporates human noise models (SDN, pink noise).
+// It assumes the caller holds the lock on the Humanoid instance.
 func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, field *PotentialField, buttonState schemas.MouseButton) (Vector2D, error) {
 	// Initialize simulation state.
 	currentPos := start
 	velocity := Vector2D{X: 0, Y: 0} // Start with zero velocity.
 	t := time.Duration(0)
 
-	// Use dynamic configuration parameters (affected by fatigue/habituation).
-	omega := h.dynamicConfig.Omega         // Natural frequency (speed)
-	zeta := h.dynamicConfig.Zeta           // Damping ratio (smoothness/oscillation)
-	sdnFactor := h.dynamicConfig.SDNFactor // Signal-Dependent Noise factor
+	// Capture the plant's current dynamics (omega_p, zeta_p).
+	// These may vary due to factors like fatigue modeled in dynamicConfig.
+	omega_p := h.dynamicConfig.Omega
+	zeta_p := h.dynamicConfig.Zeta
+	sdnFactor := h.dynamicConfig.SDNFactor
+	pinkNoiseMagnitude := h.dynamicConfig.PinkNoiseAmplitude
+	microCorrectionThresh := h.dynamicConfig.MicroCorrectionThreshold
 
-	// Use base configuration for timing, limits, thresholds, and anti-periodicity.
+	// Capture base configuration for timing, limits, and anti-periodicity.
 	baseCfg := h.baseConfig
 	timeStepBase := baseCfg.TimeStep
 	maxSimTime := baseCfg.MaxSimTime
 	maxVelocity := baseCfg.MaxVelocity
 	terminalDistThresh := baseCfg.TerminalDistThreshold
 	terminalVelThresh := baseCfg.TerminalVelocityThreshold
-	microCorrectionThresh := h.dynamicConfig.MicroCorrectionThreshold // FIX: Read from dynamic config
 	stochasticJitter := baseCfg.AntiPeriodicityTimeJitter
 	frameDropProb := baseCfg.AntiPeriodicityFrameDropProb
+
 	if field == nil {
 		field = NewPotentialField()
 	}
 
 	buttonsBitfield := h.calculateButtonsBitfield(buttonState)
 	rng := h.rng
-	// Noise parameters also use dynamic config (affected by fatigue).
-	// Updated to use PinkNoiseAmplitude.
-	pinkNoiseMagnitude := h.dynamicConfig.PinkNoiseAmplitude
 
-	// --- PID Controller Setup for Micro-Corrections ---
-	// This implementation replaces the previous unstable sub-targeting mechanism
-	// with a PID controller, as recommended by the diagnostic report (Section V.A).
-
-	// PID Gains. Tuned for stabilization and aggressive correction.
-	// FIX: The previous gains (Kp=600, Ki=50) improved the response but still allowed
-	// excessive steady-state error, failing the test requirement.
-	// We significantly increase Kp and Ki to ensure rapid correction of disturbances.
-	// Kd_crit = 2 * sqrt(Kp). With Kp=1200, Kd_crit ≈ 69.28.
-	const Kp = 1200.0 // Proportional Gain: Very strong reaction. (Was 600.0)
-	const Ki = 200.0  // Integral Gain: Aggressively eliminates steady-state error. (Was 50.0)
-	const Kd = 70.0   // Derivative Gain: Increased to maintain stability. (Was 50.0)
-
-	// PID State Variables.
-	var integralError Vector2D
-	var previousError Vector2D
-
-	// The MSD system now always drives towards 'end'.
+	// --- Trajectory Setup ---
 	initialDist := start.Dist(end)
 
-	// Handle zero distance movement gracefully.
-	if initialDist == 0 {
+	// Handle zero distance movement gracefully, including potential NaN inputs.
+	if initialDist == 0 || math.IsNaN(initialDist) {
 		return velocity, nil
 	}
 
 	// Ideal trajectory vector (straight line from start to end).
 	idealTrajectory := end.Sub(start)
 	idealTrajectoryNorm := idealTrajectory.Normalize()
+	// Robustness check for normalization failure (should be prevented by initialDist check, but defensive coding).
+	if math.IsNaN(idealTrajectoryNorm.X) || math.IsNaN(idealTrajectoryNorm.Y) {
+		h.logger.Error("Humanoid: Ideal trajectory normalization failed despite non-zero distance.", zap.Any("start", start), zap.Any("end", end), zap.Float64("initialDist", initialDist))
+		return velocity, nil // Cannot proceed if the path direction is unknown.
+	}
+
+	// --- PID Controller Setup: Gain Scheduling ---
+	// R6: Implement the Gain Scheduling strategy.
+	// Calculate the PID acceleration gains based on the current plant dynamics.
+	Kp_a, Ki_a, Kd_a := calculateScheduledAccelerationGains(omega_p, zeta_p)
+
+	h.logger.Debug("Gain Scheduling: Calculated PID acceleration gains.",
+		zap.Float64("omega_p", omega_p),
+		zap.Float64("zeta_p", zeta_p),
+		zap.Float64("Kp_a", Kp_a),
+		zap.Float64("Ki_a", Ki_a),
+		zap.Float64("Kd_a", Kd_a),
+	)
+
+	// PID State Variables initialization.
+	var integralError Vector2D
+	var previousError Vector2D
 
 	// --- Simulation Loop ---
+	// Integrates the equations of motion over time using Semi-implicit Euler method.
 	for t < maxSimTime {
+		// 1. Check for context cancellation.
 		if ctx.Err() != nil {
 			return velocity, ctx.Err()
 		}
 
-		// 1. Anti-Periodicity: Stochastic Time Step (dt)
-		// Jitter the time step for this iteration (e.g., +/- 2ms on a 5ms base).
+		// 2. Anti-Periodicity: Stochastic Time Step (dt).
+		// Introduces realistic variability in timing.
 		jitter := (rng.Float64()*2.0 - 1.0) * stochasticJitter.Seconds()
 		dt := timeStepBase.Seconds() + jitter
 		if dt <= 0.001 {
-			dt = 0.001 // Ensure dt is positive and non-zero.
+			dt = 0.001 // Enforce a minimum positive time step for numerical stability (prevents division by zero).
 		}
 
-		// 2. Check termination condition.
+		// 3. Check termination condition (proximity and low velocity).
 		distanceToTarget := currentPos.Dist(end)
-		// Use velocity magnitude from the previous step for termination checks.
 		currentVelocityMag := velocity.Mag()
-
-		// Stop if we are very close to the current target AND moving slowly.
 		if distanceToTarget < terminalDistThresh && currentVelocityMag < terminalVelThresh {
 			break
 		}
 
-		// 3. PID-Based Micro-Correction Force Calculation.
-		var correctionForce Vector2D // Initialize correction force to zero.
+		// 4. PID-Based Micro-Correction Acceleration (a_pid).
+		var correctionAcceleration Vector2D // a_pid
 
-		// Calculate progress along the ideal trajectory.
+		// Calculate the current progress along the ideal trajectory.
 		currentProgress := currentPos.Sub(start)
 		projectedMag := currentProgress.Dot(idealTrajectoryNorm)
 
-		// Calculate remaining distance. We clamp the projection magnitude for this calculation
-		// to handle cases where the cursor hasn't yet passed the start point (projectedMag < 0).
-		clampedProjectedMag := projectedMag
-		if clampedProjectedMag < 0 {
-			clampedProjectedMag = 0
-		}
+		// Determine the remaining distance (clamped to handle potential overshoot or starting behind the line).
+		// Use math.Max/Min for idiomatic clamping.
+		clampedProjectedMag := math.Max(0, math.Min(projectedMag, initialDist))
 		remainingDist := initialDist - clampedProjectedMag
 
-		// State-Dependent Triggering (Report Section V.B):
-		// Disable corrections if the total movement is insignificant, or during the terminal phase
-		// (close to target or overshot, where remainingDist < terminalDistThresh).
-		// This prevents the controller from fighting the natural terminal oscillations of the MSD model.
-		if initialDist < terminalDistThresh || remainingDist < terminalDistThresh {
-			// In the terminal phase, reset PID state and apply no force.
+		// Reset PID state if very close to the target to prevent windup or chatter (smooth landing).
+		if remainingDist < terminalDistThresh {
 			integralError = Vector2D{}
 			previousError = Vector2D{}
 		} else if microCorrectionThresh > 0 {
-			// Calculate the error vector (deviation).
-			// We must use the actual (unclamped) projectedMag here to calculate the true orthogonal
-			// distance from the infinite ideal line.
+			// Calculate the error vector (perpendicular deviation from the ideal path).
 			projectedProgress := idealTrajectoryNorm.Mul(projectedMag)
-			// Error vector points from the ideal line towards the current position.
 			errorVector := currentProgress.Sub(projectedProgress)
 
-			// Dead Zone Implementation (Report Section V.B):
-			// Only activate PID if the error exceeds the threshold.
+			// Apply correction only if the error exceeds the threshold.
 			if errorVector.Mag() > microCorrectionThresh {
+				// P-Term (Proportional): Acceleration directly opposing the current error.
+				P_out := errorVector.Mul(-Kp_a)
 
-				// P-Term (Proportional): Force opposes the error.
-				P_out := errorVector.Mul(-Kp)
-
-				// I-Term (Integral): Accumulate error over time.
+				// I-Term (Integral): Accumulates error over time (discrete-time integration) to eliminate steady-state error.
 				integralError = integralError.Add(errorVector.Mul(dt))
-				I_out := integralError.Mul(-Ki)
+				I_out := integralError.Mul(-Ki_a)
 
-				// D-Term (Derivative): Rate of change of error (damping).
+				// D-Term (Derivative): Opposes the rate of change of error (adds damping).
 				derivativeError := errorVector.Sub(previousError).Mul(1.0 / dt)
-				D_out := derivativeError.Mul(-Kd)
+				D_out := derivativeError.Mul(-Kd_a)
 
-				// Total Correction Force.
-				correctionForce = P_out.Add(I_out).Add(D_out)
+				// Total PID Acceleration (a_pid).
+				correctionAcceleration = P_out.Add(I_out).Add(D_out)
 
-				// Update state for next iteration.
 				previousError = errorVector
-
 			} else {
-				// If within the dead zone, reset the integral term to prevent windup,
-				// but continue tracking the error for the derivative term.
+				// Reset integral error if within the threshold to prevent drift.
 				integralError = Vector2D{}
 				previousError = errorVector
 			}
 		}
 
-		// 4. Calculate Forces (F = ma).
-		// Spring force towards the final target (end).
+		// 5. Calculate Net Acceleration (a_total = a_spring + a_damping + a_external + a_pid).
+		// All terms are accelerations (Force/mass).
+
+		// Spring acceleration (a_spring = (k/m)x = omega_p^2 * displacement). Drives towards the target.
 		displacement := end.Sub(currentPos)
-		springForce := displacement.Mul(omega * omega)
+		springAcceleration := displacement.Mul(omega_p * omega_p)
 
-		// Damping force opposing velocity.
-		dampingForce := velocity.Mul(-2.0 * zeta * omega)
+		// Damping acceleration (a_damping = (c/m)v = 2 * zeta_p * omega_p * velocity).
+		// Opposes velocity.
+		dampingAcceleration := velocity.Mul(-2.0 * zeta_p * omega_p)
 
-		// External forces from the potential field.
-		externalForce := field.CalculateNetForce(currentPos)
+		// External acceleration (a_external = F_ext / m). From potential fields (disturbances).
+		// Assumes field.CalculateNetForce returns acceleration.
+		externalAcceleration := field.CalculateNetForce(currentPos)
 
-		// Net acceleration (a = F/m). Includes the PID correction force.
-		acceleration := springForce.Add(dampingForce).Add(externalForce).Add(correctionForce)
+		// Net acceleration.
+		acceleration := springAcceleration.Add(dampingAcceleration).Add(externalAcceleration).Add(correctionAcceleration)
 
-		// 5. Update Velocity and Position (Semi-implicit Euler integration).
+		// 6. Update Velocity (Semi-implicit Euler integration).
 		velocity = velocity.Add(acceleration.Mul(dt))
 
-		// 6. Apply Signal-Dependent Noise (SDN).
-		// Noise that scales with the magnitude of the motor command (velocity).
+		// 7. Apply Signal-Dependent Noise (SDN).
+		// Noise magnitude increases with velocity, modeling motor control inaccuracies.
 		currentVelocityMag = velocity.Mag()
 		if sdnFactor > 0 && currentVelocityMag > 0 {
 			noiseMag := currentVelocityMag * sdnFactor
-			// Apply noise orthogonal to the direction of movement (trajectory spreading).
-			// Rotate velocity vector by 90 degrees.
+			// Noise is applied orthogonally to the direction of movement.
 			orthogonalDir := Vector2D{X: -velocity.Y, Y: velocity.X}.Normalize()
-			sdnNoise := orthogonalDir.Mul(rng.NormFloat64() * noiseMag)
-			velocity = velocity.Add(sdnNoise)
+			// Check for NaN in case velocity was somehow a zero vector (defensive check).
+			if !math.IsNaN(orthogonalDir.X) && !math.IsNaN(orthogonalDir.Y) {
+				sdnNoise := orthogonalDir.Mul(rng.NormFloat64() * noiseMag)
+				velocity = velocity.Add(sdnNoise)
+			}
 		}
 
-		// Clamp velocity to realistic maximums.
+		// Clamp velocity to realistic physical maximums.
 		if velocity.Mag() > maxVelocity {
 			velocity = velocity.Normalize().Mul(maxVelocity)
 		}
 
+		// 8. Update Position (Semi-implicit Euler integration).
 		currentPos = currentPos.Add(velocity.Mul(dt))
 
-		// 7. Apply Low-Frequency Drift and High-Frequency Tremor.
-		// Apply Pink noise (1/f drift/waver). Pink noise generators are stateful.
+		// 9. Apply Low-Frequency Drift (Pink Noise) and High-Frequency Tremor (Gaussian Noise).
+		// Models physiological noise sources.
 		pinkNoiseDrift := Vector2D{
 			X: h.noiseX.Next() * pinkNoiseMagnitude,
 			Y: h.noiseY.Next() * pinkNoiseMagnitude,
 		}
 		driftAppliedPos := currentPos.Add(pinkNoiseDrift)
-
-		// Apply Gaussian noise (high-frequency tremor).
 		finalPerturbedPoint := h.applyGaussianNoise(driftAppliedPos)
 
-		// 8. Dispatch Event (with Anti-Periodicity Frame Dropping)
-		// Skip dispatching the event occasionally to break rhythmic patterns.
+		// 10. Dispatch Event (with Anti-Periodicity Frame Dropping).
+		// Simulates variability in the operating system's event handling rate.
 		if rng.Float64() > frameDropProb {
 			eventData := schemas.MouseEventData{
 				Type:    schemas.MouseMove,
 				X:       finalPerturbedPoint.X,
 				Y:       finalPerturbedPoint.Y,
-				Button:  schemas.ButtonNone,
-				Buttons: buttonsBitfield,
+				Button:  schemas.ButtonNone, // Button field indicates the button that *changed* state (e.g., click), not held buttons.
+				Buttons: buttonsBitfield,    // Buttons bitfield indicates which buttons are currently held down (for dragging).
 			}
-
 			if err := h.executor.DispatchMouseEvent(ctx, eventData); err != nil {
+				// Log the error unless it was caused by context cancellation.
 				if ctx.Err() == nil {
-					h.logger.Warn("Humanoid: Failed to dispatch mouse move event", zap.Error(err))
+					h.logger.Warn("Humanoid: Failed to dispatch mouse event", zap.Error(err))
 				}
 				return velocity, err
 			}
 		}
 
-		// 9. Update State and Timing.
-		// Always update internal position even if frame was dropped.
+		// 11. Update State and Timing.
 		h.currentPos = finalPerturbedPoint
-		// t is updated by the actual dt used in the simulation step.
 		t += time.Duration(dt * float64(time.Second))
 
-		// Sleep for the duration of the stochastic time step (dt) to maintain real-time simulation speed.
+		// 12. Sleep for the duration of the time step to maintain real-time simulation speed.
 		sleepDuration := time.Duration(dt * float64(time.Second))
 		if sleepDuration > 0 {
 			if err := h.executor.Sleep(ctx, sleepDuration); err != nil {
@@ -237,8 +332,13 @@ func (h *Humanoid) simulateTrajectory(ctx context.Context, start, end Vector2D, 
 		}
 	}
 
+	// Log if the simulation timed out (this is not an error state, but indicates incomplete movement).
 	if t >= maxSimTime {
-		h.logger.Warn("Humanoid: Movement simulation timed out", zap.Any("start", start), zap.Any("end", end), zap.Float64("distance_remaining", currentPos.Dist(end)))
+		h.logger.Warn("Humanoid: Movement simulation timed out",
+			zap.Duration("maxSimTime", maxSimTime),
+			zap.Any("start", start),
+			zap.Any("end", end),
+			zap.Float64("distance_remaining", currentPos.Dist(end)))
 	}
 
 	// Return the final velocity achieved at the end of the movement.
