@@ -19,7 +19,7 @@ import (
 	"golang.org/x/net/http2/hpack"
 )
 
-// ExecuteH2Dependency leverages HTTP/2 Stream Dependencies (PRIORITY frames).
+// ExecuteH2Dependency leverages HTTP/2 Stream Dependencies.
 // It manually controls H2 frames to create a dependency chain for tighter synchronization.
 func ExecuteH2Dependency(ctx context.Context, candidate *RaceCandidate, config *Config, oracle *SuccessOracle, logger *zap.Logger) (*RaceResult, error) {
 	startTime := time.Now()
@@ -63,8 +63,7 @@ func ExecuteH2Dependency(ctx context.Context, candidate *RaceCandidate, config *
 	if _, err := conn.Write([]byte(http2.ClientPreface)); err != nil {
 		return nil, fmt.Errorf("%w: failed to write H2 preface: %v", ErrH2FrameError, err)
 	}
-	// Send initial SETTINGS frame.
-	// We disable PUSH (SettingID 2) as we don't handle it here.
+	// Send initial SETTINGS frame. Disable PUSH.
 	if err := framer.WriteSettings(http2.Setting{ID: http2.SettingEnablePush, Val: 0}); err != nil {
 		return nil, fmt.Errorf("%w: failed to write initial SETTINGS: %v", ErrH2FrameError, err)
 	}
@@ -80,8 +79,7 @@ func ExecuteH2Dependency(ctx context.Context, candidate *RaceCandidate, config *
 		return nil, err
 	}
 
-	// 4. Define Stream IDs.
-	// Client-initiated streams must be odd.
+	// 4. Define Stream IDs (Client-initiated streams must be odd).
 	gateStreamID := uint32(1)
 	nextStreamID := gateStreamID + 2
 
@@ -96,32 +94,30 @@ func ExecuteH2Dependency(ctx context.Context, candidate *RaceCandidate, config *
 		streamIDs = append(streamIDs, streamID)
 		nextStreamID += 2
 
-		// Write PRIORITY frame: This stream depends exclusively on the gateStreamID.
+		// Define PRIORITY parameters: This stream depends on the gateStreamID.
 		priority := http2.PriorityParam{
 			StreamDep: gateStreamID,
-			Weight:    15, // Default weight (16 when serialized)
-			// Exclusive dependency can be rejected by some servers (like httptest.Server).
-			// Using non-exclusive dependency is more compatible and still achieves the goal.
-			Exclusive: false,
-		}
-		if err := framer.WritePriority(streamID, priority); err != nil {
-			return nil, fmt.Errorf("%w: failed to write PRIORITY frame for stream %d: %v", ErrH2FrameError, streamID, err)
+			Weight:    16, // Default weight (16 when serialized)
+			// Using non-exclusive dependency is generally more compatible.
+			Exclusive: true,
 		}
 
-		// Send the actual request (HEADERS + DATA).
-		if err := sendH2Request(framer, encoder, hbuf, streamID, candidate.Method, reqData, targetURL); err != nil {
+		// Send the actual request (HEADERS including Priority + DATA).
+		// FIX: Include the priority in the HEADERS frame instead of sending a separate PRIORITY frame.
+		// This resolves potential PROTOCOL_ERROR issues seen in the logs.
+		if err := sendH2Request(framer, encoder, hbuf, streamID, candidate.Method, reqData, targetURL, &priority); err != nil {
 			return nil, fmt.Errorf("%w: failed to send dependent request %d: %v", ErrH2FrameError, streamID, err)
 		}
 	}
 
 	// 7. Send the Gate request. This should trigger the server to process the dependent streams.
 	streamIDs = append(streamIDs, gateStreamID)
-	if err := sendH2Request(framer, encoder, hbuf, gateStreamID, candidate.Method, gateRequest, targetURL); err != nil {
+	// The gate request doesn't need special priority settings.
+	if err := sendH2Request(framer, encoder, hbuf, gateStreamID, candidate.Method, gateRequest, targetURL, nil); err != nil {
 		return nil, fmt.Errorf("%w: failed to send gate request %d: %v", ErrH2FrameError, gateStreamID, err)
 	}
 
-	// 8. Read responses.
-	// We rely on the connection deadline set earlier to manage read timeouts.
+	// 8. Read responses (relies on the connection deadline).
 	responses, err := readH2Responses(framer, decoder, streamIDs, logger)
 	duration := time.Since(startTime)
 
@@ -133,6 +129,7 @@ func ExecuteH2Dependency(ctx context.Context, candidate *RaceCandidate, config *
 	if len(responses) == 0 {
 		// If we received no responses, classify as unreachable.
 		if err != nil {
+			// This includes the GOAWAY error handling from the logs.
 			return nil, fmt.Errorf("%w: no responses received, last error: %v", ErrTargetUnreachable, err)
 		}
 		return nil, fmt.Errorf("%w: no responses received", ErrTargetUnreachable)
@@ -153,7 +150,6 @@ func ExecuteH2Dependency(ctx context.Context, candidate *RaceCandidate, config *
 			Headers:    resp.Header,
 			Body:       resp.BodyBytes,
 			Duration:   0, // Individual timing isn't measured in this manual strategy.
-			// Raw *http.Response is not available as we manually constructed it.
 		}
 
 		fingerprint := GenerateFingerprint(parsedResponse.StatusCode, parsedResponse.Headers, parsedResponse.Body, excludeMap)
@@ -232,12 +228,11 @@ func dialH2Connection(ctx context.Context, targetURL *url.URL, config *Config) (
 }
 
 // waitForSettingsAck waits for the server to acknowledge our initial SETTINGS frame.
-// Relies on the connection deadline for timeout.
 func waitForSettingsAck(framer *http2.Framer) error {
 	for {
+		// Relies on the connection deadline for timeout.
 		frame, err := framer.ReadFrame()
 		if err != nil {
-			// Check if the error is a timeout from the connection deadline.
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				return fmt.Errorf("%w: timeout waiting for SETTINGS ACK: %v", ErrTargetUnreachable, err)
 			}
@@ -264,9 +259,11 @@ func waitForSettingsAck(framer *http2.Framer) error {
 func prepareH2Requests(candidate *RaceCandidate, count int) ([]h2RequestData, error) {
 	var requests []h2RequestData
 	for i := 0; i < count; i++ {
-		// Create a copy of the candidate for mutation to avoid side effects between iterations.
+		// Create a copy of the candidate for mutation.
 		candidateCopy := *candidate
-		candidateCopy.Headers = candidate.Headers.Clone()
+		if candidate.Headers != nil {
+			candidateCopy.Headers = candidate.Headers.Clone()
+		}
 
 		mutatedBody, mutatedHeaders, _, err := MutateRequest(&candidateCopy)
 		if err != nil {
@@ -278,7 +275,8 @@ func prepareH2Requests(candidate *RaceCandidate, count int) ([]h2RequestData, er
 }
 
 // sendH2Request encodes headers and writes the HEADERS and DATA frames for a request.
-func sendH2Request(framer *http2.Framer, encoder *hpack.Encoder, hbuf *bytes.Buffer, streamID uint32, method string, reqData h2RequestData, targetURL *url.URL) error {
+// It optionally includes priority information in the HEADERS frame.
+func sendH2Request(framer *http2.Framer, encoder *hpack.Encoder, hbuf *bytes.Buffer, streamID uint32, method string, reqData h2RequestData, targetURL *url.URL, priority *http2.PriorityParam) error {
 	// Encode headers.
 	headerBlock, err := encodeHeaders(encoder, hbuf, method, reqData.body, reqData.headers, targetURL)
 	if err != nil {
@@ -287,19 +285,25 @@ func sendH2Request(framer *http2.Framer, encoder *hpack.Encoder, hbuf *bytes.Buf
 
 	// Write HEADERS frame.
 	endStream := len(reqData.body) == 0
-	if err := framer.WriteHeaders(http2.HeadersFrameParam{
+	params := http2.HeadersFrameParam{
 		StreamID:      streamID,
 		BlockFragment: headerBlock,
 		EndStream:     endStream,
 		EndHeaders:    true,
-	}); err != nil {
+	}
+
+	// Include priority information if provided (FIX for PROTOCOL_ERROR).
+	if priority != nil {
+		params.Priority = *priority
+	}
+
+	if err := framer.WriteHeaders(params); err != nil {
 		return fmt.Errorf("failed to write HEADERS frame: %w", err)
 	}
 
 	// Write DATA frame if body exists.
 	if !endStream {
 		// Assuming request bodies fit in one frame for this strategy.
-		// For very large bodies, this would need chunking based on MAX_FRAME_SIZE.
 		if err := framer.WriteData(streamID, true, reqData.body); err != nil {
 			return fmt.Errorf("failed to write DATA frame: %w", err)
 		}
@@ -337,12 +341,8 @@ func encodeHeaders(encoder *hpack.Encoder, hbuf *bytes.Buffer, method string, bo
 	// Regular headers
 	for k, vv := range headers {
 		canonicalKey := http.CanonicalHeaderKey(k)
-		// Skip Host as it's covered by :authority
-		if canonicalKey == "Host" {
-			continue
-		}
-		// Skip Content-Length as we handled it explicitly above
-		if canonicalKey == "Content-Length" {
+		// Skip Host (covered by :authority) and Content-Length (handled explicitly).
+		if canonicalKey == "Host" || canonicalKey == "Content-Length" {
 			continue
 		}
 
@@ -360,7 +360,6 @@ func encodeHeaders(encoder *hpack.Encoder, hbuf *bytes.Buffer, method string, bo
 }
 
 // readH2Responses handles the asynchronous reading and parsing of H2 frames into responses.
-// It relies on the connection deadline for timeouts.
 func readH2Responses(framer *http2.Framer, decoder *hpack.Decoder, streamIDs []uint32, logger *zap.Logger) ([]h2ResponseData, error) {
 	responses := make(map[uint32]*h2ResponseData)
 	expectedStreams := make(map[uint32]bool)
@@ -391,6 +390,7 @@ func readH2Responses(framer *http2.Framer, decoder *hpack.Decoder, streamIDs []u
 		if streamID == 0 {
 			switch f := frame.(type) {
 			case *http2.GoAwayFrame:
+				// Capture GOAWAY errors, which caused the failure in the logs.
 				lastErr = fmt.Errorf("server sent GOAWAY: %v (LastStreamID: %d)", f.ErrCode, f.LastStreamID)
 				// Stop processing further streams.
 				expectedStreams = make(map[uint32]bool)
@@ -398,20 +398,18 @@ func readH2Responses(framer *http2.Framer, decoder *hpack.Decoder, streamIDs []u
 
 			case *http2.PingFrame:
 				if !f.IsAck() {
-					// Acknowledge PINGs to keep the connection alive.
+					// Acknowledge PINGs (best effort).
 					if err := framer.WritePing(true, f.Data); err != nil {
 						lastErr = fmt.Errorf("failed to write PING ACK: %w", err)
-						// Continue processing existing frames even if PING ACK fails
 					}
 				}
 			case *http2.WindowUpdateFrame, *http2.SettingsFrame:
-				// Flow control/Settings frames, ignored in this simple implementation.
 				logger.Debug("Received control frame", zap.String("type", frame.Header().Type.String()))
 			}
 			continue
 		}
 
-		// Ignore frames for streams we didn't initiate, unless we are already tracking them.
+		// Ignore frames for unexpected streams.
 		if !expectedStreams[streamID] && responses[streamID] == nil {
 			logger.Debug("Ignoring unexpected stream ID", zap.Uint32("streamID", streamID))
 			continue
@@ -421,11 +419,10 @@ func readH2Responses(framer *http2.Framer, decoder *hpack.Decoder, streamIDs []u
 		switch f := frame.(type) {
 		case *http2.HeadersFrame:
 			if _, exists := responses[streamID]; exists {
-				// Potential Trailers, which we ignore for simplicity in this analysis.
+				// Potential Trailers, ignored here.
 				if f.StreamEnded() {
 					delete(expectedStreams, streamID)
 				}
-				logger.Debug("Received HEADERS (likely trailers) for existing stream", zap.Uint32("streamID", streamID))
 				continue
 			}
 
@@ -449,7 +446,7 @@ func readH2Responses(framer *http2.Framer, decoder *hpack.Decoder, streamIDs []u
 					if err != nil {
 						logger.Error("Invalid :status header", zap.String("value", hf.Value), zap.Uint32("streamID", streamID))
 						delete(expectedStreams, streamID)
-						break // Stop parsing headers for this frame
+						break
 					}
 					respData.StatusCode = status
 				} else {
@@ -461,7 +458,6 @@ func readH2Responses(framer *http2.Framer, decoder *hpack.Decoder, streamIDs []u
 			if respData.StatusCode != 0 {
 				responses[streamID] = respData
 			} else {
-				// If status code wasn't found, it's an invalid response.
 				delete(expectedStreams, streamID)
 			}
 
@@ -472,9 +468,8 @@ func readH2Responses(framer *http2.Framer, decoder *hpack.Decoder, streamIDs []u
 		case *http2.DataFrame:
 			respData, exists := responses[streamID]
 			if !exists {
-				// DATA before HEADERS? Protocol error.
+				// DATA before HEADERS (Protocol error).
 				logger.Error("Received DATA before HEADERS", zap.Uint32("streamID", streamID))
-				// Send RST_STREAM (best effort)
 				framer.WriteRSTStream(streamID, http2.ErrCodeProtocol)
 				delete(expectedStreams, streamID)
 				continue
@@ -485,7 +480,6 @@ func readH2Responses(framer *http2.Framer, decoder *hpack.Decoder, streamIDs []u
 			if len(respData.BodyBytes) > maxResponseBodyBytes {
 				logger.Warn("Response body exceeded limit, truncating and resetting stream.", zap.Uint32("streamID", streamID))
 				respData.BodyBytes = respData.BodyBytes[:maxResponseBodyBytes]
-				// Send RST_STREAM (best effort)
 				framer.WriteRSTStream(streamID, http2.ErrCodeFrameSize)
 				delete(expectedStreams, streamID)
 				continue
@@ -498,10 +492,6 @@ func readH2Responses(framer *http2.Framer, decoder *hpack.Decoder, streamIDs []u
 		case *http2.RSTStreamFrame:
 			logger.Info("Stream reset by server", zap.Uint32("streamID", streamID), zap.Uint32("errorCode", uint32(f.ErrCode)))
 			delete(expectedStreams, streamID)
-
-		case *http2.WindowUpdateFrame:
-			// Flow control frame, ignored here.
-			logger.Debug("Received WINDOW_UPDATE for stream", zap.Uint32("streamID", streamID))
 		}
 	}
 

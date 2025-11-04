@@ -114,9 +114,17 @@ func (f *concreteFactory) Create(ctx context.Context, cfg config.Interface, targ
 	// TODO: When OAST is configurable, initialize it here.
 	logger.Debug("OAST provider remains nil (not yet implemented).")
 
+	// FIX: Perform a type assertion to get the concrete config struct.
+	// Some components, like the browser manager, expect the concrete type for creating analysis contexts.
+	concreteCfg, ok := cfg.(*config.Config)
+	if !ok {
+		initializationErr = fmt.Errorf("system requires a concrete *config.Config, but received %T", cfg)
+		return nil, initializationErr
+	}
+
 	// 7. Global Context for analyzers
 	globalCtx := &core.GlobalContext{
-		Config:         cfg,
+		Config:         concreteCfg,
 		Logger:         logger,
 		BrowserManager: browserManager,
 		DBPool:         dbPool,

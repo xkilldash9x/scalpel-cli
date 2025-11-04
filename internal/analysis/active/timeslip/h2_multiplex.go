@@ -25,12 +25,10 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 	}
 
 	// 1. Configure the client for H2.
-	// FIX: Renamed function and updated field names for consistency with network package refactor.
 	clientConfig := network.NewBrowserClientConfig()
 	clientConfig.RequestTimeout = config.Timeout
 	clientConfig.InsecureSkipVerify = config.InsecureSkipVerify
-	// The new transport automatically attempts H2, so ForceHTTP2 is no longer needed.
-	// Optimize for single connection reuse.
+	// The transport automatically attempts H2. Optimize for single connection reuse.
 	clientConfig.MaxIdleConnsPerHost = 1
 	clientConfig.MaxConnsPerHost = 1
 
@@ -42,7 +40,7 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 	initWg := sync.WaitGroup{}
 	startGate := make(chan struct{})
 
-	// Get the exclusion map once for use in all goroutines.
+	// Get the exclusion map once.
 	excludeMap := config.GetExcludedHeaders()
 
 	// 3. Initialize the request goroutines.
@@ -53,9 +51,11 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 			defer wg.Done()
 
 			// -- Mutation Phase --
-			// Create a copy of the candidate for mutation to avoid side effects between goroutines.
+			// Create a copy of the candidate for mutation.
 			candidateCopy := *candidate
-			candidateCopy.Headers = candidate.Headers.Clone()
+			if candidate.Headers != nil {
+				candidateCopy.Headers = candidate.Headers.Clone()
+			}
 
 			mutatedBody, mutatedHeaders, mutatedURL, err := MutateRequest(&candidateCopy)
 			if err != nil {
@@ -78,9 +78,9 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 
 			// Apply Request Jitter.
 			if config.RequestJitter > 0 {
-				rng := getRNG() // Use pooled RNG
+				rng := getRNG()
 				jitter := time.Duration(rng.Int63n(int64(config.RequestJitter)))
-				putRNG(rng) // Return RNG immediately after use
+				putRNG(rng)
 				time.Sleep(jitter)
 			}
 
@@ -129,7 +129,6 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 			copy(body, buf.Bytes()[:n])
 
 			// Generate the composite fingerprint.
-			// Use the excludeMap.
 			fingerprint := GenerateFingerprint(resp.StatusCode, resp.Header, body, excludeMap)
 
 			parsedResponse := &ParsedResponse{
@@ -191,6 +190,7 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 		return nil, ErrH2Unsupported
 	}
 
+	// If no requests succeeded, report as unreachable.
 	if !h2Used && len(result.Responses) > 0 {
 		if firstError != nil {
 			return nil, fmt.Errorf("%w: %v", ErrTargetUnreachable, firstError)

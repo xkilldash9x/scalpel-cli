@@ -28,7 +28,7 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 	// Configure dialer.
 	dialerConfig := network.NewDialerConfig()
 	dialerConfig.Timeout = config.Timeout
-	dialerConfig.NoDelay = true // Disable Nagle's algorithm.
+	dialerConfig.NoDelay = true // Disable Nagle's algorithm for precise timing.
 
 	address, err := setupConnectionDetails(targetURL, dialerConfig, config.InsecureSkipVerify)
 	if err != nil {
@@ -41,7 +41,7 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 	}
 	defer conn.Close()
 
-	// Set deadline.
+	// Set deadline for the entire operation.
 	deadline := time.Now().Add(config.Timeout)
 	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
 		deadline = ctxDeadline
@@ -68,6 +68,7 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 
 		// Write the prefix.
 		if _, err := conn.Write(prefix); err != nil {
+			// Connection closed during prefix write usually means the server rejected pipelining.
 			return nil, fmt.Errorf("%w: error writing prefix %d: %v", ErrPipeliningRejected, i, err)
 		}
 
@@ -85,6 +86,7 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 	duration := time.Since(startTime)
 
 	if err != nil {
+		// Log parsing errors but continue if we got at least some responses.
 		logger.Warn("Warning: failed to parse all pipelined responses",
 			zap.Int("parsed", len(httpResponses)),
 			zap.Error(err))
@@ -108,8 +110,7 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 	}
 
 	for _, httpResp := range httpResponses {
-		// FIX: Convert the standard *http.Response from the parser into our
-		// local *ParsedResponse type for analysis.
+		// Convert the standard *http.Response into our local *ParsedResponse type.
 
 		bodyBytes, readErr := io.ReadAll(httpResp.Body)
 		if readErr != nil {
@@ -119,7 +120,7 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 		}
 		httpResp.Body.Close()
 
-		// Create the local ParsedResponse. Individual duration isn't available here.
+		// Create the local ParsedResponse. Individual duration isn't available.
 		localParsedResp := &ParsedResponse{
 			StatusCode: httpResp.StatusCode,
 			Headers:    httpResp.Header,
@@ -128,8 +129,7 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 			Raw:        httpResp,
 		}
 
-		// Generate the composite fingerprint using the now-correct types.
-		// Use the excludeMap.
+		// Generate the composite fingerprint.
 		fingerprint := GenerateFingerprint(localParsedResp.StatusCode, localParsedResp.Headers, localParsedResp.Body, excludeMap)
 
 		raceResp := &RaceResponse{
@@ -183,7 +183,9 @@ func preparePipelinedRequests(candidate *RaceCandidate, count int, host string) 
 		// 1. Apply mutations.
 		// Create a copy of the candidate for mutation to avoid side effects between iterations.
 		candidateCopy := *candidate
-		candidateCopy.Headers = candidate.Headers.Clone()
+		if candidate.Headers != nil {
+			candidateCopy.Headers = candidate.Headers.Clone()
+		}
 
 		mutatedBody, mutatedHeaders, mutatedURL, err := MutateRequest(&candidateCopy)
 		if err != nil {
@@ -201,11 +203,8 @@ func preparePipelinedRequests(candidate *RaceCandidate, count int, host string) 
 		req.Header.Set("Connection", "keep-alive")
 
 		// IMPROVEMENT: Explicitly disable 'Expect: 100-continue'.
-		// If a request has a body, the Go client might automatically add this header,
-		// or the server might expect it by default.
-		// If the server honors it, it will pause and send a 100 Continue response
-		// before reading the body. This ruins the synchronization of the single-byte strategy
-		// by causing the server to process the stream prematurely.
+		// If the server honors this header, it will pause and send a 100 Continue response
+		// before reading the body. This ruins the synchronization of the single-byte strategy.
 		if len(mutatedBody) > 0 {
 			req.Header.Set("Expect", "")
 		}
@@ -220,10 +219,12 @@ func preparePipelinedRequests(candidate *RaceCandidate, count int, host string) 
 		buf := getBuffer()
 
 		if err := req.Write(buf); err != nil {
+			putBuffer(buf) // Return buffer in case of error
 			return nil, fmt.Errorf("failed to serialize request %d: %w", i, err)
 		}
 
 		if buf.Len() == 0 {
+			putBuffer(buf)
 			return nil, fmt.Errorf("%w: serialized request %d is empty", ErrConfigurationError, i)
 		}
 
@@ -233,7 +234,7 @@ func preparePipelinedRequests(candidate *RaceCandidate, count int, host string) 
 
 		preparedRequests = append(preparedRequests, reqBytes)
 
-		// Return the buffer to the pool manually at the end of the loop iteration.
+		// Return the buffer to the pool.
 		putBuffer(buf)
 	}
 	return preparedRequests, nil
