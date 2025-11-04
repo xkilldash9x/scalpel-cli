@@ -12,14 +12,12 @@ import (
 	"time"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"go.uber.org/zap"
 )
 
 // ExecuteH1SingleByteSend implements the "single-byte send" strategy using HTTP Pipelining.
-func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, config *Config, oracle *SuccessOracle) (*RaceResult, error) {
+func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, config *Config, oracle *SuccessOracle, logger *zap.Logger) (*RaceResult, error) {
 	startTime := time.Now()
-	logger := observability.GetLogger().Named("timeslip.h1_singlebyte")
 
 	// 1. Establish a raw TCP/TLS connection.
 	targetURL, err := url.Parse(candidate.URL)
@@ -183,13 +181,17 @@ func preparePipelinedRequests(candidate *RaceCandidate, count int, host string) 
 
 	for i := 0; i < count; i++ {
 		// 1. Apply mutations.
-		mutatedBody, mutatedHeaders, err := MutateRequest(candidate.Body, candidate.Headers)
+		// Create a copy of the candidate for mutation to avoid side effects between iterations.
+		candidateCopy := *candidate
+		candidateCopy.Headers = candidate.Headers.Clone()
+
+		mutatedBody, mutatedHeaders, mutatedURL, err := MutateRequest(&candidateCopy)
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to mutate request %d: %v", ErrPayloadMutationFail, i, err)
 		}
 
 		// 2. Create request object.
-		req, err := http.NewRequest(candidate.Method, candidate.URL, bytes.NewReader(mutatedBody))
+		req, err := http.NewRequest(candidate.Method, mutatedURL, bytes.NewReader(mutatedBody))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create request object %d: %w", i, err)
 		}
@@ -216,7 +218,6 @@ func preparePipelinedRequests(candidate *RaceCandidate, count int, host string) 
 
 		// 3. Serialize the request using a pooled buffer.
 		buf := getBuffer()
-		defer putBuffer(buf)
 
 		if err := req.Write(buf); err != nil {
 			return nil, fmt.Errorf("failed to serialize request %d: %w", i, err)
@@ -231,6 +232,9 @@ func preparePipelinedRequests(candidate *RaceCandidate, count int, host string) 
 		copy(reqBytes, buf.Bytes())
 
 		preparedRequests = append(preparedRequests, reqBytes)
+
+		// Return the buffer to the pool manually at the end of the loop iteration.
+		putBuffer(buf)
 	}
 	return preparedRequests, nil
 }

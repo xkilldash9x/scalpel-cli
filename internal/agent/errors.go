@@ -12,7 +12,7 @@ const (
 	ErrCodeExecutionFailure  ErrorCode = "EXECUTION_FAILURE"
 	ErrCodeNotImplemented    ErrorCode = "NOT_IMPLEMENTED"
 	ErrCodeInvalidParameters ErrorCode = "INVALID_PARAMETERS"
-	ErrCodeJSONMarshalFailed ErrorCode = "JSON_MARSHAL_FAILED" // From a previous step
+	ErrCodeJSONMarshalFailed ErrorCode = "JSON_MARSHAL_FAILED"
 	ErrCodeUnknownAction     ErrorCode = "UNKNOWN_ACTION_TYPE"
 	ErrCodeFeatureDisabled   ErrorCode = "FEATURE_DISABLED"
 	// -- Browser/DOM Errors (used by both ExecutorRegistry and Agent/Humanoid) --

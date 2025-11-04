@@ -1,6 +1,6 @@
 package adapters
 
-import (
+import ( // This is a comment to force a change
 	"context"
 	"fmt"
 
@@ -15,7 +15,7 @@ type AgentAdapter struct {
 	*core.BaseAnalyzer
 }
 
-//  creates a new adapter for agent missions.
+// creates a new adapter for agent missions.
 func NewAgentAdapter() *AgentAdapter {
 	return &AgentAdapter{
 		BaseAnalyzer: core.NewBaseAnalyzer("AgentAdapter", "Executes autonomous agent missions", core.TypeAgent, zap.NewNop()),

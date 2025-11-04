@@ -11,8 +11,10 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
 	"go.uber.org/zap"
+	"golang.org/x/net/http2"
 )
 
 // --- III. Concurrency & Reliability Tests ---
@@ -36,7 +38,7 @@ func TestGoroutineLeaks_H1Concurrent(t *testing.T) {
 	candidate := &RaceCandidate{Method: "GET", URL: server.URL}
 
 	// 3. Execution
-	_, err := ExecuteH1Concurrent(context.Background(), candidate, config, oracle)
+	_, err := ExecuteH1Concurrent(context.Background(), candidate, config, oracle, zap.NewNop())
 	assert.NoError(t, err)
 
 	// 4. Verification (handled by the defer goleak.VerifyNone(t))
@@ -66,7 +68,7 @@ func TestGoroutineLeaks_Cancellation(t *testing.T) {
 	done := make(chan error)
 	go func() {
 		// We use H2Multiplexing as an example strategy
-		_, err := ExecuteH2Multiplexing(ctx, candidate, config, oracle)
+		_, err := ExecuteH2Multiplexing(ctx, candidate, config, oracle, zap.NewNop())
 		done <- err
 	}()
 
@@ -93,11 +95,16 @@ func TestStress_AnalyzerConcurrency(t *testing.T) {
 	reporter := &MockReporter{} // Thread-safe mock
 
 	// Setup Mock Server
-	// FIX: Use NewTLSServer as the Analyzer will attempt H2 strategies which require HTTPS.
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	// Use NewUnstartedServer and explicitly configure H2 to support all strategies.
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "{\"success\":true}")
 	}))
+	// SOLUTION: Explicitly enable HTTP/2 on the test server.
+	require.NoError(t, http2.ConfigureServer(server.Config, &http2.Server{}))
+	// FIX: Assign the configured TLSConfig back to the server before starting.
+	server.TLS = server.Config.TLSConfig
+	server.StartTLS()
 	defer server.Close()
 
 	config := &Config{

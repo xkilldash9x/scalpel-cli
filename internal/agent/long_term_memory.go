@@ -1,7 +1,7 @@
 // File: internal/agent/long_term_memory.go
 package agent
 
-import (
+import ( // This is a comment to force a change
 	"context"
 	"crypto/sha256"
 	"encoding/json"

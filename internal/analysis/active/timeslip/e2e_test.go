@@ -127,13 +127,14 @@ func TestE2E_TOCTOU_Vulnerable(t *testing.T) {
 		processDelay: 50 * time.Millisecond,
 		useLocking:   false,
 	}
-	// FIX: Use NewTLSServer because the Analyzer prioritizes H2 strategies which require HTTPS.
+	// FIX: Use NewTLSServer because the Analyzer prioritizes H2 strategies which require HTTPS. Set InsecureSkipVerify to true.
 	server := httptest.NewTLSServer(http.HandlerFunc(vs.handler))
 	defer server.Close()
 
 	reporter := &E2EMockReporter{}
-	analyzer, err := setupE2EAnalyzer(reporter, true) // true for insecure
+	analyzer, err := setupE2EAnalyzer(reporter, true)
 	require.NoError(t, err)
+	analyzer.UseHTTP1OnlyForTests() // Force fallback to H1 for this specific vulnerable server simulation
 
 	candidate := &timeslip.RaceCandidate{
 		Method: "POST",
@@ -180,13 +181,14 @@ func TestE2E_Patched_WithLocking(t *testing.T) {
 		processDelay: 50 * time.Millisecond,
 		useLocking:   true, // Enable locking
 	}
-	// FIX: Use NewTLSServer.
+	// FIX: Use NewTLSServer and set InsecureSkipVerify to true.
 	server := httptest.NewTLSServer(http.HandlerFunc(vs.handler))
 	defer server.Close()
 
 	reporter := &E2EMockReporter{}
-	analyzer, err := setupE2EAnalyzer(reporter, true) // true for insecure
+	analyzer, err := setupE2EAnalyzer(reporter, true)
 	require.NoError(t, err)
+	analyzer.UseHTTP1OnlyForTests() // Force H1 to test the locking delay timing anomaly
 
 	candidate := &timeslip.RaceCandidate{
 		Method: "POST",

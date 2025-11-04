@@ -10,6 +10,8 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"go.uber.org/zap"
+
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 )
 
 // -- Executor Registry --
@@ -21,8 +23,9 @@ type ExecutorRegistry struct {
 	logger    *zap.Logger
 	executors map[ActionType]ActionExecutor
 
-	sessionProvider SessionProvider
-	providerMu      sync.RWMutex
+	sessionProvider  SessionProvider
+	humanoidProvider HumanoidProvider
+	providerMu       sync.RWMutex
 }
 
 // NewExecutorRegistry creates and initializes the registry with its set of specialized executors.
@@ -35,15 +38,21 @@ func NewExecutorRegistry(logger *zap.Logger, projectRoot string, globalCtx *core
 
 	// This getter ensures that the latest session provider is used by executors at runtime.
 	safeProviderGetter := r.GetSessionProvider()
+	safeHumanoidGetter := r.GetHumanoidProvider()
 
 	// Initialize the executors managed by this registry.
 	browserExec := NewBrowserExecutor(logger, safeProviderGetter)
 	codebaseExec := NewCodebaseExecutor(logger, projectRoot)
 	analysisExec := NewAnalysisExecutor(logger, globalCtx, safeProviderGetter)
+	humanoidExec := NewHumanoidExecutor(logger, safeHumanoidGetter)
 
 	// Register browser actions. Note that CLICK and INPUT_TEXT are absent,
 	// as they are now orchestrated by the Agent via the Humanoid module.
 	r.register(browserExec, ActionNavigate, ActionSubmitForm, ActionScroll, ActionWaitForAsync)
+
+	// Register complex, interactive browser actions.
+	// These are handled by the HumanoidExecutor, which orchestrates human-like interactions.
+	r.register(humanoidExec, ActionClick, ActionInputText, ActionHumanoidDragAndDrop)
 
 	// Register codebase actions, which are non-interactive by nature.
 	r.register(codebaseExec, ActionGatherCodebaseContext)
@@ -62,6 +71,14 @@ func (r *ExecutorRegistry) UpdateSessionProvider(provider SessionProvider) {
 	r.sessionProvider = provider
 }
 
+// UpdateHumanoidProvider allows the Agent to dynamically set the humanoid provider function
+// once the Humanoid controller has been initialized. This method is thread-safe.
+func (r *ExecutorRegistry) UpdateHumanoidProvider(provider HumanoidProvider) {
+	r.providerMu.Lock()
+	defer r.providerMu.Unlock()
+	r.humanoidProvider = provider
+}
+
 // GetSessionProvider returns a function that safely retrieves the current session provider,
 // preventing race conditions.
 func (r *ExecutorRegistry) GetSessionProvider() SessionProvider {
@@ -70,6 +87,19 @@ func (r *ExecutorRegistry) GetSessionProvider() SessionProvider {
 		defer r.providerMu.RUnlock()
 		if r.sessionProvider != nil {
 			return r.sessionProvider()
+		}
+		return nil
+	}
+}
+
+// GetHumanoidProvider returns a function that safely retrieves the current humanoid provider,
+// preventing race conditions.
+func (r *ExecutorRegistry) GetHumanoidProvider() HumanoidProvider {
+	return func() *humanoid.Humanoid {
+		r.providerMu.RLock()
+		defer r.providerMu.RUnlock()
+		if r.humanoidProvider != nil {
+			return r.humanoidProvider()
 		}
 		return nil
 	}
@@ -89,8 +119,8 @@ func (r *ExecutorRegistry) Execute(ctx context.Context, action Action) (*Executi
 	executor, ok := r.executors[action.Type]
 	if !ok {
 		switch action.Type {
-		case ActionConclude, ActionPerformComplexTask, ActionClick, ActionInputText, ActionHumanoidDragAndDrop, ActionEvolveCodebase:
-			return nil, fmt.Errorf("%s should be handled by the Agent, not dispatched to ExecutorRegistry", action.Type)
+		case ActionConclude, ActionPerformComplexTask, ActionEvolveCodebase:
+			return nil, fmt.Errorf("%s should be handled by the Agent's cognitive loop, not dispatched to ExecutorRegistry", action.Type)
 		default:
 			return nil, fmt.Errorf("no executor registered for action type: %s", action.Type)
 		}
@@ -127,12 +157,24 @@ func NewBrowserExecutor(logger *zap.Logger, provider SessionProvider) *BrowserEx
 func (e *BrowserExecutor) Execute(ctx context.Context, action Action) (*ExecutionResult, error) {
 	session := e.sessionProvider()
 	if session == nil {
-		return nil, fmt.Errorf("cannot execute browser action (%s): no active browser session", action.Type)
+		// Return a structured result instead of a raw error for consistency.
+		return &ExecutionResult{
+			Status:          "failed",
+			ObservationType: ObservedSystemState,
+			ErrorCode:       ErrCodeExecutionFailure,
+			ErrorDetails:    map[string]interface{}{"message": fmt.Sprintf("cannot execute browser action (%s): no active browser session", action.Type)},
+		}, nil
 	}
 
 	handler, ok := e.handlers[action.Type]
 	if !ok {
-		return nil, fmt.Errorf("BrowserExecutor handler not found for type: %s", action.Type)
+		// This should ideally be caught by the registry, but acts as a safeguard.
+		return &ExecutionResult{
+			Status:          "failed",
+			ObservationType: ObservedSystemState,
+			ErrorCode:       ErrCodeUnknownAction,
+			ErrorDetails:    map[string]interface{}{"message": fmt.Sprintf("BrowserExecutor handler not found for type: %s", action.Type)},
+		}, nil
 	}
 
 	err := handler(ctx, session, action)
@@ -194,7 +236,7 @@ func (e *BrowserExecutor) handleWaitForAsync(ctx context.Context, session schema
 		switch v := val.(type) {
 		case float64:
 			durationMs = int(v)
-		// FIX: Handle integer types individually to avoid panic on type assertion in multi-type case.
+		// Handle integer types individually to avoid panic on type assertion in multi-type case.
 		case int:
 			durationMs = v
 		case int64:
@@ -238,19 +280,29 @@ func ParseBrowserError(err error, action Action) (ErrorCode, map[string]interfac
 		"action":  action.Type,
 	}
 
-	if strings.Contains(errStr, "selector") || strings.Contains(errStr, "no element found") || strings.Contains(errStr, "geometry retrieval failed") {
-		details["selector"] = action.Selector
-		return ErrCodeElementNotFound, details
+	// 1. Check for parameter validation errors explicitly.
+	// This prevents validation errors (which often contain the word "selector")
+	// from being misclassified by subsequent checks.
+	if strings.Contains(errStr, "requires a 'selector'") ||
+		strings.Contains(errStr, "requires a 'value'") ||
+		strings.Contains(errStr, "requires 'metadata.target_selector'") ||
+		strings.Contains(errStr, "'metadata.target_selector' must be a non-empty string") {
+		return ErrCodeInvalidParameters, details
 	}
-	if strings.Contains(errStr, "not interactable") || strings.Contains(errStr, "zero size") {
-		details["selector"] = action.Selector
-		return ErrCodeHumanoidGeometryInvalid, details
-	}
+
+	// 2. Check for common execution errors.
 	if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "context deadline exceeded") {
 		return ErrCodeTimeoutError, details
 	}
 	if strings.Contains(errStr, "net::ERR") {
 		return ErrCodeNavigationError, details
+	}
+
+	// 3. Check for element lookup failures.
+	// Removed the overly broad `strings.Contains(errStr, "selector")`.
+	if strings.Contains(errStr, "no element found") || strings.Contains(errStr, "geometry retrieval failed") {
+		details["selector"] = action.Selector
+		return ErrCodeElementNotFound, details
 	}
 
 	return ErrCodeExecutionFailure, details

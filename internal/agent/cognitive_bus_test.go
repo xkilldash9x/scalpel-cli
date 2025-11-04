@@ -50,6 +50,19 @@ func setupCognitiveBus(t *testing.T, bufferSize int) *CognitiveBus {
 	return bus
 }
 
+// -- Test Cases: Initialization --
+
+// NEW: Verifies that a zero or negative buffer size defaults to 100.
+func TestCognitiveBus_New_DefaultBufferSize(t *testing.T) {
+	logger := zaptest.NewLogger(t)
+
+	bus1 := NewCognitiveBus(logger, 0)
+	assert.Equal(t, 100, bus1.bufferSize)
+
+	bus2 := NewCognitiveBus(logger, -10)
+	assert.Equal(t, 100, bus2.bufferSize)
+}
+
 // -- Test Cases: Basic Functionality --
 
 // Verifies the basic message flow from posting to acknowledging.
@@ -127,6 +140,118 @@ func TestCognitiveBus_Filtering(t *testing.T) {
 	assert.Empty(t, obsChan, "Observation channel should be empty")
 }
 
+// NEW: Verifies subscribing to multiple specific types.
+func TestCognitiveBus_SubscribeMultipleTypes(t *testing.T) {
+	bus := setupCognitiveBus(t, 10)
+	ctx := context.Background()
+
+	// Subscribe to Action OR Observation
+	multiChan, unsub := bus.Subscribe(MessageTypeAction, MessageTypeObservation)
+	defer unsub()
+
+	require.NoError(t, bus.Post(ctx, CognitiveMessage{Type: MessageTypeAction, Payload: "A1"}))
+	require.NoError(t, bus.Post(ctx, CognitiveMessage{Type: MessageTypeStateChange, Payload: "S1"})) // Should be ignored
+	require.NoError(t, bus.Post(ctx, CognitiveMessage{Type: MessageTypeObservation, Payload: "O1"}))
+
+	// Receive A1
+	select {
+	case msg := <-multiChan:
+		assert.Equal(t, "A1", msg.Payload)
+		bus.Acknowledge(msg)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Timeout waiting for A1")
+	}
+
+	// Receive O1
+	select {
+	case msg := <-multiChan:
+		assert.Equal(t, "O1", msg.Payload)
+		bus.Acknowledge(msg)
+	case <-time.After(500 * time.Millisecond):
+		t.Fatal("Timeout waiting for O1")
+	}
+
+	assert.Empty(t, multiChan, "Channel should be empty, S1 should have been ignored")
+}
+
+// NEW: Verifies that a subscriber listening to both a specific type and "all" only receives the message once.
+func TestCognitiveBus_SubscribeSpecificAndAll_Uniqueness(t *testing.T) {
+	bus := setupCognitiveBus(t, 10)
+	ctx := context.Background()
+
+	// Manually manipulate subscribers to simulate a channel listening to both specific and "all".
+	// This tests the uniqueness logic within the Post method.
+	ch := make(chan CognitiveMessage, 10)
+	bus.mu.Lock()
+	bus.subscribers[MessageTypeAction] = append(bus.subscribers[MessageTypeAction], ch)
+	bus.subscribers[""] = append(bus.subscribers[""], ch) // "" represents "all"
+	bus.mu.Unlock()
+
+	// Act
+	require.NoError(t, bus.Post(ctx, CognitiveMessage{Type: MessageTypeAction, Payload: "A1"}))
+
+	// Assert
+	select {
+	case msg := <-ch:
+		bus.Acknowledge(msg)
+		assert.Equal(t, "A1", msg.Payload)
+	case <-time.After(1 * time.Second):
+		t.Fatal("Timeout waiting for message")
+	}
+
+	// Crucial check: Ensure the channel is now empty (no duplicate delivery)
+	assert.Empty(t, ch, "Subscriber received the message more than once")
+}
+
+// NEW: Verifies the unsubscribe logic works correctly and cleans up internal maps.
+func TestCognitiveBus_Unsubscribe(t *testing.T) {
+	bus := setupCognitiveBus(t, 10)
+	ctx := context.Background()
+
+	ch1, unsub1 := bus.Subscribe(MessageTypeAction)
+	ch2, unsub2 := bus.Subscribe(MessageTypeAction)
+
+	// Unsubscribe the first listener
+	unsub1()
+
+	// Act
+	require.NoError(t, bus.Post(ctx, CognitiveMessage{Type: MessageTypeAction, Payload: "A1"}))
+
+	// Assert
+	// ch1 should receive nothing
+	select {
+	case msg, ok := <-ch1:
+		if ok {
+			t.Fatalf("Unsubscribed channel received a message: %+v", msg)
+		}
+	default:
+		// Expected path if not closed yet
+	}
+
+	// ch2 should receive the message
+	select {
+	case msg := <-ch2:
+		bus.Acknowledge(msg)
+		assert.Equal(t, "A1", msg.Payload)
+	case <-time.After(1 * time.Second):
+		t.Fatal("Active subscriber did not receive message")
+	}
+
+	// Verify internal state (requires RLock)
+	bus.mu.RLock()
+	assert.Len(t, bus.subscribers[MessageTypeAction], 1, "Internal subscribers map not cleaned up")
+	bus.mu.RUnlock()
+
+	// Unsubscribe the second listener
+	unsub2()
+
+	// Verify map cleanup when empty
+	bus.mu.RLock()
+	_, exists := bus.subscribers[MessageTypeAction]
+	assert.False(t, exists, "Map entry should be deleted when subscriber list is empty")
+	bus.mu.RUnlock()
+}
+
 // -- Test Cases: Robustness and Backpressure --
 
 // Verifies that Post blocks when a subscriber's buffer is full.
@@ -173,7 +298,6 @@ func TestCognitiveBus_Backpressure(t *testing.T) {
 	}
 
 	//
-	// -- FIX --
 	// Consume and acknowledge the second message. This is the crucial step
 	// to prevent the test cleanup (bus.Shutdown) from hanging.
 	//
@@ -312,6 +436,20 @@ func TestCognitiveBus_Shutdown_UnblocksPost(t *testing.T) {
 	case <-time.After(1 * time.Second):
 		t.Fatal("Timeout waiting for Shutdown to complete.")
 	}
+}
+
+// NEW: Verifies that Post returns an error if called after Shutdown has started.
+func TestCognitiveBus_PostAfterShutdown(t *testing.T) {
+	bus := setupCognitiveBus(t, 10)
+	ctx := context.Background()
+
+	// Initiate shutdown
+	bus.Shutdown()
+
+	// Attempt to post
+	err := bus.Post(ctx, CognitiveMessage{Type: MessageTypeAction, Payload: "Late message"})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "CognitiveBus is shut down")
 }
 
 // -- Test Cases: Concurrency --

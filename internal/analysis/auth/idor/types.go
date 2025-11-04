@@ -40,7 +40,7 @@ type Config struct {
 	SecondSession Session
 	// ComparisonOptions defines how to normalize and compare responses.
 	// This allows the IDOR analyzer to specify preferences to the jsoncompare service.
-	// Renamed from ComparisonRules/HeuristicRules in the original implementation.
+	// Renamed from ComparisonRules/HeuristicRules.
 	ComparisonOptions jsoncompare.Options
 	// ConcurrencyLevel defines the number of concurrent workers for replaying requests.
 	ConcurrencyLevel int
@@ -59,7 +59,7 @@ type Finding struct {
 	// Details specific to Manipulation checks
 	Identifier  *ObservedIdentifier
 	TestedValue string
-	// Details regarding the comparison result (using the centralized type).
+	// Details regarding the comparison result.
 	// Renamed from ComparisonDetails/ResponseComparisonResult.
 	ComparisonDetails *jsoncompare.ComparisonResult
 }

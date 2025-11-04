@@ -1,9 +1,9 @@
 // File: internal/agent/agent.go
 package agent
 
-import (
+import ( // This is a comment to force a change
 	"context"
-	"encoding/json"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -12,6 +12,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
+	json "github.com/json-iterator/go"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
@@ -46,8 +47,9 @@ type Agent struct {
 	evolution EvolutionEngine
 }
 
-// Acts as a factory to create the appropriate GraphStore.
-func NewGraphStoreFromConfig(
+// NewGraphStoreFromConfig acts as a factory to create the appropriate GraphStore.
+// It is a variable to allow for mocking in tests.
+var NewGraphStoreFromConfig = func(
 	ctx context.Context,
 	cfg config.KnowledgeGraphConfig,
 	pool *pgxpool.Pool,
@@ -66,6 +68,11 @@ func NewGraphStoreFromConfig(
 	}
 }
 
+// NewLLMClient is a variable to allow for mocking in tests.
+// It should be defined in the llmclient package, but we declare it here
+// to satisfy the compiler for the current scope.
+var NewLLMClient = llmclient.NewClient
+
 // Creates and initializes a fully featured agent instance.
 func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, session schemas.SessionContext) (*Agent, error) {
 	agentID := uuid.New().String()[:8]
@@ -82,7 +89,7 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 		return nil, fmt.Errorf("failed to create knowledge graph store: %w", err)
 	}
 
-	llmRouter, err := llmclient.NewClient(globalCtx.Config.Agent(), logger)
+	llmRouter, err := NewLLMClient(globalCtx.Config.Agent(), logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create LLM router for agent: %w", err)
 	}
@@ -100,6 +107,11 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 	// Pass the specific humanoid configuration struct that the New function now expects.
 	browserCfg := globalCtx.Config.Browser()
 	h := humanoid.New(browserCfg.Humanoid, logger.Named("humanoid"), session)
+	// Connect the humanoid controller to the executor registry so that humanoid actions
+	// can be dispatched correctly.
+	executors.UpdateHumanoidProvider(func() *humanoid.Humanoid {
+		return h
+	})
 
 	// 5. Initialize Self-Healing (Autofix) System.
 	// This initializes the system but does not start monitoring yet.
@@ -153,12 +165,18 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 		go a.selfHeal.Start(missionCtx)
 	}
 
+	// Subscribe to actions before starting the loops. This ensures no actions generated
+	// immediately by the mind (e.g., after SetMission) are missed by the actionLoop.
+	actionChan, unsubscribeActions := a.bus.Subscribe(MessageTypeAction)
+	// Ensure unsubscription happens when RunMission returns (via defer).
+	defer unsubscribeActions()
+
 	// Start the Mind's cognitive loop.
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
 		if err := a.mind.Start(missionCtx); err != nil {
-			// If the mind fails to start and the context wasn't already cancelled,
+			// If the mind fails to start and the context wasn't already canceled,
 			// it's a critical startup failure.
 			if missionCtx.Err() == nil {
 				a.logger.Error("Mind process failed to start", zap.Error(err))
@@ -173,7 +191,8 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 
 	// Start the Action execution loop.
 	a.wg.Add(1)
-	go a.actionLoop(missionCtx)
+	// Pass the pre-subscribed channel to the actionLoop.
+	go a.actionLoop(missionCtx, actionChan)
 
 	// Kick off the mission.
 	a.mind.SetMission(a.mission)
@@ -182,11 +201,16 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 	select {
 	case result := <-a.resultChan:
 		a.logger.Info("Mission finished. Returning results.")
+
+		// Ensure graceful shutdown of the bus.
+		a.bus.Shutdown()
+
 		// Ensure the self-heal system shuts down gracefully.
 		if a.selfHeal != nil {
 			// cancelMission() stops the loop; WaitForShutdown waits for completion.
 			a.selfHeal.WaitForShutdown()
 		}
+		a.wg.Wait()
 		return &result, nil
 	case <-missionCtx.Done():
 		a.logger.Warn("Mission context cancelled.", zap.Error(missionCtx.Err()))
@@ -198,9 +222,14 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 		}
 		a.wg.Wait() // Wait for actionLoop and mind loop to finish.
 
+		// FIX (Group 2): When the mission is cancelled (missionCtx.Done()), the parent context (ctx) might also be cancelled.
+		// We must use a new context with a timeout to allow the conclusion summary to be generated successfully.
+		// If we passed the cancelled 'ctx', the LLM call in concludeMission would fail immediately.
+		conclusionCtx, conclusionCancel := context.WithTimeout(context.Background(), 90*time.Second)
+		defer conclusionCancel()
+
 		// Return a concluding summary, but also propagate the context error.
-		// Use the parent ctx for conclusion if missionCtx is done, to allow time for summary.
-		result, concludeErr := a.concludeMission(ctx)
+		result, concludeErr := a.concludeMission(conclusionCtx)
 		if concludeErr != nil {
 			a.logger.Error("Failed to generate conclusion on mission cancellation.", zap.Error(concludeErr))
 		}
@@ -219,10 +248,8 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 	}
 }
 
-func (a *Agent) actionLoop(ctx context.Context) {
+func (a *Agent) actionLoop(ctx context.Context, actionChan <-chan CognitiveMessage) {
 	defer a.wg.Done()
-	actionChan, unsubscribe := a.bus.Subscribe(MessageTypeAction)
-	defer unsubscribe()
 
 	for {
 		select {
@@ -231,148 +258,83 @@ func (a *Agent) actionLoop(ctx context.Context) {
 				return
 			}
 
-			go func(actionMsg CognitiveMessage) {
-				// Use a flag to ensure Acknowledge is called exactly once.
-				// This prevents a panic (negative WaitGroup counter) if Acknowledge is called explicitly
-				// (e.g., for ActionConclude) and then again by the defer.
-				acknowledged := false
-				defer func() {
-					if !acknowledged {
-						a.bus.Acknowledge(actionMsg)
-					}
-				}()
+			action, ok := msg.Payload.(Action)
+			if !ok {
+				a.logger.Error("Received invalid payload for ACTION message", zap.Any("payload", msg.Payload))
+				a.bus.Acknowledge(msg)
+				continue
+			}
 
-				action, ok := actionMsg.Payload.(Action)
-				if !ok {
-					a.logger.Error("Received invalid payload for ACTION message", zap.Any("payload", actionMsg.Payload))
-					return
+			var execResult *ExecutionResult
+			var execErr error
+
+			switch action.Type {
+			case ActionConclude:
+				a.logger.Info("Mind decided to conclude mission.", zap.String("rationale", action.Rationale))
+				result, err := a.concludeMission(ctx)
+				if err != nil {
+					a.logger.Error("Failed to generate final mission result", zap.Error(err))
+					a.bus.Acknowledge(msg)
+					continue
 				}
-
-				var execResult *ExecutionResult
-
-				switch action.Type {
-				case ActionConclude:
-					a.logger.Info("Mind decided to conclude mission.", zap.String("rationale", action.Rationale))
-					result, err := a.concludeMission(ctx)
-					if err != nil {
-						a.logger.Error("Failed to generate final mission result", zap.Error(err))
-						// If conclusion fails, the defer handles the acknowledgment.
-						return
-					}
-					if result != nil {
-						// CRITICAL: Acknowledge BEFORE calling finish().
-						// finish() calls bus.Shutdown(), which waits for this acknowledgment.
-						// If we wait for the defer, Shutdown() will deadlock.
-						a.bus.Acknowledge(actionMsg)
-						acknowledged = true // Prevent the defer from acknowledging again.
-						a.finish(ctx, *result)
-					}
-					return
-
-				case ActionEvolveCodebase:
-					a.logger.Info("Agent decided to initiate self-improvement (Evolution).", zap.String("rationale", action.Rationale))
-					// Evolution runs synchronously within this goroutine.
-					execResult = a.executeEvolution(ctx, action)
-
-				case ActionClick, ActionInputText, ActionHumanoidDragAndDrop:
-					a.logger.Debug("Orchestrating humanoid action", zap.String("type", string(action.Type)))
-					execResult = a.executeHumanoidAction(ctx, action)
-
-				case ActionPerformComplexTask:
-					a.logger.Info("Agent is orchestrating a complex task (Placeholder)", zap.Any("metadata", action.Metadata))
-					taskName, _ := action.Metadata["task_name"].(string)
-					execResult = &ExecutionResult{
-						Status:          "failed",
-						ObservationType: ObservedSystemState,
-						ErrorCode:       ErrCodeNotImplemented,
-						ErrorDetails:    map[string]interface{}{"task_name": taskName},
-					}
-
-				case ActionGatherCodebaseContext, ActionNavigate, ActionWaitForAsync, ActionSubmitForm, ActionScroll, ActionAnalyzeTaint, ActionAnalyzeProtoPollution, ActionAnalyzeHeaders:
-					a.logger.Debug("Dispatching action to ExecutorRegistry", zap.String("type", string(action.Type)))
-					var err error
-					execResult, err = a.executors.Execute(ctx, action)
-					if err != nil {
-						a.logger.Error("ExecutorRegistry failed with raw error", zap.String("action_type", string(action.Type)), zap.Error(err))
-						execResult = &ExecutionResult{
-							Status:          "failed",
-							ObservationType: ObservedSystemState,
-							ErrorCode:       ErrCodeExecutionFailure,
-							ErrorDetails:    map[string]interface{}{"message": err.Error()},
-						}
-					}
-
-				default:
-					a.logger.Warn("Received unknown action type", zap.String("type", string(action.Type)))
-					execResult = &ExecutionResult{
-						Status:          "failed",
-						ObservationType: ObservedSystemState,
-						ErrorCode:       ErrCodeUnknownAction,
-					}
+				if result != nil {
+					// CRITICAL: Acknowledge BEFORE calling finish().
+					// finish() calls bus.Shutdown(), which waits for this acknowledgment.
+					a.bus.Acknowledge(msg)
+					a.finish(ctx, *result)
 				}
+				return // End the action loop.
 
-				a.postObservation(ctx, action, execResult)
-				// The defer handles acknowledgment for these paths.
+			case ActionEvolveCodebase:
+				a.logger.Info("Agent decided to initiate self-improvement (Evolution).", zap.String("rationale", action.Rationale))
+				execResult = a.executeEvolution(ctx, action)
 
-			}(msg)
+			case ActionPerformComplexTask:
+				a.logger.Info("Agent is orchestrating a complex task (Placeholder)", zap.Any("metadata", action.Metadata))
+				taskName, _ := action.Metadata["task_name"].(string)
+				execResult = &ExecutionResult{
+					Status:          "failed",
+					ObservationType: ObservedSystemState,
+					ErrorCode:       ErrCodeNotImplemented,
+					ErrorDetails:    map[string]interface{}{"task_name": taskName},
+				}
+				// FIX: Removed the default case that was incorrectly handling all other actions.
+			}
+
+			// If execResult is not yet set, it means the action should be handled by the ExecutorRegistry.
+			if execResult == nil {
+				a.logger.Debug("Dispatching action to ExecutorRegistry", zap.String("type", string(action.Type)))
+				execResult, execErr = a.executors.Execute(ctx, action)
+			}
+
+			// Centralized error and nil-result handling.
+			if execErr != nil {
+				a.logger.Error("Action execution failed with a raw error", zap.String("action_type", string(action.Type)), zap.Error(execErr))
+				execResult = &ExecutionResult{
+					Status:          "failed",
+					ObservationType: ObservedSystemState,
+					ErrorCode:       ErrCodeExecutionFailure,
+					ErrorDetails:    map[string]interface{}{"message": execErr.Error()},
+				}
+			} else if execResult == nil {
+				// This is a safeguard against a logic error where an action handler returns (nil, nil).
+				a.logger.Error("CRITICAL: Action handler returned nil result and nil error.", zap.String("action_type", string(action.Type)))
+				// Create a fallback result to prevent nil pointer in postObservation
+				execResult = &ExecutionResult{
+					Status:          "failed",
+					ObservationType: ObservedSystemState,
+					ErrorCode:       ErrCodeExecutionFailure,
+					ErrorDetails:    map[string]interface{}{"message": "Internal Error: Action handler returned nil result."},
+				}
+			}
+
+			a.postObservation(ctx, action, execResult)
+			a.bus.Acknowledge(msg)
 
 		case <-ctx.Done():
 			return
 		}
 	}
-}
-
-func (a *Agent) executeHumanoidAction(ctx context.Context, action Action) *ExecutionResult {
-	var err error
-
-	switch action.Type {
-	case ActionClick:
-		if action.Selector == "" {
-			err = fmt.Errorf("ActionClick requires a 'selector'")
-			break
-		}
-		err = a.humanoid.IntelligentClick(ctx, action.Selector, nil)
-	case ActionInputText:
-		if action.Selector == "" {
-			err = fmt.Errorf("ActionInputText requires a 'selector'")
-			break
-		}
-		err = a.humanoid.Type(ctx, action.Selector, action.Value, nil)
-	case ActionHumanoidDragAndDrop:
-		startSelector := action.Selector
-		targetSelectorRaw, okMeta := action.Metadata["target_selector"]
-		targetSelector, okCast := targetSelectorRaw.(string)
-		if !okMeta || !okCast || startSelector == "" || targetSelector == "" {
-			err = fmt.Errorf("ActionHumanoidDragAndDrop requires 'selector' (start) and 'metadata.target_selector' (end, string)")
-			break
-		}
-		err = a.humanoid.DragAndDrop(ctx, startSelector, targetSelector, nil)
-	default:
-		err = fmt.Errorf("unsupported humanoid action type: %s", action.Type)
-	}
-
-	result := &ExecutionResult{
-		Status:          "success",
-		ObservationType: ObservedDOMChange,
-	}
-
-	if err != nil {
-		result.Status = "failed"
-		errorCode, errorDetails := ParseBrowserError(err, action)
-
-		if errorCode == ErrCodeExecutionFailure {
-			errStr := err.Error()
-			if strings.Contains(errStr, "failed to click") || strings.Contains(errStr, "failed to type") {
-				errorCode = ErrCodeHumanoidInteractionFailed
-			}
-		}
-
-		result.ErrorCode = errorCode
-		result.ErrorDetails = errorDetails
-		a.logger.Warn("Humanoid action execution failed", zap.String("action", string(action.Type)), zap.String("error_code", string(errorCode)), zap.Error(err))
-	}
-
-	return result
 }
 
 // executeEvolution handles the EVOLVE_CODEBASE action by invoking the EvolutionEngine.
@@ -438,7 +400,9 @@ func (a *Agent) executeEvolution(ctx context.Context, action Action) *ExecutionR
 		a.logger.Error("Evolution Analyst finished with error.", zap.Error(err))
 		result.Status = "failed"
 		errorCode := ErrCodeEvolutionFailure
-		if evoCtx.Err() == context.DeadlineExceeded || strings.Contains(err.Error(), "timed out") {
+		// FIX (Group 3): Use errors.Is() for robust detection of context deadline exceeded,
+		// regardless of whether the context itself cancelled (evoCtx.Err()) or the underlying operation returned the error (err).
+		if errors.Is(err, context.DeadlineExceeded) || errors.Is(evoCtx.Err(), context.DeadlineExceeded) || strings.Contains(err.Error(), "timed out") {
 			errorCode = ErrCodeTimeoutError
 		}
 
@@ -548,6 +512,9 @@ func (a *Agent) concludeMission(ctx context.Context) (*MissionResult, error) {
 }
 
 func (a *Agent) gatherMissionContext(ctx context.Context, missionID string) (*schemas.Subgraph, error) {
+	// Note (Group 4): This function is designed to be resilient to KG errors.
+	// If GetNode or GetEdges fails, it logs a warning (see below) and continues the traversal,
+	// returning a partial (or empty) subgraph and a nil error.
 	queue := []string{missionID}
 	visitedNodes := make(map[string]schemas.Node)
 	visitedEdges := make(map[string]struct{})
@@ -602,7 +569,7 @@ func (a *Agent) finish(ctx context.Context, result MissionResult) {
 	}
 	a.isFinished = true
 	a.mind.Stop()
-	a.bus.Shutdown()
+	// Bus shutdown is handled in RunMission after the result is successfully received.
 
 	// Use select to send result, preventing blocking forever if the runner (RunMission)
 	// has already exited (e.g., due to timeout/cancellation).

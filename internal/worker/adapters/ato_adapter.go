@@ -49,7 +49,7 @@ func (a *ATOAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCont
 	analysisCtx.Logger.Info("Starting active password spraying attack.")
 
 	// Use the specific parameter struct for type safety.
-	// FIX: Use robust type assertion.
+	// Use robust type assertion.
 	var params schemas.ATOTaskParams
 	switch p := analysisCtx.Task.Parameters.(type) {
 	case schemas.ATOTaskParams:
@@ -82,7 +82,7 @@ func (a *ATOAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCont
 		case <-ctx.Done():
 			analysisCtx.Logger.Warn("ATO analysis cancelled by context.", zap.Error(ctx.Err()))
 			return ctx.Err()
-		case <-throttle.C: // FIX: Receive from the ticker's channel 'C'.
+		case <-throttle.C: // Receive from the ticker's channel 'C'.
 			a.performLoginAttempt(ctx, analysisCtx, attempt)
 		}
 	}
@@ -147,7 +147,7 @@ func (a *ATOAdapter) createAtoFinding(analysisCtx *core.AnalysisContext, vulnNam
 	}
 
 	evidenceMap := map[string]interface{}{
-		"username":       result.Attempt.Username,
+		"username": result.Attempt.Username,
 		// Password intentionally omitted from evidence logs.
 		"statusCode":     result.StatusCode,
 		"responseBody":   responseBodyEvidence,

@@ -17,9 +17,15 @@ func TestMutateRequest_ApplicationAndConsistency(t *testing.T) {
 		"Authorization": {"Bearer {{UUID}}"},
 		"X-Request-Id":  {"{{NONCE}}"},
 	}
+	originalURL := "https://example.com/api/{{UUID}}"
 
 	// Execute mutation
-	mutatedBody, mutatedHeaders, err := MutateRequest(originalBody, originalHeaders)
+	candidate := &RaceCandidate{
+		Body:    originalBody,
+		Headers: originalHeaders,
+		URL:     originalURL,
+	}
+	mutatedBody, mutatedHeaders, mutatedURL, err := MutateRequest(candidate)
 	require.NoError(t, err)
 
 	// Verify replacements occurred
@@ -35,17 +41,21 @@ func TestMutateRequest_ApplicationAndConsistency(t *testing.T) {
 
 	assert.Contains(t, string(mutatedBody), generatedUUID)
 	assert.Contains(t, string(mutatedBody), generatedNonce)
+	assert.Contains(t, mutatedURL, generatedUUID)
+	assert.NotContains(t, mutatedURL, "{{UUID}}")
 }
 
 func TestMutateRequest_Uniqueness(t *testing.T) {
 	templateBody := []byte(`{"id":"{{UUID}}", "nonce":"{{NONCE}}"}`)
 
 	// Execute first mutation
-	body1, _, err1 := MutateRequest(templateBody, http.Header{})
+	candidate1 := &RaceCandidate{Body: templateBody, Headers: http.Header{}}
+	body1, _, _, err1 := MutateRequest(candidate1)
 	require.NoError(t, err1)
 
 	// Execute second mutation
-	body2, _, err2 := MutateRequest(templateBody, http.Header{})
+	candidate2 := &RaceCandidate{Body: templateBody, Headers: http.Header{}}
+	body2, _, _, err2 := MutateRequest(candidate2)
 	require.NoError(t, err2)
 
 	// Assertions: Results must be different
@@ -56,20 +66,27 @@ func TestMutateRequest_OptimizationPath(t *testing.T) {
 	// Input without any template markers
 	body := []byte(`{"id":"fixed-id"}`)
 	headers := http.Header{"Authorization": {"Bearer fixed-token"}}
+	url := "http://example.com/fixed"
 
-	mutatedBody, mutatedHeaders, err := MutateRequest(body, headers)
+	candidate := &RaceCandidate{
+		Body:    body,
+		Headers: headers,
+		URL:     url,
+	}
+	mutatedBody, mutatedHeaders, mutatedURL, err := MutateRequest(candidate)
 	require.NoError(t, err)
 
 	// Verify that the inputs are returned unchanged (optimization path)
+	assert.Equal(t, url, mutatedURL)
 	assert.Equal(t, body, mutatedBody)
 	// Headers are cloned, so we check content equality
 	assert.Equal(t, headers, mutatedHeaders)
 
-    // Advanced check: Verify the pointer to the body slice data is the same (no allocation)
+	// Advanced check: Verify the pointer to the body slice data is the same (no allocation)
 	if len(body) > 0 && len(mutatedBody) > 0 {
-        // This confirms the optimization mentioned in templating.go (lines 43-59)
-	    assert.Same(t, &body[0], &mutatedBody[0], "Body slice pointer changed even without mutation, optimization failed.")
-    }
+		// This confirms the optimization mentioned in templating.go (lines 43-59)
+		assert.Same(t, &body[0], &mutatedBody[0], "Body slice pointer changed even without mutation, optimization failed.")
+	}
 }
 
 func TestGenerateNonce(t *testing.T) {

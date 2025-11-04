@@ -18,7 +18,7 @@ type HeadersAdapter struct {
 func NewHeadersAdapter() *HeadersAdapter {
 	return &HeadersAdapter{
 		// Give the adapter its own name for logging clarity.
-		// FIX: Dereference the pointer returned by NewBaseAnalyzer and provide all required arguments.
+		// Dereference the pointer returned by NewBaseAnalyzer and provide all required arguments.
 		BaseAnalyzer:    *core.NewBaseAnalyzer("Headers Adapter", "Analyzes security headers", core.TypePassive, zap.NewNop()),
 		headersAnalyzer: headers.NewHeadersAnalyzer(), // Creates an instance of the real analyzer.
 	}

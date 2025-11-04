@@ -108,30 +108,27 @@ func NewTestHumanoid(executor Executor, seed int64) *Humanoid {
 	humanoidCfg.FatigueRecoveryRate = 0.01
 	humanoidCfg.HabituationRate = 0.005
 
-	// FIX: Initialize the struct manually instead of calling New() to ensure determinism
-	// and prevent finalizeSessionPersona from running with randomized values.
 	source := rand.NewSource(seed)
 	rng := rand.New(source)
 	nOscillators := 12
 
-	h := &Humanoid{
+	// FIX: Initialize the struct manually instead of calling New() to ensure determinism
+	// and prevent finalizeSessionPersona from running with randomized values.
+	return &Humanoid{
 		logger:             zap.NewNop(),
 		executor:           executor,
 		baseConfig:         humanoidCfg,
 		dynamicConfig:      humanoidCfg, // Ensure dynamic config matches the base config.
 		rng:                rng,
+		skillFactor:        1.0, // Force skill factor for testing.
 		currentButtonState: schemas.ButtonNone,
 		lastActionType:     ActionTypeNone,
-		// Force skill factor for testing.
-		skillFactor: 1.0,
 		// Initialize Pink Noise generators with deterministic seeds.
 		noiseX: NewPinkNoiseGenerator(rand.New(rand.NewSource(seed)), nOscillators),
 		noiseY: NewPinkNoiseGenerator(rand.New(rand.NewSource(seed+1)), nOscillators),
 	}
 
 	// We do NOT call finalizeSessionPersona here, as tests rely on the predictable baseConfig values.
-
-	return h
 }
 
 // ensureVisible is a private helper that checks options and performs scrolling if needed.

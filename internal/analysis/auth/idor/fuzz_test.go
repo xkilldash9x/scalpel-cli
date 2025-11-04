@@ -89,7 +89,7 @@ func FuzzApplyTestValue(f *testing.F) {
 		req.Header.Set("Content-Type", "application/json")
 
 		// 2. Execute the function under test
-		// MODIFICATION: Pass context.Background() for the fuzz environment.
+		// Pass context.Background() for the fuzz environment.
 		newReq, newBody, err := ApplyTestValue(context.Background(), req, []byte(jsonBody), ident, testValue)
 
 		// 3. Assertions

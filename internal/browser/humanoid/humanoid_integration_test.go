@@ -137,7 +137,7 @@ func TestContextCancellation_DuringMovement(t *testing.T) {
 
 	go func() {
 		// The humanoid will use the session's GetElementGeometry, Sleep, etc.
-		// FIX: Use CSS selector
+		// Use CSS selector
 		errChan <- h.MoveTo(actionCtx, "#target", nil)
 	}()
 
@@ -167,7 +167,7 @@ func TestContextCancellation_DuringTyping(t *testing.T) {
 	go func() {
 		// A long string ensures the typing action is in progress when we cancel it.
 		longSentence := "This is a very long sentence designed to take a significant amount of time to type, ensuring we can cancel it mid-operation."
-		// FIX: Use CSS selector
+		// Use CSS selector
 		errChan <- h.Type(actionCtx, "#inputField", longSentence, nil)
 	}()
 
@@ -204,7 +204,7 @@ func TestConcurrentActions_OnSingleSession(t *testing.T) {
 			// Each goroutine performs an action using the SAME humanoid instance,
 			// which in turn uses the SAME session. This directly tests the
 			// concurrent safety of the underlying executor implementation.
-			// FIX: Use CSS selector
+			// Use CSS selector
 			err := h.MoveTo(ctx, "#target", nil)
 			// A nil error here confirms the action could complete.
 			// The race detector confirms it did so safely.

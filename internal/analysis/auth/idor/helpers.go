@@ -147,9 +147,9 @@ func GenerateTestValue(ident ObservedIdentifier) (string, error) {
 
 // ApplyTestValue creates a new request with the identifier replaced by the test value.
 // This function must handle the complexity of modifying nested JSON structures.
-// MODIFICATION: Updated the signature to accept a context.Context.
+// Updated the signature to accept a context.Context.
 func ApplyTestValue(ctx context.Context, req *http.Request, body []byte, ident ObservedIdentifier, testValue string) (*http.Request, []byte, error) {
-	// MODIFICATION: Clone the request using the provided context (ctx) to ensure cancellation is respected.
+	// Clone the request using the provided context (ctx) to ensure cancellation is respected.
 	newReq := req.Clone(ctx)
 	newBody := body
 

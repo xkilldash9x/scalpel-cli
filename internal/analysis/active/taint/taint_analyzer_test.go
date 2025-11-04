@@ -315,8 +315,6 @@ func setupCorrelationTest(t *testing.T) (*Analyzer, *MockResultsReporter) {
 		c.CleanupInterval = time.Hour
 	}, false)
 	analyzer.backgroundCtx, analyzer.backgroundCancel = context.WithCancel(context.Background())
-	analyzer.wg.Add(1)
-	go analyzer.correlateWorker(0)
 	return analyzer, reporter
 }
 
@@ -373,6 +371,9 @@ func TestProcessSinkEvent_ValidFlow(t *testing.T) {
 	analyzer, reporter := setupCorrelationTest(t)
 	canary := analyzer.generateCanary("T", schemas.ProbeTypeXSS)
 	payload := fmt.Sprintf("<img src=x onerror=%s>", canary)
+	analyzer.wg.Add(1)
+	go analyzer.correlateWorker(0)
+
 	probe := ActiveProbe{Type: schemas.ProbeTypeXSS, Canary: canary, Value: payload, Source: schemas.SourceURLParam}
 	analyzer.registerProbe(probe)
 	sinkValue := fmt.Sprintf("<div>%s</div>", payload)
@@ -398,6 +399,9 @@ func TestProcessSinkEvent_InvalidFlow_Suppressed(t *testing.T) {
 	analyzer, reporter := setupCorrelationTest(t)
 	analyzer.logger = logger
 
+	analyzer.wg.Add(1)
+	go analyzer.correlateWorker(0)
+
 	// XSS probe flowing into a WebSocketSend sink is invalid according to ValidTaintFlows (FP)
 	canary := analyzer.generateCanary("T", schemas.ProbeTypeXSS)
 	payload := fmt.Sprintf("<svg onload=%s>", canary)
@@ -419,6 +423,9 @@ func TestProcessSinkEvent_SanitizationDetected(t *testing.T) {
 	analyzer, reporter := setupCorrelationTest(t)
 	canary := analyzer.generateCanary("T", schemas.ProbeTypeXSS)
 	originalPayload := fmt.Sprintf("<img src=x onerror=%s>", canary)
+	analyzer.wg.Add(1)
+	go analyzer.correlateWorker(0)
+
 	probe := ActiveProbe{Type: schemas.ProbeTypeXSS, Canary: canary, Value: originalPayload}
 	analyzer.registerProbe(probe)
 
@@ -442,6 +449,9 @@ func TestProcessSinkEvent_MultipleCanaries(t *testing.T) {
 	canary1 := analyzer.generateCanary("M1", schemas.ProbeTypeXSS)
 	canary2 := analyzer.generateCanary("M2", schemas.ProbeTypeSSTI)
 
+	analyzer.wg.Add(1)
+	go analyzer.correlateWorker(0)
+
 	analyzer.registerProbe(ActiveProbe{Type: schemas.ProbeTypeXSS, Canary: canary1, Value: canary1})
 	analyzer.registerProbe(ActiveProbe{Type: schemas.ProbeTypeSSTI, Canary: canary2, Value: canary2})
 
@@ -464,6 +474,9 @@ func TestProcessOASTInteraction_Valid(t *testing.T) {
 	analyzer, reporter := setupCorrelationTest(t)
 	canary := analyzer.generateCanary("T", schemas.ProbeTypeOAST)
 	probe := ActiveProbe{Type: schemas.ProbeTypeOAST, Canary: canary, Source: schemas.SourceHeader}
+	analyzer.wg.Add(1)
+	go analyzer.correlateWorker(0)
+
 	analyzer.registerProbe(probe)
 	interactionTime := time.Now().UTC()
 	oastEvent := OASTInteraction{Canary: canary, Protocol: "DNS", SourceIP: "1.2.3.4", InteractionTime: interactionTime}
@@ -483,6 +496,9 @@ func TestProcessExecutionProof_Valid(t *testing.T) {
 	analyzer, reporter := setupCorrelationTest(t)
 	canary := analyzer.generateCanary("XSS", schemas.ProbeTypeXSS)
 	probe := ActiveProbe{Type: schemas.ProbeTypeXSS, Canary: canary, Source: schemas.SourceCookie}
+	analyzer.wg.Add(1)
+	go analyzer.correlateWorker(0)
+
 	analyzer.registerProbe(probe)
 
 	proofEvent := ExecutionProofEvent{
@@ -509,6 +525,9 @@ func TestProcessPrototypePollutionConfirmation_Valid(t *testing.T) {
 	analyzer, reporter := setupCorrelationTest(t)
 	canary := analyzer.generateCanary("PP", schemas.ProbeTypePrototypePollution)
 	payload := fmt.Sprintf(`{"__proto__":{"scalpelPolluted":"%s"}}`, canary)
+	analyzer.wg.Add(1)
+	go analyzer.correlateWorker(0)
+
 	probe := ActiveProbe{Type: schemas.ProbeTypePrototypePollution, Canary: canary, Value: payload, Source: schemas.SourceLocalStorage}
 	analyzer.registerProbe(probe)
 

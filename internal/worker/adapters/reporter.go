@@ -76,12 +76,12 @@ func (r *ContextReporter) Report(finding taint.CorrelatedFinding) {
 }
 
 func (r *ContextReporter) classifyTaintFinding(finding taint.CorrelatedFinding) (string, schemas.Severity, string) {
-	// FIX: Changed taint.SinkExecution to schemas.SinkExecution as the constant moved.
+	// Changed taint.SinkExecution to schemas.SinkExecution as the constant moved.
 	if finding.Sink == schemas.SinkExecution {
 		return r.classifyConfirmedExecution(finding)
 	}
 	switch finding.Sink {
-	// FIX: Changed all taint.Sink... constants to schemas.Sink...
+	// Changed all taint.Sink... constants to schemas.Sink...
 	case schemas.SinkInnerHTML, schemas.SinkOuterHTML, schemas.SinkDocumentWrite, schemas.SinkIframeSrcDoc:
 		return "DOM-Based Cross-Site Scripting (Potential)", schemas.SeverityHigh, "CWE-79"
 	case schemas.SinkEval, schemas.SinkFunctionConstructor:
@@ -89,7 +89,7 @@ func (r *ContextReporter) classifyTaintFinding(finding taint.CorrelatedFinding) 
 	case schemas.SinkScriptSrc, schemas.SinkIframeSrc:
 		return "Tainted Resource Loading (Potential XSS/Injection)", schemas.SeverityHigh, "CWE-829"
 	case schemas.SinkNavigation:
-		// FIX: Changed taint.ProbeType... to schemas.ProbeType...
+		// Changed taint.ProbeType... to schemas.ProbeType...
 		if finding.Probe.Type == schemas.ProbeTypeXSS || finding.Probe.Type == schemas.ProbeTypeSSTI {
 			return "DOM-Based Cross-Site Scripting (Navigation) (Potential)", schemas.SeverityHigh, "CWE-79"
 		}
@@ -103,7 +103,7 @@ func (r *ContextReporter) classifyTaintFinding(finding taint.CorrelatedFinding) 
 
 func (r *ContextReporter) classifyConfirmedExecution(finding taint.CorrelatedFinding) (string, schemas.Severity, string) {
 	switch finding.Probe.Type {
-	// FIX: Changed all taint.ProbeType... constants to schemas.ProbeType...
+	// Changed all taint.ProbeType... constants to schemas.ProbeType...
 	case schemas.ProbeTypeXSS, schemas.ProbeTypeDOMClobbering:
 		return "Confirmed Cross-Site Scripting", schemas.SeverityCritical, "CWE-79"
 	case schemas.ProbeTypeSSTI:
@@ -124,4 +124,3 @@ func (r *ContextReporter) getRecommendation(vulnType string) string {
 	// ... other recommendations
 	return "Validate and sanitize all user input at the source and before use in sensitive sinks."
 }
-

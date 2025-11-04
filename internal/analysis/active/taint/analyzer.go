@@ -27,7 +27,7 @@ var taintShimFS embed.FS
 const taintShimFilename = "taint_shim.js"
 
 // Canary format: SCALPEL_{Prefix}_{Type}_{UUID_Short}
-var canaryRegex = regexp.MustCompile(`SCALPEL_[A-Z]+_[A-Z_]+_[a-f0-9]{8}`)
+var canaryRegex = regexp.MustCompile(`SCALPEL_[A-Z0-9]+_[A-Z_]+_[a-f0-9]{8}`)
 
 // HumanoidProvider defines an interface for duck-typing the SessionContext
 // to check if it provides access to the Humanoid controller.
@@ -53,6 +53,10 @@ type Analyzer struct {
 	// -- Concurrency Control --
 	// The primary communication channel from producers (JS callbacks, OAST poller) to consumers (correlation workers).
 	eventsChan chan Event
+
+	// FIX: Add a mutex to protect concurrent access to the taint flow rules.
+	rulesMutex      sync.RWMutex
+	validTaintFlows map[TaintFlowPath]bool
 
 	// wg tracks the lifecycle of the correlation worker pool.
 	wg sync.WaitGroup
@@ -80,15 +84,30 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 	// Apply robust defaults for performance and stability.
 	config = applyConfigDefaults(config)
 
+	// FIX: Create a local copy of the global taint flow rules to prevent data races.
+	// The analyzer will use its own copy, which can be safely modified for testing.
+	localValidTaintFlows := make(map[TaintFlowPath]bool, len(ValidTaintFlows))
+	for k, v := range ValidTaintFlows {
+		localValidTaintFlows[k] = v
+	}
+
 	return &Analyzer{
-		config:       config,
-		reporter:     reporter,
-		oastProvider: oastProvider,
-		logger:       taskLogger,
-		activeProbes: make(map[string]ActiveProbe),
-		eventsChan:   make(chan Event, config.EventChannelBuffer),
-		shimTemplate: templateContent, // <-- Store the raw string
+		config:          config,
+		reporter:        reporter,
+		oastProvider:    oastProvider,
+		logger:          taskLogger,
+		activeProbes:    make(map[string]ActiveProbe),
+		eventsChan:      make(chan Event, config.EventChannelBuffer),
+		shimTemplate:    templateContent, // <-- Store the raw string
+		validTaintFlows: localValidTaintFlows,
 	}, nil
+}
+
+// UpdateTaintFlowRuleForTesting provides a thread-safe way to modify a rule for a specific test.
+func (a *Analyzer) UpdateTaintFlowRuleForTesting(flow TaintFlowPath, isValid bool) {
+	a.rulesMutex.Lock()
+	defer a.rulesMutex.Unlock()
+	a.validTaintFlows[flow] = isValid
 }
 
 // BuildTaintShim constructs the final JavaScript shim from a template string and config.
@@ -1000,6 +1019,9 @@ func (a *Analyzer) checkSanitization(sinkValue string, probe ActiveProbe) (Sanit
 // if a detected taint flow from a source to a sink is logical.
 func (a *Analyzer) isContextValid(event SinkEvent, probe ActiveProbe) bool {
 	flow := TaintFlowPath{ProbeType: probe.Type, SinkType: event.Type}
+	// FIX: Use the analyzer's local, mutex-protected copy of the rules.
+	a.rulesMutex.RLock()
+	defer a.rulesMutex.RUnlock()
 
 	// Normalize probe types for broader rule matching.
 	probeTypeString := string(probe.Type)
@@ -1007,7 +1029,8 @@ func (a *Analyzer) isContextValid(event SinkEvent, probe ActiveProbe) bool {
 		flow.ProbeType = schemas.ProbeTypeXSS
 	}
 
-	if !ValidTaintFlows[flow] {
+	// Read from the local map.
+	if !a.validTaintFlows[flow] {
 		return false
 	}
 
