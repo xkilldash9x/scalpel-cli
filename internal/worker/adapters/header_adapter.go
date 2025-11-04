@@ -1,4 +1,4 @@
-// internal/worker/adapters/headers_adapter.go
+// File: internal/worker/adapters/headers_adapter.go
 package adapters
 
 import (
@@ -9,26 +9,44 @@ import (
 	"go.uber.org/zap"
 )
 
-type HeadersAdapter struct {
-	core.BaseAnalyzer
-	headersAnalyzer *headers.HeadersAnalyzer
+// AnalyzerInterface defines the contract for the underlying analyzer logic.
+// This allows for mocking in tests and decouples the adapter from the implementation.
+//
+//go:generate mockery --name AnalyzerInterface --output ../../../internal/mocks --outpkg mocks --structname MockHeadersAnalyzer
+type AnalyzerInterface interface {
+	Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error
 }
 
-// NewHeadersAdapter creates a new adapter instance.
+// HeadersAdapter bridges the worker framework and the passive security headers analyzer.
+type HeadersAdapter struct {
+	core.BaseAnalyzer
+	// Holds the instance of the analyzer logic, now using the interface for testability.
+	headersAnalyzer AnalyzerInterface
+}
+
+// NewHeadersAdapter creates a new adapter instance using the default concrete implementation.
 func NewHeadersAdapter() *HeadersAdapter {
+	// Initialize the default analyzer.
+	return NewHeadersAdapterWithAnalyzer(headers.NewHeadersAnalyzer())
+}
+
+// NewHeadersAdapterWithAnalyzer allows injecting a specific analyzer implementation (primarily for testing).
+func NewHeadersAdapterWithAnalyzer(analyzer AnalyzerInterface) *HeadersAdapter {
 	return &HeadersAdapter{
-		// Give the adapter its own name for logging clarity.
-		// Dereference the pointer returned by NewBaseAnalyzer and provide all required arguments.
-		BaseAnalyzer:    *core.NewBaseAnalyzer("Headers Adapter", "Analyzes security headers", core.TypePassive, zap.NewNop()),
-		headersAnalyzer: headers.NewHeadersAnalyzer(), // Creates an instance of the real analyzer.
+		// Initialize the BaseAnalyzer with metadata.
+		BaseAnalyzer: *core.NewBaseAnalyzer("Headers Adapter", "Analyzes HTTP response headers for security best practices and information disclosure.", core.TypePassive, zap.NewNop()),
+		// Use the injected analyzer.
+		headersAnalyzer: analyzer,
 	}
 }
 
 // Analyze is the bridge function called by the worker.
 func (a *HeadersAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
-	analysisCtx.Logger.Info("Dispatching to security headers analyzer.")
+	logger := analysisCtx.Logger.With(zap.String("adapter", a.Name()))
+	logger.Debug("Dispatching to security headers analyzer.")
 
-	// The beautiful part about good interface design is that sometimes,
-	// the adapter just needs to pass the work along.
+	// The adapter simply delegates the call to the underlying analyzer.
+	// The headersAnalyzer will use the Artifacts (HAR data) in the analysisCtx
+	// and add findings directly to the context.
 	return a.headersAnalyzer.Analyze(ctx, analysisCtx)
 }

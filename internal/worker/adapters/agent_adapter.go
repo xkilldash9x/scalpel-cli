@@ -1,6 +1,7 @@
+// File: internal/worker/adapters/agent_adapter.go
 package adapters
 
-import ( // This is a comment to force a change
+import (
 	"context"
 	"fmt"
 
@@ -10,22 +11,26 @@ import ( // This is a comment to force a change
 	"go.uber.org/zap"
 )
 
-// the bridge that lets our autonomous agent play nice as a standard worker module.
+// AgentAdapter is the bridge that lets our autonomous agent operate as a standard worker module.
 type AgentAdapter struct {
-	*core.BaseAnalyzer
+	// Embed BaseAnalyzer by value for consistency.
+	core.BaseAnalyzer
 }
 
-// creates a new adapter for agent missions.
+// NewAgentAdapter creates a new adapter for agent missions.
 func NewAgentAdapter() *AgentAdapter {
 	return &AgentAdapter{
-		BaseAnalyzer: core.NewBaseAnalyzer("AgentAdapter", "Executes autonomous agent missions", core.TypeAgent, zap.NewNop()),
+		// Initialize the embedded struct by dereferencing the pointer from the constructor.
+		BaseAnalyzer: *core.NewBaseAnalyzer("AgentAdapter", "Executes autonomous agent missions", core.TypeAgent, zap.NewNop()),
 	}
 }
 
 func (a *AgentAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
-	a.Logger = analysisCtx.Logger
-	a.Logger.Info("Agent mission received. Initializing agent...")
+	// Use the logger from the context.
+	logger := analysisCtx.Logger.With(zap.String("adapter", a.Name()))
+	logger.Info("Agent mission received. Initializing agent...")
 
+	// 1. Parameter Validation and Extraction
 	var params schemas.AgentMissionParams
 	switch p := analysisCtx.Task.Parameters.(type) {
 	case schemas.AgentMissionParams:
@@ -37,7 +42,7 @@ func (a *AgentAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 		params = *p
 	default:
 		actualType := fmt.Sprintf("%T", analysisCtx.Task.Parameters)
-		a.Logger.Error("Invalid parameter type assertion for Agent mission",
+		logger.Error("Invalid parameter type assertion for Agent mission",
 			zap.String("expected", "schemas.AgentMissionParams or pointer"),
 			zap.String("actual", actualType))
 		return fmt.Errorf("invalid parameters type for Agent mission; expected schemas.AgentMissionParams or *schemas.AgentMissionParams, got %s", actualType)
@@ -47,14 +52,11 @@ func (a *AgentAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 		return fmt.Errorf("validation error: agent mission task is missing required 'MissionBrief'")
 	}
 
-	agentMission := agent.Mission{
-		ID:        analysisCtx.Task.TaskID,
-		Objective: params.MissionBrief,
-		TargetURL: analysisCtx.Task.TargetURL,
+	// 2. Resource Acquisition (Browser Session)
+	if analysisCtx.Global == nil || analysisCtx.Global.BrowserManager == nil {
+		return fmt.Errorf("critical error: BrowserManager is not available in GlobalContext")
 	}
 
-	// The agent is an active module that requires a browser session to run.
-	// We create one here and pass it to the agent's constructor.
 	session, err := analysisCtx.Global.BrowserManager.NewAnalysisContext(
 		ctx,
 		analysisCtx.Task,
@@ -66,31 +68,47 @@ func (a *AgentAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 	if err != nil {
 		return fmt.Errorf("failed to create browser session for agent: %w", err)
 	}
+	// Ensure the session is closed. Use a background context for cleanup in case the main context is canceled.
 	defer session.Close(context.Background())
 
-	// Pass the newly created session as the fourth argument.
+	// 3. Agent Initialization
+	agentMission := agent.Mission{
+		ID:        analysisCtx.Task.TaskID,
+		Objective: params.MissionBrief,
+		TargetURL: analysisCtx.Task.TargetURL,
+	}
+
+	// Pass the newly created session to the agent constructor.
 	agentInstance, err := agent.New(ctx, agentMission, analysisCtx.Global, session)
 	if err != nil {
 		return fmt.Errorf("failed to initialize agent: %w", err)
 	}
 
-	a.Logger.Info("Agent initialized. Starting mission execution.")
-
+	// 4. Execution
+	logger.Info("Agent initialized. Starting mission execution.")
 	missionResult, err := agentInstance.RunMission(ctx)
 	if err != nil {
+		// Handle context cancellation gracefully.
 		if ctx.Err() != nil {
-			a.Logger.Warn("Agent mission interrupted or timed out.", zap.Error(err))
+			logger.Warn("Agent mission interrupted or timed out.", zap.Error(err))
 			return ctx.Err()
 		}
 		return fmt.Errorf("agent mission failed: %w", err)
 	}
 
-	a.Logger.Info("Agent mission completed.", zap.String("summary", missionResult.Summary))
+	// 5. Result Processing
+	logger.Info("Agent mission completed.", zap.String("summary", missionResult.Summary))
 
 	if len(missionResult.Findings) > 0 {
 		for _, finding := range missionResult.Findings {
 			analysisCtx.AddFinding(finding)
 		}
+	}
+
+	// Ensure KGUpdates is initialized before modification (defensive check against nil pointer)
+	if analysisCtx.KGUpdates == nil {
+		// Initialize if nil, assuming the expected type based on usage.
+		analysisCtx.KGUpdates = &schemas.KnowledgeGraphUpdate{}
 	}
 
 	if missionResult.KGUpdates != nil {

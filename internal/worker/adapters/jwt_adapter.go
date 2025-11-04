@@ -1,4 +1,4 @@
-// internal/worker/adapters/jwt_adapter.go
+// File: internal/worker/adapters/jwt_adapter.go
 package adapters
 
 import (
@@ -6,43 +6,61 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/static/jwt"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"go.uber.org/zap"
 )
 
 // JWTAdapter acts as a bridge between the worker and the specific JWT static analyzer.
 type JWTAdapter struct {
-	// embedding the BaseAnalyzer provides default implementations for Name(), etc.
+	// Embedding the BaseAnalyzer provides default implementations for Name(), etc.
 	core.BaseAnalyzer
 }
 
 // NewJWTAdapter creates a new adapter for JWT analysis.
 func NewJWTAdapter() *JWTAdapter {
 	return &JWTAdapter{
-		// Add the missing *zap.Logger argument to the NewBaseAnalyzer call.
-		BaseAnalyzer: *core.NewBaseAnalyzer("JWT Adapter", "Scans for common JWT vulnerabilities.", core.TypeStatic, zap.NewNop()),
+		BaseAnalyzer: *core.NewBaseAnalyzer("JWT Adapter", "Scans artifacts (e.g., HAR files) for JWTs and analyzes them for common vulnerabilities.", core.TypeStatic, zap.NewNop()),
 	}
 }
 
 // Analyze is the main execution method for the adapter.
 func (a *JWTAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
-	// The adapter's primary role is to correctly configure and
-	// delegate the analysis task to the underlying analyzer.
+	logger := analysisCtx.Logger.With(zap.String("adapter", a.Name()))
 
-	// extract the necessary configuration from the global context using the new contract.
-	bruteForceEnabled := false
-	if analysisCtx.Global != nil && analysisCtx.Global.Config != nil {
-		jwtConfig := analysisCtx.Global.Config.JWT()
-		// If the entire JWT scanner is disabled, we should stop here.
-		if !jwtConfig.Enabled {
-			return nil
-		}
-		bruteForceEnabled = jwtConfig.BruteForceEnabled
+	// 1. Configuration Retrieval
+	jwtConfig := a.getConfiguration(analysisCtx.Global)
+
+	// 2. Check if the scanner is enabled.
+	if !jwtConfig.Enabled {
+		logger.Debug("Skipping JWT analysis as it is disabled in the configuration.")
+		return nil
 	}
 
-	// instantiate the actual analyzer with the correct logger and configuration.
-	analyzer := jwt.NewJWTAnalyzer(analysisCtx.Logger, bruteForceEnabled)
+	// 3. Analyzer Initialization
+	// Instantiate the actual analyzer with the correct logger and configuration flags.
+	analyzer := jwt.NewJWTAnalyzer(logger, jwtConfig.BruteForceEnabled)
 
-	// delegate the analysis call. the analyzer will add any findings
-	// directly to the provided analysis context.
-	return analyzer.Analyze(ctx, analysisCtx)
+	// 4. Execution Delegation
+	logger.Debug("Starting JWT analysis.", zap.Bool("brute_force_enabled", jwtConfig.BruteForceEnabled))
+
+	// The analyzer will use the Artifacts (HAR data) in the analysisCtx
+	// and add findings directly to the context.
+	if err := analyzer.Analyze(ctx, analysisCtx); err != nil {
+		// The underlying analyzer handles artifact parsing errors. We just report the failure.
+		logger.Error("JWT analysis failed.", zap.Error(err))
+		return err
+	}
+
+	logger.Debug("JWT analysis completed.")
+	return nil
+}
+
+// getConfiguration safely retrieves the JWT configuration from the GlobalContext.
+func (a *JWTAdapter) getConfiguration(globalCtx *core.GlobalContext) config.JWTConfig {
+	// Provide safe defaults if the context or config is missing.
+	if globalCtx == nil || globalCtx.Config == nil {
+		// Return a disabled configuration if the main config isn't available to be safe.
+		return config.JWTConfig{Enabled: false}
+	}
+	return globalCtx.Config.JWT()
 }
