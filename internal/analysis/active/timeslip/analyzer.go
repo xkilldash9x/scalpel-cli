@@ -22,14 +22,13 @@ import (
 const timingAnomalyStdDevThreshold = 3.0
 
 // This var block holds the strategy execution functions. By making them variables,
-// we can replace them in our tests to mock their behavior without actually
-// executing them. This is key to fixing the "cannot assign to" error.
+// we can replace them in our tests to mock their behavior.
 var (
-	executeH1Concurrent     = ExecuteH1Concurrent     // Takes logger
-	executeH1SingleByteSend = ExecuteH1SingleByteSend // Takes logger
-	executeH2Multiplexing   = ExecuteH2Multiplexing   // Takes logger
-	executeH2Dependency     = ExecuteH2Dependency     // Takes logger
-	executeGraphQLAsync     = ExecuteGraphQLAsync     // Takes logger
+	executeH1Concurrent     = ExecuteH1Concurrent
+	executeH1SingleByteSend = ExecuteH1SingleByteSend
+	executeH2Multiplexing   = ExecuteH2Multiplexing
+	executeH2Dependency     = ExecuteH2Dependency
+	executeGraphQLAsync     = ExecuteGraphQLAsync
 )
 
 // Analyzer orchestrates the TimeSlip module, managing strategy execution and result analysis.
@@ -44,11 +43,9 @@ type Analyzer struct {
 }
 
 // NewAnalyzer initializes the TimeSlip Analyzer.
-// The signature is updated to return an error if the configuration, like its regex patterns, is invalid.
 func NewAnalyzer(scanID uuid.UUID, config *Config, logger *zap.Logger, reporter core.Reporter) (*Analyzer, error) {
 	if logger == nil {
-		// This is a safety net. If no logger is provided, we use a no-op one
-		// so we don't have to deal with nil pointer panics down the line.
+		// This is a safety net. If no logger is provided, we use a fallback/no-op one.
 		logger = observability.GetLogger().Named("timeslip_analyzer_nop")
 	}
 	log := logger.Named("timeslip_analyzer")
@@ -63,14 +60,14 @@ func NewAnalyzer(scanID uuid.UUID, config *Config, logger *zap.Logger, reporter 
 		}
 	}
 
-	// Configuration validation is key.
+	// Configuration validation.
 	if config.Concurrency < 2 {
 		log.Warn("Concurrency must be at least 2 for race condition testing. Adjusting to minimum.", zap.Int("configured_concurrency", config.Concurrency))
 		config.Concurrency = 2
 	}
 
-	// We'll try to initialize the Oracle here just to validate the configuration (especially the regexes).
-	// The actual Oracle used during the analysis will be specific to the candidate type (GraphQL or not).
+	// Initialize the Oracle here to validate the configuration (especially the regexes).
+	// The actual Oracle used during the analysis will be specific to the candidate type.
 	_, err := NewSuccessOracle(config, false) // Test with standard HTTP config
 	if err != nil {
 		log.Error("Invalid TimeSlip configuration detected during initialization.", zap.Error(err))
@@ -98,10 +95,10 @@ func (a *Analyzer) Analyze(ctx context.Context, candidate *RaceCandidate) error 
 		zap.String("method", candidate.Method),
 		zap.Int("concurrency", a.config.Concurrency))
 
-	// Initialize the SuccessOracle specific to this candidate which handles the IsGraphQL flag.
+	// Initialize the SuccessOracle specific to this candidate (handles the IsGraphQL flag).
 	oracle, err := NewSuccessOracle(a.config, candidate.IsGraphQL)
 	if err != nil {
-		// This indicates an internal inconsistency.
+		// This indicates an internal inconsistency, as config was validated at initialization.
 		a.logger.Error("Internal Error: Failed to initialize SuccessOracle despite prior validation.", zap.Error(err))
 		return fmt.Errorf("internal error initializing SuccessOracle: %w", err)
 	}
@@ -109,7 +106,7 @@ func (a *Analyzer) Analyze(ctx context.Context, candidate *RaceCandidate) error 
 	strategies := a.determineStrategies(candidate)
 
 	for _, strategy := range strategies {
-		// Check for context cancellation before kicking off a new strategy.
+		// Check for context cancellation before starting a new strategy.
 		if ctx.Err() != nil {
 			a.logger.Info("TimeSlip analysis cancelled", zap.Error(ctx.Err()))
 			return ctx.Err()
@@ -120,8 +117,7 @@ func (a *Analyzer) Analyze(ctx context.Context, candidate *RaceCandidate) error 
 		var result *RaceResult
 		var execErr error
 
-		// Execute the selected strategy, passing the configuration and the oracle.
-		// These now call the package-level variables, enabling mocks.
+		// Execute the selected strategy via the package-level variables (enabling mocks).
 		switch strategy {
 		case H1Concurrent:
 			result, execErr = executeH1Concurrent(ctx, candidate, a.config, oracle, a.logger.Named("h1_concurrent"))
@@ -136,20 +132,18 @@ func (a *Analyzer) Analyze(ctx context.Context, candidate *RaceCandidate) error 
 		}
 
 		if execErr != nil {
-			// If a strategy fails, we need to know why so we can decide whether to continue.
-			// Added ErrH2FrameError to the list of recoverable errors.
+			// Determine if the error is recoverable and we should continue to the next strategy.
 			if errors.Is(execErr, ErrH2Unsupported) || errors.Is(execErr, ErrPipeliningRejected) || errors.Is(execErr, ErrH2FrameError) {
 				a.logger.Info("Strategy not supported by target or encountered protocol error.", zap.String("strategy", string(strategy)), zap.Error(execErr))
 			} else if errors.Is(execErr, ErrTargetUnreachable) {
 				a.logger.Warn("Strategy failed due to target being unreachable or timing out.", zap.String("strategy", string(strategy)), zap.Error(execErr))
-				// Could consider breaking here if the target seems completely down.
 			} else if errors.Is(execErr, ErrConfigurationError) || errors.Is(execErr, ErrPayloadMutationFail) {
 				a.logger.Error("Strategy failed due to configuration or payload issues. Halting analysis for this candidate.", zap.String("strategy", string(strategy)), zap.Error(execErr))
-				break // Stop analysis for this candidate if the input or config is just plain wrong.
+				break // Stop analysis if the input or config is fundamentally wrong.
 			} else {
 				a.logger.Warn("Strategy execution encountered an unexpected error.", zap.String("strategy", string(strategy)), zap.Error(execErr))
 			}
-			continue // Try the next strategy.
+			continue
 		}
 
 		// Analyze the results.
@@ -162,10 +156,9 @@ func (a *Analyzer) Analyze(ctx context.Context, candidate *RaceCandidate) error 
 				zap.Bool("vulnerable", analysis.Vulnerable),
 				zap.String("details", analysis.Details))
 
-			// Report the finding (handles both vulnerable and informational).
 			a.reportFinding(candidate, analysis, result)
 
-			// Optimization: If Confidence is 1.0 (a confirmed TOCTOU) and it is vulnerable, we can stop further analysis.
+			// Optimization: If Confidence is 1.0 (confirmed TOCTOU), stop further analysis.
 			if analysis.Vulnerable && analysis.Confidence == 1.0 {
 				a.logger.Info("Critical TOCTOU detected (Confidence 1.0). Halting further strategies.")
 				break
@@ -178,7 +171,7 @@ func (a *Analyzer) Analyze(ctx context.Context, candidate *RaceCandidate) error 
 
 // determineStrategies selects the appropriate attack strategies based on the candidate characteristics.
 func (a *Analyzer) determineStrategies(candidate *RaceCandidate) []RaceStrategy {
-	// GraphQL endpoints get a specialized strategy all to themselves.
+	// GraphQL endpoints get a specialized strategy.
 	if candidate.IsGraphQL {
 		return []RaceStrategy{AsyncGraphQL}
 	}
@@ -190,12 +183,12 @@ func (a *Analyzer) determineStrategies(candidate *RaceCandidate) []RaceStrategy 
 			H1Concurrent,
 		}
 	}
-	// For standard HTTP endpoints, we attempt all applicable strategies in order of preference (most precise first).
+	// Standard HTTP endpoints: attempt strategies in order of precision.
 	return []RaceStrategy{
-		H2Dependency,     // Preferred: Offers the tightest synchronization if H2 is supported.
+		H2Dependency,     // Preferred: Tightest synchronization if H2 is supported.
 		H2Multiplexing,   // Efficient H2 strategy.
-		H1SingleByteSend, // The most precise technique for HTTP/1.1.
-		H1Concurrent,     // The classic brute force fallback.
+		H1SingleByteSend, // Most precise technique for HTTP/1.1.
+		H1Concurrent,     // The classic fallback.
 	}
 }
 
@@ -244,7 +237,7 @@ func (a *Analyzer) reportFinding(candidate *RaceCandidate, analysis *AnalysisRes
 		cwes = append(cwes, "CWE-362") // Contextual CWE
 	}
 
-	// Compile all the juicy evidence.
+	// Compile evidence.
 	evidenceData := TimeSlipEvidence{
 		Strategy:        analysis.Strategy,
 		TotalDurationMs: result.Duration.Milliseconds(),
@@ -252,7 +245,7 @@ func (a *Analyzer) reportFinding(candidate *RaceCandidate, analysis *AnalysisRes
 		SampleResponses: a.sampleUniqueResponses(result.Responses),
 	}
 
-	// Marshal evidence. Use MarshalIndent for better readability in reports.
+	// Marshal evidence. Use MarshalIndent for better readability.
 	evidenceBytes, err := json.MarshalIndent(evidenceData, "", "  ")
 	if err != nil {
 		a.logger.Error("Failed to marshal evidence data", zap.Error(err))
@@ -260,7 +253,7 @@ func (a *Analyzer) reportFinding(candidate *RaceCandidate, analysis *AnalysisRes
 		evidenceBytes = []byte(fmt.Sprintf("{\"error\": \"Failed to serialize evidence: %v\"}", err))
 	}
 
-	// Define the vulnerability details (using the schemas.Vulnerability struct).
+	// Define the vulnerability details.
 	vulnerability := schemas.Vulnerability{
 		Name:        title,
 		Description: vulnDescription,
@@ -271,26 +264,22 @@ func (a *Analyzer) reportFinding(candidate *RaceCandidate, analysis *AnalysisRes
 		Timestamp:      time.Now().UTC(),
 		Target:         candidate.URL,
 		Module:         "TimeSlipAnalyzer",
-		Vulnerability:  vulnerability, // Use the struct
+		Vulnerability:  vulnerability,
 		Severity:       severity,
 		Description:    description,
-		Evidence:       string(evidenceBytes), // Use the string representation
+		Evidence:       string(evidenceBytes),
 		Recommendation: "Implement proper synchronization mechanisms such as atomic transactions, database constraints (e.g., uniqueness constraints), or pessimistic/optimistic locking to ensure operations on shared resources are processed safely and consistently.",
-		CWE:            cwes, // Use the slice
+		CWE:            cwes,
 	}
 
-	// If a reporter is configured, this is where we use it.
+	// Publish the finding.
 	if a.reporter != nil {
-		// Let's get this finding packaged up for delivery in a ResultEnvelope.
-		// The envelope provides scan-level context around the individual finding.
 		envelope := &schemas.ResultEnvelope{
 			Timestamp: time.Now().UTC(),
 			ScanID:    a.ScanID.String(),
 			Findings:  []schemas.Finding{finding},
 		}
 
-		// Fire it off to the reporter. If something goes wrong, we need to log it
-		// so we don't silently fail to report a vulnerability.
 		if err := a.reporter.Write(envelope); err != nil {
 			a.logger.Error("Failed to report finding via reporter",
 				zap.String("finding_id", finding.ID),
@@ -371,6 +360,7 @@ func (a *Analyzer) analyzeResults(result *RaceResult, config *Config) *AnalysisR
 		analysis.Stats = a.calculateStatistics(validResponses)
 	}
 
+	// Run the heuristics pipeline.
 	for _, heuristic := range heuristicsPipeline {
 		if heuristic(result, config, analysis) {
 			break
@@ -379,6 +369,7 @@ func (a *Analyzer) analyzeResults(result *RaceResult, config *Config) *AnalysisR
 
 	if analysis.Details == "" {
 		analysis.Details = "No clear indication of a race condition vulnerability found."
+		// Minor indicator: High Coefficient of Variation (StdDev / Avg)
 		if analysis.Stats.StdDevMs > 0 && analysis.Stats.AvgDurationMs > 50 && (analysis.Stats.StdDevMs/analysis.Stats.AvgDurationMs) > 0.3 {
 			analysis.Confidence = 0.1
 			analysis.Details += fmt.Sprintf(" Note: High standard deviation observed (%.2fms).", analysis.Stats.StdDevMs)
@@ -416,12 +407,13 @@ func (a *Analyzer) calculateStatistics(responses []*RaceResponse) ResponseStatis
 	durationsMs := make([]int64, 0, len(responses))
 
 	for _, resp := range responses {
-		// **FIXED**: Accessing Duration from the correct nested struct.
+		// We only consider positive durations for statistical analysis.
 		if resp.ParsedResponse != nil && resp.ParsedResponse.Duration > 0 {
 			durationsMs = append(durationsMs, resp.ParsedResponse.Duration.Milliseconds())
 		}
 	}
 
+	// Need at least 2 data points for statistics.
 	if len(durationsMs) < 2 {
 		return ResponseStatistics{}
 	}
@@ -431,7 +423,7 @@ func (a *Analyzer) calculateStatistics(responses []*RaceResponse) ResponseStatis
 	})
 
 	stats := ResponseStatistics{
-		Count:         len(durationsMs), // Populate the count for statistical analysis.
+		Count:         len(durationsMs),
 		MinDurationMs: durationsMs[0],
 		MaxDurationMs: durationsMs[len(durationsMs)-1],
 	}
@@ -465,17 +457,17 @@ func (a *Analyzer) calculateStatistics(responses []*RaceResponse) ResponseStatis
 // analysisHeuristic defines a function that checks for a specific indicator of a race condition.
 type analysisHeuristic func(result *RaceResult, config *Config, analysis *AnalysisResult) bool
 
-// The order and logic of the pipeline is crucial for correct analysis.
-// We check for the strongest signals (TOCTOU) first and weakest (timing) last.
+// The order of the pipeline is crucial: Strongest signals (TOCTOU) first, weakest (timing) last.
 var heuristicsPipeline = []analysisHeuristic{
 	checkTOCTOU,
-	checkTimingAnomalies, // <-- Moved up
 	checkDifferentialState,
 	checkStateFlutter,
+	checkTimingAnomalies,
 }
 
 // -- Heuristics --
 
+// checkTOCTOU checks for Time-of-Check Time-of-Use conditions (more successes than expected).
 func checkTOCTOU(result *RaceResult, config *Config, analysis *AnalysisResult) bool {
 	expectedSuccesses := 1
 	if config.ExpectedSuccesses > 0 {
@@ -495,21 +487,37 @@ func checkTOCTOU(result *RaceResult, config *Config, analysis *AnalysisResult) b
 	return false
 }
 
+// checkDifferentialState checks if different responses occurred, including at least one success.
 func checkDifferentialState(result *RaceResult, config *Config, analysis *AnalysisResult) bool {
 	if len(analysis.UniqueResponses) > 1 && analysis.SuccessCount >= 1 {
+		// FIX: Defer to timing analysis if variation is high (e.g., a patched, locked endpoint).
+		// This prevents false positives on correctly serialized "redeem once" endpoints.
+		coefficientOfVariation := 0.0
+		if analysis.Stats.AvgDurationMs > 0 {
+			coefficientOfVariation = analysis.Stats.StdDevMs / analysis.Stats.AvgDurationMs
+		}
+
+		const highVariationThreshold = 0.5 // Match threshold from checkStateFlutter
+		isHighVariation := coefficientOfVariation > highVariationThreshold
+		isLargeDelta := config.ThresholdMs > 0 && analysis.Stats.TimingDeltaMs > int64(config.ThresholdMs)
+
+		if isHighVariation || isLargeDelta {
+			return false // Defer to checkTimingAnomalies.
+		}
+
 		analysis.Vulnerable = true
 		analysis.Confidence = 0.8
-		analysis.Details = fmt.Sprintf("VULNERABLE: Differential responses detected (%d unique responses) including successful operations. Indicates inconsistent state during concurrent processing.", len(analysis.UniqueResponses))
+		analysis.Details = fmt.Sprintf("VULNERABLE: Differential responses detected (%d unique responses) including successful operations (with low timing variation, CoV: %.2f). Indicates inconsistent state during concurrent processing.", len(analysis.UniqueResponses), coefficientOfVariation)
 		return true
 	}
 	return false
 }
 
+// checkStateFlutter checks if multiple unique failure responses occurred with low timing variation.
 func checkStateFlutter(result *RaceResult, config *Config, analysis *AnalysisResult) bool {
 	if len(analysis.UniqueResponses) > 1 && analysis.SuccessCount == 0 {
-		// This is a key change. If there's a significant timing delta or high variation,
-		// we should not classify this as a "State Flutter". Instead, we should fall through
-		// to the timing anomaly heuristic, which is a better fit for that scenario.
+		// If there is high timing variation, this might not be a flutter, but rather resource contention.
+		// We defer to the timing anomaly heuristic in that case.
 
 		// Calculate the Coefficient of Variation (CoV) = StdDev / Mean.
 		coefficientOfVariation := 0.0
@@ -517,18 +525,17 @@ func checkStateFlutter(result *RaceResult, config *Config, analysis *AnalysisRes
 			coefficientOfVariation = analysis.Stats.StdDevMs / analysis.Stats.AvgDurationMs
 		}
 
-		// If CoV is high (e.g. > 0.5) OR the simple delta threshold is met, defer to timing analysis.
+		// If CoV is high OR the simple delta threshold is met, defer to timing analysis.
 		const highVariationThreshold = 0.5
 		isHighVariation := coefficientOfVariation > highVariationThreshold
 		isLargeDelta := config.ThresholdMs > 0 && analysis.Stats.TimingDeltaMs > int64(config.ThresholdMs)
 
 		if isHighVariation || isLargeDelta {
-			return false // Defer to the timing anomaly heuristic.
+			return false // Defer to checkTimingAnomalies.
 		}
 
 		analysis.Vulnerable = true
 		analysis.Confidence = 0.6
-		// Update details to include CoV for better context.
 		analysis.Details = fmt.Sprintf("VULNERABLE: State flutter detected. %d unique failure responses observed with low timing variation (CoV: %.2f). Indicates unstable state under concurrency.", len(analysis.UniqueResponses), coefficientOfVariation)
 		return true
 	}
@@ -538,28 +545,26 @@ func checkStateFlutter(result *RaceResult, config *Config, analysis *AnalysisRes
 // checkTimingAnomalies analyzes response times using statistical outlier detection.
 func checkTimingAnomalies(result *RaceResult, config *Config, analysis *AnalysisResult) bool {
 	// Timing anomalies are unreliable for strategies where individual request timing is obscured or artificial.
-	// H2Dependency timing is not measured per request in the current implementation.
 	if result.Strategy == AsyncGraphQL || result.Strategy == H2Dependency {
 		return false
 	}
 
 	stats := analysis.Stats
 
-	// We need a minimum number of data points for meaningful statistics (e.g. 5).
+	// We need a minimum number of data points for meaningful statistics.
 	minDataPoints := 5
 	if stats.Count < minDataPoints {
-		// Fallback to legacy threshold check if not enough data for stats, but enough for a simple delta.
+		// Fallback to simple delta check if insufficient data for stats, but enough for a delta (>=2).
 		if config.ThresholdMs > 0 && stats.TimingDeltaMs > int64(config.ThresholdMs) && stats.Count >= 2 {
 			analysis.Vulnerable = false
-			analysis.Confidence = 0.2 // Low confidence due to insufficient data.
+			analysis.Confidence = 0.2 // Low confidence.
 			analysis.Details = fmt.Sprintf("INFO: Timing delta detected (%dms), but insufficient data (%d points) for robust statistical analysis.", stats.TimingDeltaMs, stats.Count)
 			return true
 		}
 		return false
 	}
 
-	// IMPROVEMENT: Heuristic 1: Outlier Detection (Bimodal distribution indicator)
-	// A true race often manifests as N-1 fast responses and 1 slow response (the one that acquired the lock).
+	// Heuristic 1: Outlier Detection (Bimodal distribution / Lock-Wait pattern)
 
 	// Basic noise filtering: If StdDev or Median is very low, timing analysis is unreliable.
 	const minStdDevMs = 10.0
@@ -571,9 +576,9 @@ func checkTimingAnomalies(result *RaceResult, config *Config, analysis *Analysis
 
 		// Check if the maximum duration significantly exceeds this bound.
 		if float64(stats.MaxDurationMs) > upperBound {
-			// Strong signal detected. Verify the distribution (looking for bimodal pattern).
+			// Strong signal detected. Verify the distribution.
 			outliers := 0
-			// We iterate over responses again to count outliers, as stats only holds aggregates.
+			// Count how many responses exceeded the bound.
 			for _, resp := range result.Responses {
 				if resp.Error == nil && resp.ParsedResponse != nil && resp.ParsedResponse.Duration > 0 {
 					if float64(resp.ParsedResponse.Duration.Milliseconds()) > upperBound {
@@ -585,13 +590,13 @@ func checkTimingAnomalies(result *RaceResult, config *Config, analysis *Analysis
 			// If only a small fraction of requests are outliers (e.g., 1-2 requests, or < 15%), it strongly suggests a lock-wait.
 			if outliers > 0 && (outliers <= 2 || float64(outliers)/float64(stats.Count) < 0.15) {
 				analysis.Vulnerable = false
-				analysis.Confidence = 0.4 // Stronger signal than simple delta (0.3).
+				analysis.Confidence = 0.4 // Stronger signal than simple delta.
 
 				analysis.Details = fmt.Sprintf(
 					"INFO: Significant timing anomaly (Lock-Wait pattern) detected. %d/%d response(s) were statistical outliers (>%.1f SDs from median). Median: %.0fms, Max: %dms. Suggests sequential locking or significant resource contention.",
 					outliers, stats.Count, timingAnomalyStdDevThreshold, stats.MedDurationMs, stats.MaxDurationMs)
 
-				// If the distribution is clearly bimodal (e.g., only 1 outlier among many requests), the confidence increases.
+				// If the distribution is clearly bimodal (e.g., only 1 outlier among many requests).
 				if outliers == 1 && stats.Count >= 10 {
 					analysis.Confidence = 0.5
 					analysis.Details += " Bimodal distribution strongly suggests serialization."
@@ -601,7 +606,7 @@ func checkTimingAnomalies(result *RaceResult, config *Config, analysis *Analysis
 		}
 	}
 
-	// Heuristic 2: Fallback to simple delta threshold (Legacy check)
+	// Heuristic 2: Fallback to simple delta threshold.
 	if config.ThresholdMs > 0 && stats.TimingDeltaMs > int64(config.ThresholdMs) {
 		analysis.Vulnerable = false
 		analysis.Confidence = 0.3

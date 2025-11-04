@@ -50,7 +50,10 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 			// -- Mutation Phase --
 			// Create a copy of the candidate for mutation to avoid side effects between goroutines.
 			candidateCopy := *candidate
-			candidateCopy.Headers = candidate.Headers.Clone()
+			// Clone headers safely (handles nil map).
+			if candidate.Headers != nil {
+				candidateCopy.Headers = candidate.Headers.Clone()
+			}
 
 			mutatedBody, mutatedHeaders, mutatedURL, err := MutateRequest(&candidateCopy)
 			if err != nil {
@@ -87,9 +90,9 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 
 			// Apply Request Jitter just before sending.
 			if config.RequestJitter > 0 {
-				rng := getRNG() // Use pooled RNG
+				rng := getRNG()
 				jitter := time.Duration(rng.Int63n(int64(config.RequestJitter)))
-				putRNG(rng) // Return RNG immediately after use
+				putRNG(rng)
 				time.Sleep(jitter)
 			}
 
@@ -135,11 +138,10 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 			}
 
 			// CRITICAL: Copy the bytes from the buffer into a new slice.
-			// Use the actual number of bytes read (n).
 			body := make([]byte, n)
 			copy(body, buf.Bytes()[:n])
 
-			// Generate the composite fingerprint using the configured exclusion map.
+			// Generate the composite fingerprint.
 			fingerprint := GenerateFingerprint(resp.StatusCode, resp.Header, body, excludeMap)
 
 			parsedResponse := &ParsedResponse{
@@ -193,12 +195,12 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 				allFailed = false
 				break
 			}
+			// Capture the first significant error.
 			if firstError == nil && r.Error != context.Canceled && r.Error != context.DeadlineExceeded {
 				firstError = r.Error
 			}
 		}
 		if allFailed && firstError != nil {
-			// If we can identify a root cause error, use it, otherwise default to ErrTargetUnreachable.
 			return nil, fmt.Errorf("%w: %v", ErrTargetUnreachable, firstError)
 		}
 	}

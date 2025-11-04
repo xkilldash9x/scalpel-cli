@@ -32,7 +32,7 @@ func TestMutateRequest_ApplicationAndConsistency(t *testing.T) {
 	assert.NotContains(t, string(mutatedBody), "{{UUID}}")
 	assert.NotContains(t, string(mutatedBody), "{{NONCE}}")
 
-	// Verify consistency: the same generated UUID/Nonce must be used in both body and headers for this call
+	// Verify consistency: the same generated UUID/Nonce must be used in body, headers, and URL.
 	generatedUUID := strings.TrimPrefix(mutatedHeaders.Get("Authorization"), "Bearer ")
 	generatedNonce := mutatedHeaders.Get("X-Request-Id")
 
@@ -76,24 +76,47 @@ func TestMutateRequest_OptimizationPath(t *testing.T) {
 	mutatedBody, mutatedHeaders, mutatedURL, err := MutateRequest(candidate)
 	require.NoError(t, err)
 
-	// Verify that the inputs are returned unchanged (optimization path)
+	// Verify that the inputs are returned (headers are cloned, body/url are the same).
 	assert.Equal(t, url, mutatedURL)
 	assert.Equal(t, body, mutatedBody)
-	// Headers are cloned, so we check content equality
 	assert.Equal(t, headers, mutatedHeaders)
 
 	// Advanced check: Verify the pointer to the body slice data is the same (no allocation)
 	if len(body) > 0 && len(mutatedBody) > 0 {
-		// This confirms the optimization mentioned in templating.go (lines 43-59)
 		assert.Same(t, &body[0], &mutatedBody[0], "Body slice pointer changed even without mutation, optimization failed.")
 	}
+}
+
+// Test case for ensuring headers are initialized even if input headers are nil.
+func TestMutateRequest_NilHeadersInitialization(t *testing.T) {
+	// Case 1: No mutation needed
+	candidate1 := &RaceCandidate{
+		Body:    []byte("no templates"),
+		Headers: nil, // Nil headers
+		URL:     "http://example.com",
+	}
+	_, mutatedHeaders1, _, err1 := MutateRequest(candidate1)
+	require.NoError(t, err1)
+	// Headers should be initialized to an empty map, not nil, to prevent panics downstream.
+	assert.NotNil(t, mutatedHeaders1)
+	assert.Empty(t, mutatedHeaders1)
+
+	// Case 2: Mutation needed (e.g., in URL)
+	candidate2 := &RaceCandidate{
+		Body:    []byte("no templates"),
+		Headers: nil,
+		URL:     "http://example.com/{{NONCE}}",
+	}
+	_, mutatedHeaders2, _, err2 := MutateRequest(candidate2)
+	require.NoError(t, err2)
+	assert.NotNil(t, mutatedHeaders2)
 }
 
 func TestGenerateNonce(t *testing.T) {
 	nonce1 := generateNonce()
 	nonce2 := generateNonce()
 
-	// Check format (12 digits as defined in templating.go line 88)
+	// Check format (12 digits)
 	assert.Len(t, nonce1, 12)
 	assert.NotEqual(t, nonce1, nonce2, "Nonces should be unique")
 }

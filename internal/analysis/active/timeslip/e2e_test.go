@@ -17,6 +17,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/active/timeslip"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"go.uber.org/zap"
+	"golang.org/x/net/http2"
 )
 
 // MockReporter for E2E tests (Thread-safe).
@@ -109,7 +110,7 @@ func setupE2EAnalyzer(reporter core.Reporter, insecure bool) (*timeslip.Analyzer
 		Timeout:            5 * time.Second,
 		ExpectedSuccesses:  1,
 		ThresholdMs:        150,      // Threshold for timing anomaly detection
-		InsecureSkipVerify: insecure, // FIX: Added InsecureSkipVerify
+		InsecureSkipVerify: insecure, // Added InsecureSkipVerify
 		// Define success criteria matching the vulnerable server's success response
 		Success: timeslip.SuccessCondition{
 			BodyRegex: `"status":"success"`,
@@ -127,14 +128,18 @@ func TestE2E_TOCTOU_Vulnerable(t *testing.T) {
 		processDelay: 50 * time.Millisecond,
 		useLocking:   false,
 	}
-	// FIX: Use NewTLSServer because the Analyzer prioritizes H2 strategies which require HTTPS. Set InsecureSkipVerify to true.
-	server := httptest.NewTLSServer(http.HandlerFunc(vs.handler))
+	// FIX: Explicitly configure an H2 server.
+	// Use NewUnstartedServer to ensure H2 is available, which the analyzer prioritizes.
+	server := httptest.NewUnstartedServer(http.HandlerFunc(vs.handler))
+	require.NoError(t, http2.ConfigureServer(server.Config, &http2.Server{}))
+	server.TLS = server.Config.TLSConfig
+	server.StartTLS()
 	defer server.Close()
 
 	reporter := &E2EMockReporter{}
-	analyzer, err := setupE2EAnalyzer(reporter, true)
+	analyzer, err := setupE2EAnalyzer(reporter, true) // Insecure=true
 	require.NoError(t, err)
-	analyzer.UseHTTP1OnlyForTests() // Force fallback to H1 for this specific vulnerable server simulation
+	// We allow H2 strategies here, as they should also detect the vulnerability.
 
 	candidate := &timeslip.RaceCandidate{
 		Method: "POST",
@@ -181,14 +186,21 @@ func TestE2E_Patched_WithLocking(t *testing.T) {
 		processDelay: 50 * time.Millisecond,
 		useLocking:   true, // Enable locking
 	}
-	// FIX: Use NewTLSServer and set InsecureSkipVerify to true.
-	server := httptest.NewTLSServer(http.HandlerFunc(vs.handler))
+	// FIX: Explicitly configure an H2 server.
+	// Use NewUnstartedServer to ensure H2 is available, which the analyzer prioritizes.
+	server := httptest.NewUnstartedServer(http.HandlerFunc(vs.handler))
+	require.NoError(t, http2.ConfigureServer(server.Config, &http2.Server{}))
+	server.TLS = server.Config.TLSConfig
+	server.StartTLS()
 	defer server.Close()
 
 	reporter := &E2EMockReporter{}
 	analyzer, err := setupE2EAnalyzer(reporter, true)
 	require.NoError(t, err)
-	analyzer.UseHTTP1OnlyForTests() // Force H1 to test the locking delay timing anomaly
+
+	// We force H1 here specifically to test the timing anomaly detection based on the delays,
+	// as H2 strategies (like H2Dependency) don't report individual request timings.
+	analyzer.UseHTTP1OnlyForTests()
 
 	candidate := &timeslip.RaceCandidate{
 		Method: "POST",
