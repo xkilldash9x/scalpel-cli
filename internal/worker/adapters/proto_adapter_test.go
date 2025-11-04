@@ -86,13 +86,16 @@ func TestProtoAdapter_UnitTests(t *testing.T) {
 				}
 				ts.mockConfig.On("Scanners").Return(scannersConfig)
 
-				// FIX: Mock the browser manager interaction that was causing the panic.
-				mockSession := &mocks.MockSessionContext{}
+				// Mock the browser manager interaction that was causing the panic.
+				mockSession := mocks.NewMockSessionContext()
 				ts.mockBrowser.On("NewAnalysisContext",
 					mock.Anything, mock.Anything, mock.Anything,
 					mock.Anything, mock.Anything, mock.Anything,
 				).Return(mockSession, nil)
 				mockSession.On("Close", mock.Anything).Return(nil)
+				mockSession.On("ExposeFunction", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+				mockSession.On("InjectScriptPersistently", mock.Anything, mock.Anything).Return(nil)
+				mockSession.On("Navigate", mock.Anything, mock.Anything).Return(nil)
 			},
 			expectError: false,
 		},
@@ -144,8 +147,10 @@ func TestProtoAdapter_UnitTests(t *testing.T) {
 		{
 			name: "Context Handling: Context is canceled before execution",
 			setupModifier: func(ts *testSetup) {
-				// The test runner will handle the context setup for this case.
-				// No config mock needed as the function should exit early.
+				// Removed the mock expectation for `Scanners()`.
+				// The adapter should return immediately due to the
+				// ctx.Err() check at the top of Analyze(),
+				// so no mocks will be called.
 			},
 			expectError: true,
 			expectedErr: "context canceled",
@@ -212,14 +217,24 @@ func TestProtoAdapter_ContextCancellation_DuringAnalysis(t *testing.T) {
 	}
 	ts.mockConfig.On("Scanners").Return(scannersConfig)
 
-	// FIX: Add the required mock setup to prevent the initial panic.
+	// Add the required mock setup to prevent the initial panic.
 	// This allows the test to proceed to the part where it actually tests the timeout.
-	mockSession := &mocks.MockSessionContext{}
+	mockSession := mocks.NewMockSessionContext()
 	ts.mockBrowser.On("NewAnalysisContext",
 		mock.Anything, mock.Anything, mock.Anything,
 		mock.Anything, mock.Anything, mock.Anything,
 	).Return(mockSession, nil)
 	mockSession.On("Close", mock.Anything).Return(nil)
+	mockSession.On("ExposeFunction", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+
+	// Add missing mock for InjectScriptPersistently to prevent panic
+	mockSession.On("InjectScriptPersistently", mock.Anything, mock.Anything).Return(nil)
+
+	// Add mock for Navigate and make it block until context is canceled
+	mockSession.On("Navigate", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		// Wait for the context passed to Navigate to be Done
+		<-args.Get(0).(context.Context).Done()
+	}).Return(context.DeadlineExceeded)
 
 	analysisCtx := &core.AnalysisContext{
 		Task:   *ts.task,
@@ -265,6 +280,7 @@ func FuzzProtoAdapter_Analyze(f *testing.F) {
 
 	f.Fuzz(func(t *testing.T, targetURL string, taskID string, scannerEnabled bool) {
 		// Using a subtest for each fuzz input for better isolation
+		// Corrected invalid syntax func(t, *testing.T) to func(t *testing.T)
 		t.Run("Fuzz", func(t *testing.T) {
 			t.Parallel() // Run fuzz inputs in parallel
 			logger := zap.NewNop()
@@ -279,12 +295,17 @@ func FuzzProtoAdapter_Analyze(f *testing.F) {
 			}
 			cfg.On("Scanners").Return(scannersConfig)
 
-			// FIX: Add mock setup for browser manager if the scanner is enabled
+			// Add mock setup for browser manager if the scanner is enabled
 			// and the URL is valid, which is the path where it would be called.
 			if scannerEnabled && targetURL != "" {
-				mockSession := &mocks.MockSessionContext{}
+				mockSession := mocks.NewMockSessionContext()
 				browserManager.On("NewAnalysisContext", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockSession, nil)
 				mockSession.On("Close", mock.Anything).Return(nil)
+				mockSession.On("ExposeFunction",
+					mock.Anything, mock.Anything, mock.Anything).Return(nil)
+				// Add missing mocks to prevent panics during fuzzing
+				mockSession.On("InjectScriptPersistently", mock.Anything, mock.Anything).Return(nil)
+				mockSession.On("Navigate", mock.Anything, mock.Anything).Return(nil)
 			}
 
 			task := &schemas.Task{
@@ -347,6 +368,7 @@ func FuzzProtoAdapter_Analyze_Structured(f *testing.F) {
 		ctx := context.Background()
 
 		// Gracefully catch any panics, report them as a test failure,
+		//
 		// and continue fuzzing.
 		defer func() {
 			if r := recover(); r != nil {
@@ -355,7 +377,8 @@ func FuzzProtoAdapter_Analyze_Structured(f *testing.F) {
 		}()
 
 		_ = adapter.Analyze(ctx, analysisCtx)
-		// We don't assert on the error here. The goal is simply to survive
+		// We don't assert on the error here.
+		// The goal is simply to survive
 		// the execution without panicking, no matter how malformed the input struct is.
 	})
 }

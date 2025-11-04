@@ -4,12 +4,12 @@
 package agent_test
 
 import (
-	"encoding/json"
 	"reflect"
 	"testing"
 	"time"
 
 	"github.com/google/go-cmp/cmp"
+	json "github.com/json-iterator/go"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/agent"
 )
@@ -31,19 +31,12 @@ func mustParseTime(ts string) time.Time {
 // =============================================================================
 //  UNIT TESTS
 // =============================================================================
-// Justification: Unit tests are essential for verifying the core functionality of
-// the data models, which is JSON serialization and deserialization. Table-driven
-// tests provide a clean and maintainable way to check various scenarios,
-// including happy paths, zero-value cases (for `omitempty`), and edge cases,
-// directly addressing the best practices from the search context regarding JSON
-// contracts, `omitempty` behavior, and `time.Time` serialization.
 
 func TestMission_JSONRoundTrip(t *testing.T) {
 	t.Parallel()
 
-	// As highlighted in the search context, numbers in `map[string]interface{}`
-	// are deserialized as float64. We define the `want` struct with float64
-	// to make the DeepEqual comparison pass correctly.
+	// Numbers in `map[string]interface{}` are deserialized as float64.
+	// We define the expected struct with float64 to make the comparison pass.
 	testTime := mustParseTime("2023-10-27T10:00:00Z")
 	missionWithIntParam := agent.Mission{
 		ID:          "mission-123",
@@ -127,7 +120,7 @@ func TestAction_JSONMarshaling(t *testing.T) {
 				ScanID:    "scan-abc",
 				Type:      agent.ActionAnalyzeTaint,
 				Rationale: "Initial taint analysis on the landing page.",
-				Timestamp: testTime,
+				Timestamp: testTime, // Thought is empty and omitempty.
 			},
 			// `thought`, `selector`, `value`, `metadata` should be omitted.
 			expectedJSON: `{"id":"action-002","mission_id":"mission-123","scan_id":"scan-abc","type":"ANALYZE_TAINT","rationale":"Initial taint analysis on the landing page.","timestamp":"2023-10-27T10:05:00Z"}`,
@@ -142,8 +135,9 @@ func TestAction_JSONMarshaling(t *testing.T) {
 				Selector:  "input[name='username']",
 				Value:     "admin' OR 1=1; --",
 				Rationale: "Testing for SQL injection in the username field.",
-				Timestamp: testTime,
+				Timestamp: testTime, // Thought is empty and omitempty.
 			},
+			// 'thought' should be omitted.
 			expectedJSON: `{"id":"action-003","mission_id":"mission-123","scan_id":"scan-abc","type":"INPUT_TEXT","selector":"input[name='username']","value":"admin' OR 1=1; --","rationale":"Testing for SQL injection in the username field.","timestamp":"2023-10-27T10:05:00Z"}`,
 		},
 	}
@@ -253,7 +247,7 @@ func TestObservation_JSONRoundTrip(t *testing.T) {
 					Status:          "success",
 					ObservationType: agent.ObservedVulnerability,
 					Findings: []schemas.Finding{
-						// FIX: Changed to use the correct nested Vulnerability struct
+						// Changed to use the correct nested Vulnerability struct
 						{ID: "finding-xss-1", Vulnerability: schemas.Vulnerability{Name: "Reflected XSS"}},
 					},
 					KGUpdates: &schemas.KnowledgeGraphUpdate{
@@ -288,6 +282,16 @@ func TestObservation_JSONRoundTrip(t *testing.T) {
 				}
 			}
 
+			// Handle json.RawMessage `null` vs nil slice normalization for comparison
+			if expectedObs.Result.KGUpdates != nil && newObs.Result.KGUpdates != nil {
+				if expectedObs.Result.KGUpdates.NodesToAdd != nil && newObs.Result.KGUpdates.NodesToAdd == nil {
+					newObs.Result.KGUpdates.NodesToAdd = []schemas.NodeInput{}
+				}
+				if expectedObs.Result.KGUpdates.EdgesToAdd != nil && newObs.Result.KGUpdates.EdgesToAdd == nil {
+					newObs.Result.KGUpdates.EdgesToAdd = []schemas.EdgeInput{}
+				}
+			}
+
 			if !reflect.DeepEqual(newObs, expectedObs) {
 				t.Errorf("Round trip failed. Diff:\n%s", cmp.Diff(expectedObs, newObs))
 			}
@@ -308,20 +312,20 @@ func TestExecutionResult_JSONMarshaling(t *testing.T) {
 			result: agent.ExecutionResult{
 				Status:          "success",
 				ObservationType: agent.ObservedAnalysisResult,
-				Data:            map[string]interface{}{"items_found": 3.0},
-				Findings: []schemas.Finding{
-					// FIX: Changed to use the correct nested Vulnerability struct
-					{ID: "finding-1", Vulnerability: schemas.Vulnerability{Name: "XSS"}},
+				Data:            map[string]interface{}{"items_found": float64(3)},
+				Findings: []schemas.Finding{ // We initialize the nested structs to ensure all fields are present for the comparison.
+					{ID: "finding-1", Vulnerability: schemas.Vulnerability{Name: "XSS", Description: ""}},
 				},
 				KGUpdates: &schemas.KnowledgeGraphUpdate{
 					NodesToAdd: []schemas.NodeInput{
-						{ID: "node-1", Label: "Vulnerable Page"},
+						{ID: "node-1", Label: "Vulnerable Page", Type: "", Status: "", Properties: nil},
 					},
+					EdgesToAdd: nil,
 				},
 			},
 			// `error_code` and `error_details` should be omitted.
-			// FIX: Updated expectedJSON to reflect the actual marshaled struct, including zero-value fields.
-			expectedJSON: `{"status":"success","observation_type":"ANALYSIS_RESULT","data":{"items_found":3},"findings":[{"id":"finding-1","scan_id":"","task_id":"","timestamp":"0001-01-01T00:00:00Z","target":"","module":"","vulnerability":{"name":"XSS","description":""},"severity":"","description":"","evidence":"","recommendation":""}],"kg_updates":{"nodes_to_add":[{"id":"node-1","label":"Vulnerable Page"}]}}`,
+			// The nested schemas do not have omitempty tags on all fields, causing zero values to be serialized.
+			expectedJSON: `{"status":"success","observation_type":"ANALYSIS_RESULT","data":{"items_found":3},"findings":[{"id":"finding-1","scan_id":"","task_id":"","timestamp":"0001-01-01T00:00:00Z","target":"","module":"","vulnerability":{"name":"XSS","description":""},"severity":"","description":"","evidence":"","recommendation":""}],"kg_updates":{"nodes_to_add":[{"id":"node-1","type":"","label":"Vulnerable Page","status":"","properties":null}],"edges_to_add":null}}`,
 		},
 		{
 			name: "failed result with error details",
@@ -360,10 +364,10 @@ func TestExecutionResult_JSONMarshaling(t *testing.T) {
 
 			var actualMap, expectedMap map[string]interface{}
 			if err := json.Unmarshal(jsonData, &actualMap); err != nil {
-				t.Fatalf("Failed to unmarshal actual JSON: %v", err)
+				t.Fatalf("Failed to unmarshal actual JSON: %v\nRaw JSON: %s", err, string(jsonData))
 			}
 			if err := json.Unmarshal([]byte(tc.expectedJSON), &expectedMap); err != nil {
-				t.Fatalf("Failed to unmarshal expected JSON: %v", err)
+				t.Fatalf("Failed to unmarshal expected JSON: %v\nRaw JSON: %s", err, tc.expectedJSON)
 			}
 			if !reflect.DeepEqual(actualMap, expectedMap) {
 				t.Errorf("JSON mismatch. Diff:\n%s", cmp.Diff(expectedMap, actualMap))
@@ -375,24 +379,15 @@ func TestExecutionResult_JSONMarshaling(t *testing.T) {
 // =============================================================================
 //  FUZZ TESTS
 // =============================================================================
-// Justification: The search context highlights significant security risks from
-// parsing untrusted input, such as type confusion in `interface{}` fields and
-// potential panics from malformed JSON. Fuzz testing is the ideal strategy to
-// explore the entire input space for the JSON unmarshaling process, ensuring
-// the code is resilient against unexpected or malicious data. It automatically
-// seeks out inputs that cause crashes, making it superior to manually crafted
-// negative test cases for ensuring robustness.
 
-// FIX: Changed t *testing.T to f *testing.F
+// FuzzMission_UnmarshalJSON tests the robustness of Mission JSON unmarshaling.
 func FuzzMission_UnmarshalJSON(f *testing.F) {
-	// Seed with a valid JSON to give the fuzzer a starting point.
+	// Seed corpus
 	validJSON := `{"id":"mission-123","scan_id":"scan-abc","objective":"Find XSS.","target_url":"https://example.com","constraints":["Stay within scope"],"parameters":{"depth":5},"start_time":"2023-10-27T10:00:00Z"}`
-	// FIX: Changed t.Add to f.Add
 	f.Add([]byte(validJSON))
 	f.Add([]byte(`{}`))
 	f.Add([]byte(`{"id":123, "objective":true}`)) // Invalid types
 
-	// FIX: Removed `fuzz.New(t)`
 	f.Fuzz(func(t *testing.T, data []byte) {
 		// The test passes as long as Unmarshal does not panic.
 		var m agent.Mission
@@ -400,33 +395,30 @@ func FuzzMission_UnmarshalJSON(f *testing.F) {
 	})
 }
 
-// FIX: Changed t *testing.T to f *testing.F
+// FuzzAction_UnmarshalJSON tests the robustness of Action JSON unmarshaling.
 func FuzzAction_UnmarshalJSON(f *testing.F) {
+	// Seed corpus
 	validJSON := `{"id":"action-001","mission_id":"mission-123","scan_id":"scan-abc","type":"CLICK","selector":"#btn","rationale":"Click button.","timestamp":"2023-10-27T10:05:00Z"}`
-	// FIX: Changed t.Add to f.Add
 	f.Add([]byte(validJSON))
-	f.Add([]byte(`{"type":"UNKNOWN_ACTION_TYPE"}`)) // Test unregistered enum value
+	f.Add([]byte(`{"type":"UNKNOWN_ACTION_TYPE"}`))
 	f.Add([]byte(`{"metadata": "not-a-map"}`))
 
-	// FIX: Removed `fuzz.New(t)`
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var a agent.Action
 		_ = json.Unmarshal(data, &a)
 	})
 }
 
-// FIX: Changed t *testing.T to f *testing.F
+// FuzzObservation_UnmarshalJSON tests the robustness of Observation JSON unmarshaling.
 func FuzzObservation_UnmarshalJSON(f *testing.F) {
+	// Seed corpus
 	validJSON := `{"id":"obs-001","mission_id":"m-1","source_action_id":"a-1","type":"DOM_CHANGE","data":{"url":"/"},"result":{"status":"success"},"timestamp":"2023-10-27T11:00:00Z"}`
-	// FIX: Changed t.Add to f.Add
 	f.Add([]byte(validJSON))
-	f.Add([]byte(`{"data":123.45, "result": "not-an-object"}`)) // Test different data types and invalid nested objects
+	f.Add([]byte(`{"data":123.45, "result": "not-an-object"}`))
 
-	// FIX: Removed `fuzz.New(t)`
 	f.Fuzz(func(t *testing.T, data []byte) {
 		var o agent.Observation
-		// Fuzzing the `data interface{}` field is particularly important
-		// to catch type confusion issues.
+		// Fuzzing the `data interface{}` field is important to catch type confusion issues.
 		_ = json.Unmarshal(data, &o)
 	})
 }

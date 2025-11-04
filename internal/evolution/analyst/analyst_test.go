@@ -35,6 +35,23 @@ func SetupTestEnvironment(t *testing.T) func() {
 	}
 }
 
+// setupTestAnalyst is a helper to create an analyst with mocks and a valid config.
+func setupTestAnalyst(t *testing.T) (*analyst.ImprovementAnalyst, *mocks.MockLLMClient, *mocks.MockKGClient) {
+	t.Helper()
+	logger := zaptest.NewLogger(t)
+	mockLLM := new(mocks.MockLLMClient)
+	mockKG := new(mocks.MockKGClient)
+
+	// Create a config with Evolution enabled.
+	cfg := config.NewDefaultConfig()
+	cfg.AgentCfg.Evolution.Enabled = true
+
+	a, err := analyst.NewImprovementAnalyst(logger, cfg, mockLLM, mockKG)
+	require.NoError(t, err, "Analyst should initialize successfully with a valid config")
+	require.NotNil(t, a, "Analyst should not be nil when enabled")
+	return a, mockLLM, mockKG
+}
+
 // TestAnalyst_GracefulShutdownUnderLoad verifies Strategy 2.2 and Strategy 1.1.
 func TestAnalyst_GracefulShutdownUnderLoad(t *testing.T) {
 	// Strategy 1.1: Goroutine Leak Detection for the entire stack.
@@ -43,9 +60,8 @@ func TestAnalyst_GracefulShutdownUnderLoad(t *testing.T) {
 	cleanup := SetupTestEnvironment(t)
 	defer cleanup()
 
-	logger := zaptest.NewLogger(t)
-	mockLLM := new(mocks.MockLLMClient)
-	mockKG := new(mocks.MockKGClient)
+	// Initialize mocks first.
+	a, mockLLM, mockKG := setupTestAnalyst(t)
 
 	// Setup: We want the OODA loop "stuck" mid-process (e.g., Synthesizer waiting for LLM).
 	// Create the master context.
@@ -59,7 +75,7 @@ func TestAnalyst_GracefulShutdownUnderLoad(t *testing.T) {
 	mockKG.On("AddNode", mock.Anything, mock.Anything).Return(nil).Maybe()
 
 	// This simulates the long running operation (Strategy 2.2: loaded state).
-	// FIX: Ensure the mock respects the specific context passed to Generate.
+	// Ensure the mock respects the specific context passed to Generate.
 	mockLLM.On("Generate", mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
 			// The context passed here is derived from masterCtx.
@@ -67,10 +83,6 @@ func TestAnalyst_GracefulShutdownUnderLoad(t *testing.T) {
 			<-ctx.Done() // Block until the specific context passed to Generate is cancelled
 		}).
 		Return("", context.Canceled)
-
-	// Initialize and Start the Analyst.
-	a, err := analyst.NewImprovementAnalyst(logger, &config.Config{}, mockLLM, mockKG)
-	require.NoError(t, err)
 
 	runErrorChan := make(chan error)
 	go func() {
@@ -101,7 +113,7 @@ func TestAnalyst_RobustTimeoutPattern(t *testing.T) {
 	// Add leak detection to ensure graceful shutdown even on timeout.
 	defer goleak.VerifyNone(t)
 
-	// Strategy 3.1 / R4 FIX: Implement the t.Deadline() pattern, but also enforce a short test duration.
+	// Strategy 3.1 / R4: Implement the t.Deadline() pattern, but also enforce a short test duration.
 	// The previous implementation relied solely on the external -timeout flag.
 	// If run without -timeout, the test would take 10 minutes (the default go test timeout).
 	testCtx := context.Background()
@@ -126,9 +138,8 @@ func TestAnalyst_RobustTimeoutPattern(t *testing.T) {
 	cleanup := SetupTestEnvironment(t)
 	defer cleanup()
 
-	logger := zaptest.NewLogger(t)
-	mockLLM := new(mocks.MockLLMClient)
-	mockKG := new(mocks.MockKGClient)
+	// Initialize mocks first.
+	a, mockLLM, mockKG := setupTestAnalyst(t)
 
 	// Configure mocks: LLM takes longer than the testCtx allows.
 	mockKG.On("QueryImprovementHistory", mock.Anything, mock.Anything, mock.Anything).Return(nil, nil)
@@ -136,21 +147,21 @@ func TestAnalyst_RobustTimeoutPattern(t *testing.T) {
 	mockKG.On("AddNode", mock.Anything, mock.Anything).Return(nil).Maybe()
 
 	// The LLM respects the context passed to it, which is derived from testCtx.
-	// FIX: Ensure the mock respects the specific context passed to Generate.
+	// Ensure the mock respects the specific context passed to Generate.
 	mockLLM.On("Generate", mock.Anything, mock.Anything).
 		Run(func(args mock.Arguments) {
 			ctx := args.Get(0).(context.Context)
 			<-ctx.Done() // Block until the specific context passed to Generate is cancelled (by the timeout)
 		}).
 		Return("", context.Canceled) // Return Canceled as the Generate implementation wraps the specific context error.
-	a, err := analyst.NewImprovementAnalyst(logger, &config.Config{}, mockLLM, mockKG)
-	require.NoError(t, err)
 
-	// R5 FIX: Run the analyst in a separate goroutine to avoid potential deadlocks
+	// R5: Run the analyst in a separate goroutine to avoid potential deadlocks
 	// involving testing.T synchronization during logging when the main test goroutine is blocked.
 	runErrorChan := make(chan error, 1)
+	var err error
 	go func() {
-		runErrorChan <- a.Run(testCtx, "Test timeout behavior", []string{})
+		err = a.Run(testCtx, "Test timeout behavior", []string{})
+		runErrorChan <- err
 	}()
 
 	// Wait for completion or timeout.

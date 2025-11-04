@@ -91,6 +91,9 @@ type Config struct {
 	// for fingerprinting (e.g., specific custom volatile headers).
 	ExcludeHeadersFromFingerprint []string `json:"exclude_headers_fingerprint,omitempty"`
 
+	// initOnce ensures that the excludeHeadersMap is initialized exactly once.
+	initOnce sync.Once
+
 	// Internal map for quick lookups during fingerprinting (unexported).
 	excludeHeadersMap map[string]bool
 }
@@ -113,9 +116,7 @@ func (c *Config) InitializeExcludedHeaders() {
 // GetExcludedHeaders returns the map of headers to exclude.
 // It uses lazy initialization for the map.
 func (c *Config) GetExcludedHeaders() map[string]bool {
-	if c.excludeHeadersMap == nil {
-		c.InitializeExcludedHeaders()
-	}
+	c.initOnce.Do(c.InitializeExcludedHeaders)
 	return c.excludeHeadersMap
 }
 

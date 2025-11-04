@@ -95,40 +95,36 @@ func (a *Analyzer) constructPrompt(report PostMortem, sourceCode string) (string
 	contextLines := extractCodeContext(sourceCode, report.LineNumber, 5) // Use a smaller context size for the prompt
 
 	return fmt.Sprintf(`
-Analyze the following Go code and crash report.
-
-**Objective:**
-1.  Identify the precise root cause of the panic.
-2.  Explain the bug and the proposed fix.
-3.  Assess the confidence score (0.0 to 1.0) of the fix.
-4.  Generate a patch in the standard 'git diff' (unified) format. The patch MUST be relative to the project root.
-
-**Crash Details:**
-- Panic Message: %s
-- File: %s
-- Line: %d
-
-**Stack Trace:**
-`+"```"+`
-%s
-`+"```"+`
-
-**Relevant Source Code Context (Around Line %d):**
-`+"```go"+`
-%s
-`+"```"+`
-
-**Response Format (Strict JSON):**
-{
-  "explanation": "Markdown explanation of the bug and fix.",
-  "root_cause": "A concise description of the issue (e.g., 'Nil pointer dereference').",
-  "confidence": 0.95,
-  "patch": "The 'git diff' formatted patch string."
-}
-
-Example patch format within the JSON:
-"patch": "--- a/%s\n+++ b/%s\n@@ -10,6 +10,9 @@ func MyFunction(input *MyStruct) {\n+    if input == nil {\n+        // Handle nil input\n+        return\n+    }\n     input.DoSomething()\n }"
-`, report.PanicMessage, report.FilePath, report.LineNumber, report.FullStackTrace, report.LineNumber, contextLines, filePathForDiff, filePathForDiff), nil
+	Analyze the following Go code and crash report.
+	
+	**Objective:**
+	1.  Identify the precise root cause of the panic.
+	2.  Explain the bug and the proposed fix.
+	3.  Assess the confidence score (0.0 to 1.0) of the fix.
+	4.  Generate a patch in the standard 'git diff' (unified) format. The patch MUST be relative to the project root.
+	
+	**Crash Details:**
+	- Panic Message: %s
+	- File: %s
+	- Line: %d
+	
+	**Stack Trace:**
+	`+"```\n%s\n```"+`
+	
+	**Relevant Source Code Context (Around Line %d):**
+	`+"```go\n%s\n```"+`
+	
+	**Response Format (Strict JSON):**
+	{
+	  "explanation": "Markdown explanation of the bug and fix.",
+	  "root_cause": "A concise description of the issue (e.g., 'Nil pointer dereference').",
+	  "confidence": 0.95,
+	  "patch": "The 'git diff' formatted patch string."
+	}
+	
+	Example patch format within the JSON:
+	"patch": "--- a/%s\n+++ b/%s\n@@ -10,6 +10,9 @@ func MyFunction(input *MyStruct) {\n+    if input == nil {\n+        // Handle nil input\n+        return\n+    }\n     input.DoSomething()\n }"
+	`, report.PanicMessage, report.FilePath, report.LineNumber, report.FullStackTrace, report.LineNumber, contextLines, filePathForDiff, filePathForDiff), nil
 }
 
 // patchRegex extracts content if the LLM mistakenly wraps the patch in markdown.
@@ -178,7 +174,7 @@ func extractCodeContext(sourceCode string, lineNum int, contextSize int) string 
 	if lineNum <= 0 || lineNum > len(lines) {
 		return "// Context unavailable: Invalid line number."
 	}
-	start := lineNum - contextSize/2 -1
+	start := lineNum - contextSize/2 - 1
 	if start < 0 {
 		start = 0
 	}

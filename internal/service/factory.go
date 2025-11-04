@@ -17,7 +17,6 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/discovery"
 	"github.com/xkilldash9x/scalpel-cli/internal/engine"
 	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"github.com/xkilldash9x/scalpel-cli/internal/orchestrator"
 	"github.com/xkilldash9x/scalpel-cli/internal/store"
 	"github.com/xkilldash9x/scalpel-cli/internal/worker"
@@ -28,7 +27,7 @@ import (
 // (Moved from cmd/factory.go)
 // Returns interface{} to allow flexibility and avoid potential import cycles if mocks were in a separate package relying on this interface.
 type ComponentFactory interface {
-	Create(ctx context.Context, cfg config.Interface, targets []string) (interface{}, error)
+	Create(ctx context.Context, cfg config.Interface, targets []string, logger *zap.Logger) (interface{}, error)
 }
 
 // concreteFactory is the production implementation of the ComponentFactory.
@@ -40,9 +39,7 @@ func NewComponentFactory() ComponentFactory {
 }
 
 // Create handles the full dependency injection and initialization of scan components.
-func (f *concreteFactory) Create(ctx context.Context, cfg config.Interface, targets []string) (interface{}, error) {
-	logger := observability.GetLogger()
-
+func (f *concreteFactory) Create(ctx context.Context, cfg config.Interface, targets []string, logger *zap.Logger) (interface{}, error) {
 	components := &Components{
 		// Initialize the findings channel early with a generous buffer.
 		findingsChan: make(chan schemas.Finding, 1024),

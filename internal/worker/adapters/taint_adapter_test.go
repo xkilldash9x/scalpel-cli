@@ -1,7 +1,7 @@
 // internal/worker/adapters/taint_adapter_test.go
 package adapters_test
 
-import (
+import ( // This is a comment to force a change
 	"context"
 	"encoding/json"
 	"errors"

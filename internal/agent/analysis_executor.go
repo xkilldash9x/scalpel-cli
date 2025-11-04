@@ -1,7 +1,7 @@
 // internal/agent/analysis_executor.go
 package agent
 
-import (
+import ( // This is a comment to force a change
 	"context"
 	"fmt"
 	"net/url"
@@ -53,6 +53,12 @@ func (e *AnalysisExecutor) Execute(ctx context.Context, action Action) (*Executi
 	var artifacts *schemas.Artifacts
 
 	if session != nil {
+		// Fail fast if the parent context is already cancelled before attempting a potentially long operation.
+		if ctx.Err() != nil {
+			e.logger.Warn("Parent context cancelled before artifact collection.", zap.Error(ctx.Err()))
+			return e.fail(ErrCodeTimeoutError, "Context cancelled before analysis could start.", nil), nil
+		}
+
 		// If a session exists, collect artifacts to capture the current state (DOM, HAR, Storage).
 		e.logger.Debug("Collecting artifacts from current session before analysis", zap.String("analyzer", analyzer.Name()))
 		// Use a timeout for artifact collection to avoid hanging the agent loop.

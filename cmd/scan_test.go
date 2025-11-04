@@ -118,7 +118,7 @@ func TestRunScanLogic(t *testing.T) {
 		mockComponents := &service.Components{Orchestrator: mockOrchestrator}
 		cfg := config.NewDefaultConfig()
 
-		mockFactory.On("Create", mock.Anything, cfg, defaultTargets).Return(mockComponents, nil)
+		mockFactory.On("Create", mock.Anything, cfg, defaultTargets, mock.AnythingOfType("*zap.Logger")).Return(mockComponents, nil)
 		mockOrchestrator.On("StartScan", mock.Anything, defaultTargets, mock.AnythingOfType("string")).Return(nil)
 
 		// Act
@@ -137,7 +137,7 @@ func TestRunScanLogic(t *testing.T) {
 		factoryErr := errors.New("failed to connect to db")
 
 		// Return nil components when an error occurs. The factory handles cleanup internally now.
-		mockFactory.On("Create", mock.Anything, cfg, defaultTargets).Return(nil, factoryErr)
+		mockFactory.On("Create", mock.Anything, cfg, defaultTargets, mock.AnythingOfType("*zap.Logger")).Return(nil, factoryErr)
 
 		// Act
 		err := runScan(baseCtx, logger, cfg, defaultTargets, "", "", mockFactory)
@@ -158,7 +158,7 @@ func TestRunScanLogic(t *testing.T) {
 		cfg := config.NewDefaultConfig()
 		orchestratorError := errors.New("orchestrator failed")
 
-		mockFactory.On("Create", mock.Anything, cfg, defaultTargets).Return(mockComponents, nil)
+		mockFactory.On("Create", mock.Anything, cfg, defaultTargets, mock.AnythingOfType("*zap.Logger")).Return(mockComponents, nil)
 		mockOrchestrator.On("StartScan", mock.Anything, defaultTargets, mock.AnythingOfType("string")).Return(orchestratorError)
 
 		// Act
@@ -186,7 +186,7 @@ func TestRunScanLogic(t *testing.T) {
 		outputFile := tmpfile.Name()
 		format := "sarif"
 
-		mockFactory.On("Create", mock.Anything, cfg, defaultTargets).Return(mockComponents, nil)
+		mockFactory.On("Create", mock.Anything, cfg, defaultTargets, mock.AnythingOfType("*zap.Logger")).Return(mockComponents, nil)
 		mockOrchestrator.On("StartScan", mock.Anything, defaultTargets, mock.AnythingOfType("string")).Return(nil)
 		mockStore.On("GetFindingsByScanID", mock.Anything, mock.AnythingOfType("string")).Return([]schemas.Finding{}, nil)
 
@@ -216,7 +216,7 @@ func TestRunScanLogic(t *testing.T) {
 		expectedTargets := []string{"https://example.com", "http://test.com", "https://another.org"}
 
 		// Factory is called with original targets for initialization logic (like scope).
-		mockFactory.On("Create", mock.Anything, cfg, targetsInput).Return(mockComponents, nil)
+		mockFactory.On("Create", mock.Anything, cfg, targetsInput, mock.AnythingOfType("*zap.Logger")).Return(mockComponents, nil)
 		// Assert that the normalized URLs are passed to the orchestrator.
 		mockOrchestrator.On("StartScan", mock.Anything, expectedTargets, mock.AnythingOfType("string")).Return(nil)
 

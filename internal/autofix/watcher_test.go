@@ -26,11 +26,6 @@ type mockConfig struct {
 	// Add other config structs here if needed by other tests
 }
 
-// SetBrowserHumanoidKeyHoldMu implements config.Interface.
-func (m *mockConfig) SetBrowserHumanoidKeyHoldMu(ms float64) {
-	panic("unimplemented")
-}
-
 // SetATOConfig implements config.Interface.
 func (m *mockConfig) SetATOConfig(atoCfg config.ATOConfig) {
 	panic("unimplemented")
@@ -41,75 +36,20 @@ func (m *mockConfig) JWT() config.JWTConfig {
 	panic("unimplemented")
 }
 
-// SetBrowserHumanoidKeyHoldMean implements config.Interface.
-func (m *mockConfig) SetBrowserHumanoidKeyHoldMean(ms float64) {
-	panic("unimplemented")
-}
-
-// SetJWTBruteForceEnabled implements config.Interface.
-func (m *mockConfig) SetJWTBruteForceEnabled(bool) {
-	panic("unimplemented")
-}
-
-// SetJWTEnabled implements config.Interface.
-func (m *mockConfig) SetJWTEnabled(bool) {
-	panic("unimplemented")
-}
-
-// SetBrowserDebug implements config.Interface.
-func (m *mockConfig) SetBrowserDebug(bool) {
-	panic("unimplemented")
-}
-
-// SetBrowserDisableCache implements config.Interface.
-func (m *mockConfig) SetBrowserDisableCache(bool) {
-	panic("unimplemented")
-}
-
-// SetBrowserHeadless implements config.Interface.
-func (m *mockConfig) SetBrowserHeadless(bool) {
-	panic("unimplemented")
-}
-
-// SetBrowserHumanoidClickHoldMaxMs implements config.Interface.
-func (m *mockConfig) SetBrowserHumanoidClickHoldMaxMs(int) {
-	panic("unimplemented")
-}
-
-// SetBrowserHumanoidClickHoldMinMs implements config.Interface.
-func (m *mockConfig) SetBrowserHumanoidClickHoldMinMs(int) {
-	panic("unimplemented")
-}
-
-// SetBrowserHumanoidKeyHoldMeanMs implements config.Interface.
-func (m *mockConfig) SetBrowserHumanoidKeyHoldMeanMs(float64) {
-	panic("unimplemented")
-}
-
-// SetBrowserIgnoreTLSErrors implements config.Interface.
-func (m *mockConfig) SetBrowserIgnoreTLSErrors(bool) {
-	panic("unimplemented")
-}
-
-// SetIASTEnabled implements config.Interface.
-func (m *mockConfig) SetIASTEnabled(bool) {
-	panic("unimplemented")
-}
-
-// SetNetworkCaptureResponseBodies implements config.Interface.
-func (m *mockConfig) SetNetworkCaptureResponseBodies(bool) {
-	panic("unimplemented")
-}
-
-// SetNetworkIgnoreTLSErrors implements config.Interface.
-func (m *mockConfig) SetNetworkIgnoreTLSErrors(bool) {
-	panic("unimplemented")
-}
-
-// SetNetworkNavigationTimeout implements config.Interface.
-func (m *mockConfig) SetNetworkNavigationTimeout(time.Duration) {
-	panic("unimplemented")
-}
+// This is a partial mock, so many methods are unimplemented.
+func (m *mockConfig) SetBrowserHumanoidKeyHoldMu(ms float64)      { panic("unimplemented") }
+func (m *mockConfig) SetJWTBruteForceEnabled(b bool)              { panic("unimplemented") }
+func (m *mockConfig) SetJWTEnabled(b bool)                        { panic("unimplemented") }
+func (m *mockConfig) SetBrowserDebug(b bool)                      { panic("unimplemented") }
+func (m *mockConfig) SetBrowserDisableCache(b bool)               { panic("unimplemented") }
+func (m *mockConfig) SetBrowserHeadless(b bool)                   { panic("unimplemented") }
+func (m *mockConfig) SetBrowserHumanoidClickHoldMaxMs(ms int)     { panic("unimplemented") }
+func (m *mockConfig) SetBrowserHumanoidClickHoldMinMs(ms int)     { panic("unimplemented") }
+func (m *mockConfig) SetBrowserIgnoreTLSErrors(b bool)            { panic("unimplemented") }
+func (m *mockConfig) SetIASTEnabled(b bool)                       { panic("unimplemented") }
+func (m *mockConfig) SetNetworkCaptureResponseBodies(b bool)      { panic("unimplemented") }
+func (m *mockConfig) SetNetworkIgnoreTLSErrors(b bool)            { panic("unimplemented") }
+func (m *mockConfig) SetNetworkNavigationTimeout(d time.Duration) { panic("unimplemented") }
 
 // Ensure mockConfig satisfies the interface.
 var _ config.Interface = (*mockConfig)(nil)

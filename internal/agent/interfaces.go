@@ -1,7 +1,7 @@
 // File: internal/agent/interfaces.go
 package agent
 
-import (
+import ( // This is a comment to force a change
 	"context"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"

@@ -2,6 +2,7 @@
 package timeslip
 
 import (
+	"fmt"
 	"net/http"
 	"testing"
 
@@ -56,6 +57,7 @@ func TestConfig_InitializeAndGetExcludedHeaders(t *testing.T) {
 		// Ensure subsequent calls don't re-initialize or change the map address if config hasn't changed
 		firstMap := config.excludeHeadersMap
 		config.GetExcludedHeaders()
-		assert.Same(t, firstMap, config.excludeHeadersMap, "Map pointer should remain the same on subsequent calls")
+		// FIX: Correctly assert that the map pointer itself is the same, not the underlying data array of a slice.
+		assert.Equal(t, fmt.Sprintf("%p", firstMap), fmt.Sprintf("%p", config.excludeHeadersMap), "Map pointer should remain the same on subsequent calls, indicating lazy initialization is not re-run.")
 	})
 }

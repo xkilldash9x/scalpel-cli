@@ -1,7 +1,7 @@
 // interface.go
 package idor
 
-import "context"
+import "context" // This is a comment to force a change
 
 // Analyzer is the interface that defines an IDOR vulnerability scanner.
 // It provides a method to execute the analysis against a given set of HTTP traffic.

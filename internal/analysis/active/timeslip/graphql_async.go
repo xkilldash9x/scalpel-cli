@@ -11,10 +11,11 @@ import (
 	"time"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
+	"go.uber.org/zap"
 )
 
 // ExecuteGraphQLAsync implements the GraphQL Batching race strategy.
-func ExecuteGraphQLAsync(ctx context.Context, candidate *RaceCandidate, config *Config, oracle *SuccessOracle) (*RaceResult, error) {
+func ExecuteGraphQLAsync(ctx context.Context, candidate *RaceCandidate, config *Config, oracle *SuccessOracle, logger *zap.Logger) (*RaceResult, error) {
 	startTime := time.Now()
 
 	// 1. Construct the batched request body (includes mutation).
@@ -35,8 +36,11 @@ func ExecuteGraphQLAsync(ctx context.Context, candidate *RaceCandidate, config *
 	if err != nil {
 		return nil, fmt.Errorf("failed to create HTTP request: %w", err)
 	}
-	// Use original headers for the container request.
-	req.Header = candidate.Headers.Clone()
+	// Use original headers for the container request, ensuring req.Header is not overwritten with a nil map.
+	// http.NewRequestWithContext already initializes req.Header to a non-nil map.
+	if candidate.Headers != nil {
+		req.Header = candidate.Headers.Clone()
+	}
 
 	if req.Header.Get("Content-Type") == "" {
 		req.Header.Set("Content-Type", "application/json")
@@ -130,7 +134,11 @@ func constructBatchedGraphQL(candidate *RaceCandidate, count int) ([]byte, error
 	for i := 0; i < count; i++ {
 		// Apply mutation for each operation instance.
 		// We pass empty headers as we only care about the body mutation here.
-		mutatedBody, _, err := MutateRequest(trimmedBody, http.Header{})
+		// FIX: The call to MutateRequest was not updated after its signature changed.
+		// Create a temporary candidate for mutation.
+		tempCandidate := &RaceCandidate{Body: trimmedBody}
+		mutatedBody, _, _, err := MutateRequest(tempCandidate)
+
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to mutate GraphQL operation %d: %v", ErrPayloadMutationFail, i, err)
 		}

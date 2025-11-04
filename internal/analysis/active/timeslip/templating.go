@@ -56,9 +56,13 @@ func putRNG(rng *rand.Rand) {
 
 // MutateRequest applies template substitutions to the request body and headers.
 // It generates unique values for each call.
-func MutateRequest(body []byte, headers http.Header) ([]byte, http.Header, error) {
-	mutatedBody := body
-	mutatedHeaders := headers.Clone()
+func MutateRequest(candidate *RaceCandidate) (body []byte, headers http.Header, url string, err error) {
+	// FIX: Use the fields from the candidate passed into the function.
+	mutatedBody := candidate.Body
+	mutatedHeaders := candidate.Headers.Clone()
+	mutatedURL := candidate.URL
+	originalBody := candidate.Body
+	originalHeaders := candidate.Headers
 
 	// FIX: Ensure the headers map is initialized if the input was nil (Clone() returns nil if input is nil).
 	// This prevents "panic: assignment to entry in nil map" in downstream consumers
@@ -69,31 +73,37 @@ func MutateRequest(body []byte, headers http.Header) ([]byte, http.Header, error
 
 	const templateMarker = "{{"
 
-	// Optimization: Check if any mutation is actually needed.
-	needsMutation := bytes.Contains(body, []byte(templateMarker))
-	if !needsMutation {
+	// FIX: Check for mutation markers in body, headers, and URL.
+	// The original logic missed mutations in headers/URL when the body was empty (e.g., GET requests).
+	needsMutation := bytes.Contains(originalBody, []byte(templateMarker)) ||
+		strings.Contains(candidate.URL, templateMarker)
+
+	if !needsMutation { // Only check headers if body/URL don't need mutation. FIX: Add missing label.
 	headerCheck:
 		// We check the original headers for the marker, as mutatedHeaders might be empty if input was nil.
-		for _, values := range headers {
+		for _, values := range originalHeaders {
 			for _, value := range values {
 				// Use strings.Contains to avoid allocation.
 				if strings.Contains(value, templateMarker) {
 					needsMutation = true
-					break headerCheck
+					break headerCheck // Now correctly breaks out of both loops.
 				}
 			}
 		}
 	}
 
 	if !needsMutation {
-		return mutatedBody, mutatedHeaders, nil
+		return mutatedBody, mutatedHeaders, mutatedURL, nil
 	}
 
 	// Generate unique values for this specific mutation instance.
 	uniqueUUID := uuid.NewString()
 	uniqueNonce := generateNonce()
 
-	// Apply mutations to the body.
+	// Apply mutations to the body and URL string.
+	mutatedURL = strings.ReplaceAll(mutatedURL, templateUUIDStr, uniqueUUID)
+	mutatedURL = strings.ReplaceAll(mutatedURL, templateNonceStr, uniqueNonce)
+
 	if bytes.Contains(mutatedBody, templateUUID) {
 		mutatedBody = bytes.ReplaceAll(mutatedBody, templateUUID, []byte(uniqueUUID))
 	}
@@ -114,7 +124,7 @@ func MutateRequest(body []byte, headers http.Header) ([]byte, http.Header, error
 		}
 	}
 
-	return mutatedBody, mutatedHeaders, nil
+	return mutatedBody, mutatedHeaders, mutatedURL, nil
 }
 
 // generateNonce creates a simple random 12-digit nonce using a pooled PRNG.

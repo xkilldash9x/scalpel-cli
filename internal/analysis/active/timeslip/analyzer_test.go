@@ -460,11 +460,12 @@ func TestReportFinding_SeverityMapping(t *testing.T) {
 		vulnerable bool
 		expected   schemas.Severity
 		expectCWEs []string
-	}{
-		{"Critical", 1.0, true, schemas.SeverityCritical, []string{"CWE-367"}},
-		{"High", 0.8, true, schemas.SeverityHigh, []string{"CWE-362"}},
-		{"Medium", 0.6, true, schemas.SeverityMedium, []string{"CWE-362"}},
-		{"Low", 0.5, true, schemas.SeverityLow, []string{"CWE-362"}},
+	}{ // FIX: Updated expected CWE strings to match the descriptive format from the analyzer.
+		{"Critical", 1.0, true, schemas.SeverityCritical, []string{"CWE-367: Time-of-check Time-of-use (TOCTOU) Race Condition"}},
+		{"High", 0.8, true, schemas.SeverityHigh, []string{"CWE-362: Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')"}},
+		{"Medium", 0.6, true, schemas.SeverityMedium, []string{"CWE-362: Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')"}},
+		{"Low", 0.5, true, schemas.SeverityLow, []string{"CWE-362: Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')"}},
+		// Informational findings still use the simple CWE ID.
 		{"Informational", 0.3, false, schemas.SeverityInformational, []string{"CWE-362"}},
 	}
 
@@ -588,8 +589,8 @@ func mockStrategies(t *testing.T, behaviorMap map[RaceStrategy]func() (*RaceResu
 	})
 
 	// Define mock wrapper.
-	mockWrapper := func(strategy RaceStrategy) func(context.Context, *RaceCandidate, *Config, *SuccessOracle) (*RaceResult, error) {
-		return func(ctx context.Context, c *RaceCandidate, cfg *Config, o *SuccessOracle) (*RaceResult, error) {
+	mockWrapper := func(strategy RaceStrategy) func(context.Context, *RaceCandidate, *Config, *SuccessOracle, *zap.Logger) (*RaceResult, error) {
+		return func(ctx context.Context, c *RaceCandidate, cfg *Config, o *SuccessOracle, l *zap.Logger) (*RaceResult, error) {
 			executed[strategy] = true
 			if behavior, exists := behaviorMap[strategy]; exists {
 				return behavior()
