@@ -14,7 +14,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -22,9 +21,8 @@ import (
 
 // ExecuteH2Dependency leverages HTTP/2 Stream Dependencies (PRIORITY frames).
 // It manually controls H2 frames to create a dependency chain for tighter synchronization.
-func ExecuteH2Dependency(ctx context.Context, candidate *RaceCandidate, config *Config, oracle *SuccessOracle) (*RaceResult, error) {
+func ExecuteH2Dependency(ctx context.Context, candidate *RaceCandidate, config *Config, oracle *SuccessOracle, logger *zap.Logger) (*RaceResult, error) {
 	startTime := time.Now()
-	logger := observability.GetLogger().Named("timeslip.h2_dependency")
 
 	// H2 requires HTTPS.
 	if !strings.HasPrefix(candidate.URL, "https://") {
@@ -102,8 +100,9 @@ func ExecuteH2Dependency(ctx context.Context, candidate *RaceCandidate, config *
 		priority := http2.PriorityParam{
 			StreamDep: gateStreamID,
 			Weight:    15, // Default weight (16 when serialized)
-			// Exclusive dependency aims for the tightest serialization behind the gate.
-			Exclusive: true,
+			// Exclusive dependency can be rejected by some servers (like httptest.Server).
+			// Using non-exclusive dependency is more compatible and still achieves the goal.
+			Exclusive: false,
 		}
 		if err := framer.WritePriority(streamID, priority); err != nil {
 			return nil, fmt.Errorf("%w: failed to write PRIORITY frame for stream %d: %v", ErrH2FrameError, streamID, err)
@@ -265,7 +264,11 @@ func waitForSettingsAck(framer *http2.Framer) error {
 func prepareH2Requests(candidate *RaceCandidate, count int) ([]h2RequestData, error) {
 	var requests []h2RequestData
 	for i := 0; i < count; i++ {
-		mutatedBody, mutatedHeaders, err := MutateRequest(candidate.Body, candidate.Headers)
+		// Create a copy of the candidate for mutation to avoid side effects between iterations.
+		candidateCopy := *candidate
+		candidateCopy.Headers = candidate.Headers.Clone()
+
+		mutatedBody, mutatedHeaders, _, err := MutateRequest(&candidateCopy)
 		if err != nil {
 			return nil, fmt.Errorf("%w: failed to mutate request %d: %v", ErrPayloadMutationFail, i, err)
 		}

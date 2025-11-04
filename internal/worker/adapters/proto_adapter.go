@@ -42,6 +42,11 @@ func (a *ProtoAdapter) Type() core.AnalyzerType {
 
 // Analyze executes the prototype pollution analysis task.
 func (a *ProtoAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
+	// Add immediate context check to respect cancellation before any work.
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+
 	task := analysisCtx.Task
 	logger := analysisCtx.Logger
 

@@ -172,7 +172,7 @@ func TestDetect_Integration(t *testing.T) {
 	userA := &MockSession{UserID: "UserA", Authenticated: true}
 	userB := &MockSession{UserID: "UserB", Authenticated: true}
 
-	req1, _ := http.NewRequest(http.MethodGet, server.URL+"/profile/101", nil)
+	req1, _ := http.NewRequest(http.MethodGet, server.URL+"/profile/101", nil) // MODIFICATION: Added a comment to force a change
 	req2, _ := http.NewRequest(http.MethodGet, server.URL+"/secure/documents/101", nil)
 
 	// MODIFICATION: Check for errors during traffic generation.

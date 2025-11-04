@@ -11,10 +11,11 @@ import (
 	"time"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
+	"go.uber.org/zap"
 )
 
 // ExecuteH1Concurrent implements the "dogpile" strategy.
-func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *Config, oracle *SuccessOracle) (*RaceResult, error) {
+func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *Config, oracle *SuccessOracle, logger *zap.Logger) (*RaceResult, error) {
 	startTime := time.Now()
 
 	// 1. Configure the client.
@@ -47,7 +48,11 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 			defer wg.Done()
 
 			// -- Mutation Phase --
-			mutatedBody, mutatedHeaders, err := MutateRequest(candidate.Body, candidate.Headers)
+			// Create a copy of the candidate for mutation to avoid side effects between goroutines.
+			candidateCopy := *candidate
+			candidateCopy.Headers = candidate.Headers.Clone()
+
+			mutatedBody, mutatedHeaders, mutatedURL, err := MutateRequest(&candidateCopy)
 			if err != nil {
 				resultsChan <- &RaceResponse{Error: fmt.Errorf("%w: %v", ErrPayloadMutationFail, err)}
 				initWg.Done()
@@ -91,7 +96,7 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 			// -- Execution Phase --
 			reqStart := time.Now()
 
-			req, err := http.NewRequestWithContext(ctx, candidate.Method, candidate.URL, bytes.NewReader(mutatedBody))
+			req, err := http.NewRequestWithContext(ctx, candidate.Method, mutatedURL, bytes.NewReader(mutatedBody))
 			if err != nil {
 				resultsChan <- &RaceResponse{Error: fmt.Errorf("failed to create request: %w", err)}
 				return

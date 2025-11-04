@@ -25,7 +25,7 @@ import (
 // We redefine the interface here to allow injection of mocks during testing without creating import cycles,
 // although we import 'service' to use the concrete Components struct in runScan.
 type ComponentFactory interface {
-	Create(ctx context.Context, cfg config.Interface, targets []string) (interface{}, error)
+	Create(ctx context.Context, cfg config.Interface, targets []string, logger *zap.Logger) (interface{}, error)
 }
 
 // newScanCmd creates and configures the `scan` command.
@@ -137,7 +137,7 @@ func runScan(
 	factory ComponentFactory,
 ) error {
 	// Initialize all dependencies using the factory.
-	rawComponents, err := factory.Create(ctx, cfg, targets)
+	rawComponents, err := factory.Create(ctx, cfg, targets, logger)
 	if err != nil {
 		// If creation fails, the factory handles the shutdown of partially initialized components.
 		return fmt.Errorf("failed to initialize scan components: %w", err)

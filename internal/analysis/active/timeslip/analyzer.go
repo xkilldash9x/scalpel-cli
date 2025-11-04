@@ -25,11 +25,11 @@ const timingAnomalyStdDevThreshold = 3.0
 // we can replace them in our tests to mock their behavior without actually
 // executing them. This is key to fixing the "cannot assign to" error.
 var (
-	executeH1Concurrent     = ExecuteH1Concurrent
-	executeH1SingleByteSend = ExecuteH1SingleByteSend
-	executeH2Multiplexing   = ExecuteH2Multiplexing
-	executeH2Dependency     = ExecuteH2Dependency // Added H2 Dependency strategy
-	executeGraphQLAsync     = ExecuteGraphQLAsync
+	executeH1Concurrent     = ExecuteH1Concurrent     // Takes logger
+	executeH1SingleByteSend = ExecuteH1SingleByteSend // Takes logger
+	executeH2Multiplexing   = ExecuteH2Multiplexing   // Takes logger
+	executeH2Dependency     = ExecuteH2Dependency     // Takes logger
+	executeGraphQLAsync     = ExecuteGraphQLAsync     // Takes logger
 )
 
 // Analyzer orchestrates the TimeSlip module, managing strategy execution and result analysis.
@@ -38,6 +38,9 @@ type Analyzer struct {
 	config   *Config
 	logger   *zap.Logger
 	reporter core.Reporter
+
+	// testOnlyHTTP1 is a flag for forcing HTTP/1 strategies in tests.
+	testOnlyHTTP1 bool
 }
 
 // NewAnalyzer initializes the TimeSlip Analyzer.
@@ -82,6 +85,12 @@ func NewAnalyzer(scanID uuid.UUID, config *Config, logger *zap.Logger, reporter 
 	}, nil
 }
 
+// UseHTTP1OnlyForTests is a test helper to disable H2 strategies.
+func (a *Analyzer) UseHTTP1OnlyForTests() {
+	a.testOnlyHTTP1 = true
+	a.logger.Warn("Forcing HTTP/1 strategies for testing purposes.")
+}
+
 // Analyze executes the analysis pipeline against a specific candidate request.
 func (a *Analyzer) Analyze(ctx context.Context, candidate *RaceCandidate) error {
 	a.logger.Info("Starting TimeSlip analysis",
@@ -115,15 +124,15 @@ func (a *Analyzer) Analyze(ctx context.Context, candidate *RaceCandidate) error 
 		// These now call the package-level variables, enabling mocks.
 		switch strategy {
 		case H1Concurrent:
-			result, execErr = executeH1Concurrent(ctx, candidate, a.config, oracle)
+			result, execErr = executeH1Concurrent(ctx, candidate, a.config, oracle, a.logger.Named("h1_concurrent"))
 		case H1SingleByteSend:
-			result, execErr = executeH1SingleByteSend(ctx, candidate, a.config, oracle)
+			result, execErr = executeH1SingleByteSend(ctx, candidate, a.config, oracle, a.logger.Named("h1_singlebyte"))
 		case H2Multiplexing:
-			result, execErr = executeH2Multiplexing(ctx, candidate, a.config, oracle)
+			result, execErr = executeH2Multiplexing(ctx, candidate, a.config, oracle, a.logger.Named("h2_multiplex"))
 		case H2Dependency:
-			result, execErr = executeH2Dependency(ctx, candidate, a.config, oracle)
+			result, execErr = executeH2Dependency(ctx, candidate, a.config, oracle, a.logger.Named("h2_dependency"))
 		case AsyncGraphQL:
-			result, execErr = executeGraphQLAsync(ctx, candidate, a.config, oracle)
+			result, execErr = executeGraphQLAsync(ctx, candidate, a.config, oracle, a.logger.Named("graphql_async"))
 		}
 
 		if execErr != nil {
@@ -174,6 +183,13 @@ func (a *Analyzer) determineStrategies(candidate *RaceCandidate) []RaceStrategy 
 		return []RaceStrategy{AsyncGraphQL}
 	}
 
+	// Test hook to force H1 strategies.
+	if a.testOnlyHTTP1 {
+		return []RaceStrategy{
+			H1SingleByteSend,
+			H1Concurrent,
+		}
+	}
 	// For standard HTTP endpoints, we attempt all applicable strategies in order of preference (most precise first).
 	return []RaceStrategy{
 		H2Dependency,     // Preferred: Offers the tightest synchronization if H2 is supported.
@@ -453,9 +469,9 @@ type analysisHeuristic func(result *RaceResult, config *Config, analysis *Analys
 // We check for the strongest signals (TOCTOU) first and weakest (timing) last.
 var heuristicsPipeline = []analysisHeuristic{
 	checkTOCTOU,
+	checkTimingAnomalies, // <-- Moved up
 	checkDifferentialState,
 	checkStateFlutter,
-	checkTimingAnomalies,
 }
 
 // -- Heuristics --

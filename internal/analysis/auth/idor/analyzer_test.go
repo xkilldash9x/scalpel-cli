@@ -87,7 +87,7 @@ func TestAnalyzer_AnalyzeTraffic_Validation(t *testing.T) {
 			} else {
 				// If we don't expect an error, we must ensure the error is nil OR context.DeadlineExceeded
 				// because the analysis might have started and then timed out.
-				// MODIFICATION: Use errors.Is for robust checking of context errors.
+				// Use errors.Is for robust checking of context errors.
 				if err != nil && !errors.Is(err, context.DeadlineExceeded) && !errors.Is(err, context.Canceled) {
 					t.Fatalf("Expected no error (or DeadlineExceeded), but got: %v", err)
 				}

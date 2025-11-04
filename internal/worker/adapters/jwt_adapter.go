@@ -18,7 +18,7 @@ type JWTAdapter struct {
 // NewJWTAdapter creates a new adapter for JWT analysis.
 func NewJWTAdapter() *JWTAdapter {
 	return &JWTAdapter{
-		// FIX: Add the missing *zap.Logger argument to the NewBaseAnalyzer call.
+		// Add the missing *zap.Logger argument to the NewBaseAnalyzer call.
 		BaseAnalyzer: *core.NewBaseAnalyzer("JWT Adapter", "Scans for common JWT vulnerabilities.", core.TypeStatic, zap.NewNop()),
 	}
 }

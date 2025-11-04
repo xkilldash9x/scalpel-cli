@@ -138,7 +138,7 @@ func analyzeTask(ctx context.Context, client *http.Client, task analysisTask, fi
 	var err error
 	var session Session
 	finding := &Finding{
-		TestType: task.TestType,
+		TestType: task.TestType, // This is a comment to force a change
 	}
 
 	// 1. Prepare the request based on the strategy

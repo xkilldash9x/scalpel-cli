@@ -3,7 +3,7 @@ package agent
 
 import (
 	"context"
-	"encoding/json"
+	encodingjson "encoding/json"
 	"fmt"
 	"regexp"
 	"strings"
@@ -12,6 +12,7 @@ import (
 	"unicode/utf8"
 
 	"github.com/google/uuid"
+	json "github.com/json-iterator/go"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
@@ -39,6 +40,9 @@ type LLMMind struct {
 
 	contextLookbackSteps int
 }
+
+// Allows for mocking in tests.
+var uuidNewString = uuid.NewString
 
 // Statically assert that LLMMind implements the Mind interface.
 var _ Mind = (*LLMMind)(nil)
@@ -351,22 +355,55 @@ func (m *LLMMind) decideNextAction(ctx context.Context, contextSnapshot *schemas
 		return Action{}, fmt.Errorf("failed to parse llm response: %w", err)
 	}
 
-	action.ID = uuid.NewString()
+	action.ID = uuidNewString()
 	action.MissionID = m.currentMission.ID
 	action.ScanID = m.currentMission.ScanID
 	action.Timestamp = time.Now().UTC()
 	return action, nil
 }
 
-// -- REFACTORING NOTE --
-// The system prompt is the core instruction set for the agent's brain.
-// This version is updated with the new HUMANOID_DRAG_AND_DROP action and,
-// explicit instructions for error handling strategies, and conditional inclusion
-// of the EVOLVE_CODEBASE capability.
+// generateSystemPrompt constructs the core instruction set for the agent's brain dynamically.
 func (m *LLMMind) generateSystemPrompt() string {
 	basePrompt := `You are the Mind of 'scalpel-cli', an advanced, autonomous security analysis agent.
 Your goal is to achieve the Mission Objective by exploring a web application, analyzing its components, and identifying vulnerabilities.
-You operate in a continuous OODA loop. You receive the state as a JSON Knowledge Graph snapshot and must respond with a single JSON object for the next action.
+You operate in a continuous OODA loop. You receive the state as a JSON Knowledge Graph snapshot and must respond with a single JSON object for the next action.`
+
+	// Conditionally include the evolution prompt if enabled in the configuration.
+	evolutionPrompt := ""
+	if m.cfg.Evolution.Enabled {
+		evolutionPrompt = `
+    4. Proactive Self-Improvement (Evolution):
+    - EVOLVE_CODEBASE: Initiate an autonomous OODA loop to improve the agent's own source code.
+      **WHEN TO USE:** Only when you identify a limitation, bug, or inefficiency in the agent's capabilities that prevents achieving the mission objective, AND you have context about the relevant code (e.g., from GATHER_CODEBASE_CONTEXT).
+      **PARAMETERS:**
+        - value: The objective of the improvement (Required, String).
+        - metadata.target_files: List of relevant file paths (Optional, Array[string]).
+      Example: {"type": "EVOLVE_CODEBASE", "value": "Improve error handling for timeouts in BrowserExecutor", "metadata": {"target_files": ["internal/agent/executors.go"]}, "rationale": "Repeated timeouts require better handling."}
+`
+	}
+
+	vulnerabilityProbingPrompt := `    **Advanced Vulnerability Probing Strategies**:
+    When testing for vulnerabilities like SQL Injection, do not use a single payload. Follow a multi-stage diagnostic process.
+    1.  **Character Probing**: Start by injecting single characters (` + "`" + `'` + "`" + `, ` + "`" + `"` + "`" + `) to trigger database errors. An error is a strong signal.
+    2.  **Boolean-Based Blind Probing**: If no errors appear, try to force a different application response using logical conditions.
+        - Inject a TRUE condition (e.g., ` + "`" + `admin' AND '1'='1'` + "`" + `). Observe the response (e.g., "Incorrect password").
+        - Inject a FALSE condition (e.g., ` + "`" + `admin' AND '1'='2'` + "`" + `). Observe the response (e.g., "User not found").
+        - If the responses differ, you have confirmed a blind SQLi.
+    3.  **Time-Based Blind Probing**: If Boolean responses are identical, attempt to introduce a time delay. This is your final confirmation method for blind injection.
+        - Inject a time-delay payload (e.g., ` + "`" + `admin' AND pg_sleep(5)--` + "`" + ` for PostgreSQL, or ` + "`" + `admin' AND SLEEP(5)--` + "`" + ` for MySQL).
+        - Observe the response time. A significant delay confirms the vulnerability.
+    
+    Record your findings from each stage in the ` + "`thought`" + ` and ` + "`rationale`" + ` fields of your action. Use the observations from one step to inform the next. For example, if a single quote causes an error, all subsequent payloads should use single quotes.`
+
+	// Generate the error handling prompt dynamically to ensure EVOLVE_CODEBASE is only mentioned if enabled.
+	errorHandlingPrompt := m.generateErrorHandlingPrompt()
+
+	return basePrompt + m.getActionListPrompt() + evolutionPrompt + errorHandlingPrompt + vulnerabilityProbingPrompt + m.getClosingPrompt()
+}
+
+// getActionListPrompt returns the static list of available actions.
+func (m *LLMMind) getActionListPrompt() string {
+	return `
 Available Action Types:
 
     1. Basic Browser Interaction (Executed realistically via Humanoid):
@@ -390,38 +427,48 @@ Available Action Types:
     - ANALYZE_HEADERS: (Passive) Analyze the HTTP headers captured in the current browser state artifacts for security misconfigurations.
       Example: {"type": "ANALYZE_HEADERS", "rationale": "Checking security headers on the main application responses."}
     - GATHER_CODEBASE_CONTEXT: Read source code for a module. (Params: metadata={"module_path": "..."})
-    - CONCLUDE: Finish the mission.
-`
+    - CONCLUDE: Finish the mission.`
+}
 
-	// Conditionally include the evolution prompt if enabled in the configuration.
-	evolutionPrompt := ""
-	if m.cfg.Evolution.Enabled {
-		evolutionPrompt = `
-    4. Proactive Self-Improvement (Evolution):
-    - EVOLVE_CODEBASE: Initiate an autonomous OODA loop to improve the agent's own source code.
-      **WHEN TO USE:** Only when you identify a limitation, bug, or inefficiency in the agent's capabilities that prevents achieving the mission objective, AND you have context about the relevant code (e.g., from GATHER_CODEBASE_CONTEXT).
-      **PARAMETERS:**
-        - value: The objective of the improvement (Required, String).
-        - metadata.target_files: List of relevant file paths (Optional, Array[string]).
-      Example: {"type": "EVOLVE_CODEBASE", "value": "Improve error handling for timeouts in BrowserExecutor", "metadata": {"target_files": ["internal/agent/executors.go"]}, "rationale": "Repeated timeouts require better handling."}
-`
-	}
+// generateErrorHandlingPrompt creates the instructions for error recovery strategies dynamically.
+func (m *LLMMind) generateErrorHandlingPrompt() string {
+	// Base error handling instructions applicable always.
+	baseErrorHandling := `
 
-	errorHandlingPrompt := `
     **Crucial Error Handling Instructions**:
     Analyze the "error_code" (in the KG node properties) if a previous action failed (status="ERROR").
-    - ELEMENT_NOT_FOUND: The selector was incorrect or the element does not exist. Strategy: Try a different selector or navigate elsewhere.
-    - HUMANOID_GEOMETRY_INVALID: The element exists but has zero size or invalid structure. Strategy: Try interacting with a parent element or skip this target.
-    - HUMANOID_TARGET_NOT_VISIBLE: The element exists but is obscured or off-screen.
-      -> Strategy: You MUST use SCROLL or interact with other UI elements (like closing a modal) to make it visible BEFORE retrying the interaction.
-    - TIMEOUT_ERROR: The operation took too long. Strategy: Consider using WAIT_FOR_ASYNC before retrying. If EVOLVE_CODEBASE timed out, the objective was likely too complex.
-    - NAVIGATION_ERROR: The URL could not be reached. Strategy: Verify the URL or navigate back.
-    - EVOLUTION_FAILURE: The self-improvement cycle failed. Strategy: Analyze the failure details (error_details), and either retry with a refined objective or abandon the evolution attempt.
-    - FEATURE_DISABLED: You attempted to use a feature (like EVOLVE_CODEBASE) that is disabled. Strategy: Find an alternative approach; do not retry the action.
-    - EXECUTION_FAILURE: If details suggest an internal bug. Strategy: If Evolution is enabled, consider using EVOLVE_CODEBASE to fix the bug after gathering context.
+    - ` + "`ELEMENT_NOT_FOUND`" + `: The selector was incorrect or the element does not exist. Strategy: Try a different selector or navigate elsewhere.
+    - ` + "`HUMANOID_GEOMETRY_INVALID`" + `: The element exists but has zero size or invalid structure. Strategy: Try interacting with a parent element or skip this target.
+    - ` + "`HUMANOID_TARGET_NOT_VISIBLE`" + `: The element exists but is obscured or off-screen.
+      -> Strategy: You MUST use ` + "`SCROLL`" + ` or interact with other UI elements (like closing a modal) to make it visible BEFORE retrying the interaction.
+    - ` + "`NAVIGATION_ERROR`" + `: The URL could not be reached. Strategy: Verify the URL or navigate back.
+    - ` + "`FEATURE_DISABLED`" + `: You attempted to use a feature that is disabled. Strategy: Find an alternative approach; do not retry the action.
+    - ` + "`INVALID_PARAMETERS`" + `: The parameters for the action were missing or invalid. Strategy: Correct the parameters (e.g., provide the missing selector) and retry the action.`
+
+	// Conditional instructions related to Evolution capabilities.
+	conditionalErrorHandling := ""
+	if m.cfg.Evolution.Enabled {
+		// If enabled, provide detailed strategies involving EVOLVE_CODEBASE.
+		conditionalErrorHandling = `
+    - ` + "`TIMEOUT_ERROR`" + `: The operation took too long. Strategy: Consider using ` + "`WAIT_FOR_ASYNC`" + ` before retrying. If ` + "`EVOLVE_CODEBASE`" + ` timed out, the objective was likely too complex.
+    - ` + "`EVOLUTION_FAILURE`" + `: The self-improvement cycle failed. Strategy: Analyze the failure details (` + "`error_details`" + `), and either retry with a refined objective or abandon the evolution attempt.
+    - ` + "`EXECUTION_FAILURE`" + `: If details suggest an internal bug. Strategy: Consider using ` + "`EVOLVE_CODEBASE`" + ` to fix the bug after gathering context.`
+	} else {
+		// If disabled, provide simpler strategies without mentioning EVOLVE_CODEBASE.
+		conditionalErrorHandling = `
+    - ` + "`TIMEOUT_ERROR`" + `: The operation took too long. Strategy: Consider using ` + "`WAIT_FOR_ASYNC`" + ` before retrying.
+    - ` + "`EXECUTION_FAILURE`" + `: A generic failure occurred. Strategy: Analyze the error_details and try an alternative approach.`
+	}
+
+	return baseErrorHandling + conditionalErrorHandling
+}
+
+// getClosingPrompt returns the final instructions for the LLM.
+func (m *LLMMind) getClosingPrompt() string {
+	return `
+
     Analyze the provided state and objective, then decide your next move.
     Your response must be only the JSON for your chosen action.`
-	return basePrompt + evolutionPrompt + errorHandlingPrompt
 }
 
 // Constructs the user facing part of the prompt, including the mission and KG state.
@@ -556,7 +603,7 @@ func (m *LLMMind) addDependenciesToKG(ctx context.Context, sourceObservationID s
 			Type:       schemas.NodeFile,
 			Label:      sourceFile,
 			Status:     schemas.StatusAnalyzed,
-			Properties: json.RawMessage(fmt.Sprintf(`{"source": "%s"}`, sourceObservationID)),
+			Properties: encodingjson.RawMessage(fmt.Sprintf(`{"source": "%s"}`, sourceObservationID)),
 		}
 		if err := m.kg.AddNode(ctx, sourceNode); err != nil {
 			lastErr = err
@@ -570,7 +617,7 @@ func (m *LLMMind) addDependenciesToKG(ctx context.Context, sourceObservationID s
 				Type:       schemas.NodeFile,
 				Label:      depFile,
 				Status:     schemas.StatusAnalyzed,
-				Properties: json.RawMessage(fmt.Sprintf(`{"source": "%s"}`, sourceObservationID)),
+				Properties: encodingjson.RawMessage(fmt.Sprintf(`{"source": "%s"}`, sourceObservationID)),
 			}
 			if err := m.kg.AddNode(ctx, depNode); err != nil {
 				lastErr = err
@@ -579,12 +626,12 @@ func (m *LLMMind) addDependenciesToKG(ctx context.Context, sourceObservationID s
 			}
 
 			edge := schemas.Edge{
-				ID:         uuid.NewString(),
+				ID:         uuidNewString(),
 				From:       sourceFile,
 				To:         depFile,
 				Type:       schemas.RelationshipImports, // Use standardized constant.
 				Label:      "Imports",
-				Properties: json.RawMessage(fmt.Sprintf(`{"source_obs_id": "%s"}`, sourceObservationID)),
+				Properties: encodingjson.RawMessage(fmt.Sprintf(`{"source_obs_id": "%s"}`, sourceObservationID)),
 			}
 			if err := m.kg.AddEdge(ctx, edge); err != nil {
 				lastErr = err
@@ -635,7 +682,7 @@ func (m *LLMMind) updateActionStatus(ctx context.Context, actionID string, statu
 	if err != nil {
 		return fmt.Errorf("failed to marshal updated properties: %w", err)
 	}
-	node.Properties = updatedProps
+	node.Properties = encodingjson.RawMessage(updatedProps)
 
 	if err := m.kg.AddNode(ctx, node); err != nil {
 		return fmt.Errorf("kg.AddNode failed for action status update: %w", err)
@@ -644,12 +691,12 @@ func (m *LLMMind) updateActionStatus(ctx context.Context, actionID string, statu
 }
 
 // Converts a map to json.RawMessage.
-func (m *LLMMind) marshalProperties(propsMap map[string]interface{}) (json.RawMessage, error) {
+func (m *LLMMind) marshalProperties(propsMap map[string]interface{}) (encodingjson.RawMessage, error) {
 	propsBytes, err := json.Marshal(propsMap)
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal properties: %w", err)
 	}
-	return propsBytes, nil
+	return encodingjson.RawMessage(propsBytes), nil
 }
 
 // Creates a new node and edge in the KG for an observation, AND applies any embedded KGUpdates.
@@ -715,7 +762,7 @@ func (m *LLMMind) recordObservationKG(ctx context.Context, obs Observation, flag
 		"exec_error_details": obs.Result.ErrorDetails,
 		"ltm_flags":          flags,
 	}
-	propsBytes, err := m.marshalProperties(propsMap)
+	propsBytes, err := json.Marshal(propsMap)
 	if err != nil {
 		return err
 	}
@@ -727,7 +774,7 @@ func (m *LLMMind) recordObservationKG(ctx context.Context, obs Observation, flag
 		Status:     schemas.StatusNew,
 		CreatedAt:  now,
 		LastSeen:   now,
-		Properties: propsBytes,
+		Properties: encodingjson.RawMessage(propsBytes),
 	}
 	if err := m.kg.AddNode(ctx, obsNode); err != nil {
 		return fmt.Errorf("kg.AddNode failed for observation: %w", err)
@@ -735,7 +782,7 @@ func (m *LLMMind) recordObservationKG(ctx context.Context, obs Observation, flag
 
 	if obs.SourceActionID != "" {
 		actionEdge := schemas.Edge{
-			ID:        uuid.NewString(),
+			ID:        uuidNewString(),
 			From:      obs.SourceActionID,
 			To:        obs.ID,
 			Type:      schemas.RelationshipHasObservation,
@@ -771,7 +818,7 @@ func (m *LLMMind) recordActionKG(ctx context.Context, action Action) error {
 	if action.Value != "" {
 		const maxLen = 256
 		if utf8.RuneCountInString(action.Value) > maxLen {
-			runes := []rune(action.Value)
+			runes := []rune(action.Value) // FIX: Correctly handle multi-byte characters when truncating.
 			propsMap["value"] = string(runes[:maxLen]) + "..."
 		} else {
 			propsMap["value"] = action.Value
@@ -781,7 +828,7 @@ func (m *LLMMind) recordActionKG(ctx context.Context, action Action) error {
 		propsMap[fmt.Sprintf("meta_%s", k)] = v
 	}
 
-	propsBytes, err := m.marshalProperties(propsMap)
+	propsBytes, err := json.Marshal(propsMap)
 	if err != nil {
 		return err
 	}
@@ -793,14 +840,14 @@ func (m *LLMMind) recordActionKG(ctx context.Context, action Action) error {
 		Status:     schemas.StatusNew,
 		CreatedAt:  now,
 		LastSeen:   now,
-		Properties: propsBytes,
+		Properties: encodingjson.RawMessage(propsBytes),
 	}
 	if err := m.kg.AddNode(ctx, actionNode); err != nil {
 		return fmt.Errorf("kg.AddNode failed for action: %w", err)
 	}
 
 	edge := schemas.Edge{
-		ID:        uuid.NewString(),
+		ID:        uuidNewString(),
 		From:      action.MissionID,
 		To:        action.ID,
 		Type:      schemas.RelationshipExecuted,
@@ -812,6 +859,30 @@ func (m *LLMMind) recordActionKG(ctx context.Context, action Action) error {
 		return fmt.Errorf("kg.AddEdge failed for mission->action link: %w", err)
 	}
 	return nil
+}
+
+// Safely transitions the Mind to a new state, enforcing state machine rules.
+func (m *LLMMind) updateState(newState AgentState) {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+
+	// Rule 1: Do not transition if the state is already the target state.
+	if m.currentState == newState {
+		return
+	}
+
+	// Rule 2: Terminal states (FAILED, COMPLETED) cannot be exited.
+	if m.currentState == StateFailed || m.currentState == StateCompleted {
+		// Log an attempt to transition out of a terminal state, but prevent it.
+		m.logger.Warn("Attempted to transition out of a terminal state. Ignoring.",
+			zap.String("current_state", string(m.currentState)),
+			zap.String("attempted_state", string(newState)))
+		return
+	}
+
+	// Transition is valid.
+	m.logger.Debug("Mind state transition", zap.String("from", string(m.currentState)), zap.String("to", string(newState)))
+	m.currentState = newState
 }
 
 // Assigns a new mission to the Mind and creates the initial mission node in the KG.
@@ -843,7 +914,7 @@ func (m *LLMMind) SetMission(mission Mission) {
 			Status:     schemas.StatusProcessing,
 			CreatedAt:  now,
 			LastSeen:   now,
-			Properties: propsBytes,
+			Properties: encodingjson.RawMessage(propsBytes),
 		}
 		if err := m.kg.AddNode(ctx, missionNode); err != nil {
 			m.logger.Error("Failed to record new Mission node in KG", zap.Error(err))
@@ -855,34 +926,8 @@ func (m *LLMMind) SetMission(mission Mission) {
 	m.signalStateReady()
 }
 
-// Safely transitions the Mind to a new state, enforcing state machine rules.
-func (m *LLMMind) updateState(newState AgentState) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-
-	// Rule 1: Do not transition if the state is already the target state.
-	if m.currentState == newState {
-		return
-	}
-
-	// Rule 2: Terminal states (FAILED, COMPLETED) cannot be exited.
-	if m.currentState == StateFailed || m.currentState == StateCompleted {
-		// Log an attempt to transition out of a terminal state, but prevent it.
-		m.logger.Warn("Attempted to transition out of a terminal state. Ignoring.",
-			zap.String("current_state", string(m.currentState)),
-			zap.String("attempted_state", string(newState)))
-		return
-	}
-
-	// Transition is valid.
-	m.logger.Debug("Mind state transition", zap.String("from", string(m.currentState)), zap.String("to", string(newState)))
-	m.currentState = newState
-}
-
 // Gracefully shuts down the Mind's cognitive loops.
 func (m *LLMMind) Stop() {
-	// Use sync.Once to guarantee the channel is closed exactly once, preventing panics
-	// if Stop is called concurrently or repeatedly.
 	m.stopOnce.Do(func() {
 		close(m.stopChan)
 		m.ltm.Stop() // Gracefully stop the LTM's background processes.

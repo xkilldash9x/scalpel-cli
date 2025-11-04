@@ -13,6 +13,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"go.uber.org/zap"
 )
 
 // -- Config Mock --
@@ -462,8 +463,8 @@ type MockComponentFactory struct {
 // Create provides a mock function for component creation.
 // It returns interface{} to avoid a direct dependency on the cmd package (where Components is defined),
 // preventing an import cycle. The calling test code will perform a type assertion.
-func (m *MockComponentFactory) Create(ctx context.Context, cfg config.Interface, targets []string) (interface{}, error) {
-	args := m.Called(ctx, cfg, targets)
+func (m *MockComponentFactory) Create(ctx context.Context, cfg config.Interface, targets []string, logger *zap.Logger) (interface{}, error) {
+	args := m.Called(ctx, cfg, targets, logger)
 	return args.Get(0), args.Error(1)
 }
 
@@ -528,4 +529,9 @@ func (m *MockHumanoidController) CognitivePause(ctx context.Context, meanScale, 
 // Shortcut provides a mock function with given fields: ctx, keysExpression
 func (m *MockHumanoidController) Shortcut(ctx context.Context, keysExpression string) error {
 	return m.Called(ctx, keysExpression).Error(0)
+}
+
+// NewMockHumanoid creates a new mock instance for the humanoid controller.
+func NewMockHumanoid() *MockHumanoidController {
+	return &MockHumanoidController{}
 }

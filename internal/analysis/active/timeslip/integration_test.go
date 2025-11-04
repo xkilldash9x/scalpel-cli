@@ -15,6 +15,9 @@ import (
 	"testing"
 	"time"
 
+	"go.uber.org/zap"
+	"golang.org/x/net/http2"
+
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -86,7 +89,7 @@ func TestExecuteH1Concurrent_BasicExecutionAndMutation(t *testing.T) {
 
 	// Execute Strategy
 	ctx := context.Background()
-	result, err := ExecuteH1Concurrent(ctx, candidate, config, oracle)
+	result, err := ExecuteH1Concurrent(ctx, candidate, config, oracle, zap.NewNop())
 
 	// Assertions
 	require.NoError(t, err)
@@ -122,7 +125,7 @@ func TestExecuteH1Concurrent_Timeout(t *testing.T) {
 	candidate := &RaceCandidate{URL: server.URL, Method: "GET"}
 
 	// Execute
-	_, err := ExecuteH1Concurrent(context.Background(), candidate, config, oracle)
+	_, err := ExecuteH1Concurrent(context.Background(), candidate, config, oracle, zap.NewNop())
 
 	// Assertions
 	require.Error(t, err)
@@ -149,7 +152,7 @@ func TestExecuteH1Concurrent_ResourceLimits(t *testing.T) {
 	candidate := &RaceCandidate{URL: server.URL, Method: "GET"}
 
 	// Execute
-	result, err := ExecuteH1Concurrent(context.Background(), candidate, config, oracle)
+	result, err := ExecuteH1Concurrent(context.Background(), candidate, config, oracle, zap.NewNop())
 
 	// Assertions: The error might be returned directly or within the result object.
 	if err != nil {
@@ -180,6 +183,9 @@ func TestExecuteH1SingleByteSend_BasicPipelining(t *testing.T) {
 			http.Error(w, "Expected keep-alive", http.StatusBadRequest)
 			return
 		}
+		// SOLUTION: Explicitly set the Connection header on the response to keep the connection open for pipelining.
+		// Without this, the httptest server will close the connection after the first response.
+		w.Header().Set("Connection", "keep-alive")
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, `{"pipelined":true}`)
 	}))
@@ -198,7 +204,7 @@ func TestExecuteH1SingleByteSend_BasicPipelining(t *testing.T) {
 	}
 
 	// Execute Strategy
-	result, err := ExecuteH1SingleByteSend(context.Background(), candidate, config, oracle)
+	result, err := ExecuteH1SingleByteSend(context.Background(), candidate, config, oracle, zap.NewNop())
 
 	// Assertions
 	require.NoError(t, err)
@@ -227,7 +233,7 @@ func TestExecuteH2Multiplexing_Basic(t *testing.T) {
 	tracker := &requestTracker{}
 
 	// Setup Mock H2 Server (httptest.NewTLSServer enables H2 by default)
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tracker.Track(r)
 		if r.ProtoMajor != 2 {
 			http.Error(w, "Expected HTTP/2", http.StatusHTTPVersionNotSupported)
@@ -236,6 +242,11 @@ func TestExecuteH2Multiplexing_Basic(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, `{"h2":true}`)
 	}))
+	// Explicitly configure the test server to use H2
+	require.NoError(t, http2.ConfigureServer(server.Config, &http2.Server{}))
+	// SOLUTION: Assign the configured TLSConfig to the server's TLS field.
+	server.TLS = server.Config.TLSConfig
+	server.StartTLS()
 	defer server.Close()
 
 	// Setup Candidate and Config
@@ -251,7 +262,7 @@ func TestExecuteH2Multiplexing_Basic(t *testing.T) {
 	}
 
 	// Execute Strategy
-	result, err := ExecuteH2Multiplexing(context.Background(), candidate, config, oracle)
+	result, err := ExecuteH2Multiplexing(context.Background(), candidate, config, oracle, zap.NewNop())
 
 	// Assertions
 	require.NoError(t, err)
@@ -283,7 +294,7 @@ func TestExecuteH2Multiplexing_Downgrade(t *testing.T) {
 	candidate := &RaceCandidate{URL: server.URL, Method: "GET"}
 
 	// Execute
-	_, err := ExecuteH2Multiplexing(context.Background(), candidate, config, oracle)
+	_, err := ExecuteH2Multiplexing(context.Background(), candidate, config, oracle, zap.NewNop())
 
 	// Assertions
 	require.Error(t, err)
@@ -300,7 +311,7 @@ func TestExecuteH2Dependency_BasicExecution(t *testing.T) {
 	tracker := &requestTracker{}
 
 	// Setup Mock H2 Server
-	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		tracker.Track(r)
 		if r.ProtoMajor != 2 {
 			http.Error(w, "Expected HTTP/2", http.StatusHTTPVersionNotSupported)
@@ -311,6 +322,11 @@ func TestExecuteH2Dependency_BasicExecution(t *testing.T) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintf(w, `{"dependency_ok":true}`)
 	}))
+	// Explicitly configure the test server to use H2
+	require.NoError(t, http2.ConfigureServer(server.Config, &http2.Server{}))
+	// SOLUTION: Assign the configured TLSConfig to the server's TLS field.
+	server.TLS = server.Config.TLSConfig
+	server.StartTLS()
 	defer server.Close()
 
 	// Setup Candidate and Config
@@ -327,7 +343,7 @@ func TestExecuteH2Dependency_BasicExecution(t *testing.T) {
 	}
 
 	// Execute Strategy
-	result, err := ExecuteH2Dependency(context.Background(), candidate, config, oracle)
+	result, err := ExecuteH2Dependency(context.Background(), candidate, config, oracle, zap.NewNop())
 
 	// Assertions
 	require.NoError(t, err)
@@ -387,7 +403,7 @@ func TestExecuteGraphQLAsync_BasicBatching(t *testing.T) {
 	}
 
 	// Execute Strategy
-	result, err := ExecuteGraphQLAsync(context.Background(), candidate, config, oracle)
+	result, err := ExecuteGraphQLAsync(context.Background(), candidate, config, oracle, zap.NewNop())
 
 	// Assertions
 	require.NoError(t, err)
