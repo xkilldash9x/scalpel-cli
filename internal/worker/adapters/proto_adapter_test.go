@@ -1,5 +1,5 @@
 // File: internal/worker/adapters/proto_adapter_test.go
-package adapters
+package adapters_test
 
 import (
 	"context"
@@ -18,13 +18,14 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
+	"github.com/xkilldash9x/scalpel-cli/internal/worker/adapters"
 )
 
 // -- Test Suite Setup --
 
 // testSetup holds all the components needed for a single test case.
 type testSetup struct {
-	adapter       *ProtoAdapter
+	adapter       *adapters.ProtoAdapter // Use the actual type
 	mockLogger    *zap.Logger
 	mockBrowser   *mocks.MockBrowserManager
 	mockConfig    *mocks.MockConfig
@@ -33,14 +34,12 @@ type testSetup struct {
 }
 
 // setup creates a fresh test environment for each test case.
-// This is key to ensuring tests are isolated and don't interfere with each other.
 func setup(t *testing.T) *testSetup {
 	t.Helper()
 
-	// Initialize components using mocks from the global mocks package.
+	// Initialize components using mocks.
 	logger := zaptest.NewLogger(t)
 	browserManager := &mocks.MockBrowserManager{}
-	// Use the mock config for better isolation and control.
 	cfg := &mocks.MockConfig{}
 
 	task := &schemas.Task{
@@ -55,7 +54,7 @@ func setup(t *testing.T) *testSetup {
 	}
 
 	return &testSetup{
-		adapter:       NewProtoAdapter(),
+		adapter:       adapters.NewProtoAdapter(), // Use the constructor
 		mockLogger:    logger,
 		mockBrowser:   browserManager,
 		mockConfig:    cfg,
@@ -66,9 +65,14 @@ func setup(t *testing.T) *testSetup {
 
 // -- Unit Tests --
 
+func TestProtoAdapter_Metadata(t *testing.T) {
+	adapter := adapters.NewProtoAdapter()
+	assert.Equal(t, "ProtoAdapter", adapter.Name())
+	assert.Contains(t, adapter.Description(), "Analyzes web pages for client-side prototype pollution")
+	assert.Equal(t, core.TypeActive, adapter.Type())
+}
+
 func TestProtoAdapter_UnitTests(t *testing.T) {
-	// Test cases are defined as a table to cover various scenarios clearly.
-	// This approach makes it easy to add new tests and understand the coverage.
 	testCases := []struct {
 		name          string
 		setupModifier func(ts *testSetup)
@@ -78,7 +82,7 @@ func TestProtoAdapter_UnitTests(t *testing.T) {
 		{
 			name: "Success Case: Valid task with scanner enabled",
 			setupModifier: func(ts *testSetup) {
-				// Mock config to say the scanner is enabled
+				// Mock config: enabled
 				scannersConfig := config.ScannersConfig{
 					Active: config.ActiveScannersConfig{
 						ProtoPollution: config.ProtoPollutionConfig{Enabled: true},
@@ -86,13 +90,14 @@ func TestProtoAdapter_UnitTests(t *testing.T) {
 				}
 				ts.mockConfig.On("Scanners").Return(scannersConfig)
 
-				// Mock the browser manager interaction that was causing the panic.
+				// Mock the browser manager interaction required by the underlying analyzer.
 				mockSession := mocks.NewMockSessionContext()
 				ts.mockBrowser.On("NewAnalysisContext",
 					mock.Anything, mock.Anything, mock.Anything,
 					mock.Anything, mock.Anything, mock.Anything,
 				).Return(mockSession, nil)
 				mockSession.On("Close", mock.Anything).Return(nil)
+				// Mocks required by the underlying proto analyzer implementation
 				mockSession.On("ExposeFunction", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 				mockSession.On("InjectScriptPersistently", mock.Anything, mock.Anything).Return(nil)
 				mockSession.On("Navigate", mock.Anything, mock.Anything).Return(nil)
@@ -100,8 +105,9 @@ func TestProtoAdapter_UnitTests(t *testing.T) {
 			expectError: false,
 		},
 		{
-			name: "Skipped Case: Scanner is disabled in configuration",
+			name: "Skipped Case: Scanner is disabled",
 			setupModifier: func(ts *testSetup) {
+				// Mock config: disabled
 				scannersConfig := config.ScannersConfig{
 					Active: config.ActiveScannersConfig{
 						ProtoPollution: config.ProtoPollutionConfig{Enabled: false},
@@ -112,24 +118,22 @@ func TestProtoAdapter_UnitTests(t *testing.T) {
 			expectError: false, // Skipping is not an error
 		},
 		{
-			name: "Failure Case: Task is missing the required TargetURL",
+			name: "Failure Case: Missing TargetURL",
 			setupModifier: func(ts *testSetup) {
 				ts.task.TargetURL = ""
-				// No config mock needed as validation fails before config is accessed.
 			},
 			expectError: true,
 			expectedErr: "TargetURL is required",
 		},
 		{
-			name: "Failure Case: GlobalContext is missing from AnalysisContext",
-			setupModifier: func(ts *testSetup) {
-				// This modifier will be applied before the analysis context is created for the test.
-			},
-			expectError: true,
-			expectedErr: "GlobalContext is required",
+			name: "Failure Case: GlobalContext is missing",
+			// No setupModifier needed, we modify the analysisCtx directly in the test runner loop.
+			setupModifier: nil,
+			expectError:   true,
+			expectedErr:   "GlobalContext is required",
 		},
 		{
-			name: "Failure Case: BrowserManager is missing from GlobalContext",
+			name: "Failure Case: BrowserManager is missing",
 			setupModifier: func(ts *testSetup) {
 				ts.globalContext.BrowserManager = nil
 			},
@@ -137,7 +141,7 @@ func TestProtoAdapter_UnitTests(t *testing.T) {
 			expectedErr: "browser manager is required",
 		},
 		{
-			name: "Failure Case: Config is missing from GlobalContext",
+			name: "Failure Case: Config is missing",
 			setupModifier: func(ts *testSetup) {
 				ts.globalContext.Config = nil
 			},
@@ -145,15 +149,11 @@ func TestProtoAdapter_UnitTests(t *testing.T) {
 			expectedErr: "configuration is not available",
 		},
 		{
-			name: "Context Handling: Context is canceled before execution",
-			setupModifier: func(ts *testSetup) {
-				// Removed the mock expectation for `Scanners()`.
-				// The adapter should return immediately due to the
-				// ctx.Err() check at the top of Analyze(),
-				// so no mocks will be called.
-			},
-			expectError: true,
-			expectedErr: "context canceled",
+			name: "Context Handling: Canceled before execution",
+			// No setupModifier needed, we control the context in the test runner loop.
+			setupModifier: nil,
+			expectError:   true,
+			expectedErr:   "context canceled",
 		},
 	}
 
@@ -170,20 +170,22 @@ func TestProtoAdapter_UnitTests(t *testing.T) {
 				Global: ts.globalContext,
 			}
 
-			if tc.name == "Failure Case: GlobalContext is missing from AnalysisContext" {
+			// Specific modification for the "GlobalContext is missing" case.
+			if tc.name == "Failure Case: GlobalContext is missing" {
 				analysisCtx.Global = nil
 			}
 
 			var ctx context.Context
 			var cancel context.CancelFunc
 
-			if tc.name == "Context Handling: Context is canceled before execution" {
+			// Specific context setup for the cancellation case.
+			if tc.name == "Context Handling: Canceled before execution" {
 				ctx, cancel = context.WithCancel(context.Background())
 				cancel() // Cancel immediately
 			} else {
 				ctx, cancel = context.WithCancel(context.Background())
+				defer cancel()
 			}
-			defer cancel()
 
 			err := ts.adapter.Analyze(ctx, analysisCtx)
 
@@ -207,18 +209,19 @@ func TestProtoAdapter_UnitTests(t *testing.T) {
 // context cancellation that occurs *during* a simulated analysis.
 func TestProtoAdapter_ContextCancellation_DuringAnalysis(t *testing.T) {
 	ts := setup(t)
+
+	// Configure scanner enabled with long duration.
 	scannersConfig := config.ScannersConfig{
 		Active: config.ActiveScannersConfig{
 			ProtoPollution: config.ProtoPollutionConfig{
 				Enabled:      true,
-				WaitDuration: 10 * time.Second, // Long duration to ensure it would block without cancellation
+				WaitDuration: 10 * time.Second,
 			},
 		},
 	}
 	ts.mockConfig.On("Scanners").Return(scannersConfig)
 
-	// Add the required mock setup to prevent the initial panic.
-	// This allows the test to proceed to the part where it actually tests the timeout.
+	// Setup browser manager mocks.
 	mockSession := mocks.NewMockSessionContext()
 	ts.mockBrowser.On("NewAnalysisContext",
 		mock.Anything, mock.Anything, mock.Anything,
@@ -226,15 +229,13 @@ func TestProtoAdapter_ContextCancellation_DuringAnalysis(t *testing.T) {
 	).Return(mockSession, nil)
 	mockSession.On("Close", mock.Anything).Return(nil)
 	mockSession.On("ExposeFunction", mock.Anything, mock.Anything, mock.Anything).Return(nil)
-
-	// Add missing mock for InjectScriptPersistently to prevent panic
 	mockSession.On("InjectScriptPersistently", mock.Anything, mock.Anything).Return(nil)
 
-	// Add mock for Navigate and make it block until context is canceled
+	// Mock Navigate to block until the context is canceled.
 	mockSession.On("Navigate", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
-		// Wait for the context passed to Navigate to be Done
+		// Wait for the context passed to Navigate to be Done.
 		<-args.Get(0).(context.Context).Done()
-	}).Return(context.DeadlineExceeded)
+	}).Return(context.DeadlineExceeded) // Return the context error.
 
 	analysisCtx := &core.AnalysisContext{
 		Task:   *ts.task,
@@ -242,12 +243,13 @@ func TestProtoAdapter_ContextCancellation_DuringAnalysis(t *testing.T) {
 		Global: ts.globalContext,
 	}
 
+	// Create a context with a short timeout.
 	ctx, cancel := context.WithTimeout(context.Background(), 200*time.Millisecond)
 	defer cancel()
 
+	// Run the analysis in a goroutine.
 	var wg sync.WaitGroup
 	wg.Add(1)
-
 	var err error
 	go func() {
 		defer wg.Done()
@@ -256,129 +258,131 @@ func TestProtoAdapter_ContextCancellation_DuringAnalysis(t *testing.T) {
 
 	wg.Wait()
 
-	// We expect an error related to the context being done.
+	// Assertions: We expect the adapter to return the context error.
 	require.Error(t, err)
-	assert.ErrorContains(t, err, context.DeadlineExceeded.Error(), "Expected a context deadline exceeded error")
-}
+	assert.ErrorIs(t, err, context.DeadlineExceeded, "Expected a context deadline exceeded error")
 
-// TestProtoAdapter_Metadata verifies that the adapter's metadata methods
-// return the expected constant values.
-func TestProtoAdapter_Metadata(t *testing.T) {
-	adapter := NewProtoAdapter()
-	assert.Equal(t, "ProtoAdapter", adapter.Name())
-	assert.Equal(t, "Analyzes web pages for prototype pollution vulnerabilities.", adapter.Description())
-	assert.Equal(t, core.TypeActive, adapter.Type())
+	// Verify mocks.
+	ts.mockConfig.AssertExpectations(t)
+	ts.mockBrowser.AssertExpectations(t)
+	mockSession.AssertExpectations(t)
 }
 
 // -- Fuzz Testing --
+// Fuzz tests ensure robustness against unexpected inputs.
 
-// FuzzProtoAdapter_Analyze provides a fuzz test for the Analyze method.
+// FuzzProtoAdapter_Analyze provides a fuzz test for the Analyze method using basic inputs.
 func FuzzProtoAdapter_Analyze(f *testing.F) {
+	// Seed corpus
 	f.Add("https://example.com", "task-seed-1", true)
 	f.Add("http://test.internal/path", "task-seed-2", false)
-	f.Add("", "task-seed-3", true) // Empty URL
+	f.Add("", "task-seed-3", true)
 
 	f.Fuzz(func(t *testing.T, targetURL string, taskID string, scannerEnabled bool) {
-		// Using a subtest for each fuzz input for better isolation
-		// Corrected invalid syntax func(t, *testing.T) to func(t *testing.T)
-		t.Run("Fuzz", func(t *testing.T) {
-			t.Parallel() // Run fuzz inputs in parallel
-			logger := zap.NewNop()
-			browserManager := &mocks.MockBrowserManager{}
-			cfg := &mocks.MockConfig{}
+		t.Parallel() // Run fuzz inputs in parallel
 
-			// Set up mock based on fuzzed input.
-			scannersConfig := config.ScannersConfig{
-				Active: config.ActiveScannersConfig{
-					ProtoPollution: config.ProtoPollutionConfig{Enabled: scannerEnabled},
-				},
-			}
+		// Setup environment for fuzzing (Nop loggers and mocks)
+		logger := zap.NewNop()
+		browserManager := &mocks.MockBrowserManager{}
+		cfg := &mocks.MockConfig{}
+
+		// Configure mocks based on fuzzed input.
+		scannersConfig := config.ScannersConfig{
+			Active: config.ActiveScannersConfig{
+				ProtoPollution: config.ProtoPollutionConfig{Enabled: scannerEnabled},
+			},
+		}
+		// Only set the expectation if the config is actually needed (i.e., URL is not empty).
+		if targetURL != "" {
 			cfg.On("Scanners").Return(scannersConfig)
+		}
 
-			// Add mock setup for browser manager if the scanner is enabled
-			// and the URL is valid, which is the path where it would be called.
-			if scannerEnabled && targetURL != "" {
-				mockSession := mocks.NewMockSessionContext()
-				browserManager.On("NewAnalysisContext", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockSession, nil)
-				mockSession.On("Close", mock.Anything).Return(nil)
-				mockSession.On("ExposeFunction",
-					mock.Anything, mock.Anything, mock.Anything).Return(nil)
-				// Add missing mocks to prevent panics during fuzzing
-				mockSession.On("InjectScriptPersistently", mock.Anything, mock.Anything).Return(nil)
-				mockSession.On("Navigate", mock.Anything, mock.Anything).Return(nil)
-			}
+		// Mock browser interaction if the path leads to execution.
+		if scannerEnabled && targetURL != "" {
+			mockSession := mocks.NewMockSessionContext()
+			browserManager.On("NewAnalysisContext", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockSession, nil)
+			mockSession.On("Close", mock.Anything).Return(nil)
+			// Add necessary mocks required by the underlying analyzer to prevent panics.
+			mockSession.On("ExposeFunction", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+			mockSession.On("InjectScriptPersistently", mock.Anything, mock.Anything).Return(nil)
+			mockSession.On("Navigate", mock.Anything, mock.Anything).Return(nil)
+		}
 
-			task := &schemas.Task{
-				TaskID:    taskID,
-				TargetURL: targetURL,
-				Type:      schemas.TaskAnalyzeWebPageProtoPP,
-			}
-			globalCtx := &core.GlobalContext{
-				BrowserManager: browserManager,
-				Config:         cfg,
-			}
-			analysisCtx := &core.AnalysisContext{
-				Task:   *task,
-				Logger: logger,
-				Global: globalCtx,
-			}
+		// Prepare context
+		task := &schemas.Task{
+			TaskID:    taskID,
+			TargetURL: targetURL,
+			Type:      schemas.TaskAnalyzeWebPageProtoPP,
+		}
+		globalCtx := &core.GlobalContext{
+			BrowserManager: browserManager,
+			Config:         cfg,
+		}
+		analysisCtx := &core.AnalysisContext{
+			Task:   *task,
+			Logger: logger,
+			Global: globalCtx,
+		}
 
-			adapter := NewProtoAdapter()
-			err := adapter.Analyze(context.Background(), analysisCtx)
+		// Execute
+		adapter := adapters.NewProtoAdapter()
+		err := adapter.Analyze(context.Background(), analysisCtx)
 
-			// Basic validation: if the input URL is empty, we MUST get an error.
-			if targetURL == "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), "TargetURL is required")
-			}
-		})
+		// Basic validation: if the input URL is empty, we MUST get an error.
+		if targetURL == "" {
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "TargetURL is required")
+		}
 	})
 }
 
-// FuzzProtoAdapter_Analyze_Structured fuzzes the entire AnalysisContext.
+// FuzzProtoAdapter_Analyze_Structured fuzzes the entire AnalysisContext structure.
 func FuzzProtoAdapter_Analyze_Structured(f *testing.F) {
 	f.Fuzz(func(t *testing.T, data []byte) {
 		fuzzConsumer := fuzz.NewConsumer(data)
 		analysisCtx := &core.AnalysisContext{}
 
+		// Attempt to populate the struct from fuzzed data.
 		err := fuzzConsumer.GenerateStruct(analysisCtx)
 		if err != nil {
-			return // Ignore inputs that can't be mapped to our struct.
+			return // Ignore inputs that can't be mapped to the struct.
 		}
 
-		// Ensure logger is not nil to prevent panics in the tested code.
+		// --- Sanitization for Fuzzing ---
+		// Ensure required pointers are not nil to prevent trivial panics.
+
 		if analysisCtx.Logger == nil {
 			analysisCtx.Logger = zap.NewNop()
 		}
 
-		// Prevent panics from nil pointers when fuzzer generates a valid Global context.
+		// If Global context is generated, ensure its components are safe.
 		if analysisCtx.Global != nil {
 			if analysisCtx.Global.Config == nil {
+				// Provide a mock config that returns safe defaults.
 				mockCfg := &mocks.MockConfig{}
-				// Return a default, safe value to allow fuzzing to proceed.
-				mockCfg.On("Scanners").Return(config.ScannersConfig{})
+				// Only set the expectation if the URL is valid, otherwise the mock might not be called if validation fails early.
+				if analysisCtx.Task.TargetURL != "" {
+					mockCfg.On("Scanners").Return(config.ScannersConfig{})
+				}
 				analysisCtx.Global.Config = mockCfg
 			}
 			if analysisCtx.Global.BrowserManager == nil {
+				// Provide a mock browser manager.
 				analysisCtx.Global.BrowserManager = &mocks.MockBrowserManager{}
 			}
 		}
 
-		adapter := NewProtoAdapter()
+		adapter := adapters.NewProtoAdapter()
 		ctx := context.Background()
 
-		// Gracefully catch any panics, report them as a test failure,
-		//
-		// and continue fuzzing.
+		// Gracefully catch any panics during execution.
 		defer func() {
 			if r := recover(); r != nil {
-				t.Errorf("Caught a panic: %v", r)
+				t.Errorf("Caught a panic during structured fuzzing: %v", r)
 			}
 		}()
 
+		// Execute the function. The goal is survival without panicking.
 		_ = adapter.Analyze(ctx, analysisCtx)
-		// We don't assert on the error here.
-		// The goal is simply to survive
-		// the execution without panicking, no matter how malformed the input struct is.
 	})
 }
