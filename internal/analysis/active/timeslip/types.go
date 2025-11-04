@@ -6,7 +6,7 @@ import (
 	"errors"
 	"net/http"
 
-	// FIX: regexp import removed as compiled regexes are moved to SuccessOracle.
+	// regexp import removed as compiled regexes are moved to SuccessOracle.
 	"sync"
 	"time"
 )
@@ -18,12 +18,11 @@ var (
 	ErrTargetUnreachable   = errors.New("target unreachable or timed out")
 	ErrConfigurationError  = errors.New("configuration or input data error")
 	ErrPayloadMutationFail = errors.New("payload mutation failed")
-	// ErrH2FrameError indicates an issue during manual H2 frame processing (e.g., in H2Dependency).
+	// ErrH2FrameError indicates an issue during manual H2 frame processing.
 	ErrH2FrameError = errors.New("H2 frame processing error")
 )
 
 // ParsedResponse holds the essential details of an HTTP response.
-// This is a local definition to decouple the module from the refactored network package.
 type ParsedResponse struct {
 	StatusCode int
 	Headers    http.Header
@@ -40,7 +39,7 @@ const (
 	H1Concurrent     RaceStrategy = "H1_CONCURRENT"
 	H1SingleByteSend RaceStrategy = "H1_SINGLE_BYTE_SEND"
 	H2Multiplexing   RaceStrategy = "H2_MULTIPLEXING"
-	// H2Dependency uses H2 Stream Dependencies (PRIORITY frames) for precise synchronization.
+	// H2Dependency uses H2 Stream Dependencies for precise synchronization.
 	H2Dependency RaceStrategy = "H2_DEPENDENCY"
 	AsyncGraphQL RaceStrategy = "ASYNC_GRAPHQL_BATCH"
 )
@@ -65,8 +64,7 @@ type SuccessCondition struct {
 	HeaderRegex string `json:"header_regex,omitempty"`
 
 	// FIX: Removed compiled regexes (bodyRx, headerRx).
-	// Storing them in the shared Config caused data races during concurrent Analyzer initialization.
-	// They are now stored within the SuccessOracle instance.
+	// They are now stored within the SuccessOracle instance to prevent data races.
 }
 
 // Config holds the configuration parameters for the TimeSlip analysis.
@@ -83,27 +81,23 @@ type Config struct {
 	RequestJitter time.Duration `json:"request_jitter,omitempty"`
 	// ConnectionDelay (H1Concurrent only) adds a delay during initialization to prime connections.
 	ConnectionDelay time.Duration `json:"connection_delay,omitempty"`
-	// ExpectedSuccesses defines the maximum number of successful operations expected.
-	// If nil or <= 0, defaults to 1 (standard TOCTOU assumption).
+	// ExpectedSuccesses defines the maximum number of successful operations expected (default: 1).
 	ExpectedSuccesses int `json:"expected_successes,omitempty"`
 
-	// ExcludeHeadersFromFingerprint allows adding extra headers to the default exclusion list
-	// for fingerprinting (e.g., specific custom volatile headers).
+	// ExcludeHeadersFromFingerprint allows adding extra headers to the default exclusion list.
 	ExcludeHeadersFromFingerprint []string `json:"exclude_headers_fingerprint,omitempty"`
 
 	// initOnce ensures that the excludeHeadersMap is initialized exactly once.
 	initOnce sync.Once
 
-	// Internal map for quick lookups during fingerprinting (unexported).
+	// Internal map for quick lookups during fingerprinting.
 	excludeHeadersMap map[string]bool
 }
 
 // InitializeExcludedHeaders sets up the internal map for fast lookups.
-// It merges the default exclusions with any user-provided exclusions.
 func (c *Config) InitializeExcludedHeaders() {
 	c.excludeHeadersMap = make(map[string]bool)
-	// Add defaults first
-	// FIX: Use the exported DefaultExcludedHeaders.
+	// Add defaults first.
 	for k := range DefaultExcludedHeaders {
 		c.excludeHeadersMap[k] = true
 	}
@@ -113,29 +107,27 @@ func (c *Config) InitializeExcludedHeaders() {
 	}
 }
 
-// GetExcludedHeaders returns the map of headers to exclude.
-// It uses lazy initialization for the map.
+// GetExcludedHeaders returns the map of headers to exclude (lazy initialized).
 func (c *Config) GetExcludedHeaders() map[string]bool {
 	c.initOnce.Do(c.InitializeExcludedHeaders)
 	return c.excludeHeadersMap
 }
 
-// DefaultExcludedHeaders defines headers to exclude from fingerprinting as they are often volatile.
-// Keys MUST be in Canonical format (e.g., "Content-Length").
-// FIX: Exported (renamed from defaultExcludedHeaders) so it can be used explicitly in tests.
+// DefaultExcludedHeaders defines headers excluded from fingerprinting as they are often volatile.
+// Keys MUST be in Canonical format.
 var DefaultExcludedHeaders = map[string]bool{
 	"Date":            true,
-	"Set-Cookie":      true, // Often contains unique tokens per response.
+	"Set-Cookie":      true,
 	"X-Request-Id":    true,
 	"X-Trace-Id":      true,
-	"X-Amzn-Trace-Id": true, // Common AWS trace ID
+	"X-Amzn-Trace-Id": true,
 	"Cf-Ray":          true,
 	"Cf-Cache-Status": true,
-	"Etag":            true, // Derived from content, which we hash separately.
+	"Etag":            true,
 	"Last-Modified":   true,
 	"Expires":         true,
 	"Cache-Control":   true,
-	"Content-Length":  true, // Derived from body length.
+	"Content-Length":  true,
 	"Connection":      true,
 	"Keep-Alive":      true,
 	"Server-Timing":   true,
@@ -153,10 +145,10 @@ type RaceResponse struct {
 	// StreamID is relevant for H2 strategies.
 	StreamID uint32
 
-	// IsSuccess indicates whether the specific action succeeded (determined by the SuccessOracle).
+	// IsSuccess indicates whether the specific action succeeded.
 	IsSuccess bool
 
-	// SpecificBody holds the response body relevant to this operation.
+	// SpecificBody holds the response body relevant to this operation (handles GraphQL batching).
 	SpecificBody []byte
 }
 
@@ -169,14 +161,12 @@ type RaceResult struct {
 
 // ResponseStatistics holds statistical data about the response times.
 type ResponseStatistics struct {
-	Count         int     `json:"count"` // Number of data points used in the calculation.
+	Count         int     `json:"count"`
 	MinDurationMs int64   `json:"min_duration_ms"`
 	MaxDurationMs int64   `json:"max_duration_ms"`
 	AvgDurationMs float64 `json:"avg_duration_ms"`
-	// MedDurationMs (Median) is crucial for outlier detection.
-	MedDurationMs float64 `json:"med_duration_ms"`
-	// StdDevMs (Standard Deviation) measures the dispersion.
-	StdDevMs      float64 `json:"std_dev_ms"`
+	MedDurationMs float64 `json:"med_duration_ms"` // Median
+	StdDevMs      float64 `json:"std_dev_ms"`      // Standard Deviation
 	TimingDeltaMs int64   `json:"timing_delta_ms"`
 }
 
@@ -189,9 +179,7 @@ type AnalysisResult struct {
 	Confidence      float64
 	SuccessCount    int
 	UniqueResponses map[string]int
-
-	// Stats provides detailed timing analysis.
-	Stats ResponseStatistics
+	Stats           ResponseStatistics
 }
 
 // -- sync.Pool Implementation for Performance Optimization --
@@ -201,9 +189,8 @@ const maxResponseBodyBytes = 2 * 1024 * 1024 // 2 MB limit
 // bufferPool is used to reuse bytes.Buffer objects, reducing GC pressure.
 var bufferPool = sync.Pool{
 	New: func() interface{} {
-		// Pre-allocate a reasonable size buffer (e.g., 4KB).
 		b := new(bytes.Buffer)
-		b.Grow(4096)
+		b.Grow(4096) // Pre-allocate 4KB
 		return b
 	},
 }
@@ -213,11 +200,10 @@ func getBuffer() *bytes.Buffer {
 	return bufferPool.Get().(*bytes.Buffer)
 }
 
-// putBuffer returns a buffer to the pool.
-// The buffer is reset before being put back.
+// putBuffer returns a buffer to the pool after resetting it.
 func putBuffer(buf *bytes.Buffer) {
 	buf.Reset()
-	// Optimization: Avoid returning excessively large buffers to the pool if they grew significantly.
+	// Optimization: Avoid returning excessively large buffers to the pool.
 	if buf.Cap() < 64*1024 { // 64KB limit
 		bufferPool.Put(buf)
 	}

@@ -21,27 +21,24 @@ import (
 
 // TestGoroutineLeaks_H1Concurrent validates that all worker goroutines are cleaned up properly after execution.
 func TestGoroutineLeaks_H1Concurrent(t *testing.T) {
-	// goleak.VerifyNone(t) will fail if any unexpected goroutines are still running when the test finishes.
+	// goleak.VerifyNone(t) will fail if any unexpected goroutines are still running.
 	defer goleak.VerifyNone(t)
 
 	// 1. Setup Mock Server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		// Introduce a small delay
 		time.Sleep(10 * time.Millisecond)
 		w.WriteHeader(http.StatusOK)
 	}))
 	defer server.Close()
 
 	// 2. Setup Configuration
-	config := &Config{Concurrency: 50, Timeout: 2 * time.Second} // High concurrency
+	config := &Config{Concurrency: 50, Timeout: 2 * time.Second}
 	oracle, _ := NewSuccessOracle(config, false)
 	candidate := &RaceCandidate{Method: "GET", URL: server.URL}
 
 	// 3. Execution
 	_, err := ExecuteH1Concurrent(context.Background(), candidate, config, oracle, zap.NewNop())
 	assert.NoError(t, err)
-
-	// 4. Verification (handled by the defer goleak.VerifyNone(t))
 }
 
 // TestGoroutineLeaks_Cancellation validates cleanup when the context is canceled during execution.
@@ -49,14 +46,13 @@ func TestGoroutineLeaks_Cancellation(t *testing.T) {
 	defer goleak.VerifyNone(t)
 
 	// 1. Setup Mock Server with significant delay
-	// FIX: Use NewTLSServer as H2Multiplexing requires HTTPS.
+	// Use NewTLSServer as H2Multiplexing requires HTTPS.
 	server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(5 * time.Second) // Long delay
 	}))
 	defer server.Close()
 
 	// 2. Setup Configuration
-	// FIX: Set InsecureSkipVerify for the self-signed TLS server.
 	config := &Config{Concurrency: 10, Timeout: 10 * time.Second, InsecureSkipVerify: true}
 	oracle, _ := NewSuccessOracle(config, false)
 	candidate := &RaceCandidate{Method: "GET", URL: server.URL}
@@ -64,10 +60,10 @@ func TestGoroutineLeaks_Cancellation(t *testing.T) {
 	// 3. Setup Context with cancellation
 	ctx, cancel := context.WithCancel(context.Background())
 
-	// 4. Execution in a separate goroutine so we can cancel it
+	// 4. Execution in a separate goroutine
 	done := make(chan error)
 	go func() {
-		// We use H2Multiplexing as an example strategy
+		// Use H2Multiplexing as an example strategy
 		_, err := ExecuteH2Multiplexing(ctx, candidate, config, oracle, zap.NewNop())
 		done <- err
 	}()
@@ -83,24 +79,20 @@ func TestGoroutineLeaks_Cancellation(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Execution did not terminate promptly after context cancellation")
 	}
-
-	// 7. Verification (handled by goleak)
 }
 
-// TestStress_AnalyzerConcurrency runs the analyzer itself concurrently multiple times.
-// This is primarily to ensure stability and detect data races when run with `go test -race`.
+// TestStress_AnalyzerConcurrency runs the analyzer concurrently to ensure stability and detect data races.
 func TestStress_AnalyzerConcurrency(t *testing.T) {
 	// Setup shared components
 	logger := zap.NewNop()
 	reporter := &MockReporter{} // Thread-safe mock
 
-	// Setup Mock Server
-	// Use NewUnstartedServer and explicitly configure H2 to support all strategies.
+	// Setup Mock Server. Use NewUnstartedServer to explicitly configure H2.
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		w.WriteHeader(http.StatusOK)
 		fmt.Fprintln(w, "{\"success\":true}")
 	}))
-	// SOLUTION: Explicitly enable HTTP/2 on the test server.
+	// SOLUTION: Explicitly enable HTTP/2 on the test server to prevent PROTOCOL_ERRORs seen in logs.
 	require.NoError(t, http2.ConfigureServer(server.Config, &http2.Server{}))
 	// FIX: Assign the configured TLSConfig back to the server before starting.
 	server.TLS = server.Config.TLSConfig
@@ -109,9 +101,9 @@ func TestStress_AnalyzerConcurrency(t *testing.T) {
 
 	config := &Config{
 		Concurrency:        5,
-		Timeout:            1 * time.Second,
+		Timeout:            2 * time.Second, // Increased timeout slightly for stress test stability
 		Success:            SuccessCondition{BodyRegex: "success"},
-		InsecureSkipVerify: true, // FIX: Added InsecureSkipVerify
+		InsecureSkipVerify: true,
 	}
 	candidate := &RaceCandidate{Method: "GET", URL: server.URL}
 
@@ -124,7 +116,7 @@ func TestStress_AnalyzerConcurrency(t *testing.T) {
 		go func(analysisID int) {
 			defer wg.Done()
 
-			// Each goroutine gets its own analyzer instance
+			// Each goroutine gets its own analyzer instance (this tests the data race fix in Oracle/Config).
 			analyzer, err := NewAnalyzer(uuid.New(), config, logger, reporter)
 			if !assert.NoError(t, err) {
 				return

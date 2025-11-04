@@ -62,7 +62,7 @@ func canonicalizeHeaders(w io.Writer, headers http.Header, excludeMap map[string
 	keys := make([]string, 0, len(headers))
 	for k := range headers {
 		// Check the canonical version of the key against the provided exclusion list.
-		// FIX: Added nil check for excludeMap for defensive programming (treat nil map as empty map).
+		// Added nil check for excludeMap for defensive programming.
 		if excludeMap == nil || !excludeMap[http.CanonicalHeaderKey(k)] {
 			keys = append(keys, k)
 		}
@@ -78,7 +78,7 @@ func canonicalizeHeaders(w io.Writer, headers http.Header, excludeMap map[string
 		// Use the original key `k` to retrieve the correct values.
 		values := headers[k]
 
-		// Sort values to handle multi-value headers consistently, regardless of the order the server returned them.
+		// Sort values to handle multi-value headers consistently.
 		sort.Strings(values)
 		normalizedValue := strings.Join(values, ",")
 

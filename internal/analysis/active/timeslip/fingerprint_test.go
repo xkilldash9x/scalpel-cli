@@ -68,16 +68,15 @@ func TestGenerateFingerprint_Insensitivity_ExcludedHeaders(t *testing.T) {
 	baseBody := []byte("Content")
 	baseHeaders := http.Header{
 		"Content-Type": {"text/plain"}, // Included header
-		// Excluded headers (as defined in types.go DefaultExcludedHeaders)
+		// Excluded headers
 		"Date":       {"Day 1"},
 		"Set-Cookie": {"Session=1"},
 		"Etag":       {"ETAG1"},
 	}
 
-	// FIX: Get the default exclusions which the test relies on.
+	// Get the default exclusions which the test relies on.
 	defaultExclusions := getDefaultExclusions()
 
-	// Pass the correct exclusion map instead of nil.
 	baseFP := GenerateFingerprint(baseStatus, baseHeaders, baseBody, defaultExclusions)
 
 	t.Run("Change Date", func(t *testing.T) {
@@ -110,7 +109,6 @@ func TestGenerateFingerprint_Canonicalization(t *testing.T) {
 		"b-header": {"ValueB"},
 	}
 
-	// Canonicalization shouldn't depend on exclusions.
 	noExclusions := map[string]bool{}
 
 	fp1 := GenerateFingerprint(status, headers1, body, noExclusions)

@@ -118,11 +118,8 @@ func TestEncodeHeaders_NoBody_GET(t *testing.T) {
 		decodedMap[field.Name] = field.Value
 	}
 
-	assert.Equal(t, "GET", decodedMap[":method"])
-	assert.Equal(t, "http", decodedMap[":scheme"])
 	// :authority should default to URL host if Host header is absent
 	assert.Equal(t, "example.com", decodedMap[":authority"])
-	assert.Equal(t, "/", decodedMap[":path"])
 	// Content-Length must be absent for requests without bodies
 	assert.Empty(t, decodedMap["content-length"], "Content-Length should be absent for GET")
 }

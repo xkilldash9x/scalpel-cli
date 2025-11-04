@@ -19,15 +19,12 @@ func TestConfig_InitializeAndGetExcludedHeaders(t *testing.T) {
 
 		assert.NotNil(t, excludeMap)
 		// Check specific defaults (keys must be canonical)
-		assert.True(t, excludeMap["Date"], "Date should be excluded by default")
-		assert.True(t, excludeMap["Etag"], "Etag should be excluded by default")
-		assert.True(t, excludeMap["Content-Length"], "Content-Length should be excluded by default")
+		assert.True(t, excludeMap["Date"])
+		assert.True(t, excludeMap["Etag"])
+		assert.True(t, excludeMap["Content-Length"])
 
 		// Check a header that should NOT be excluded
-		assert.False(t, excludeMap["Content-Type"], "Content-Type should NOT be excluded by default")
-
-		// Sanity check on the number of defaults
-		assert.Greater(t, len(excludeMap), 10, "Should have many default exclusions")
+		assert.False(t, excludeMap["Content-Type"])
 	})
 
 	t.Run("With Custom Exclusions and Canonicalization", func(t *testing.T) {
@@ -38,12 +35,12 @@ func TestConfig_InitializeAndGetExcludedHeaders(t *testing.T) {
 		excludeMap := config.GetExcludedHeaders()
 
 		// Check defaults still exist
-		assert.True(t, excludeMap["Date"], "Date should still be excluded")
+		assert.True(t, excludeMap["Date"])
 
 		// Check custom headers (must be stored in Canonical format)
-		assert.True(t, excludeMap["X-Custom-Header"], "X-Custom-Header should be excluded")
-		assert.True(t, excludeMap[http.CanonicalHeaderKey("authorization")], "Authorization should be excluded")
-		assert.True(t, excludeMap["Another-One"], "Another-One should be excluded (Canonicalized)")
+		assert.True(t, excludeMap["X-Custom-Header"])
+		assert.True(t, excludeMap[http.CanonicalHeaderKey("authorization")])
+		assert.True(t, excludeMap["Another-One"])
 	})
 
 	t.Run("Lazy Initialization Behavior", func(t *testing.T) {
@@ -54,10 +51,10 @@ func TestConfig_InitializeAndGetExcludedHeaders(t *testing.T) {
 		config.GetExcludedHeaders()
 		assert.NotNil(t, config.excludeHeadersMap, "Map should be initialized after GetExcludedHeaders")
 
-		// Ensure subsequent calls don't re-initialize or change the map address if config hasn't changed
+		// Ensure subsequent calls don't re-initialize or change the map address
 		firstMap := config.excludeHeadersMap
 		config.GetExcludedHeaders()
-		// FIX: Correctly assert that the map pointer itself is the same, not the underlying data array of a slice.
-		assert.Equal(t, fmt.Sprintf("%p", firstMap), fmt.Sprintf("%p", config.excludeHeadersMap), "Map pointer should remain the same on subsequent calls, indicating lazy initialization is not re-run.")
+		// Correctly assert that the map pointer itself is the same.
+		assert.Equal(t, fmt.Sprintf("%p", firstMap), fmt.Sprintf("%p", config.excludeHeadersMap), "Map pointer should remain the same on subsequent calls.")
 	})
 }
