@@ -83,7 +83,7 @@ func (m *MockLTM) Stop() {
 
 // setupLLMMind initializes the LLMMind and its dependencies for testing.
 // Optionally accepts configuration modifier functions.
-func setupLLMMind(t *testing.T, cfgModifiers ...func(*config.AgentConfig)) (*LLMMind, *mocks.MockLLMClient, *mocks.MockKGClient, *MockLTM, *CognitiveBus) {
+func setupLLMMind(t *testing.T, cfgModifiers ...func(*config.AgentConfig)) (*LLMMind, *mocks.MockLLMClient, *mocks.MockKGClient, *MockLTM, CognitiveBus) {
 	t.Helper()
 	logger := zaptest.NewLogger(t)
 	mockLLM := new(mocks.MockLLMClient)
@@ -452,7 +452,7 @@ func TestOODALoop_HappyPath(t *testing.T) {
 }
 
 // assertActionReceived is a helper to wait for and validate an action on the bus.
-func assertActionReceived(t *testing.T, bus *CognitiveBus, actionChan <-chan CognitiveMessage, expectedID, timeoutMsg string) {
+func assertActionReceived(t *testing.T, bus CognitiveBus, actionChan <-chan CognitiveMessage, expectedID, timeoutMsg string) {
 	t.Helper()
 	select {
 	case msg := <-actionChan:

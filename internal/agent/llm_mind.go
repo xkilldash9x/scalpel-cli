@@ -25,8 +25,8 @@ import (
 type LLMMind struct {
 	cfg            config.AgentConfig
 	logger         *zap.Logger
-	kg             GraphStore
-	bus            *CognitiveBus
+	kg             schemas.KnowledgeGraphClient // Use the canonical interface
+	bus            CognitiveBus                 // This should be the interface
 	llmClient      schemas.LLMClient
 	ltm            LTM
 	currentMission Mission
@@ -52,12 +52,17 @@ func NewLLMMind(
 	logger *zap.Logger,
 	client schemas.LLMClient,
 	cfg config.AgentConfig,
-	kg GraphStore,
-	bus *CognitiveBus,
+	kg schemas.KnowledgeGraphClient,
+	bus CognitiveBus, // This should be the interface
 	ltm LTM,
 ) *LLMMind {
 
-	contextLookbackSteps := 10 // Default lookback
+	// Determine the context lookback depth from configuration, with a sensible default.
+	// Assuming cfg.Mind.ContextLookbackSteps exists for this refinement.
+	contextLookbackSteps := cfg.Mind.ContextLookbackSteps
+	if contextLookbackSteps <= 0 {
+		contextLookbackSteps = 10 // Default lookback if not configured or invalid
+	}
 
 	m := &LLMMind{
 		logger:               logger.Named("llm_mind"),

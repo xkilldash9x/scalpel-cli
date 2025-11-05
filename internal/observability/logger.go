@@ -46,6 +46,23 @@ var colorMap = map[string]string{
 	"white":   colorWhite,
 }
 
+// NewLogger initializes the logger based on configuration and returns the instance.
+// It sets up the global logger state but also returns the logger for direct use (dependency injection).
+func NewLogger(cfg config.LoggerConfig) (*zap.Logger, error) {
+	// Use the standard console writer (locked Stdout) for initialization.
+	Initialize(cfg, zapcore.Lock(os.Stdout))
+
+	// Retrieve the initialized logger.
+	logger := GetLogger()
+
+	// Basic validation
+	if logger == nil || logger.Core() == zapcore.NewNopCore() {
+		return nil, fmt.Errorf("logger initialization failed unexpectedly")
+	}
+
+	return logger, nil
+}
+
 // Initialize sets up the global Zap logger based on configuration and a specified output writer.
 // This is the core, flexible initializer.
 func Initialize(cfg config.LoggerConfig, consoleWriter zapcore.WriteSyncer) {
@@ -92,6 +109,7 @@ func Initialize(cfg config.LoggerConfig, consoleWriter zapcore.WriteSyncer) {
 
 // InitializeLogger is a convenience wrapper around Initialize for production use.
 // It defaults console output to a locked Stdout.
+// Deprecated: Prefer NewLogger for dependency injection.
 func InitializeLogger(cfg config.LoggerConfig) {
 	Initialize(cfg, zapcore.Lock(os.Stdout))
 }
@@ -159,9 +177,16 @@ func GetLogger() *zap.Logger {
 		if err != nil {
 			return zap.NewNop()
 		}
+		l = l.Named("fallback")
 		// Log a warning that the fallback is being used.
 		l.Warn("Global logger requested before initialization; using fallback.")
-		return l.Named("fallback")
+
+		// Attempt to store the fallback logger atomically if it's still nil.
+		if globalLogger.CompareAndSwap(nil, l) {
+			return l
+		}
+		// If another thread initialized it concurrently, return the initialized one.
+		return globalLogger.Load()
 	}
 	return logger
 }
@@ -174,9 +199,12 @@ func Sync() {
 			// Handle common sync errors gracefully (e.g., writing to closed stdout/stderr on some OSes).
 			// This prevents noisy errors during application shutdown or test teardown.
 			errMsg := err.Error()
+			// Check for common errors related to closed pipes or invalid arguments during shutdown.
 			if !strings.Contains(errMsg, "sync /dev/stdout") &&
+				!strings.Contains(errMsg, "sync /dev/stderr") &&
 				!strings.Contains(errMsg, "invalid argument") &&
-				!strings.Contains(errMsg, "operation not supported") {
+				!strings.Contains(errMsg, "operation not supported") &&
+				!strings.Contains(errMsg, "write: broken pipe") {
 				fmt.Fprintln(os.Stderr, "Error: failed to sync logger:", err)
 			}
 		}

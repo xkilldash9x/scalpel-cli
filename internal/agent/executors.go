@@ -3,6 +3,7 @@ package agent
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"strings"
 	"sync"
@@ -90,13 +91,14 @@ func (r *ExecutorRegistry) UpdateHumanoidProvider(provider HumanoidProvider) {
 // GetSessionProvider returns a function that safely retrieves the current session provider,
 // preventing race conditions.
 func (r *ExecutorRegistry) GetSessionProvider() SessionProvider {
-	return func() schemas.SessionContext {
+	// Returns a function matching the updated SessionProvider signature: func(context.Context) (schemas.SessionContext, error)
+	return func(ctx context.Context) (schemas.SessionContext, error) {
 		r.providerMu.RLock()
 		defer r.providerMu.RUnlock()
 		if r.sessionProvider != nil {
-			return r.sessionProvider()
+			return r.sessionProvider(ctx)
 		}
-		return nil
+		return nil, errors.New("session provider not yet initialized")
 	}
 }
 
@@ -163,14 +165,17 @@ func NewBrowserExecutor(logger *zap.Logger, provider SessionProvider) *BrowserEx
 
 // Execute looks up and runs the appropriate handler for a given browser action.
 func (e *BrowserExecutor) Execute(ctx context.Context, action Action) (*ExecutionResult, error) {
-	session := e.sessionProvider()
-	if session == nil {
+	// Use the context to get the session, as it might involve initialization.
+	session, err := e.sessionProvider(ctx)
+	if err != nil {
+		errMsg := fmt.Sprintf("cannot execute browser action (%s): failed to acquire session: %v", action.Type, err)
+
 		// Return a structured result instead of a raw error for consistency.
 		return &ExecutionResult{
 			Status:          "failed",
 			ObservationType: ObservedSystemState,
 			ErrorCode:       ErrCodeExecutionFailure,
-			ErrorDetails:    map[string]interface{}{"message": fmt.Sprintf("cannot execute browser action (%s): no active browser session", action.Type)},
+			ErrorDetails:    map[string]interface{}{"message": errMsg},
 		}, nil
 	}
 
@@ -185,7 +190,7 @@ func (e *BrowserExecutor) Execute(ctx context.Context, action Action) (*Executio
 		}, nil
 	}
 
-	err := handler(ctx, session, action)
+	err = handler(ctx, session, action)
 
 	result := &ExecutionResult{
 		Status:          "success",
@@ -269,7 +274,7 @@ type CodebaseExecutor struct {
 var _ ActionExecutor = (*CodebaseExecutor)(nil) // Verify interface compliance.
 
 // NewCodebaseExecutor creates a new CodebaseExecutor.
-func NewCodebaseExecutor(logger *zap.Logger, projectRoot string) *CodebaseExecutor {
+func NewCodebaseExecutor(logger *zap.Logger, projectRoot string) *CodeCodebaseExecutor {
 	return &CodebaseExecutor{
 		logger:      logger.Named("codebase_executor"),
 		projectRoot: projectRoot,
@@ -314,6 +319,4 @@ func ParseBrowserError(err error, action Action) (ErrorCode, map[string]interfac
 	}
 
 	return ErrCodeExecutionFailure, details
-}
-
 }

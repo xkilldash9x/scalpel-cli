@@ -142,7 +142,7 @@ func (e *ScanExecutor) StartInternalScan(params ScanParams) (*ScanJob, error) {
 	// 3. Initialize Sub-Agent
 	// We pass nil for the session initially.
 	// NOTE: This currently means the sub-agent will not have browser capabilities unless browser management is refactored.
-	subAgent, err := New(context.Background(), &mission, e.globalCtx, nil)
+	subAgent, err := New(context.Background(), &mission, e.globalCtx)
 	if err != nil {
 		e.updateJobStatus(job, "FAILED", fmt.Errorf("failed to initialize sub-agent: %w", err))
 		return job, err

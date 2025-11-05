@@ -84,8 +84,11 @@ func NewRootCommand() *cobra.Command {
 	_ = rootCmd.PersistentFlags().MarkHidden("validate-fix")
 
 	// --- Sub-command Initialization ---
-	rootCmd.AddCommand(newScanCmd(componentFactory))
+	rootCmd.AddCommand(newScanCmd(service.NewComponentFactory()))
 
+	rootCmd.AddCommand(newReportCmd(NewStoreProvider()))
+	rootCmd.AddCommand(newSelfHealCmd())
+	rootCmd.AddCommand(newEvolveCmd())
 	return rootCmd
 }
 

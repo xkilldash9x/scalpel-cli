@@ -21,6 +21,18 @@ const (
 	StateFailed       AgentState = "FAILED"
 )
 
+// ErrorCode defines standardized error types for action execution.
+
+const (
+	ErrCodeNone             ErrorCode = ""
+	ErrCodeTimeout          ErrorCode = "TIMEOUT"
+	ErrCodeNavigationFailed ErrorCode = "NAVIGATION_FAILED"
+	ErrCodeActionFailed     ErrorCode = "ACTION_FAILED"
+	ErrCodeAnalysisFailed   ErrorCode = "ANALYSIS_FAILED"
+	ErrCodeInternal         ErrorCode = "INTERNAL_ERROR"
+	ErrCodeLLMError         ErrorCode = "LLM_ERROR"
+)
+
 // Mission represents the high-level objective assigned to the agent.
 type Mission struct {
 	ID          string                 `json:"id"`
@@ -136,21 +148,22 @@ type ExecutionResult struct {
 	Findings []schemas.Finding `json:"findings,omitempty"`
 	// KGUpdates can be suggested to update the central knowledge graph.
 	KGUpdates *schemas.KnowledgeGraphUpdate `json:"kg_updates,omitempty"`
+
+	// Optional fields providing more context about the execution.
+	Rationale   string      `json:"rationale,omitempty"`
+	LLMTrace    interface{} `json:"llm_trace,omitempty"`
+	Screenshots interface{} `json:"screenshots,omitempty"`
 }
 
 // CognitiveMessageType defines the message types used on the CognitiveBus.
 type CognitiveMessageType string
 
 const (
-	MessageTypeAction      CognitiveMessageType = "ACTION"
-	MessageTypeObservation CognitiveMessageType = "OBSERVATION"
-	MessageTypeStateChange CognitiveMessageType = "STATE_CHANGE"
-	MessageTypeInterrupt   CognitiveMessageType = "INTERRUPT"
+	MessageTypeAction      CognitiveMessageType = "ACTION"       // An action decided by the Mind, ready for execution.
+	MessageTypeObservation CognitiveMessageType = "OBSERVATION"  // Data from the environment, result of an action.
+	MessageTypeDecision    CognitiveMessageType = "DECISION"     // The output from the Orient/Decide phase.
+	MessageTypeStateUpdate CognitiveMessageType = "STATE_UPDATE" // A change in the agent's internal state.
+	MessageTypeError       CognitiveMessageType = "ERROR"        // A system level error message.
+	MessageTypeControl     CognitiveMessageType = "CONTROL"      // A command to the agent (e.g., pause, resume).
+	MessageTypeLog         CognitiveMessageType = "LOG"          // A general logging message.
 )
-
-// MissionResult summarizes the outcome of a completed mission.
-type MissionResult struct {
-	Summary   string
-	Findings  []schemas.Finding
-	KGUpdates *schemas.KnowledgeGraphUpdate
-}

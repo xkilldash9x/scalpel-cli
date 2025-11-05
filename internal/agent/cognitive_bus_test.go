@@ -37,7 +37,7 @@ func waitTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
 }
 
 // Creates a standard CognitiveBus instance for testing.
-func setupCognitiveBus(t *testing.T, bufferSize int) *CognitiveBus {
+func setupCognitiveBus(t *testing.T, bufferSize int) *CognitiveBusService {
 	t.Helper()
 	logger := zaptest.NewLogger(t)
 	bus := NewCognitiveBus(logger, bufferSize)

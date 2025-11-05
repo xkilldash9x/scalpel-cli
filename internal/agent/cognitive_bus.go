@@ -18,9 +18,9 @@ type CognitiveMessage struct {
 	Payload   interface{}
 }
 
-// CognitiveBus manages the flow of information using a Pub/Sub model.
+// CognitiveBusService manages the flow of information using a Pub/Sub model.
 // Implements blocking sends (backpressure) and graceful shutdown.
-type CognitiveBus struct {
+type CognitiveBusService struct {
 	logger *zap.Logger
 
 	// Map of message type to a list of channels (subscribers).
@@ -41,11 +41,11 @@ type CognitiveBus struct {
 }
 
 // NewCognitiveBus initializes the CognitiveBus.
-func NewCognitiveBus(logger *zap.Logger, bufferSize int) *CognitiveBus {
+func NewCognitiveBus(logger *zap.Logger, bufferSize int) *CognitiveBusService {
 	if bufferSize <= 0 {
 		bufferSize = 100
 	}
-	return &CognitiveBus{
+	return &CognitiveBusService{
 		logger:       logger.Named("cognitive_bus"),
 		subscribers:  make(map[CognitiveMessageType][]chan CognitiveMessage),
 		bufferSize:   bufferSize,
@@ -54,7 +54,7 @@ func NewCognitiveBus(logger *zap.Logger, bufferSize int) *CognitiveBus {
 }
 
 // Post sends a message onto the bus. Blocks if subscriber buffers are full.
-func (cb *CognitiveBus) Post(ctx context.Context, msg CognitiveMessage) error {
+func (cb *CognitiveBusService) Post(ctx context.Context, msg CognitiveMessage) error {
 	// 1. Check shutdown state and increment activePostsWg.
 	cb.shutdownMu.Lock()
 	if cb.isShutdown {
@@ -123,7 +123,7 @@ func (cb *CognitiveBus) Post(ctx context.Context, msg CognitiveMessage) error {
 
 // Subscribe returns a channel to listen for specific message types.
 // Supports variadic arguments to align with test usage (e.g. Subscribe(TypeA, TypeB)).
-func (cb *CognitiveBus) Subscribe(msgTypes ...CognitiveMessageType) (<-chan CognitiveMessage, func()) {
+func (cb *CognitiveBusService) Subscribe(msgTypes ...CognitiveMessageType) (<-chan CognitiveMessage, func()) {
 	cb.mu.Lock()
 	defer cb.mu.Unlock()
 
@@ -170,12 +170,12 @@ func (cb *CognitiveBus) Subscribe(msgTypes ...CognitiveMessageType) (<-chan Cogn
 }
 
 // Acknowledge signals that a message has been processed by a consumer.
-func (cb *CognitiveBus) Acknowledge(msg CognitiveMessage) {
+func (cb *CognitiveBusService) Acknowledge(msg CognitiveMessage) {
 	cb.processingWg.Done()
 }
 
 // Shutdown gracefully closes the bus, waiting for all messages to be acknowledged.
-func (cb *CognitiveBus) Shutdown() {
+func (cb *CognitiveBusService) Shutdown() {
 	cb.shutdownOnce.Do(func() {
 		// 1. Set shutdown flag to prevent new posts from starting.
 		cb.shutdownMu.Lock()
