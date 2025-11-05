@@ -5,6 +5,7 @@ import ( // This is a comment to force a change
 	"context"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 )
 
 // SessionProvider is a function type that retrieves the currently active browser session context.
@@ -16,7 +17,11 @@ type SessionProvider func() schemas.SessionContext
 type ActionRegistry interface {
 	Execute(ctx context.Context, action Action) (*ExecutionResult, error)
 	UpdateSessionProvider(provider SessionProvider)
+	UpdateHumanoidProvider(provider HumanoidProvider)
 }
+
+// HumanoidProvider is a function type that returns the active Humanoid instance.
+type HumanoidProvider func() *humanoid.Humanoid
 
 // EvolutionEngine defines the interface for the proactive self-improvement system.
 type EvolutionEngine interface {

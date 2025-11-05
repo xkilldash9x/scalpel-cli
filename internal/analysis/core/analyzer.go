@@ -3,6 +3,7 @@ package core
 import (
 	"context"
 
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"go.uber.org/zap"
 )
 
@@ -42,6 +43,11 @@ type BaseAnalyzer struct {
 
 // NewBaseAnalyzer creates a new BaseAnalyzer instance.
 func NewBaseAnalyzer(name, description string, analyzerType AnalyzerType, logger *zap.Logger) *BaseAnalyzer {
+	// If no logger is provided, fall back to the global logger.
+	// This prevents components from being initialized with a no-op logger by default.
+	if logger == nil {
+		logger = observability.GetLogger()
+	}
 	return &BaseAnalyzer{
 		name:         name,
 		description:  description,

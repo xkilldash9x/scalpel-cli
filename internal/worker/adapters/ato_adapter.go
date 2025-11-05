@@ -1,4 +1,5 @@
 // File: internal/worker/adapters/ato_adapter.go
+// File: internal/worker/adapters/ato_adapter.go
 package adapters
 
 import (
@@ -17,6 +18,10 @@ import (
 	"go.uber.org/zap"
 )
 
+// jsonMarshal is a variable that holds the json.Marshal function.
+// This allows it to be replaced during testing to simulate marshaling errors.
+var jsonMarshal = json.Marshal
+
 // Default settings for the ATO adapter.
 const (
 	defaultHTTPTimeout      = 15 * time.Second
@@ -25,6 +30,12 @@ const (
 	atoScannerUserAgent     = "evolution-scalpel-ATO-Scanner/1.1"
 )
 
+// ATOAdapter is responsible for performing password spraying attacks to find weak credentials.
+// It iterates through a list of usernames and a predefined wordlist of common passwords,
+// reporting successful logins or potential user enumeration vulnerabilities.
+//
+// The adapter includes throttling to avoid overwhelming the target system and handles
+// context cancellation gracefully to allow for clean shutdown of scans.
 type ATOAdapter struct {
 	core.BaseAnalyzer
 	httpClient *http.Client
@@ -41,7 +52,11 @@ func NewATOAdapter() *ATOAdapter {
 	}
 
 	return &ATOAdapter{
-		BaseAnalyzer: *core.NewBaseAnalyzer("ATO Adapter (Password Spraying)", "Tests for weak credentials via password spraying", core.TypeActive, zap.NewNop()),
+		// Do not fetch the global logger here. The logger will be retrieved from the
+		// AnalysisContext during the Analyze method. This prevents race conditions
+		// during initialization where the global logger may not have been configured yet.
+		// The BaseAnalyzer safely handles a nil logger.
+		BaseAnalyzer: *core.NewBaseAnalyzer("ATO Adapter (Password Spraying)", "Tests for weak credentials via password spraying", core.TypeActive, nil),
 		httpClient:   defaultClient,
 	}
 }
@@ -109,11 +124,11 @@ func (a *ATOAdapter) extractParams(analysisCtx *core.AnalysisContext) (schemas.A
 		}
 		params = *p
 	default:
-		actualType := fmt.Sprintf("%T", analysisCtx.Task.Parameters)
+		actualType := fmt.Sprintf("%T", p)
 		analysisCtx.Logger.Error("Invalid parameter type assertion",
 			zap.String("expected", "schemas.ATOTaskParams or pointer"),
 			zap.String("actual", actualType))
-		return schemas.ATOTaskParams{}, fmt.Errorf("invalid parameters type for ATO task; expected schemas.ATOTaskParams or *schemas.ATOTaskParams, got %s", actualType)
+		return schemas.ATOTaskParams{}, fmt.Errorf("invalid parameters type for ATO task; expected schemas.ATOTaskParams or *schemas.ATOTaskParams, got %T", p)
 	}
 
 	if len(params.Usernames) == 0 {
@@ -124,7 +139,8 @@ func (a *ATOAdapter) extractParams(analysisCtx *core.AnalysisContext) (schemas.A
 }
 
 func (a *ATOAdapter) performLoginAttempt(ctx context.Context, analysisCtx *core.AnalysisContext, attempt ato.LoginAttempt) {
-	logger := analysisCtx.Logger.With(zap.String("username", attempt.Username))
+	logger := analysisCtx.Logger.With(zap.String("username", attempt.Username), zap.String("password", "REDACTED"))
+	logger.Debug("Performing login attempt")
 
 	// Ensure TargetURL is valid before use.
 	if analysisCtx.TargetURL == nil {
@@ -134,17 +150,17 @@ func (a *ATOAdapter) performLoginAttempt(ctx context.Context, analysisCtx *core.
 
 	// Prepare the request (Assuming JSON POST).
 	payloadBytes, err := json.Marshal(map[string]string{
-		"username": attempt.Username,
-		"password": attempt.Password,
+		"username": attempt.Username, // Redacted in logs
+		"password": attempt.Password, // Redacted in logs
 	})
 	if err != nil {
-		logger.Error("Failed to marshal login payload", zap.Error(err))
+		logger.Error("Failed to marshal login payload for ATO attempt", zap.Error(err))
 		return
 	}
 
 	req, err := http.NewRequestWithContext(ctx, "POST", analysisCtx.TargetURL.String(), bytes.NewReader(payloadBytes))
 	if err != nil {
-		logger.Error("Failed to create HTTP request", zap.Error(err))
+		logger.Error("Failed to create HTTP request for ATO attempt", zap.Error(err), zap.String("target_url", analysisCtx.TargetURL.String()))
 		return
 	}
 	req.Header.Set("Content-Type", "application/json")
@@ -158,7 +174,7 @@ func (a *ATOAdapter) performLoginAttempt(ctx context.Context, analysisCtx *core.
 		if ctx.Err() != nil {
 			return
 		}
-		logger.Warn("HTTP request failed during login attempt", zap.Error(err))
+		logger.Warn("HTTP request failed during login attempt", zap.Error(err), zap.String("target_url", analysisCtx.TargetURL.String()))
 		return
 	}
 	defer resp.Body.Close()
@@ -167,7 +183,7 @@ func (a *ATOAdapter) performLoginAttempt(ctx context.Context, analysisCtx *core.
 	// Read the body, limiting the size.
 	bodyBytes, err := io.ReadAll(io.LimitReader(resp.Body, maxResponseBodyReadSize))
 	if err != nil {
-		logger.Warn("Failed to read response body", zap.Error(err))
+		logger.Warn("Failed to read response body during ATO attempt", zap.Error(err), zap.Int("status_code", resp.StatusCode))
 		// We can still proceed with analysis based on the status code.
 	}
 
@@ -205,7 +221,7 @@ func (a *ATOAdapter) createAtoFinding(analysisCtx *core.AnalysisContext, vulnNam
 	}
 	evidence, err := json.Marshal(evidenceMap)
 	if err != nil {
-		analysisCtx.Logger.Error("Failed to marshal ATO evidence", zap.Error(err))
+		analysisCtx.Logger.Error("Failed to marshal ATO evidence", zap.Error(err), zap.String("vuln_name", vulnName))
 		// Fallback evidence in case of marshaling error.
 		evidence = []byte(fmt.Sprintf(`{"error": "failed to marshal evidence: %s"}`, err.Error()))
 	}
@@ -232,4 +248,22 @@ func (a *ATOAdapter) createAtoFinding(analysisCtx *core.AnalysisContext, vulnNam
 		CWE:            []string{cwe},
 	}
 	analysisCtx.AddFinding(finding)
+	analysisCtx.Logger.Info("ATO finding generated",
+		zap.String("vulnerability", vulnName),
+		zap.String("severity", string(severity)),
+		zap.String("username", result.Attempt.Username),
+		zap.String("target", target),
+	)
+}
+
+// -- Test Helpers --
+
+// GetJSONMarshalForTest returns the current json.Marshal function used by the adapter.
+func GetJSONMarshalForTest() func(v interface{}) ([]byte, error) {
+	return jsonMarshal
+}
+
+// SetJSONMarshalForTest overrides the json.Marshal function for testing purposes.
+func SetJSONMarshalForTest(fn func(v interface{}) ([]byte, error)) {
+	jsonMarshal = fn
 }

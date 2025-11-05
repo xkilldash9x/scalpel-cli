@@ -5,8 +5,6 @@ import (
 	"context"
 	"errors" // Added import
 	"fmt"
-	"io"
-	"log"
 	"net/http"
 	"regexp"
 	"testing"
@@ -16,15 +14,17 @@ import (
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
 	"github.com/xkilldash9x/scalpel-cli/internal/jsoncompare"
+	"go.uber.org/zap"
+	"go.uber.org/zap/zaptest"
 )
 
 // TestAnalyzer_AnalyzeTraffic_Validation verifies the prerequisite checks.
 func TestAnalyzer_AnalyzeTraffic_Validation(t *testing.T) {
 	t.Parallel()
 	// Discard logger output for clean test runs.
-	logger := log.New(io.Discard, "", 0)
+	logger := zaptest.NewLogger(t)
 	// Initialize the analyzer with a real comparer service instance.
-	analyzer := NewIDORAnalyzer(logger, jsoncompare.NewService())
+	analyzer := NewIDORAnalyzer(logger.Named("idor-analyzer-validation"), jsoncompare.NewService(logger))
 	ctx := context.Background()
 
 	// Define Sessions (using MockSession from idor_test.go)
@@ -100,7 +100,7 @@ func TestAnalyzer_AnalyzeTraffic_Validation(t *testing.T) {
 func TestValidateAndConfigure_Defaults(t *testing.T) {
 	// Setup a dummy analyzer to call the internal method.
 	analyzer := &IDORAnalyzer{
-		logger: log.New(io.Discard, "", 0),
+		logger: zap.NewNop(),
 	}
 	userA := &MockSession{Authenticated: true}
 	userB := &MockSession{Authenticated: true}

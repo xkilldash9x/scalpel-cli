@@ -1,0 +1,627 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Scalpel MCP Dashboard</title>
+    <style>
+        :root {
+            /* Tokyo Night Color Palette */
+            --bg-color: #1a1b26;
+            --fg-color: #a9b1d6;
+            --border-color: #414868;
+            --input-bg: #24283b;
+            --header-color: #7aa2f7;
+            --btn-bg: #7aa2f7;
+            --btn-text: #1a1b26;
+            --success: #9ece6a;
+            --error: #f7768e;
+            --warn: #e0af68;
+            --info: #7dcfff;
+            /* Severity Colors */
+            --critical: #f7768e;
+            --high: #ff9e64;
+            --medium: #e0af68;
+            --low: #7aa2f7;
+        }
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, "Segoe UI", Roboto, "Helvetica Neue", Arial, sans-serif;
+            background-color: var(--bg-color);
+            color: var(--fg-color);
+            margin: 0;
+            padding: 1em 2em;
+            line-height: 1.6;
+        }
+        header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            border-bottom: 2px solid var(--border-color);
+            padding-bottom: 10px;
+            margin-bottom: 2em;
+        }
+        h1 {
+            color: var(--header-color);
+            margin: 0;
+        }
+        h2 {
+            color: var(--header-color);
+            border-bottom: 1px solid var(--border-color);
+            padding-bottom: 5px;
+        }
+        .container {
+            display: flex;
+            gap: 2em;
+            flex-wrap: wrap;
+        }
+        .panel {
+            background-color: var(--input-bg);
+            border: 1px solid var(--border-color);
+            border-radius: 8px;
+            padding: 1.5em;
+            box-shadow: 0 4px 6px rgba(0, 0, 0, 0.3);
+        }
+        .panel-scan { flex: 1 1 350px; }
+        .panel-query { flex: 1 1 350px; }
+        .panel-results { flex: 2 1 100%; }
+
+        /* Forms & Inputs */
+        form label {
+            display: block;
+            margin-bottom: 0.5em;
+            font-weight: bold;
+        }
+        form input[type="text"], form input[type="number"], form select {
+            width: 100%;
+            padding: 10px;
+            background-color: var(--bg-color);
+            border: 1px solid var(--border-color);
+            color: var(--fg-color);
+            border-radius: 4px;
+            margin-bottom: 1em;
+            box-sizing: border-box;
+        }
+        button {
+            padding: 10px 15px;
+            background-color: var(--btn-bg);
+            color: var(--btn-text);
+            border: none;
+            border-radius: 4px;
+            cursor: pointer;
+            font-weight: bold;
+            font-size: 1em;
+            transition: opacity 0.2s;
+        }
+        button:hover {
+            opacity: 0.85;
+        }
+        button:disabled {
+            background-color: var(--border-color);
+            cursor: not-allowed;
+        }
+
+        /* Status Log */
+        #scan-status-log {
+            background-color: var(--bg-color);
+            border: 1px solid var(--border-color);
+            border-radius: 4px;
+            padding: 1em;
+            height: 200px;
+            overflow-y: scroll;
+            font-family: "Consolas", "Courier New", Courier, monospace;
+            font-size: 0.9em;
+        }
+        .log-entry { margin-bottom: 5px; }
+        .log-success { color: var(--success); }
+        .log-error { color: var(--error); }
+        .log-warn { color: var(--warn); }
+        .log-info { color: var(--info); }
+
+
+        /* Connection Status */
+        #connection-status {
+            display: flex;
+            align-items: center;
+            font-size: 0.9em;
+        }
+        .status-dot {
+            height: 10px;
+            width: 10px;
+            border-radius: 50%;
+            display: inline-block;
+            margin-right: 8px;
+        }
+        .status-disconnected { background-color: var(--error); }
+        .status-connected { background-color: var(--success); }
+        .status-connecting { background-color: var(--warn); }
+
+        /* Results Table */
+        .results-container {
+            overflow-x: auto;
+        }
+        table {
+            width: 100%;
+            border-collapse: collapse;
+            margin-top: 1em;
+        }
+        th, td {
+            border: 1px solid var(--border-color);
+            padding: 8px 12px;
+            text-align: left;
+        }
+        th {
+            background-color: var(--bg-color);
+            font-weight: bold;
+        }
+        tr:nth-child(even) {
+            background-color: rgba(255, 255, 255, 0.05);
+        }
+        .severity-CRITICAL { color: var(--critical); font-weight: bold; }
+        .severity-HIGH { color: var(--high); font-weight: bold; }
+        .severity-MEDIUM { color: var(--medium); }
+        .severity-LOW { color: var(--low); }
+        .severity-INFORMATIONAL { color: var(--info); }
+
+         /* Simple Loader */
+         .loader {
+            border: 3px solid var(--input-bg);
+            border-top: 3px solid var(--btn-bg);
+            border-radius: 50%;
+            width: 15px;
+            height: 15px;
+            animation: spin 1s linear infinite;
+            display: inline-block;
+            margin-left: 10px;
+            vertical-align: middle;
+        }
+        @keyframes spin {
+            0% { transform: rotate(0deg); }
+            100% { transform: rotate(360deg); }
+        }
+
+    </style>
+</head>
+<body>
+
+    <header>
+        <h1>Scalpel MCP Dashboard</h1>
+        <div id="connection-status">
+            <span class="status-dot status-connecting"></span>
+            <span>Connecting to MCP...</span>
+        </div>
+    </header>
+
+    <div class="container">
+        <div class="panel panel-scan">
+            <h2>Start New Scan</h2>
+            <form id="scan-form">
+                <label for="target">Target URL:</label>
+                <input type="text" id="target" name="target" placeholder="https://example.com" required>
+
+                <label for="depth">Depth (Optional):</label>
+                <input type="number" id="depth" name="depth" placeholder="Default scan depth">
+
+                <label for="scope">Scope (Optional):</label>
+                <select id="scope" name="scope">
+                    <option value="">Default (Strict)</option>
+                    <option value="strict">Strict</option>
+                    <option value="subdomain">Subdomain</option>
+                </select>
+
+                <button type="submit" id="start-scan-btn" disabled>Start Scan</button>
+                <div id="scan-loader" class="loader" style="display: none;"></div>
+            </form>
+
+            <h2>Scan Status</h2>
+            <div id="scan-status-log"><div class="log-entry log-info">Dashboard loaded. Checking MCP connection...</div></div>
+        </div>
+
+        <div class="panel panel-query">
+            <h2>Query Findings</h2>
+            <p>Query the database. Defaults to the latest scan if Scan ID is empty.</p>
+            <form id="query-form">
+                <label for="scan_id">Scan ID (Optional):</label>
+                <input type="text" id="scan_id" name="scan_id" placeholder="Latest Scan">
+
+                <label for="severity">Severity (Optional):</label>
+                <select id="severity" name="severity">
+                    <option value="">All Severities</option>
+                    <option value="CRITICAL">Critical</option>
+                    <option value="HIGH">High</option>
+                    <option value="MEDIUM">Medium</option>
+                    <option value="LOW">Low</option>
+                    <option value="INFORMATIONAL">Informational</option>
+                </select>
+
+                <label for="limit">Limit (Optional):</label>
+                <input type="number" id="limit" name="limit" placeholder="Default: 50, Max: 500">
+
+                <button type="submit" id="query-findings-btn" disabled>Query Findings</button>
+                <div id="query-loader" class="loader" style="display: none;"></div>
+            </form>
+        </div>
+
+        <div class="panel panel-results">
+            <h2>Results (<span id="results-count">0</span>)</h2>
+            <div class="results-container" id="findings-result">
+                <p>No results yet. Start a scan or run a query.</p>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        // The MCP server URL. Assumes the default host and port.
+        const MCP_URL = "http://127.0.0.1:8080";
+
+        // Grab the UI elements
+        const scanForm = document.getElementById('scan-form');
+        const queryForm = document.getElementById('query-form');
+        const statusLog = document.getElementById('scan-status-log');
+        const findingsResult = document.getElementById('findings-result');
+        const connectionStatusEl = document.getElementById('connection-status');
+        const resultsCountEl = document.getElementById('results-count');
+        const startScanBtn = document.getElementById('start-scan-btn');
+        const queryFindingsBtn = document.getElementById('query-findings-btn');
+        const scanLoader = document.getElementById('scan-loader');
+        const queryLoader = document.getElementById('query-loader');
+
+
+        // State variable to track if MCP is reachable
+        let isConnected = false;
+
+        // --- Initialization ---
+        // Check MCP connectivity on load and periodically
+        checkConnectivity();
+        setInterval(checkConnectivity, 10000);
+
+
+        // -- Event Listener for Starting a Scan --
+        scanForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!isConnected) return;
+
+            const formData = new FormData(scanForm);
+            const params = {
+                target: formData.get('target')
+            };
+
+            // Only add optional params if they were actually filled in
+            const depth = formData.get('depth');
+            if (depth) params.depth = parseInt(depth, 10);
+            const scope = formData.get('scope');
+            if (scope) params.scope = scope;
+            
+
+            const command = {
+                command: "start_scan",
+                params: params
+            };
+
+            logStatus("Sending 'start_scan' command...", 'info');
+            // Set loading state. The polling function will manage re-enabling it.
+            setLoading(startScanBtn, scanLoader, true);
+
+            try {
+                const response = await mcpFetch("/api/v1/command", "POST", command);
+
+                // Check for the "accepted" status from the handler
+                if (response.status === "accepted" && response.data && response.data.id) {
+                    logStatus(`Scan accepted. Initial Job ID: ${response.data.id}`, "success");
+                    // Start polling the status using the initial (potentially pending) ID
+                    pollScanStatus(response.data.id);
+                } else {
+                    throw new Error(response.error || "Invalid response from server.");
+                }
+
+            } catch (err) {
+                logStatus(`Failed to start scan: ${err.message}`, "error");
+                renderError(findingsResult, err.message);
+                // Re-enable button if initiation failed
+                setLoading(startScanBtn, scanLoader, false);
+            }
+        });
+
+        // -- Event Listener for Querying Findings --
+        queryForm.addEventListener('submit', async (e) => {
+            e.preventDefault();
+            if (!isConnected) return;
+            
+            const formData = new FormData(queryForm);
+            const params = {};
+            
+            // Safely extract form data
+            const scanId = formData.get('scan_id');
+            const severity = formData.get('severity');
+            const limit = formData.get('limit');
+
+            if (scanId) params.scan_id = scanId;
+            if (severity) params.severity = severity;
+            if (limit) params.limit = parseInt(limit, 10);
+
+            const command = {
+                command: "query_findings",
+                params: params
+            };
+
+            logStatus(`Sending 'query_findings' command (Scan ID: ${scanId || 'latest'})...`, 'info');
+            setLoading(queryFindingsBtn, queryLoader, true);
+            findingsResult.innerHTML = "<p>Loading results...</p>";
+
+
+            try {
+                const response = await mcpFetch("/api/v1/command", "POST", command);
+
+                if (response.status === "success") {
+                    logStatus(`Query successful. Found ${response.data.count} findings.`, "success");
+                    renderFindingsTable(response.data);
+                } else {
+                    throw new Error(response.error || "Query failed.");
+                }
+
+            } catch (err) {
+                logStatus(`Failed to query findings: ${err.message}`, "error");
+                renderError(findingsResult, err.message);
+            } finally {
+                setLoading(queryFindingsBtn, queryLoader, false);
+            }
+        });
+
+
+        /**
+         * Keeps checking the status of a running scan.
+         */
+        function pollScanStatus(scanID) {
+            logStatus(`Polling status for ${scanID}...`, "warn");
+            let currentScanID = scanID; // Keep track of the ID as it might change from pending to real
+
+            // Keep the start button disabled while a scan is actively polling
+            setLoading(startScanBtn, scanLoader, true);
+
+
+            const interval = setInterval(async () => {
+                if (!isConnected) {
+                    logStatus("MCP disconnected. Stopping polling.", "error");
+                    clearInterval(interval);
+                    setLoading(startScanBtn, scanLoader, false);
+                    return;
+                }
+
+                try {
+                    // The status endpoint returns the ScanJob object directly (wrapped in the CommandResponse structure by the handler)
+                    const response = await mcpFetch(`/api/v1/scan/${currentScanID}/status`, "GET");
+                    
+                    // We must check the outer response status and extract the job from 'data'.
+                    if (response.status !== "success" || !response.data) {
+                         throw new Error(response.error || `Failed to retrieve status for ${currentScanID}`);
+                    }
+
+                    const job = response.data;
+
+                    // If the job ID was updated (from 'pending-...' to a real UUID)
+                    if (job.id !== currentScanID) {
+                         logStatus(`Job ID updated from ${currentScanID} to ${job.id}`, "warn");
+                         currentScanID = job.id; // Update the ID we use for subsequent polls
+                    }
+
+                    logStatus(`Status for ${currentScanID}: ${job.status}`);
+
+                    // Check for terminal statuses based on the inner job status
+                    if (job.status === "COMPLETED" || job.status === "FAILED" || job.status === "TIMEOUT") {
+                        clearInterval(interval); // Stop polling
+                        setLoading(startScanBtn, scanLoader, false); // Re-enable start button
+
+                        if (job.status === "COMPLETED") {
+                            logStatus(`Scan ${currentScanID} finished successfully!`, "success");
+                            // Automatically query the results for this specific scan
+                            document.getElementById('scan_id').value = currentScanID;
+                            queryForm.dispatchEvent(new Event('submit'));
+                        } else {
+                            logStatus(`Scan ${currentScanID} failed/timed out: ${job.error || 'Unknown error'}`, "error");
+                            renderError(findingsResult, `Scan ${job.status}: ${job.error}`);
+                        }
+                    }
+
+                } catch (err) {
+                    // This could fail if the scan ID isn't in the registry (e.g., server restart or 404)
+                    clearInterval(interval);
+                    setLoading(startScanBtn, scanLoader, false);
+                    logStatus(`Error polling status for ${currentScanID}: ${err.message}`, "error");
+                }
+            }, 3000); // Poll every 3 seconds
+        }
+
+        /**
+         * Renders the findings data into a readable table.
+         */
+        function renderFindingsTable(data) {
+            resultsCountEl.textContent = data.count;
+
+            if (data.count === 0) {
+                findingsResult.innerHTML = "<p>No findings matched the query criteria.</p>";
+                return;
+            }
+
+            let tableHtml = `<table>
+                <thead>
+                    <tr>
+                        <th>Severity</th>
+                        <th>Vulnerability</th>
+                        <th>Target URL</th>
+                        <th>Module</th>
+                        <th>Scan ID</th>
+                        <th>Observed At</th>
+                    </tr>
+                </thead>
+                <tbody>`;
+
+            data.findings.forEach(finding => {
+                // Format timestamp
+                const timestamp = new Date(finding.timestamp).toLocaleString();
+                
+                tableHtml += `
+                    <tr>
+                        <td class="severity-${finding.severity}">${finding.severity}</td>
+                        <td>${escapeHtml(finding.vulnerability.name)}</td>
+                        <td>${escapeHtml(finding.target)}</td>
+                        <td>${escapeHtml(finding.module)}</td>
+                        <td>${escapeHtml(finding.scan_id)}</td>
+                        <td>${timestamp}</td>
+                    </tr>`;
+            });
+
+            tableHtml += `</tbody></table>`;
+            findingsResult.innerHTML = tableHtml;
+        }
+
+        /**
+         * Renders an error message in the results area.
+         */
+        function renderError(element, message) {
+            resultsCountEl.textContent = "Error";
+            element.innerHTML = `<p style="color: var(--error);">Error: ${escapeHtml(message)}</p>`;
+        }
+
+        /**
+         * A wrapper for the native fetch API to talk to the MCP.
+         * Handles various response types and standardizes the output for the dashboard logic.
+         */
+        async function mcpFetch(endpoint, method, body = null, fetchOptions = {}) {
+            const url = `${MCP_URL}${endpoint}`;
+
+            const options = {
+                method: method,
+                headers: {
+                    // 'Content-Type' is required for POST requests with a body
+                },
+                ...fetchOptions // Allows passing signal for timeouts
+            };
+
+            if (body) {
+                options.headers['Content-Type'] = 'application/json';
+                options.body = JSON.stringify(body);
+            }
+
+            const response = await fetch(url, options);
+
+             // Handle potential empty responses or non-JSON responses robustly
+             const responseText = await response.text();
+            let responseData = null;
+
+            if (responseText) {
+                try {
+                    // Attempt to parse as JSON (standard MCP response)
+                    responseData = JSON.parse(responseText);
+                } catch (e) {
+                    // If parsing fails (e.g., /healthz plain text), create a standardized object
+                    // This ensures downstream consumers always receive an object with a 'status' field.
+                    responseData = { status: response.ok ? "success" : "error", data: responseText, error: response.ok ? "" : responseText };
+                }
+            } else if (response.ok) {
+                // Handle empty body success (e.g. 204 No Content)
+                responseData = { status: "success", data: null };
+            }
+
+
+            if (!response.ok) {
+                // Use the error message from the MCP response if available
+                let errorMsg = `HTTP error! status: ${response.status}`;
+                if (responseData && responseData.error) {
+                    errorMsg = responseData.error;
+                }
+                throw new Error(errorMsg);
+            }
+            
+            return responseData;
+        }
+
+        /**
+         * Helper to log messages to the status box.
+         */
+        function logStatus(message, type = "") {
+            const entry = document.createElement('div');
+            const cssClass = type ? `log-${type}` : 'log-info'; // Default to info
+            entry.className = `log-entry ${cssClass}`;
+            entry.textContent = `[${new Date().toLocaleTimeString()}] ${message}`;
+            statusLog.appendChild(entry);
+            // Auto scroll to the bottom
+            statusLog.scrollTop = statusLog.scrollHeight;
+        }
+
+        /**
+         * Checks connectivity to the MCP server using the /healthz endpoint.
+         */
+        async function checkConnectivity() {
+            try {
+                // Use a short timeout for the health check
+                const controller = new AbortController();
+                const timeoutId = setTimeout(() => controller.abort(), 3000);
+
+                // We use mcpFetch as it handles the response parsing correctly for /healthz
+                await mcpFetch("/healthz", "GET", null, { signal: controller.signal });
+                clearTimeout(timeoutId);
+                updateConnectionStatus(true);
+                
+            } catch (err) {
+                updateConnectionStatus(false);
+            }
+        }
+
+        /**
+         * Updates the UI based on connection status.
+         */
+        function updateConnectionStatus(status) {
+            // Prevent redundant updates
+            if (status === isConnected && isConnected !== null) return;
+            
+            isConnected = status;
+            const dot = connectionStatusEl.querySelector('.status-dot');
+            const text = connectionStatusEl.querySelector('span:last-child');
+
+            dot.classList.remove('status-connecting', 'status-connected', 'status-disconnected');
+
+            if (status) {
+                dot.classList.add('status-connected');
+                text.textContent = 'MCP Connected';
+                logStatus("Connection to MCP established.", "success");
+            } else {
+                dot.classList.add('status-disconnected');
+                text.textContent = 'MCP Disconnected';
+                logStatus("Connection to MCP lost or failed. Ensure the server is running at " + MCP_URL, "error");
+            }
+            // Update button states based on connectivity, respecting loading states
+            // We check the current disabled state; if it's disabled due to loading, we keep it disabled.
+            setLoading(startScanBtn, scanLoader, startScanBtn.disabled);
+            setLoading(queryFindingsBtn, queryLoader, queryFindingsBtn.disabled);
+        }
+
+         /**
+         * Helper to manage loading state of buttons and loaders.
+         */
+         function setLoading(button, loaderElement, isLoading) {
+            if (isLoading) {
+                button.disabled = true;
+                loaderElement.style.display = 'inline-block';
+            } else {
+                // Only re-enable if connected
+                button.disabled = !isConnected;
+                loaderElement.style.display = 'none';
+            }
+        }
+
+        /**
+        * Utility function to escape HTML characters (preventing XSS in the dashboard itself)
+        */
+        function escapeHtml(unsafe) {
+            if (unsafe == null) return '';
+            return unsafe
+                .toString()
+                .replace(/&/g, "&amp;")
+                .replace(/</g, "&lt;")
+                .replace(/>/g, "&gt;")
+                .replace(/"/g, "&quot;")
+                .replace(/'/g, "&#039;");
+        }
+
+    </script>
+</body>
+</html>

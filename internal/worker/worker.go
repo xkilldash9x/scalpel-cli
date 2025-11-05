@@ -98,7 +98,7 @@ func (w *MonolithicWorker) GlobalCtx() *core.GlobalContext {
 func (w *MonolithicWorker) registerAdapters() error {
 	// The ATO and IDOR adapters are now treated as stateless at construction.
 	w.adapterRegistry[schemas.TaskTestAuthATO] = adapters.NewATOAdapter()
-	w.adapterRegistry[schemas.TaskTestAuthIDOR] = adapters.NewIDORAdapter()
+	w.adapterRegistry[schemas.TaskTestAuthIDOR] = adapters.NewIDORAdapter(w.logger)
 
 	// STATELESS ADAPTERS
 	w.adapterRegistry[schemas.TaskAnalyzeWebPageTaint] = adapters.NewTaintAdapter()

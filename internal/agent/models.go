@@ -44,6 +44,11 @@ const (
 	ActionScroll       ActionType = "SCROLL"
 	ActionWaitForAsync ActionType = "WAIT_FOR_ASYNC"
 
+	// -- User Interaction & System Management (Used by persistent/master agents) --
+	ActionRespondToUser ActionType = "RESPOND_TO_USER"
+	ActionQueryFindings ActionType = "QUERY_FINDINGS"
+	ActionStartScan     ActionType = "START_SCAN"
+
 	// -- High-Level Humanoid Actions --
 	// Complex, multi-step interactions emulating human behavior.
 	ActionHumanoidDragAndDrop ActionType = "HUMANOID_DRAG_AND_DROP"
@@ -100,6 +105,9 @@ const (
 	ObservedEvolutionResult ObservationType = "EVOLUTION_RESULT"
 	ObservedVulnerability   ObservationType = "VULNERABILITY"
 	ObservedSystemState     ObservationType = "SYSTEM_STATE"
+	ObservedUserInput       ObservationType = "USER_INPUT"
+	ObservedQueryResult     ObservationType = "QUERY_RESULT"
+	ObservedScanStatus      ObservationType = "SCAN_STATUS"
 	// ObservedAnalysisResult is a generic type for results from analysis adapters.
 	ObservedAnalysisResult ObservationType = "ANALYSIS_RESULT"
 )

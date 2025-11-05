@@ -223,8 +223,11 @@ func configureTLS(config *ClientConfig) *tls.Config {
 	if tlsConfig.MinVersion < SecureMinTLSVersion {
 		// Log if we are overriding an explicit (non-zero) user configuration.
 		if tlsConfig.MinVersion != 0 {
-			config.Logger.Warn("Security Hardening: Overriding insecure TLS configuration. Minimum TLS version upgraded to secure minimum.",
-				"configured_version", tlsConfig.MinVersion, "enforced_version", SecureMinTLSVersion)
+			config.Logger.Warn(
+				"Overriding insecure TLS configuration with secure minimum.",
+				"reason", "Security Hardening",
+				"configured_version", tlsConfig.MinVersion,
+				"enforced_version", SecureMinTLSVersion)
 		}
 		// Enforce the secure version.
 		tlsConfig.MinVersion = SecureMinTLSVersion

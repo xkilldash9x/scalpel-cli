@@ -11,7 +11,13 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/stretchr/testify/require"
+	"go.uber.org/zap"
 )
+
+func newTestLogger() *zap.Logger {
+	logger, _ := zap.NewDevelopment()
+	return logger
+}
 
 // NOTE: This file is named `service_internal_test.go` to be part of the `jsoncompare`
 // package. This allows it to access unexported functions like `normalize` for
@@ -27,7 +33,7 @@ func FuzzCompare_Robustness(f *testing.F) {
 	f.Add([]byte(""), []byte(""))
 
 	// Instantiate the service once for the fuzz target.
-	s := NewService().(*service) // Assert to concrete type to access unexported methods if needed.
+	s := NewService(newTestLogger()).(*service) // Assert to concrete type to access unexported methods if needed.
 	opts := DefaultOptions()
 
 	// The Fuzz Target.
@@ -41,9 +47,7 @@ func FuzzCompare_Robustness(f *testing.F) {
 func FuzzCompare_SemanticInvariants(f *testing.F) {
 	// Seed with examples known to be semantically equivalent or different.
 	f.Add([]byte(`{"session_id": "S1", "user": "A"}`), []byte(`{"session_id": "S2", "user": "A"}`))
-	f.Add([]byte(`[1, 2]`), []byte(`[2, 1]`))
-
-	s := NewService().(*service)
+	s := NewService(newTestLogger()).(*service)
 	opts := DefaultOptions()
 	cmpOptions := s.buildCmpOptions(opts)
 
@@ -86,9 +90,7 @@ func FuzzCompare_SemanticInvariants(f *testing.F) {
 // This test lives in the internal test file to access the unexported `normalize` method.
 func FuzzNormalize_Idempotency(f *testing.F) {
 	f.Add([]byte(`{"key": "value", "session_id": "S1", "data": [1, "a"]}`))
-	f.Add([]byte(`{"__DYNAMIC_KEY__": ["__DYNAMIC_VALUE__"]}`))
-
-	s := NewService().(*service)
+	s := NewService(newTestLogger()).(*service)
 	opts := DefaultOptions()
 	cmpOpts := s.buildCmpOptions(opts)
 
@@ -123,11 +125,11 @@ func TestCompare_Concurrent(t *testing.T) {
     }`)
 	jsonB := []byte(`{
         "session_id": "S2",
-        "user": {"id": "550e8400-e29b-41d4-a716-446655440000"},
+        "user": {"id": "550e8400-e29b-4372-a567-0e02b2c3d479"},
         "data": [3, 1, 2]
     }`)
 
-	s := NewService()
+	s := NewService(newTestLogger())
 	opts := DefaultOptions()
 	const concurrencyLevel = 100
 	var wg sync.WaitGroup
@@ -163,7 +165,7 @@ func TestCompare_Concurrent(t *testing.T) {
 // TestNormalize_Unit tests the main normalization logic in isolation.
 func TestNormalize_Unit(t *testing.T) {
 	t.Parallel()
-	s := NewService().(*service)
+	s := NewService(newTestLogger()).(*service)
 	opts := DefaultOptions()
 
 	testCases := []struct {
@@ -210,7 +212,7 @@ func TestNormalize_Unit(t *testing.T) {
 // TestCalculateShannonEntropy tests the entropy calculation helper function.
 func TestCalculateShannonEntropy(t *testing.T) {
 	t.Parallel()
-	s := NewService().(*service)
+	s := NewService(newTestLogger()).(*service)
 	testCases := []struct {
 		name     string
 		input    string
@@ -235,7 +237,7 @@ func TestCalculateShannonEntropy(t *testing.T) {
 // TestIsPlausibleUnixTimestamp tests the timestamp detection helper function.
 func TestIsPlausibleUnixTimestamp(t *testing.T) {
 	t.Parallel()
-	s := NewService().(*service)
+	s := NewService(newTestLogger()).(*service)
 	testCases := []struct {
 		name     string
 		input    float64

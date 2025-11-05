@@ -6,12 +6,12 @@ import (
 	"context"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"strings"
 	"sync"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/jsoncompare"
+	"go.uber.org/zap"
 	"golang.org/x/sync/errgroup"
 )
 
@@ -44,13 +44,13 @@ const (
 
 // Detect performs the IDOR analysis concurrently.
 // It now accepts the comparer interface.
-func Detect(ctx context.Context, traffic []RequestResponsePair, config Config, logger *log.Logger, comparer jsoncompare.JSONComparison) ([]Finding, error) {
+func Detect(ctx context.Context, traffic []RequestResponsePair, config Config, logger *zap.SugaredLogger, comparer jsoncompare.JSONComparison) ([]Finding, error) {
 	g, groupCtx := errgroup.WithContext(ctx)
 	g.SetLimit(config.ConcurrencyLevel)
 
 	findingsChan := make(chan Finding, config.ConcurrencyLevel)
 
-	logger.Printf("Starting IDOR analysis with concurrency level %d...", config.ConcurrencyLevel)
+	logger.Infof("Starting IDOR analysis with concurrency level %d...", config.ConcurrencyLevel)
 
 	var producerWG sync.WaitGroup
 	producerWG.Add(1)
@@ -89,7 +89,7 @@ func Detect(ctx context.Context, traffic []RequestResponsePair, config Config, l
 				currentIdent := ident
 				testValue, err := GenerateTestValue(currentIdent)
 				if err != nil {
-					logger.Printf("Skipping manipulation test for %s: %v", currentIdent.Value, err)
+					logger.Warnf("Skipping manipulation test for %s: %v", currentIdent.Value, err)
 					continue
 				}
 
@@ -129,7 +129,7 @@ func Detect(ctx context.Context, traffic []RequestResponsePair, config Config, l
 }
 
 // analyzeTask performs the actual HTTP request replay and comparison.
-func analyzeTask(ctx context.Context, client *http.Client, task analysisTask, findingsChan chan<- Finding, logger *log.Logger, comparer jsoncompare.JSONComparison) error {
+func analyzeTask(ctx context.Context, client *http.Client, task analysisTask, findingsChan chan<- Finding, logger *zap.SugaredLogger, comparer jsoncompare.JSONComparison) error {
 	if ctx.Err() != nil {
 		return ctx.Err()
 	}
@@ -147,7 +147,7 @@ func analyzeTask(ctx context.Context, client *http.Client, task analysisTask, fi
 		session = task.Config.SecondSession
 		replayReq, err = cloneRequest(ctx, task.Pair.Request, task.Pair.RequestBody)
 		if err != nil {
-			logger.Printf("Error cloning request: %v", err)
+			logger.Errorf("Error cloning request: %v", err)
 			return nil
 		}
 		finding.Severity = SeverityHigh
@@ -156,7 +156,7 @@ func analyzeTask(ctx context.Context, client *http.Client, task analysisTask, fi
 		session = task.Config.Session
 		replayReq, _, err = ApplyTestValue(ctx, task.Pair.Request, task.Pair.RequestBody, *task.Identifier, task.TestValue)
 		if err != nil {
-			logger.Printf("Error applying test value: %v", err)
+			logger.Errorf("Error applying test value: %v", err)
 			return nil
 		}
 		finding.Severity = SeverityMedium
@@ -186,7 +186,7 @@ func analyzeTask(ctx context.Context, client *http.Client, task analysisTask, fi
 	// 3. Evaluate the response using the injected comparer service.
 	vulnerable, comparisonResult, err := evaluateResponse(task.Pair, resp, respBody, task.Config.ComparisonOptions, task.TestType, task.Identifier, task.TestValue, comparer)
 	if err != nil {
-		logger.Printf("Error evaluating response for %s: %v", replayReq.URL, err)
+		logger.Warnf("Error evaluating response for %s: %v", replayReq.URL, err)
 		return nil
 	}
 

@@ -8,6 +8,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
+	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
@@ -36,8 +37,7 @@ func setupHealTestConfig(t *testing.T) config.Interface {
 func TestRunSelfHeal(t *testing.T) {
 	// Common arrange steps for all sub-tests
 	// Use a silenced global logger for these tests.
-	observability.ResetForTest()
-	observability.InitializeLogger(config.LoggerConfig{Level: "fatal"})
+	observability.ResetForTest() // Ensures a clean, silent logger for each test run.
 	logger := observability.GetLogger()
 
 	ctx := context.Background()
@@ -49,7 +49,7 @@ func TestRunSelfHeal(t *testing.T) {
 	t.Run("Success", func(t *testing.T) {
 		// Arrange
 		mockRunner := new(MockMetalystRunner)
-		mockInitFn := func(cfg config.Interface, llm schemas.LLMClient) (MetalystRunner, error) {
+		mockInitFn := func(logger *zap.Logger, cfg config.Interface, llm schemas.LLMClient) (MetalystRunner, error) {
 			return mockRunner, nil
 		}
 		mockRunner.On("Run", ctx, panicLog, originalArgs).Return(nil)
@@ -65,7 +65,7 @@ func TestRunSelfHeal(t *testing.T) {
 	t.Run("MetalystInitFailure", func(t *testing.T) {
 		// Arrange
 		expectedErr := errors.New("init failed")
-		mockInitFn := func(cfg config.Interface, llm schemas.LLMClient) (MetalystRunner, error) {
+		mockInitFn := func(logger *zap.Logger, cfg config.Interface, llm schemas.LLMClient) (MetalystRunner, error) {
 			return nil, expectedErr
 		}
 
@@ -82,7 +82,7 @@ func TestRunSelfHeal(t *testing.T) {
 		// Arrange
 		mockRunner := new(MockMetalystRunner)
 		expectedErr := errors.New("runner failed during execution")
-		mockInitFn := func(cfg config.Interface, llm schemas.LLMClient) (MetalystRunner, error) {
+		mockInitFn := func(logger *zap.Logger, cfg config.Interface, llm schemas.LLMClient) (MetalystRunner, error) {
 			return mockRunner, nil
 		}
 		mockRunner.On("Run", ctx, panicLog, originalArgs).Return(expectedErr)
@@ -99,7 +99,7 @@ func TestRunSelfHeal(t *testing.T) {
 	t.Run("MissingPanicLogPath", func(t *testing.T) {
 		// Arrange
 		mockRunner := new(MockMetalystRunner)
-		mockInitFn := func(cfg config.Interface, llm schemas.LLMClient) (MetalystRunner, error) {
+		mockInitFn := func(logger *zap.Logger, cfg config.Interface, llm schemas.LLMClient) (MetalystRunner, error) {
 			return mockRunner, nil
 		}
 
@@ -118,9 +118,7 @@ func TestSelfHealCmd_RunE_LLMInitializationFailure(t *testing.T) {
 	// ensuring that an error during dependency setup is handled correctly.
 
 	// Arrange
-	// FIX: Initialize the global logger properly for the test run.
-	observability.ResetForTest()
-	observability.InitializeLogger(config.LoggerConfig{Level: "fatal"}) // Keep output clean
+	observability.ResetForTest() // Keep output clean
 
 	badCfg := config.NewDefaultConfig()
 	badCfg.AgentCfg.LLM.Models = make(map[string]config.LLMModelConfig) // No models
@@ -137,5 +135,5 @@ func TestSelfHealCmd_RunE_LLMInitializationFailure(t *testing.T) {
 
 	// Assert
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to initialize LLM client")
+	assert.Contains(t, err.Error(), "no models configured for LLM client")
 }

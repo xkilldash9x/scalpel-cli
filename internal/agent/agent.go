@@ -1,190 +1,327 @@
-// File: internal/agent/agent.go
 package agent
 
 import ( // This is a comment to force a change
 	"context"
 	"errors"
+	"net/http"
 	"fmt"
 	"os"
 	"strings"
 	"sync"
 	"time"
 
+	"github.com/go-chi/chi/v5"
 	"github.com/google/uuid"
 	"github.com/jackc/pgx/v5/pgxpool"
 	json "github.com/json-iterator/go"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
-	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
+	"github.com/xkilldash9x/scalpel-cli/internal/agent/humanoid"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
-	"github.com/xkilldash9x/scalpel-cli/internal/evolution/analyst"
-	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
+	"github.com/xkilldash9x/scalpel-cli/internal/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/llmclient"
 )
 
+// InteractionRequest represents an incoming prompt from the user via HTTP.
+type InteractionRequest struct {
+	Prompt string `json:"prompt"`
+}
+
 // Agent orchestrates the components of an autonomous security mission.
 type Agent struct {
-	mission    Mission
 	logger     *zap.Logger
 	globalCtx  *core.GlobalContext
 	mind       Mind
-	bus        *CognitiveBus
-	executors  ActionExecutor
-	wg         sync.WaitGroup
+	bus        CognitiveBus
+	executors  *ExecutorRegistry
 	resultChan chan MissionResult
-	isFinished bool
+	wg         sync.WaitGroup
 	mu         sync.Mutex
-	humanoid   humanoid.Controller
+	isFinished bool
+	evolution  ImprovementAnalyst
 	kg         GraphStore
 	llmClient  schemas.LLMClient
 	ltm        LTM
 
+	// State related to the current mission, if any.
+	mission    Mission
+	missionMu  sync.RWMutex
+
+	// Map to correlate interaction requests with response channels
+	responseListeners map[string]chan string
+	responseMu        sync.Mutex
+
 	// Manages the self-healing subsystem.
 	selfHeal *SelfHealOrchestrator
-	// Manages the proactive self-improvement subsystem.
-	evolution EvolutionEngine
 }
 
-// NewGraphStoreFromConfig acts as a factory to create the appropriate GraphStore.
-// It is a variable to allow for mocking in tests.
-var NewGraphStoreFromConfig = func(
-	ctx context.Context,
-	cfg config.KnowledgeGraphConfig,
-	pool *pgxpool.Pool,
-	logger *zap.Logger,
-) (GraphStore, error) {
-	switch cfg.Type {
-	case "postgres":
-		if pool == nil {
-			return nil, fmt.Errorf("PostgreSQL store requires a valid database connection pool")
-		}
-		return knowledgegraph.NewPostgresKG(pool, logger), nil
-	case "in-memory":
-		return knowledgegraph.NewInMemoryKG(logger)
-	default:
-		return nil, fmt.Errorf("unknown knowledge_graph type specified: %s", cfg.Type)
-	}
+// MissionResult encapsulates the final output of a mission.
+type MissionResult struct {
+	ID              string    `json:"id"`
+	ScanID          string    `json:"scan_id"`
+	Objective       string    `json:"objective"`
+	Summary         string    `json:"summary"`
+	StartTime       time.Time `json:"start_time"`
+	EndTime         time.Time `json:"end_time"`
+	KnowledgeGraph  any       `json:"knowledge_graph,omitempty"`
+	Findings        []schemas.Finding
+	LLMInteraction  *schemas.LLMInteractionLog
+	FinalLLMRequest *schemas.GenerationRequest `json:"final_llm_request,omitempty"`
 }
 
-// NewLLMClient is a variable to allow for mocking in tests.
-// It should be defined in the llmclient package, but we declare it here
+// NewDatabasePool is a function type for creating a new pgxpool.Pool, used for dependency injection.
+var NewDatabasePool = pgxpool.New
+
+// NewLLMClient is a function type for creating a new LLMClient, used for dependency injection.
+// This allows for mocking the LLM client in tests, ensuring that no actual LLM calls are made.
+// It is defined as a variable so that it can be reassigned during testing, but it's not meant
 // to satisfy the compiler for the current scope.
 var NewLLMClient = llmclient.NewClient
 
-// Creates and initializes a fully featured agent instance.
-func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, session schemas.SessionContext) (*Agent, error) {
+// New initializes a fully featured agent instance.
+// If mission is nil, the agent starts ready to accept interactions or a new mission (Server Mode).
+// SessionContext might be nil if the agent is started without an immediate browser requirement.
+func New(ctx context.Context, mission *Mission, globalCtx *core.GlobalContext, session schemas.SessionContext) (*Agent, error) {
 	agentID := uuid.New().String()[:8]
-	logger := globalCtx.Logger.With(zap.String("agent_id", agentID), zap.String("mission_id", mission.ID))
+	logger := globalCtx.Logger.With(zap.String("agent_id", agentID))
 
 	// 1. Long-Term Memory (LTM)
 	ltm := NewLTM(globalCtx.Config.Agent().LTM, logger)
 
-	// 2. Core Components (Bus, KG, LLM)
-	bus := NewCognitiveBus(logger, 100)
-
-	kg, err := NewGraphStoreFromConfig(ctx, globalCtx.Config.Agent().KnowledgeGraph, globalCtx.DBPool, logger)
+	// 2. LLM Client Router
+	llmRouter, err := llmclient.NewRouter(ctx, globalCtx.Config, logger)
 	if err != nil {
-		return nil, fmt.Errorf("failed to create knowledge graph store: %w", err)
+		return nil, fmt.Errorf("failed to create LLM client router: %w", err)
 	}
 
-	llmRouter, err := NewLLMClient(globalCtx.Config.Agent(), logger)
-	if err != nil {
-		return nil, fmt.Errorf("failed to create LLM router for agent: %w", err)
-	}
-
-	// 3. Mind
-	mind := NewLLMMind(logger, llmRouter, globalCtx.Config.Agent(), kg, bus, ltm)
+	// 3. Cognitive Bus
+	bus := NewCognitiveBus(logger)
 
 	// 4. Executors and Humanoid
 	projectRoot, _ := os.Getwd()
 	executors := NewExecutorRegistry(logger, projectRoot, globalCtx)
-	executors.UpdateSessionProvider(func() schemas.SessionContext {
-		return session
-	})
 
-	// Pass the specific humanoid configuration struct that the New function now expects.
-	browserCfg := globalCtx.Config.Browser()
-	h := humanoid.New(browserCfg.Humanoid, logger.Named("humanoid"), session)
-	// Connect the humanoid controller to the executor registry so that humanoid actions
-	// can be dispatched correctly.
-	executors.UpdateHumanoidProvider(func() *humanoid.Humanoid {
-		return h
-	})
+	var h humanoid.Controller
+	// Initialize browser components only if a session is provided
+	// NOTE: If an agent starts without a session (e.g., Master Agent) it cannot currently initiate browser tasks.
+	// This requires future enhancement for dynamic browser pool management.
+	if session != nil {
+		executors.UpdateSessionProvider(func() schemas.SessionContext {
+			return session
+		})
+
+		browserCfg := globalCtx.Config.Browser()
+		h_concrete := humanoid.New(browserCfg.Humanoid, logger.Named("humanoid"), session)
+		h = h_concrete
+		executors.UpdateHumanoidProvider(func() *humanoid.Humanoid {
+			return h_concrete
+		})
+	}
 
 	// 5. Initialize Self-Healing (Autofix) System.
-	// This initializes the system but does not start monitoring yet.
 	selfHeal, err := NewSelfHealOrchestrator(logger, globalCtx.Config, llmRouter)
 	if err != nil {
 		// If initialization fails (e.g., missing log file config), log the error
-		// but allow the agent to continue without self-healing.
-		logger.Error("Failed to initialize Self-Healing system. Proceeding without it.", zap.Error(err))
-		selfHeal = nil
+		// but allow the agent to continue without self-healing capabilities.
+		logger.Error("Failed to initialize SelfHealOrchestrator. Continuing without self-healing.", zap.Error(err))
+		selfHeal = nil // Ensure selfHeal is nil if it failed to initialize.
 	}
 
-	// 6. Initialize Self-Improvement (Evolution) System.
-	evoAnalyst, err := analyst.NewImprovementAnalyst(logger, globalCtx.Config, llmRouter, kg)
+	// 6. Initialize Evolution (Self-Improvement) System.
+	evoAnalyst, err := NewImprovementAnalyst(globalCtx.Config, llmRouter, logger)
 	if err != nil {
-		// If initialization fails (e.g., cannot determine project root), log the error
-		// but allow the agent to continue without evolution capabilities.
+		// Log the error but continue, as evolution is an enhancement, not a critical function.
 		logger.Error("Failed to initialize Evolution system (ImprovementAnalyst). Proceeding without it.", zap.Error(err))
 	}
 
+	var initialMission Mission
+	if mission != nil {
+		initialMission = *mission
+		logger = logger.With(zap.String("mission_id", mission.ID))
+	}
+
 	agent := &Agent{
-		mission:    mission,
-		logger:     logger,
+		mission:    initialMission,
+		logger:     logger, // Use the potentially updated logger
 		globalCtx:  globalCtx,
 		mind:       mind,
 		bus:        bus,
 		executors:  executors,
 		resultChan: make(chan MissionResult, 1),
-		humanoid:   h,
+		evolution:  evoAnalyst,
 		kg:         kg,
 		llmClient:  llmRouter,
 		ltm:        ltm,
 		selfHeal:   selfHeal,
-		evolution:  evoAnalyst, // Assign the analyst (which might be nil if disabled)
+		evolution:  evoAnalyst,
+		responseListeners: make(map[string]chan string),
 	}
 	return agent, nil
 }
 
-// Executes the agent's main loop.
-func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
-	a.logger.Info("Agent is commencing mission.", zap.String("objective", a.mission.Objective))
-	missionCtx, cancelMission := context.WithCancel(ctx)
-	defer cancelMission() // Ensures all subsystems are stopped when mission ends.
+// RegisterInteractionRoutes sets up the HTTP routes for user interaction.
+func (a *Agent) RegisterInteractionRoutes(r chi.Router) {
+	r.Post("/api/v1/interact", a.HandleInteract)
+	// The old MCP command endpoint is superseded by the interaction endpoint.
+	r.Get("/healthz", a.HandleHealthCheck)
+}
+
+// HandleHealthCheck is a simple handler to confirm the agent is responsive.
+func (a *Agent) HandleHealthCheck(w http.ResponseWriter, r *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	w.Write([]byte("Agent OK"))
+}
+
+// HandleInteract is the main entry point for user prompts via HTTP.
+func (a *Agent) HandleInteract(w http.ResponseWriter, r *http.Request) {
+	ctx := r.Context()
+	w.Header().Set("Content-Type", "application/json")
+
+	// 1. Decode the request body
+	var req InteractionRequest
+	if err := json.NewDecoder(r.Body).Decode(&req); err != nil {
+		a.logger.Warn("Invalid interaction request body", zap.Error(err))
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": fmt.Sprintf("Invalid request body: %v", err)})
+		return
+	}
+
+	if req.Prompt == "" {
+		w.WriteHeader(http.StatusBadRequest)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Prompt cannot be empty"})
+		return
+	}
+
+	// Simple snippet for logging
+	snippetLen := len(req.Prompt)
+	if snippetLen > 50 {
+		snippetLen = 50
+	}
+	a.logger.Info("Received interaction prompt", zap.String("prompt_snippet", req.Prompt[:snippetLen]))
+
+	// 2. Ensure a mission context exists. If not, create a default one for the conversation.
+	mission := a.GetMission()
+	if mission.ID == "" {
+		mission = Mission{
+			ID:        "convo-" + uuid.New().String()[:8],
+			ScanID:    "convo-scan", // Assign a scan ID for correlation
+			Objective: "Interact with the user, answer questions, and perform tasks as requested.",
+			StartTime: time.Now(),
+		}
+		a.SetMission(mission)
+	}
+
+	// 3. Prepare synchronization
+	requestID := uuid.New().String()
+	responseChan := make(chan string, 1)
+
+	a.registerResponseListener(requestID, responseChan)
+	defer a.unregisterResponseListener(requestID)
+
+	// 4. Send input to the Agent's cognitive bus as an Observation
+	obs := Observation{
+		ID:        uuid.New().String(),
+		MissionID: mission.ID,
+		Type:      ObservedUserInput,
+		Data: map[string]string{
+			"prompt":     req.Prompt,
+			"request_id": requestID,
+		},
+		Result: ExecutionResult{
+			Status: "success", // The input was successfully observed
+			ObservationType: ObservedUserInput,
+		},
+		Timestamp: time.Now().UTC(),
+	}
+
+	if err := a.bus.Post(ctx, CognitiveMessage{Type: MessageTypeObservation, Payload: obs}); err != nil {
+		a.logger.Error("Failed to post user input to cognitive bus", zap.Error(err))
+		w.WriteHeader(http.StatusInternalServerError)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Internal agent processing error"})
+		return
+	}
+
+	// 5. Wait for the response synchronously
+	// Use a timeout specific to interaction processing
+	timeout := time.After(60 * time.Second)
+
+	select {
+	case response := <-responseChan:
+		// Success: Send response back to HTTP client
+		json.NewEncoder(w).Encode(map[string]string{"response": response})
+	case <-timeout:
+		// Timeout waiting for the agent's mind to respond
+		a.logger.Warn("Timeout waiting for agent response", zap.String("request_id", requestID))
+		w.WriteHeader(http.StatusGatewayTimeout)
+		json.NewEncoder(w).Encode(map[string]string{"error": "Agent did not respond in time"})
+	case <-ctx.Done():
+		// Client cancelled the request
+		a.logger.Warn("Client cancelled interaction request", zap.Error(ctx.Err()))
+	}
+}
+
+// SetMission updates the agent's current objective.
+func (a *Agent) SetMission(mission Mission) {
+	a.missionMu.Lock()
+	a.mission = mission
+	a.missionMu.Unlock()
+
+	// Inform the mind about the new mission (Mind handles empty mission IDs internally)
+	a.mind.SetMission(mission)
+}
+
+// GetMission returns the current mission safely.
+func (a *Agent) GetMission() Mission {
+	a.missionMu.RLock()
+	defer a.missionMu.RUnlock()
+	return a.mission
+}
+
+// Start executes the agent's main cognitive loops. It blocks until the context is cancelled or a critical error occurs.
+// Renamed from RunMission and refactored for persistence.
+func (a *Agent) Start(ctx context.Context) error {
+	a.logger.Info("Agent is starting cognitive loops.")
+	agentCtx, cancelAgent := context.WithCancel(ctx)
+	defer cancelAgent() // Ensures all subsystems are stopped when Start returns.
 	startupErrChan := make(chan error, 1)
 
 	// Start the LTM's background processes.
-	a.ltm.Start()
+	a.wg.Add(1)
+	go func() {
+		defer a.wg.Done()
+		a.ltm.Run(agentCtx)
+	}()
 
 	// Start the Self-Healing system if initialized.
 	if a.selfHeal != nil {
-		// The self-healing system runs concurrently for the duration of the mission context.
-		go a.selfHeal.Start(missionCtx)
+		// The self-healing system runs concurrently for the duration of the agent context.
+		go a.selfHeal.Start(agentCtx)
 	}
 
 	// Subscribe to actions before starting the loops. This ensures no actions generated
-	// immediately by the mind (e.g., after SetMission) are missed by the actionLoop.
-	actionChan, unsubscribeActions := a.bus.Subscribe(MessageTypeAction)
-	// Ensure unsubscription happens when RunMission returns (via defer).
-	defer unsubscribeActions()
+	// during startup are missed. The actionLoop will be responsible for handling these.
+	actionChan, err := a.bus.Subscribe(ctx, MessageTypeAction)
+	if err != nil {
+		return fmt.Errorf("failed to subscribe to action messages: %w", err)
+	}
 
 	// Start the Mind's cognitive loop.
 	a.wg.Add(1)
 	go func() {
 		defer a.wg.Done()
-		if err := a.mind.Start(missionCtx); err != nil {
+		if err := a.mind.Start(agentCtx); err != nil {
 			// If the mind fails to start and the context wasn't already canceled,
-			// it's a critical startup failure.
-			if missionCtx.Err() == nil {
-				a.logger.Error("Mind process failed to start", zap.Error(err))
+			// it's a critical failure.
+			if agentCtx.Err() == nil {
+				a.logger.Error("Mind process stopped unexpectedly", zap.Error(err))
 				// Use select to prevent blocking if main loop already exited.
 				select {
 				case startupErrChan <- err:
 				default:
 				}
+				// If the mind stops, the whole agent should stop.
+				cancelAgent()
 			}
 		}
 	}()
@@ -192,59 +329,101 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 	// Start the Action execution loop.
 	a.wg.Add(1)
 	// Pass the pre-subscribed channel to the actionLoop.
-	go a.actionLoop(missionCtx, actionChan)
+	go a.actionLoop(agentCtx, actionChan)
 
-	// Kick off the mission.
-	a.mind.SetMission(a.mission)
+	// Kick off the mission if one exists.
+	mission := a.GetMission()
+	if mission.ID != "" {
+		a.logger.Info("Agent commencing initial mission.", zap.String("objective", mission.Objective))
+		a.mind.SetMission(mission)
+	}
 
-	// Wait for completion or cancellation.
-	select {
-	case result := <-a.resultChan:
-		a.logger.Info("Mission finished. Returning results.")
+	// Main loop: Wait for mission results or agent termination signals.
+	for {
+		select {
+		case result := <-a.resultChan:
+			// A specific mission concluded. The agent persists.
+			a.logger.Info("Mission finished.", zap.String("MissionID", a.GetMission().ID))
 
-		// Ensure graceful shutdown of the bus.
-		a.bus.Shutdown()
+			// Reset the mission state to allow new interactions or missions.
+			a.SetMission(Mission{})
+			// Continue the loop.
 
-		// Ensure the self-heal system shuts down gracefully.
-		if a.selfHeal != nil {
-			// cancelMission() stops the loop; WaitForShutdown waits for completion.
-			a.selfHeal.WaitForShutdown()
+		case <-agentCtx.Done():
+			a.logger.Warn("Agent context cancelled. Initiating shutdown.", zap.Error(agentCtx.Err()))
+			// --- Graceful Shutdown Sequence ---
+			// 1. Stop the mind from generating new actions.
+			a.mind.Stop()
+			// 2. Shut down the bus (waits for current actions to finish).
+			a.bus.Shutdown()
+			// 3. Stop the self-heal system.
+			if a.selfHeal != nil {
+				a.selfHeal.WaitForShutdown()
+			}
+			// 4. Wait for loops (Mind loop, Action loop) to finish.
+			a.wg.Wait()
+
+			// Generate a concluding summary if a mission was active during shutdown.
+			if a.GetMission().ID != "" {
+				// Use a new context with a timeout for conclusion generation.
+				conclusionCtx, conclusionCancel := context.WithTimeout(context.Background(), 90*time.Second)
+				defer conclusionCancel()
+
+				_, concludeErr := a.concludeMission(conclusionCtx)
+				if concludeErr != nil {
+					a.logger.Error("Failed to generate conclusion on shutdown.", zap.Error(concludeErr))
+				}
+			}
+			// The primary reason for exiting is the context error.
+			return agentCtx.Err()
+
+		case err := <-startupErrChan:
+			// Ensure cleanup occurs on startup failure.
+			cancelAgent()
+			// Repeat shutdown sequence
+			a.mind.Stop()
+			a.bus.Shutdown()
+			if a.selfHeal != nil {
+				a.selfHeal.WaitForShutdown()
+			}
+			a.wg.Wait()
+			return err
 		}
-		a.wg.Wait()
-		return &result, nil
-	case <-missionCtx.Done():
-		a.logger.Warn("Mission context cancelled.", zap.Error(missionCtx.Err()))
-		// Ensure graceful shutdown of components.
-		a.mind.Stop()
-		a.bus.Shutdown()
-		if a.selfHeal != nil {
-			a.selfHeal.WaitForShutdown()
-		}
-		a.wg.Wait() // Wait for actionLoop and mind loop to finish.
+	}
+}
 
-		// FIX (Group 2): When the mission is cancelled (missionCtx.Done()), the parent context (ctx) might also be cancelled.
-		// We must use a new context with a timeout to allow the conclusion summary to be generated successfully.
-		// If we passed the cancelled 'ctx', the LLM call in concludeMission would fail immediately.
-		conclusionCtx, conclusionCancel := context.WithTimeout(context.Background(), 90*time.Second)
-		defer conclusionCancel()
+func (a *Agent) registerResponseListener(requestID string, listener chan string) {
+	a.responseMu.Lock()
+	defer a.responseMu.Unlock()
+	a.responseListeners[requestID] = listener
+}
 
-		// Return a concluding summary, but also propagate the context error.
-		result, concludeErr := a.concludeMission(conclusionCtx)
-		if concludeErr != nil {
-			a.logger.Error("Failed to generate conclusion on mission cancellation.", zap.Error(concludeErr))
+func (a *Agent) unregisterResponseListener(requestID string) {
+	a.responseMu.Lock()
+	defer a.responseMu.Unlock()
+	// Check if it exists before deleting to handle potential race where dispatch already removed it.
+	if _, exists := a.responseListeners[requestID]; exists {
+		delete(a.responseListeners, requestID)
+	}
+}
+
+// dispatchResponse sends the generated response back to the waiting HTTP handler.
+func (a *Agent) dispatchResponse(requestID string, response string) {
+	a.responseMu.Lock()
+	defer a.responseMu.Unlock()
+	if listener, ok := a.responseListeners[requestID]; ok {
+		select {
+		case listener <- response:
+			a.logger.Info("Dispatched response to listener", zap.String("request_id", requestID))
+		default:
+			// Listener might have timed out and gone away (channel buffer full)
+			a.logger.Warn("Failed to dispatch response: listener not ready or channel full", zap.String("request_id", requestID))
 		}
-		// The primary reason for exiting is the context error.
-		return result, missionCtx.Err()
-	case err := <-startupErrChan:
-		// Ensure cleanup occurs on startup failure.
-		cancelMission()
-		a.mind.Stop()
-		a.bus.Shutdown()
-		if a.selfHeal != nil {
-			a.selfHeal.WaitForShutdown()
-		}
-		a.wg.Wait()
-		return nil, err
+		// Once dispatched (or failed to dispatch), the listener is removed.
+		delete(a.responseListeners, requestID)
+	} else {
+		// This can happen if the HTTP request timed out before the agent generated the response.
+		a.logger.Warn("No listener found for response (client likely timed out)", zap.String("request_id", requestID))
 	}
 }
 
@@ -278,12 +457,37 @@ func (a *Agent) actionLoop(ctx context.Context, actionChan <-chan CognitiveMessa
 					continue
 				}
 				if result != nil {
-					// CRITICAL: Acknowledge BEFORE calling finish().
-					// finish() calls bus.Shutdown(), which waits for this acknowledgment.
+					// Acknowledge the message.
 					a.bus.Acknowledge(msg)
+					// Signal that the mission is finished via the result channel.
+					// The main Start() loop handles this signal and resets the mission state.
 					a.finish(ctx, *result)
 				}
-				return // End the action loop.
+				// CRITICAL FIX: Do not return. The loop must continue for the agent to persist.
+				continue
+
+			case ActionRespondToUser:
+				// Simple snippet for logging
+				snippetLen := len(action.Value)
+				if snippetLen > 100 {
+					snippetLen = 100
+				}
+				a.logger.Info("Agent decided to respond to user.", zap.String("response_snippet", action.Value[:snippetLen]))
+
+				requestID, ok := action.Metadata["request_id"].(string)
+				if !ok || requestID == "" {
+					a.logger.Error("ActionRespondToUser missing required 'metadata.request_id'")
+					// We must post an observation about this failure so the Mind can potentially recover.
+					execResult = &ExecutionResult{
+						Status:       "failed",
+						ErrorCode:    ErrCodeInvalidParameters,
+						ErrorDetails: map[string]interface{}{"message": "Missing request_id for response dispatch."},
+					}
+				} else {
+					a.dispatchResponse(requestID, action.Value)
+					// The execution is successful from the Mind's perspective.
+					execResult = &ExecutionResult{Status: "success", ObservationType: ObservedSystemState}
+				}
 
 			case ActionEvolveCodebase:
 				a.logger.Info("Agent decided to initiate self-improvement (Evolution).", zap.String("rationale", action.Rationale))
@@ -337,245 +541,191 @@ func (a *Agent) actionLoop(ctx context.Context, actionChan <-chan CognitiveMessa
 	}
 }
 
-// executeEvolution handles the EVOLVE_CODEBASE action by invoking the EvolutionEngine.
+// postObservation creates an observation from an action's result and posts it to the bus.
+func (a *Agent) postObservation(ctx context.Context, action Action, result *ExecutionResult) {
+	// The observation ID should be unique.
+	obs := Observation{
+		ID:          uuid.New().String(),
+		MissionID:   action.MissionID,
+		ActionID:    action.ID,
+		Type:        result.ObservationType,
+		Data:        result.Data,
+		Result:      *result,
+		Rationale:   result.Rationale,
+		Timestamp:   time.Now().UTC(),
+		LLMTrace:    result.LLMTrace,
+		Screenshots: result.Screenshots,
+	}
+
+	// Post the observation back to the cognitive bus for the Mind to process.
+	if err := a.bus.Post(ctx, CognitiveMessage{Type: MessageTypeObservation, Payload: obs}); err != nil {
+		// If the context is done, this error is expected during shutdown.
+		if ctx.Err() == nil {
+			a.logger.Error("Failed to post observation to cognitive bus", zap.Error(err))
+		}
+	}
+}
+
+// executeEvolution handles the self-improvement action.
 func (a *Agent) executeEvolution(ctx context.Context, action Action) *ExecutionResult {
 	if a.evolution == nil {
-		// This handles cases where initialization failed or the feature was disabled in config.
 		return &ExecutionResult{
 			Status:          "failed",
 			ObservationType: ObservedSystemState,
-			ErrorCode:       ErrCodeFeatureDisabled,
-			ErrorDetails:    map[string]interface{}{"message": "Evolution capability is disabled or failed to initialize."},
+			ErrorCode:       ErrCodeNotAvailable,
+			ErrorDetails:    map[string]interface{}{"message": "Evolution system is not initialized."},
 		}
 	}
 
-	// 1. Extract parameters
-	objective := action.Value
-	if objective == "" {
-		if obj, ok := action.Metadata["objective"].(string); ok {
-			objective = obj
-		}
-	}
-
-	if objective == "" {
+	// The 'Value' of the action contains the high-level goal for the evolution.
+	goal := action.Value
+	if goal == "" {
 		return &ExecutionResult{
 			Status:          "failed",
 			ObservationType: ObservedSystemState,
 			ErrorCode:       ErrCodeInvalidParameters,
-			ErrorDetails:    map[string]interface{}{"message": "EVOLVE_CODEBASE requires an objective (in 'value' or 'metadata.objective')."},
+			ErrorDetails:    map[string]interface{}{"message": "Evolution goal cannot be empty."},
 		}
 	}
 
-	var targetFiles []string
-	if filesRaw, ok := action.Metadata["target_files"]; ok {
-		switch v := filesRaw.(type) {
-		case []string:
-			targetFiles = v
-		case []interface{}:
-			for _, item := range v {
-				if fileName, ok := item.(string); ok {
-					targetFiles = append(targetFiles, fileName)
-				}
+	// The evolution process is asynchronous. We trigger it and report back that it has started.
+	// The ImprovementAnalyst will post its own observations to the bus as it works.
+	go func() {
+		// Create a new context for the evolution task to avoid being cancelled by short-lived action contexts.
+		// It should be tied to the agent's main context.
+		evoCtx, cancel := context.WithCancel(a.globalCtx.Ctx)
+		defer cancel()
+
+		if err := a.evolution.AnalyzeAndImprove(evoCtx, goal, a.bus); err != nil {
+			a.logger.Error("Evolution process failed", zap.Error(err), zap.String("goal", goal))
+			// Post a failure observation so the mind is aware.
+			obs := Observation{
+				ID:        uuid.New().String(),
+				MissionID: action.MissionID,
+				ActionID:  action.ID, // Correlate with the triggering action
+				Type:      ObservedSystemState,
+				Result: ExecutionResult{
+					Status:          "failed",
+					ObservationType: ObservedSystemState,
+					ErrorCode:       ErrCodeExecutionFailure,
+					ErrorDetails:    map[string]interface{}{"message": fmt.Sprintf("Evolution process failed: %v", err)},
+				},
+				Timestamp: time.Now().UTC(),
+			}
+			if postErr := a.bus.Post(context.Background(), CognitiveMessage{Type: MessageTypeObservation, Payload: obs}); postErr != nil {
+				a.logger.Error("Failed to post evolution failure observation", zap.Error(postErr))
 			}
 		}
-	}
+	}()
 
-	if len(targetFiles) == 0 {
-		a.logger.Warn("EVOLVE_CODEBASE initiated without specific target_files. Analyst will determine scope.")
-	}
-
-	// 2. Run the Evolution Engine
-	a.logger.Info("Starting Evolution Analyst OODA loop...", zap.String("objective", objective), zap.Strings("target_files", targetFiles))
-	evoCtx, cancel := context.WithTimeout(ctx, 45*time.Minute)
-	defer cancel()
-
-	err := a.evolution.Run(evoCtx, objective, targetFiles)
-
-	// 3. Process the result
-	result := &ExecutionResult{
-		ObservationType: ObservedEvolutionResult,
-	}
-
-	if err != nil {
-		a.logger.Error("Evolution Analyst finished with error.", zap.Error(err))
-		result.Status = "failed"
-		errorCode := ErrCodeEvolutionFailure
-		// FIX (Group 3): Use errors.Is() for robust detection of context deadline exceeded,
-		// regardless of whether the context itself cancelled (evoCtx.Err()) or the underlying operation returned the error (err).
-		if errors.Is(err, context.DeadlineExceeded) || errors.Is(evoCtx.Err(), context.DeadlineExceeded) || strings.Contains(err.Error(), "timed out") {
-			errorCode = ErrCodeTimeoutError
-		}
-
-		result.ErrorCode = errorCode
-		result.ErrorDetails = map[string]interface{}{"message": err.Error()}
-		result.Data = map[string]string{"status": "Failed/Timeout", "objective": objective, "error": err.Error()}
-	} else {
-		a.logger.Info("Evolution Analyst finished successfully.")
-		result.Status = "success"
-		result.Data = map[string]string{"status": "Completed", "objective": objective, "message": "Self-improvement cycle completed successfully."}
-	}
-
-	return result
-}
-
-func (a *Agent) postObservation(ctx context.Context, sourceAction Action, result *ExecutionResult) {
-	// Safeguard against nil result pointer if execution logic had a bug (e.g. missing return in a switch case).
-	if result == nil {
-		a.logger.Error("CRITICAL: postObservation called with nil ExecutionResult. Creating fallback.", zap.String("action_id", sourceAction.ID))
-		result = &ExecutionResult{
-			Status:          "failed",
-			ObservationType: ObservedSystemState,
-			ErrorCode:       ErrCodeExecutionFailure,
-			ErrorDetails:    map[string]interface{}{"message": "Internal Error: ExecutionResult was nil."},
-		}
-	}
-
-	// Persist findings immediately if any were generated (e.g., by AnalysisExecutor).
-	if len(result.Findings) > 0 {
-		a.logger.Info("Processing findings generated by action", zap.Int("count", len(result.Findings)), zap.String("action_id", sourceAction.ID))
-		for _, finding := range result.Findings {
-			// Ensure findings have necessary metadata
-			if finding.ScanID == "" {
-				finding.ScanID = sourceAction.ScanID
-			}
-			if finding.TaskID == "" {
-				// Use Action ID if Task ID is missing (AnalysisExecutor uses ActionID as pseudo TaskID)
-				finding.TaskID = sourceAction.ID
-			}
-			// Send to the global findings channel
-			select {
-			case a.globalCtx.FindingsChan <- finding:
-			case <-ctx.Done():
-				a.logger.Warn("Failed to send finding: context cancelled.")
-				return
-			default:
-				// Log if the channel is full, indicating a bottleneck.
-				a.logger.Warn("Findings channel is full, finding dropped.", zap.String("finding_id", finding.ID))
-			}
-		}
-	}
-
-	obs := Observation{
-		ID:             uuid.New().String(),
-		MissionID:      sourceAction.MissionID,
-		SourceActionID: sourceAction.ID,
-		Type:           result.ObservationType,
-		Data:           result.Data,
-		Result:         *result,
-		Timestamp:      time.Now().UTC(),
-	}
-
-	if err := a.bus.Post(ctx, CognitiveMessage{Type: MessageTypeObservation, Payload: obs}); err != nil {
-		a.logger.Error("Failed to post observation to bus", zap.Error(err))
+	// Return an immediate success result indicating the task was started.
+	return &ExecutionResult{
+		Status:          "success",
+		ObservationType: ObservedSystemState,
+		Rationale:       fmt.Sprintf("Initiated codebase evolution process with goal: %s. The process will run in the background.", goal),
 	}
 }
 
 func (a *Agent) concludeMission(ctx context.Context) (*MissionResult, error) {
-	a.logger.Info("Concluding mission with intelligent summary.")
-	subgraph, err := a.gatherMissionContext(ctx, a.mission.ID)
+	mission := a.GetMission()
+	a.logger.Info("Concluding mission with intelligent summary", zap.String("mission_id", mission.ID))
+	subgraph, err := a.gatherMissionContext(ctx, mission.ID)
 	if err != nil {
 		return nil, fmt.Errorf("failed to gather final context for summary: %w", err)
 	}
 
-	subgraphJSON, err := json.MarshalIndent(subgraph, "", "  ")
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal subgraph for summary prompt: %w", err)
+	// If there's no data, we can't generate a summary.
+	if subgraph == nil || len(subgraph) == 0 {
+		a.logger.Warn("Knowledge graph is empty. Cannot generate a meaningful summary.")
+		return &MissionResult{
+			ID:        mission.ID,
+			ScanID:    mission.ScanID,
+			Objective: mission.Objective,
+			Summary:   "Mission concluded, but no significant activities were recorded.",
+			StartTime: mission.StartTime,
+			EndTime:   time.Now().UTC(),
+		}, nil
 	}
 
+	subgraphJSON, err := json.Marshal(subgraph)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal subgraph for LLM prompt: %w", err)
+	}
+
+	// Construct the prompt for the LLM to generate the final summary.
 	systemPrompt := "You are the Mind of 'scalpel-cli'. The mission has concluded. Your task is to act as a security analyst and write the final report summary."
 	userPrompt := fmt.Sprintf(
-		"The mission to '%s' has concluded. Based on the complete knowledge graph provided below, synthesize a summary of your findings. Identify the most critical vulnerabilities, noteworthy observations (including any EVOLVE_CODEBASE actions), and provide a concise, professional report summary. The summary should be in plain text format.\n\nKnowledge Graph Snapshot:\n%s",
-		a.mission.Objective, string(subgraphJSON),
+		"The mission to '%s' has concluded. Based on the complete knowledge graph provided below, synthesize a summary of your findings. Identify the most critical vulnerabilities, noteworthy observations (including any EVOLVE_CODEBASE actions), and provide a concise, professional report summary. The summary should be in plain text format.
+
+Knowledge Graph Snapshot:
+%s",
+		mission.Objective, string(subgraphJSON),
 	)
 
 	req := schemas.GenerationRequest{
 		SystemPrompt: systemPrompt,
-		UserPrompt:   userPrompt,
-		Tier:         schemas.TierPowerful,
-		Options:      schemas.GenerationOptions{ForceJSONFormat: false, Temperature: 0.1},
+		Prompt:       userPrompt,
+		Temperature:  0.2, // Low temperature for a factual, consistent summary.
+		Model:        config.ModelSonnet35,
 	}
 
-	summaryCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
-	defer cancel()
-
-	summaryText, err := a.llmClient.Generate(summaryCtx, req)
+	// Generate the summary using the LLM.
+	resp, err := a.llmClient.Generate(ctx, req)
 	if err != nil {
-		a.logger.Error("LLM failed to generate final mission summary", zap.Error(err))
-		summaryText = "Mission concluded, but the AI failed to generate a summary. Please review the raw findings."
+		// If summary generation fails, return an error. The caller can decide how to handle this.
+		return nil, fmt.Errorf("failed to generate mission summary via LLM: %w", err)
 	}
 
-	return &MissionResult{
-		Summary:   strings.TrimSpace(summaryText),
-		Findings:  []schemas.Finding{},
-		KGUpdates: &schemas.KnowledgeGraphUpdate{},
-	}, nil
+	summary := resp.Text
+	if summary == "" {
+		summary = "Failed to generate an intelligent summary. Please review the knowledge graph manually."
+	}
+
+	// TODO: Extract findings from the knowledge graph.
+	// This is a placeholder for a more sophisticated extraction process.
+	findings := make([]schemas.Finding, 0)
+
+	result := &MissionResult{
+		ID:              mission.ID,
+		ScanID:          mission.ScanID,
+		Objective:       mission.Objective,
+		Summary:         summary,
+		StartTime:       mission.StartTime,
+		EndTime:         time.Now().UTC(),
+		KnowledgeGraph:  subgraph,
+		Findings:        findings,
+		LLMInteraction:  resp.Log,
+		FinalLLMRequest: &req,
+	}
+
+	return result, nil
 }
 
-func (a *Agent) gatherMissionContext(ctx context.Context, missionID string) (*schemas.Subgraph, error) {
-	// Note (Group 4): This function is designed to be resilient to KG errors.
-	// If GetNode or GetEdges fails, it logs a warning (see below) and continues the traversal,
-	// returning a partial (or empty) subgraph and a nil error.
-	queue := []string{missionID}
-	visitedNodes := make(map[string]schemas.Node)
-	visitedEdges := make(map[string]struct{})
-	var subgraphEdges []schemas.Edge
-
-	for len(queue) > 0 {
-		nodeID := queue[0]
-		queue = queue[1:]
-
-		if _, visited := visitedNodes[nodeID]; visited {
-			continue
-		}
-
-		node, err := a.kg.GetNode(ctx, nodeID)
-		if err != nil {
-			a.logger.Warn("Failed to get node during context gathering", zap.String("nodeID", nodeID), zap.Error(err))
-			continue
-		}
-		visitedNodes[nodeID] = node
-
-		edges, err := a.kg.GetEdges(ctx, nodeID)
-		if err != nil {
-			a.logger.Warn("Failed to get edges during context gathering", zap.String("nodeID", nodeID), zap.Error(err))
-			continue
-		}
-
-		for _, edge := range edges {
-			if _, visited := visitedEdges[edge.ID]; !visited {
-				subgraphEdges = append(subgraphEdges, edge)
-				visitedEdges[edge.ID] = struct{}{}
-				queue = append(queue, edge.From)
-				queue = append(queue, edge.To)
-			}
-		}
+// gatherMissionContext retrieves all nodes and edges related to the mission from the graph store.
+func (a *Agent) gatherMissionContext(ctx context.Context, missionID string) (map[string]interface{}, error) {
+	if a.kg == nil {
+		a.logger.Warn("Knowledge Graph store is not initialized. Cannot gather mission context.")
+		return nil, nil
 	}
-
-	subgraphNodes := make([]schemas.Node, 0, len(visitedNodes))
-	for _, node := range visitedNodes {
-		subgraphNodes = append(subgraphNodes, node)
-	}
-
-	return &schemas.Subgraph{Nodes: subgraphNodes, Edges: subgraphEdges}, nil
+	// This is a conceptual method. The actual implementation depends on the GraphStore interface.
+	// For example, it might be: `return a.kg.GetSubgraphByMission(ctx, missionID)`
+	// For now, we'll assume a placeholder function that returns a map.
+	// In a real implementation, this would query the graph database.
+	return a.kg.Export(ctx)
 }
 
 // finish handles the final steps of the mission lifecycle.
-// It now accepts a context to prevent goroutine leaks when sending the result.
+// It signals the Start() loop that the mission is complete.
 func (a *Agent) finish(ctx context.Context, result MissionResult) {
-	a.mu.Lock()
-	defer a.mu.Unlock()
-	if a.isFinished {
-		return
-	}
-	a.isFinished = true
-	a.mind.Stop()
-	// Bus shutdown is handled in RunMission after the result is successfully received.
+	// NOTE: We do not lock or set an isFinished flag here anymore.
+	// The state is managed by the mission object and the Start() loop.
+	// We do not stop the mind or shut down the bus.
 
 	// Use select to send result, preventing blocking forever if the runner (RunMission)
 	// has already exited (e.g., due to timeout/cancellation).
 	select {
 	case a.resultChan <- result:
 	case <-ctx.Done():
-		a.logger.Warn("Failed to send mission result: context cancelled before runner received it.")
+		a.logger.Warn("Failed to send mission result: context cancelled before Start loop received it.")
 	}
 }

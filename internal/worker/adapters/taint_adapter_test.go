@@ -64,6 +64,7 @@ func TestTaintAdapter_Analyze_SuccessOrchestration(t *testing.T) {
 	mockBM.On("NewAnalysisContext", mock.Anything, ctx.Task, schemas.DefaultPersona, "", "", ctx.Global.FindingsChan).Return(mockSession, nil)
 	// Ensure Close is called with context.Background()
 	mockSession.On("Close", mock.MatchedBy(func(ctx context.Context) bool {
+		// We expect the adapter to call Close with context.Background() for cleanup.
 		return ctx == context.Background()
 	})).Return(nil)
 
@@ -168,8 +169,14 @@ func TestTaintAdapter_Analyze_TimeoutHandling(t *testing.T) {
 	// Expect Close to be called with context.Background() even during timeout.
 	mockSession.On("Close", mock.Anything).Return(nil)
 	mockOAST.On("GetServerURL").Return("http://oast.com")
+	// FIX: Mock OAST polling which continues in the background and runs during shutdown.
+	mockOAST.On("GetInteractions", mock.Anything, mock.Anything).Return([]schemas.OASTInteraction{}, nil)
+
 	mockSession.On("ExposeFunction", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	mockSession.On("InjectScriptPersistently", mock.Anything, mock.Anything).Return(nil)
+
+	// The analyzer attempts persistent probes (ExecuteScript) before navigation.
+	mockSession.On("ExecuteScript", mock.Anything, mock.Anything, mock.Anything).Return(json.RawMessage("null"), nil)
 
 	// Mock Navigate (the first major blocking operation) to wait until the context times out.
 	mockSession.On("Navigate", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
@@ -184,6 +191,7 @@ func TestTaintAdapter_Analyze_TimeoutHandling(t *testing.T) {
 	assert.Error(t, err)
 	assert.ErrorIs(t, err, context.DeadlineExceeded)
 	mockSession.AssertExpectations(t)
+	mockOAST.AssertExpectations(t)
 }
 
 // Test case added to increase coverage: Handling analyzer execution failure (non-timeout).
@@ -197,6 +205,13 @@ func TestTaintAdapter_Analyze_ExecutionFailure(t *testing.T) {
 	mockSession.On("ExposeFunction", mock.Anything, mock.Anything, mock.Anything).Return(nil)
 	mockSession.On("InjectScriptPersistently", mock.Anything, mock.Anything).Return(nil)
 
+	// FIX: Mock OAST interaction polling which occurs in background workers and during shutdown.
+	// This prevents the panic caused by unexpected mock calls when the analyzer shuts down after the navigation error.
+	mockOAST.On("GetInteractions", mock.Anything, mock.Anything).Return([]schemas.OASTInteraction{}, nil)
+
+	// The analyzer attempts persistent probes (ExecuteScript) before the navigation that fails.
+	mockSession.On("ExecuteScript", mock.Anything, mock.Anything, mock.Anything).Return(json.RawMessage("null"), nil)
+
 	// Simulate a failure during the first navigation attempt that is NOT a context error.
 	expectedError := errors.New("browser navigation failed unexpectedly")
 	mockSession.On("Navigate", mock.Anything, mock.Anything).Return(expectedError)
@@ -209,4 +224,5 @@ func TestTaintAdapter_Analyze_ExecutionFailure(t *testing.T) {
 	assert.Contains(t, err.Error(), "taint analysis failed during execution")
 	assert.ErrorIs(t, err, expectedError)
 	mockSession.AssertExpectations(t)
+	mockOAST.AssertExpectations(t)
 }

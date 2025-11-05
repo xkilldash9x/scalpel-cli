@@ -20,7 +20,9 @@ type TaintAdapter struct {
 // NewTaintAdapter creates a new TaintAdapter.
 func NewTaintAdapter() *TaintAdapter {
 	return &TaintAdapter{
-		BaseAnalyzer: *core.NewBaseAnalyzer("TaintAdapter_IAST_v1", "Performs IAST analysis by actively tainting inputs in a browser session and observing sensitive sinks.", core.TypeActive, zap.NewNop()),
+		// Pass nil for the logger; it will be retrieved from the AnalysisContext during Analyze.
+		// This prevents issues with global logger initialization order.
+		BaseAnalyzer: *core.NewBaseAnalyzer("TaintAdapter_IAST_v1", "Performs IAST analysis by actively tainting inputs in a browser session and observing sensitive sinks.", core.TypeActive, nil),
 	}
 }
 
@@ -59,8 +61,8 @@ func (a *TaintAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 		ctx,
 		analysisCtx.Task,
 		schemas.DefaultPersona,
-		"", // initialURL
-		"", // initialData
+		"", // taintTemplate (Analyzer injects dynamically)
+		"", // taintConfig (Analyzer injects dynamically)
 		analysisCtx.Global.FindingsChan,
 	)
 	if err != nil {
@@ -72,14 +74,27 @@ func (a *TaintAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 	// 4. Execution
 	logger.Info("Starting taint analysis execution", zap.String("target_url", analysisCtx.TargetURL.String()))
 
-	if err := analyzer.Analyze(ctx, session); err != nil {
-		// Handle context cancellation gracefully.
+	// Execute the analysis. The analyzer attempts a graceful shutdown upon timeout/cancellation.
+	err = analyzer.Analyze(ctx, session)
+
+	if err != nil {
+		// Handle context cancellation gracefully if an error occurred.
 		if ctx.Err() != nil {
-			logger.Warn("Taint analysis interrupted or timed out", zap.Error(err))
-			// Return the context error so the worker framework understands the reason for termination.
+			// If the context is done, we prioritize the context error over the specific execution error,
+			// as the execution error might be a consequence of the cancellation/timeout.
+			logger.Warn("Taint analysis interrupted or timed out during execution", zap.Error(ctx.Err()), zap.NamedError("underlying_error", err))
 			return ctx.Err()
 		}
+		// If the context is fine, it's a genuine execution failure.
 		return fmt.Errorf("taint analysis failed during execution: %w", err)
+	}
+
+	// Handle cases where the analyzer gracefully shuts down upon timeout but doesn't return an error.
+	// This ensures the worker framework recognizes the task was cancelled/timed out.
+	if ctx.Err() != nil {
+		logger.Warn("Taint analysis completed prematurely due to timeout or cancellation.", zap.Error(ctx.Err()))
+		// Return the context error so the worker framework understands the reason for termination.
+		return ctx.Err()
 	}
 
 	logger.Info("Taint analysis execution completed")
@@ -110,16 +125,18 @@ func (a *TaintAdapter) setupTaintConfig(analysisCtx *core.AnalysisContext) (tain
 	)
 
 	return taint.Config{
-		TaskID:                  analysisCtx.Task.TaskID,
-		Target:                  analysisCtx.TargetURL,
-		Probes:                  taint.DefaultProbes(), // Use standard probes.
-		Sinks:                   taint.DefaultSinks(),  // Monitor standard sinks.
-		AnalysisTimeout:         engineCfg.DefaultTaskTimeout,
-		EventChannelBuffer:      defaultEventBuffer,
-		FinalizationGracePeriod: defaultFinalizationGrace,
-		ProbeExpirationDuration: defaultProbeExpiration,
-		CleanupInterval:         defaultCleanupInterval,
-		OASTPollingInterval:     defaultOASTPollingInterval,
+		TaskID:          analysisCtx.Task.TaskID,
+		Target:          analysisCtx.TargetURL,
+		Probes:          taint.DefaultProbes(), // Use standard probes.
+		Sinks:           taint.DefaultSinks(),  // Monitor standard sinks.
+		AnalysisTimeout: engineCfg.DefaultTaskTimeout,
+		Tuning: taint.TuningConfig{
+			EventChannelBuffer:      defaultEventBuffer,
+			FinalizationGracePeriod: defaultFinalizationGrace,
+			ProbeExpirationDuration: defaultProbeExpiration,
+			CleanupInterval:         defaultCleanupInterval,
+			OASTPollingInterval:     defaultOASTPollingInterval,
+		},
 		Interaction: schemas.InteractionConfig{
 			MaxDepth: scannerCfg.Depth, // Use the configured crawl depth for interaction.
 		},
@@ -132,6 +149,8 @@ type taintReporterAdapter struct {
 	*ContextReporter
 }
 
-func (a *taintReporterAdapter) Report(finding taint.CorrelatedFinding) {
-	a.ReportTaintFinding(finding)
+func (a *taintReporterAdapter) Report(ctx context.Context, finding taint.CorrelatedFinding) error {
+	// Pass the context through to the underlying reporter.
+	a.ContextReporter.ReportTaintFinding(ctx, finding)
+	return nil
 }

@@ -24,7 +24,7 @@ type Analyzer struct {
 }
 
 // NewAnalyzer initializes a new code analysis service.
-func NewAnalyzer(logger *zap.Logger, llmClient schemas.LLMClient, projectRoot string) *Analyzer {
+func NewAnalyzer(logger *zap.Logger, llmClient schemas.LLMClient, projectRoot string) *Analyzer { // This is a comment to force a change
 	return &Analyzer{
 		logger:      logger.Named("autofix-analyzer"),
 		llmClient:   llmClient,

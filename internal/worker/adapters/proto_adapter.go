@@ -28,7 +28,9 @@ func NewProtoAdapter() *ProtoAdapter {
 			"ProtoAdapter",
 			"Analyzes web pages for client-side prototype pollution vulnerabilities using active browser instrumentation.",
 			core.TypeActive,
-			zap.NewNop(),
+			// Pass nil for the logger; it will be retrieved from the AnalysisContext during Analyze.
+			// This prevents issues with global logger initialization order.
+			nil,
 		),
 	}
 }
@@ -91,7 +93,7 @@ func (a *ProtoAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 			logger.Warn("Prototype pollution analysis interrupted or timed out.", zap.Error(err))
 			return ctx.Err()
 		}
-		logger.Error("Prototype pollution analysis failed", zap.Error(err))
+		logger.Error("Prototype pollution analysis failed", zap.String("target", task.TargetURL), zap.Error(err))
 		return fmt.Errorf("failed to analyze target %s: %w", task.TargetURL, err)
 	}
 

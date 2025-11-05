@@ -180,7 +180,7 @@ func (i *Interactor) interactDepth(
 		log.Info("No new interactive elements found at this depth.")
 		return nil
 	}
-	log.Debug("Discovered new interactive elements.", zap.Int("count", len(newElements)))
+	log.Info("Discovered new interactive elements.", zap.Int("count", len(newElements)))
 
 	// R1: 2. Prioritize and Shuffle elements
 	// We must prioritize inputs and deprioritize submit buttons to prevent premature form submission.

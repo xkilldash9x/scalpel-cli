@@ -100,7 +100,6 @@ func TestEvolveCmd_RunE_LLMInitializationFailure(t *testing.T) {
 	// is handled correctly.
 	// Arrange
 	observability.ResetForTest()
-	observability.InitializeLogger(config.LoggerConfig{Level: "fatal"}) // Keep output clean
 
 	// Create a config that will cause the LLM client to fail initialization.
 	// For example, by having no models configured.
@@ -122,5 +121,5 @@ func TestEvolveCmd_RunE_LLMInitializationFailure(t *testing.T) {
 
 	// Assert
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "failed to initialize LLM client")
+	assert.Contains(t, err.Error(), "no models configured for LLM client")
 }

@@ -33,11 +33,12 @@ type MockResultsReporter struct {
 	mutex    sync.Mutex
 }
 
-func (m *MockResultsReporter) Report(finding CorrelatedFinding) {
+func (m *MockResultsReporter) Report(ctx context.Context, finding CorrelatedFinding) error {
 	m.mutex.Lock()
 	defer m.mutex.Unlock()
-	m.Called(finding)
+	args := m.Called(ctx, finding)
 	m.Findings = append(m.Findings, finding)
+	return args.Error(0)
 }
 
 func (m *MockResultsReporter) GetFindings() []CorrelatedFinding {
@@ -57,16 +58,18 @@ func setupAnalyzer(t *testing.T, configMod func(*Config), oastEnabled bool) (*An
 
 	// Default configuration optimized for testing
 	config := Config{
-		TaskID:                  "test-task-123",
-		Target:                  targetURL,
-		Probes:                  DefaultProbes(),
-		Sinks:                   DefaultSinks(),
-		AnalysisTimeout:         5 * time.Second,
-		CleanupInterval:         10 * time.Millisecond,
-		OASTPollingInterval:     20 * time.Millisecond,
-		FinalizationGracePeriod: 50 * time.Millisecond,
-		ProbeExpirationDuration: 500 * time.Millisecond,
-		EventChannelBuffer:      10,
+		TaskID:          "test-task-123",
+		Target:          targetURL,
+		Probes:          DefaultProbes(),
+		Sinks:           DefaultSinks(),
+		AnalysisTimeout: 5 * time.Second,
+		Tuning: TuningConfig{
+			CleanupInterval:         10 * time.Millisecond,
+			OASTPollingInterval:     20 * time.Millisecond,
+			FinalizationGracePeriod: 50 * time.Millisecond,
+			ProbeExpirationDuration: 500 * time.Millisecond,
+			EventChannelBuffer:      10,
+		},
 	}
 
 	if configMod != nil {
@@ -100,11 +103,11 @@ func TestNewAnalyzer_Defaults(t *testing.T) {
 	require.NoError(t, err)
 	require.NotNil(t, analyzer)
 
-	assert.Equal(t, 1000, analyzer.config.EventChannelBuffer)
-	assert.Equal(t, 10*time.Second, analyzer.config.FinalizationGracePeriod)
-	assert.Equal(t, 10*time.Minute, analyzer.config.ProbeExpirationDuration)
-	assert.Equal(t, 1*time.Minute, analyzer.config.CleanupInterval)
-	assert.Equal(t, 20*time.Second, analyzer.config.OASTPollingInterval)
+	assert.Equal(t, 1000, analyzer.config.Tuning.EventChannelBuffer)
+	assert.Equal(t, 10*time.Second, analyzer.config.Tuning.FinalizationGracePeriod)
+	assert.Equal(t, 15*time.Minute, analyzer.config.Tuning.ProbeExpirationDuration)
+	assert.Equal(t, 2*time.Minute, analyzer.config.Tuning.CleanupInterval)
+	assert.Equal(t, 30*time.Second, analyzer.config.Tuning.OASTPollingInterval)
 	assert.NotNil(t, analyzer.shimTemplate)
 }
 
@@ -311,8 +314,8 @@ func TestProbeURLSources(t *testing.T) {
 
 func setupCorrelationTest(t *testing.T) (*Analyzer, *MockResultsReporter) {
 	t.Helper()
-	analyzer, reporter, _ := setupAnalyzer(t, func(c *Config) {
-		c.CleanupInterval = time.Hour
+	analyzer, reporter, _ := setupAnalyzer(t, func(c *Config) { // Use Tuning struct
+		c.Tuning.CleanupInterval = time.Hour
 	}, false)
 	analyzer.backgroundCtx, analyzer.backgroundCancel = context.WithCancel(context.Background())
 	return analyzer, reporter
@@ -378,7 +381,7 @@ func TestProcessSinkEvent_ValidFlow(t *testing.T) {
 	analyzer.registerProbe(probe)
 	sinkValue := fmt.Sprintf("<div>%s</div>", payload)
 	sinkEvent := SinkEvent{Type: schemas.SinkInnerHTML, Value: sinkValue, Detail: "Element.innerHTML", StackTrace: "at app.js:42"}
-	reporter.On("Report", mock.Anything).Return().Once()
+	reporter.On("Report", mock.Anything, mock.Anything).Return(nil).Once()
 	analyzer.eventsChan <- sinkEvent
 	finalizeCorrelationTest(t, analyzer)
 	require.Len(t, reporter.GetFindings(), 1)
@@ -433,7 +436,7 @@ func TestProcessSinkEvent_SanitizationDetected(t *testing.T) {
 	sanitizedValue := fmt.Sprintf("img src=x onerror=%s", canary)
 	sinkEvent := SinkEvent{Type: schemas.SinkInnerHTML, Value: sanitizedValue}
 
-	reporter.On("Report", mock.Anything).Return().Once()
+	reporter.On("Report", mock.Anything, mock.Anything).Return(nil).Once()
 
 	analyzer.eventsChan <- sinkEvent
 	finalizeCorrelationTest(t, analyzer)
@@ -459,7 +462,7 @@ func TestProcessSinkEvent_MultipleCanaries(t *testing.T) {
 	sinkValue := fmt.Sprintf("<div>%s and %s</div>", canary1, canary2)
 	sinkEvent := SinkEvent{Type: schemas.SinkInnerHTML, Value: sinkValue}
 
-	reporter.On("Report", mock.Anything).Return().Twice()
+	reporter.On("Report", mock.Anything, mock.Anything).Return(nil).Twice()
 
 	analyzer.eventsChan <- sinkEvent
 	finalizeCorrelationTest(t, analyzer)
@@ -480,7 +483,7 @@ func TestProcessOASTInteraction_Valid(t *testing.T) {
 	analyzer.registerProbe(probe)
 	interactionTime := time.Now().UTC()
 	oastEvent := OASTInteraction{Canary: canary, Protocol: "DNS", SourceIP: "1.2.3.4", InteractionTime: interactionTime}
-	reporter.On("Report", mock.Anything).Return().Once()
+	reporter.On("Report", mock.Anything, mock.Anything).Return(nil).Once()
 	analyzer.eventsChan <- oastEvent
 	finalizeCorrelationTest(t, analyzer)
 	require.Len(t, reporter.GetFindings(), 1)
@@ -506,7 +509,7 @@ func TestProcessExecutionProof_Valid(t *testing.T) {
 		StackTrace: "at <anonymous>:1:1 (via img onerror)",
 	}
 
-	reporter.On("Report", mock.Anything).Return().Once()
+	reporter.On("Report", mock.Anything, mock.Anything).Return(nil).Once()
 
 	analyzer.eventsChan <- proofEvent
 
@@ -534,7 +537,7 @@ func TestProcessPrototypePollutionConfirmation_Valid(t *testing.T) {
 	// The SinkEvent structure for PP confirmation
 	confirmationEvent := SinkEvent{Type: schemas.SinkPrototypePollution, Value: canary, Detail: "scalpelPolluted"}
 
-	reporter.On("Report", mock.Anything).Return().Once()
+	reporter.On("Report", mock.Anything, mock.Anything).Return(nil).Once()
 	analyzer.eventsChan <- confirmationEvent
 	finalizeCorrelationTest(t, analyzer)
 
@@ -606,8 +609,8 @@ func TestCheckSanitization(t *testing.T) {
 func TestCleanupExpiredProbes(t *testing.T) {
 	analyzer, _, _ := setupAnalyzer(t, func(c *Config) {
 		// Configure very fast expiration and cleanup
-		c.ProbeExpirationDuration = 20 * time.Millisecond
-		c.CleanupInterval = 5 * time.Millisecond
+		c.Tuning.ProbeExpirationDuration = 20 * time.Millisecond
+		c.Tuning.CleanupInterval = 5 * time.Millisecond
 	}, false)
 
 	// Register probes
@@ -643,7 +646,7 @@ func TestEnqueueEvent_Backpressure_Logging(t *testing.T) {
 	logger := zaptest.NewLogger(t).WithOptions(zap.WrapCore(func(c zapcore.Core) zapcore.Core { return core }))
 
 	analyzer, _, _ := setupAnalyzer(t, func(c *Config) {
-		c.EventChannelBuffer = 1
+		c.Tuning.EventChannelBuffer = 1
 	}, false)
 	analyzer.logger = logger
 	analyzer.backgroundCtx = context.Background() // Mock active context
@@ -654,12 +657,12 @@ func TestEnqueueEvent_Backpressure_Logging(t *testing.T) {
 
 	assert.Len(t, analyzer.eventsChan, 1)
 	// Verify the warning log for backpressure
-	assert.Equal(t, 1, hook.FilterMessage("Event channel full, dropping event. Consider increasing CorrelationWorkers or EventChannelBuffer.").Len())
+	assert.Equal(t, 1, hook.FilterMessage("Event channel full (backpressure), dropping event. System may be overloaded.").Len())
 }
 
 func TestPollOASTInteractions_CanaryFiltering(t *testing.T) {
 	analyzer, _, mockOAST := setupAnalyzer(t, func(c *Config) {
-		c.OASTPollingInterval = 10 * time.Millisecond
+		c.Tuning.OASTPollingInterval = 10 * time.Millisecond
 	}, true)
 	analyzer.registerProbe(ActiveProbe{Canary: "OAST_1", Type: schemas.ProbeTypeOAST})
 	analyzer.registerProbe(ActiveProbe{Canary: "BLIND_XSS_2", Type: schemas.ProbeTypeXSS, Value: "fetch('http://oast.example.com/2')"})
@@ -735,9 +738,9 @@ func TestAnalyze_HappyPath(t *testing.T) {
 		analyzer.probesMutex.RUnlock()
 		require.NotEmpty(t, activeCanary)
 		simulateCallback(t, mockSession, JSCallbackSinkEvent, SinkEvent{Type: schemas.SinkFetchURL, Value: "http://oast.example.com/" + activeCanary})
-		reporter.On("Report", mock.MatchedBy(func(f CorrelatedFinding) bool {
+		reporter.On("Report", mock.Anything, mock.MatchedBy(func(f CorrelatedFinding) bool {
 			return f.Canary == activeCanary && f.Sink == schemas.SinkFetchURL
-		})).Once()
+		})).Return(nil).Once()
 	})
 	mockOAST.On("GetInteractions", mock.Anything, mock.Anything).Return([]schemas.OASTInteraction{}, nil).Maybe()
 	err := analyzer.Analyze(ctx, mockSession)

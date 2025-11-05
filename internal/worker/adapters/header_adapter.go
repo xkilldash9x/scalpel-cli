@@ -34,7 +34,9 @@ func NewHeadersAdapter() *HeadersAdapter {
 func NewHeadersAdapterWithAnalyzer(analyzer AnalyzerInterface) *HeadersAdapter {
 	return &HeadersAdapter{
 		// Initialize the BaseAnalyzer with metadata.
-		BaseAnalyzer: *core.NewBaseAnalyzer("Headers Adapter", "Analyzes HTTP response headers for security best practices and information disclosure.", core.TypePassive, zap.NewNop()),
+		// Pass nil for the logger; it will be retrieved from the AnalysisContext during Analyze.
+		// This prevents issues with global logger initialization order.
+		BaseAnalyzer: *core.NewBaseAnalyzer("Headers Adapter", "Analyzes HTTP response headers for security best practices and information disclosure.", core.TypePassive, nil),
 		// Use the injected analyzer.
 		headersAnalyzer: analyzer,
 	}

@@ -3,33 +3,31 @@ package idor
 
 import (
 	"context"
-	"log"
 	"runtime"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
 	"github.com/xkilldash9x/scalpel-cli/internal/jsoncompare"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"go.uber.org/zap"
 )
 
 // IDORAnalyzer implements the Analyzer interface and orchestrates the IDOR detection process.
 type IDORAnalyzer struct {
-	// logger retained for compatibility, though zap logger is preferred.
-	logger *log.Logger
+	logger *zap.Logger
 	// comparer is the injected service used for semantic comparison of responses.
 	comparer jsoncompare.JSONComparison
 }
 
 // NewIDORAnalyzer creates and returns a new instance of the IDORAnalyzer.
-// It requires a logger (for compatibility) and an implementation of the JSONComparison interface.
-func NewIDORAnalyzer(logger *log.Logger, comparer jsoncompare.JSONComparison) Analyzer {
+// It requires a zap logger and an implementation of the JSONComparison interface.
+func NewIDORAnalyzer(logger *zap.Logger, comparer jsoncompare.JSONComparison) Analyzer {
 	if logger == nil {
-		logger = log.Default()
+		logger = observability.GetLogger()
 	}
 	// Ensure the comparer is provided.
 	if comparer == nil {
-		// If not injected (e.g., in older tests), initialize a default service instance and log a warning.
-		observability.GetLogger().Warn("JSONComparer not injected into IDORAnalyzer, initializing default service.")
-		comparer = jsoncompare.NewService()
+		logger.Warn("JSONComparer not injected into IDORAnalyzer, initializing default service.")
+		comparer = jsoncompare.NewService(logger)
 	}
 
 	return &IDORAnalyzer{
@@ -40,11 +38,11 @@ func NewIDORAnalyzer(logger *log.Logger, comparer jsoncompare.JSONComparison) An
 
 // AnalyzeTraffic is the main entry point for the analysis logic.
 func (a *IDORAnalyzer) AnalyzeTraffic(ctx context.Context, traffic []RequestResponsePair, config Config) ([]Finding, error) {
-	a.logger.Println("Starting IDOR analysis...")
+	a.logger.Info("Starting IDOR analysis...")
 
 	// 1. Validation and Setup
 	if len(traffic) == 0 {
-		a.logger.Println("No traffic provided to analyze.")
+		a.logger.Info("No traffic provided to analyze.")
 		return nil, nil
 	}
 
@@ -54,20 +52,20 @@ func (a *IDORAnalyzer) AnalyzeTraffic(ctx context.Context, traffic []RequestResp
 	}
 
 	// 2. Execute Detection Logic
-	// Pass the injected comparer service to the detection logic.
-	findings, err := Detect(ctx, traffic, config, a.logger, a.comparer)
+	// Pass the injected logger and comparer service to the detection logic.
+	findings, err := Detect(ctx, traffic, config, a.logger.Sugar(), a.comparer)
 	if err != nil {
 		// Check if the error is due to context cancellation.
 		if ctx.Err() != nil {
-			a.logger.Printf("IDOR analysis cancelled or timed out: %v", ctx.Err())
+			a.logger.Warn("IDOR analysis cancelled or timed out.", zap.Error(ctx.Err()))
 		} else {
-			a.logger.Printf("An error occurred during IDOR detection: %v", err)
+			a.logger.Error("An error occurred during IDOR detection.", zap.Error(err))
 		}
 		// Return findings gathered so far along with the error.
 		return findings, err
 	}
 
-	a.logger.Printf("IDOR analysis complete. Found %d potential findings.", len(findings))
+	a.logger.Info("IDOR analysis complete.", zap.Int("potential_findings", len(findings)))
 	return findings, nil
 }
 
@@ -89,7 +87,7 @@ func (a *IDORAnalyzer) validateAndConfigure(config *Config) error {
 	if config.ComparisonOptions.Rules.EntropyThreshold == 0 {
 		// Use the default options from the centralized service.
 		config.ComparisonOptions = jsoncompare.DefaultOptions()
-		a.logger.Println("Using default comparison options from jsoncompare service.")
+		a.logger.Info("Using default comparison options from jsoncompare service.")
 	}
 
 	// Set default concurrency level
@@ -98,12 +96,12 @@ func (a *IDORAnalyzer) validateAndConfigure(config *Config) error {
 		if config.ConcurrencyLevel < 10 {
 			config.ConcurrencyLevel = 10
 		}
-		a.logger.Printf("Setting concurrency level to %d.", config.ConcurrencyLevel)
+		a.logger.Debug("Setting concurrency level.", zap.Int("concurrency", config.ConcurrencyLevel))
 	}
 
 	// Set default HTTP client with networking package
 	if config.HttpClient == nil {
-		a.logger.Println("Configuring default production HTTP client.")
+		a.logger.Debug("Configuring default production HTTP client.")
 		// Production-ready HTTP client configuration
 		clientConfig := network.NewBrowserClientConfig()
 		config.HttpClient = network.NewClient(clientConfig)

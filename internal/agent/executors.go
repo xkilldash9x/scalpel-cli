@@ -45,6 +45,10 @@ func NewExecutorRegistry(logger *zap.Logger, projectRoot string, globalCtx *core
 	codebaseExec := NewCodebaseExecutor(logger, projectRoot)
 	analysisExec := NewAnalysisExecutor(logger, globalCtx, safeProviderGetter)
 	humanoidExec := NewHumanoidExecutor(logger, safeHumanoidGetter)
+	// Initialize System/API executors
+	queryExec := NewQueryExecutor(globalCtx.DBPool, logger)
+	// ScanExecutor needs GlobalContext to spawn sub-agents.
+	scanExec := NewScanExecutor(logger, globalCtx)
 
 	// Register browser actions. Note that CLICK and INPUT_TEXT are absent,
 	// as they are now orchestrated by the Agent via the Humanoid module.
@@ -59,6 +63,10 @@ func NewExecutorRegistry(logger *zap.Logger, projectRoot string, globalCtx *core
 
 	// Register analysis actions
 	r.register(analysisExec, ActionAnalyzeTaint, ActionAnalyzeProtoPollution, ActionAnalyzeHeaders)
+
+	// Register System/API actions
+	r.register(queryExec, ActionQueryFindings)
+	r.register(scanExec, ActionStartScan)
 
 	return r
 }
@@ -306,4 +314,6 @@ func ParseBrowserError(err error, action Action) (ErrorCode, map[string]interfac
 	}
 
 	return ErrCodeExecutionFailure, details
+}
+
 }

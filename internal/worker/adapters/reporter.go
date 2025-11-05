@@ -2,6 +2,7 @@
 package adapters
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -37,7 +38,7 @@ func NewContextReporter(ctx *core.AnalysisContext) *ContextReporter {
 
 // ReportTaintFinding converts a taint.CorrelatedFinding into a schemas.Finding and adds it to the context.
 // Renamed from Report for clarity as the reporter might handle other finding types in the future.
-func (r *ContextReporter) ReportTaintFinding(finding taint.CorrelatedFinding) {
+func (r *ContextReporter) ReportTaintFinding(ctx context.Context, finding taint.CorrelatedFinding) {
 	// 1. Classify the finding
 	vulnType, severity, cwe := r.classifyTaintFinding(finding)
 

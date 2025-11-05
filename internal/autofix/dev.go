@@ -36,10 +36,7 @@ type Developer struct {
 }
 
 // NewDeveloper initializes a new autonomous developer service.
-func NewDeveloper(logger *zap.Logger, llmClient schemas.LLMClient, cfg *config.AutofixConfig, sourceProjectRoot string) (*Developer, error) {
-	if !cfg.Enabled {
-		return &Developer{logger: logger.Named("autofix-developer"), cfg: cfg}, nil
-	}
+func NewDeveloper(logger *zap.Logger, llmClient schemas.LLMClient, cfg *config.AutofixConfig, sourceProjectRoot string) (*Developer, error) { // This is a comment to force a change
 
 	ghClient := github.NewClient(nil).WithAuthToken(cfg.GitHub.Token)
 	gitAuth := &gogitHTTP.BasicAuth{

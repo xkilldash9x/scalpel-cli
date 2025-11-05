@@ -30,7 +30,7 @@ type IDORAdapter struct {
 }
 
 // NewIDORAdapter creates a new IDORAdapter.
-func NewIDORAdapter() *IDORAdapter {
+func NewIDORAdapter(logger *zap.Logger) *IDORAdapter {
 	// Configure the client to not follow redirects.
 	client := &http.Client{
 		Timeout: idorHTTPTimeout,
@@ -40,9 +40,11 @@ func NewIDORAdapter() *IDORAdapter {
 	}
 
 	return &IDORAdapter{
-		BaseAnalyzer: *core.NewBaseAnalyzer("IDOR Adapter", "Finds Insecure Direct Object Reference vulnerabilities using active testing and semantic comparison.", core.TypeActive, zap.NewNop()),
+		// Pass the provided logger to the BaseAnalyzer.
+		BaseAnalyzer: *core.NewBaseAnalyzer("IDOR Adapter", "Finds Insecure Direct Object Reference vulnerabilities using active testing and semantic comparison.", core.TypeActive, logger),
 		httpClient:   client,
-		comparer:     jsoncompare.NewService(),
+		// Pass the logger to the JSON comparison service.
+		comparer:     jsoncompare.NewService(logger),
 	}
 }
 
@@ -87,7 +89,7 @@ func (a *IDORAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCon
 	// If the baseline request was unauthorized or failed, IDOR testing is irrelevant.
 	if baseStatusCode < 200 || baseStatusCode >= 400 {
 		logger.Info("Baseline request was not successful, skipping IDOR scan.", zap.Int("status_code", baseStatusCode))
-		return nil
+		return nil // Not an error, just not scannable.
 	}
 	logger.Info("Baseline request successful.", zap.Int("status_code", baseStatusCode))
 
@@ -202,7 +204,7 @@ func (a *IDORAdapter) testIdentifier(ctx context.Context, analysisCtx *core.Anal
 	if err != nil {
 		// Only log network errors if the context wasn't cancelled.
 		if ctx.Err() == nil {
-			logger.Warn("Modified IDOR test request failed", zap.Error(err))
+			logger.Warn("Modified IDOR test request failed", zap.Error(err), zap.String("test_value", testValue))
 		}
 		return
 	}
@@ -211,7 +213,7 @@ func (a *IDORAdapter) testIdentifier(ctx context.Context, analysisCtx *core.Anal
 	// Read the body, limiting the size.
 	testRespBody, err := io.ReadAll(io.LimitReader(testResp.Body, maxIDORResponseBodyRead))
 	if err != nil {
-		logger.Warn("Failed to read test response body", zap.Error(err))
+		logger.Warn("Failed to read test response body for IDOR check", zap.Error(err), zap.Int("status_code", testResp.StatusCode))
 		// Continue to check status code even if body read failed.
 	}
 
@@ -238,7 +240,7 @@ func (a *IDORAdapter) testIdentifier(ctx context.Context, analysisCtx *core.Anal
 
 	comparisonResult, err := a.comparer.CompareWithOptions(baseRespBody, testRespBody, opts)
 	if err != nil {
-		logger.Error("Failed to compare responses", zap.Error(err))
+		logger.Error("Failed to compare IDOR responses", zap.Error(err), zap.String("identifier_value", ident.Value))
 		return
 	}
 
@@ -266,7 +268,7 @@ func (a *IDORAdapter) createIdorFinding(analysisCtx *core.AnalysisContext, ident
 	}
 	evidence, err := json.Marshal(evidenceMap)
 	if err != nil {
-		analysisCtx.Logger.Error("Failed to marshal IDOR evidence", zap.Error(err))
+		analysisCtx.Logger.Error("Failed to marshal IDOR evidence", zap.Error(err), zap.String("identifier_value", ident.Value))
 		evidence = []byte(fmt.Sprintf(`{"error": "failed to marshal evidence: %s"}`, err.Error()))
 	}
 
@@ -286,4 +288,10 @@ func (a *IDORAdapter) createIdorFinding(analysisCtx *core.AnalysisContext, ident
 		CWE:            []string{"CWE-639"}, // CWE-639: Authorization Bypass Through User-Controlled Key
 	}
 	analysisCtx.AddFinding(finding)
+	analysisCtx.Logger.Info("IDOR finding generated",
+		zap.String("vulnerability", "Insecure Direct Object Reference (IDOR)"),
+		zap.String("severity", string(schemas.SeverityHigh)),
+		zap.String("identifier_location", string(ident.Location)),
+		zap.String("original_identifier", ident.Value),
+	)
 }

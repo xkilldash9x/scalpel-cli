@@ -183,7 +183,7 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, url string) ([]string,
 
 	// Operations must respect the input 'ctx'.
 	if err := session.Navigate(ctx, url); err != nil {
-		return nil, fmt.Errorf("failed to navigate to %s: %w", url, err)
+		return nil, fmt.Errorf("failed to navigate to URL: %w", err)
 	}
 
 	script := `

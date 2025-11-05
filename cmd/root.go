@@ -84,14 +84,7 @@ func NewRootCommand() *cobra.Command {
 	_ = rootCmd.PersistentFlags().MarkHidden("validate-fix")
 
 	// --- Sub-command Initialization ---
-	// Use the centralized service factory.
-	componentFactory := service.NewComponentFactory()
-	storeProvider := NewStoreProvider()
-
 	rootCmd.AddCommand(newScanCmd(componentFactory))
-	rootCmd.AddCommand(newReportCmd(storeProvider))
-	rootCmd.AddCommand(newSelfHealCmd())
-	rootCmd.AddCommand(newEvolveCmd())
 
 	return rootCmd
 }

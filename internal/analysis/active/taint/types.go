@@ -1,74 +1,130 @@
-// package taint defines the core data structures, constants, and interfaces
-// used throughout the IAST analysis system.
+// File: internal/analysis/active/taint/types.go
+
+// Package taint implements the core logic for Interactive Application Security Testing (IAST)
+// using dynamic taint analysis within a browser environment.
 package taint
 
 import (
+	"context"
 	"net/url"
 	"time"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
-// Constants defining the names of Go functions exposed to the browser's
-// JavaScript environment. These create the callback bridge from the JS shim
-// back to the Go analyzer.
+// Constants defining the names of Go functions exposed to the browser's JavaScript environment.
 const (
 	JSCallbackSinkEvent      = "__scalpel_sink_event"
 	JSCallbackExecutionProof = "__scalpel_execution_proof"
 	JSCallbackShimError      = "__scalpel_shim_error"
 )
 
-// Event is the base interface for all data flowing into the correlation engine.
-// It enables the use of a single channel for different event types.
+// ----------------------------------------------------------------------------
+// Interfaces
+// ----------------------------------------------------------------------------
+
+// Event is the marker interface for all data flowing into the correlation engine (polymorphism).
 type Event interface {
 	isEvent()
 }
 
-// SanitizationLevel indicates whether a payload was modified by the application
-// before reaching a sink.
-type SanitizationLevel int
-
-const (
-	// SanitizationNone indicates the payload reached the sink intact.
-	SanitizationNone SanitizationLevel = iota
-	// SanitizationPartial indicates the canary was found, but the payload's
-	// structure was modified (e.g., HTML tags stripped, quotes escaped).
-	SanitizationPartial
-)
-
-// ProbeDefinition defines the blueprint for an attack vector, including its type,
-// payload template, and context.
-type ProbeDefinition struct {
-	Type        schemas.ProbeType `json:"type" yaml:"type"`
-	Payload     string            `json:"payload" yaml:"payload"`
-	Context     string            `json:"context" yaml:"context"`
-	Description string            `json:"description" yaml:"description"`
+// OASTProvider defines the interface required for OAST integration.
+type OASTProvider interface {
+	GetInteractions(ctx context.Context, canaries []string) ([]schemas.OASTInteraction, error)
+	GetServerURL() string
 }
 
-// ActiveProbe represents a specific, tracked instance of a ProbeDefinition that
-// has been injected into the target application.
+// SessionContext is a local alias for the canonical schemas.SessionContext interface.
+type SessionContext schemas.SessionContext
+
+// ResultsReporter defines the interface for reporting findings.
+// CRITICAL: Implementations must be thread-safe.
+type ResultsReporter interface {
+	// Report persists a correlated finding. It accepts a context for robust error handling (e.g., database timeouts).
+	Report(ctx context.Context, finding CorrelatedFinding) error
+}
+
+// ----------------------------------------------------------------------------
+// Configuration and Definitions
+// ----------------------------------------------------------------------------
+
+// Config holds all operational parameters for a single taint analysis task.
+type Config struct {
+	TaskID      string
+	Target      *url.URL
+	Probes      []ProbeDefinition
+	Sinks       []SinkDefinition
+	Interaction schemas.InteractionConfig
+
+	// AnalysisTimeout is the maximum duration for the entire analysis task.
+	AnalysisTimeout time.Duration
+
+	// Tuning holds parameters for optimizing performance, concurrency, and timing.
+	Tuning TuningConfig
+}
+
+// TuningConfig holds low-level parameters for optimizing the analysis engine.
+type TuningConfig struct {
+	// CorrelationWorkers controls the number of concurrent goroutines processing events.
+	CorrelationWorkers int
+	// EventChannelBuffer controls the size of the buffer for the main events channel (backpressure control).
+	EventChannelBuffer int
+	// FinalizationGracePeriod is the time to wait for async events after probing finishes.
+	FinalizationGracePeriod time.Duration
+	// ProbeExpirationDuration is the TTL for active probes.
+	ProbeExpirationDuration time.Duration
+	// CleanupInterval is the frequency of the expired probe cleanup routine.
+	CleanupInterval time.Duration
+	// OASTPollingInterval is the frequency of checking the OAST provider.
+	OASTPollingInterval time.Duration
+}
+
+// ProbeDefinition defines the blueprint for an attack vector.
+type ProbeDefinition struct {
+	Type        schemas.ProbeType
+	Payload     string // Template string, e.g., {{.Canary}}, {{.OASTServer}}.
+	Context     string
+	Description string
+}
+
+// SinkDefinition defines how a specific JavaScript function or property should be instrumented.
+type SinkDefinition struct {
+	Name        string            `json:"Name"` // Full path (e.g., "Element.prototype.innerHTML").
+	Type        schemas.TaintSink `json:"Type"`
+	Setter      bool              `json:"Setter"`
+	ArgIndex    int               `json:"ArgIndex"`
+	ConditionID string            `json:"ConditionID,omitempty"` // Optional JS-side precondition ID.
+}
+
+// ----------------------------------------------------------------------------
+// Internal State Tracking
+// ----------------------------------------------------------------------------
+
+// ActiveProbe represents a specific, tracked instance of an injected probe.
 type ActiveProbe struct {
 	Type      schemas.ProbeType
-	Key       string // The name/key used for injection (e.g., URL parameter name, cookie name).
-	Value     string // The full payload after template substitution.
-	Canary    string // The unique identifier for this specific probe instance.
+	Key       string // Injection point identifier (e.g., URL param name).
+	Value     string // The actual payload injected.
+	Canary    string
 	Source    schemas.TaintSource
 	CreatedAt time.Time
 }
 
-// SinkEvent is reported by the JS shim when a tainted value is passed to an
-// instrumented function or property (a "sink").
+// ----------------------------------------------------------------------------
+// Event Types (Implementing the Event interface)
+// ----------------------------------------------------------------------------
+
+// SinkEvent is reported by the JS shim when tainted data reaches a sink.
 type SinkEvent struct {
 	Type       schemas.TaintSink `json:"type"`
-	Value      string            `json:"value"` // The tainted value observed at the sink.
-	Detail     string            `json:"detail"`  // Additional context, like the function or property name.
+	Value      string            `json:"value"`
+	Detail     string            `json:"detail"`
 	StackTrace string            `json:"stack"`
 }
 
 func (SinkEvent) isEvent() {}
 
-// ExecutionProofEvent is reported by the JS shim when a payload's canary is
-// executed directly as JavaScript, confirming a vulnerability.
+// ExecutionProofEvent is reported when a payload successfully executes as JavaScript.
 type ExecutionProofEvent struct {
 	Canary     string `json:"canary"`
 	StackTrace string `json:"stack"`
@@ -76,8 +132,7 @@ type ExecutionProofEvent struct {
 
 func (ExecutionProofEvent) isEvent() {}
 
-// ShimErrorEvent is used to report internal errors from the JavaScript shim
-// back to the Go backend for debugging.
+// ShimErrorEvent reports internal errors from the JavaScript instrumentation.
 type ShimErrorEvent struct {
 	Error      string `json:"error"`
 	Location   string `json:"location"`
@@ -86,10 +141,7 @@ type ShimErrorEvent struct {
 
 func (ShimErrorEvent) isEvent() {}
 
-
-// OASTInteraction represents a confirmed out-of-band callback received by the
-// OAST provider. It implements the Event interface to be processed by the
-// correlation engine.
+// OASTInteraction represents a confirmed out-of-band callback.
 type OASTInteraction struct {
 	Canary          string
 	Protocol        string
@@ -100,8 +152,21 @@ type OASTInteraction struct {
 
 func (OASTInteraction) isEvent() {}
 
-// CorrelatedFinding is the final output of the analysis engine, representing a
-// detected or confirmed vulnerability.
+// ----------------------------------------------------------------------------
+// Results and Findings
+// ----------------------------------------------------------------------------
+
+// SanitizationLevel indicates whether a payload was modified before reaching a sink.
+type SanitizationLevel int
+
+const (
+	// SanitizationNone indicates the payload reached the sink intact.
+	SanitizationNone SanitizationLevel = iota
+	// SanitizationPartial indicates the canary survived, but the payload structure was altered.
+	SanitizationPartial
+)
+
+// CorrelatedFinding is the output of the analysis, linking a source to a sink event.
 type CorrelatedFinding struct {
 	TaskID            string
 	TargetURL         string
@@ -114,56 +179,5 @@ type CorrelatedFinding struct {
 	IsConfirmed       bool // True if confirmed by execution proof or OAST.
 	SanitizationLevel SanitizationLevel
 	StackTrace        string
-	OASTDetails       *OASTInteraction // Details if confirmed via OAST.
-}
-
-// OASTProvider is an alias for the canonical OASTProvider interface, used to
-// decouple the analyzer from the specific implementation.
-type OASTProvider schemas.OASTProvider
-
-// SessionContext is an alias for the canonical SessionContext interface.
-type SessionContext schemas.SessionContext
-
-// ResultsReporter defines the interface for reporting findings. The Report
-// method must be thread-safe as it may be called concurrently by multiple
-// correlation workers.
-type ResultsReporter interface {
-	Report(finding CorrelatedFinding)
-}
-
-// SinkDefinition defines how a specific JavaScript function or property should
-// be instrumented by the JS shim.
-type SinkDefinition struct {
-	Name        string            `json:"Name" yaml:"name"` // Full property path (e.g., "Element.prototype.innerHTML").
-	Type        schemas.TaintSink `json:"Type" yaml:"type"` // The canonical sink type.
-	Setter      bool              `json:"Setter" yaml:"setter"`     // True if this is a property setter (e.g., innerHTML), false for a function call.
-	ArgIndex    int               `json:"ArgIndex" yaml:"arg_index"`  // The argument index to inspect for taint (for function calls).
-	ConditionID string            `json:"ConditionID,omitempty" yaml:"condition_id,omitempty"` // An optional ID for a JS-side pre-condition check.
-}
-
-// Config holds all operational parameters for a single taint analysis task.
-type Config struct {
-	TaskID      string   `json:"task_id" yaml:"task_id"`
-	Target      *url.URL
-	Probes      []ProbeDefinition `json:"probes" yaml:"probes"`
-	Sinks       []SinkDefinition  `json:"sinks" yaml:"sinks"`
-	Interaction schemas.InteractionConfig `json:"interaction" yaml:"interaction"`
-
-	// AnalysisTimeout is the total maximum duration for the entire analysis.
-	AnalysisTimeout time.Duration `json:"analysis_timeout" yaml:"analysis_timeout"`
-
-	// -- Performance & Concurrency Tuning --
-
-	// CorrelationWorkers controls the number of goroutines processing events concurrently.
-	CorrelationWorkers int `json:"correlation_workers" yaml:"correlation_workers"`
-	// EventChannelBuffer is the size of the buffer for the main events channel.
-	EventChannelBuffer int `json:"event_channel_buffer" yaml:"event_channel_buffer"`
-	// FinalizationGracePeriod is the extra time to wait for async events after probing finishes.
-	FinalizationGracePeriod time.Duration `json:"finalization_grace_period" yaml:"finalization_grace_period"`
-	// ProbeExpirationDuration is the TTL for active probes to prevent memory leaks.
-	ProbeExpirationDuration time.Duration `json:"probe_expiration_duration" yaml:"probe_expiration_duration"`
-	// CleanupInterval is the frequency at which the expired probe cleanup task runs.
-	CleanupInterval time.Duration `json:"cleanup_interval" yaml:"cleanup_interval"`
-	// OASTPollingInterval is the frequency at which the OAST provider is checked for interactions.
-	OASTPollingInterval time.Duration `json:"oast_polling_interval" yaml:"oast_polling_interval"`
+	OASTDetails       *OASTInteraction
 }

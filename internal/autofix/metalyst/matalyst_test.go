@@ -177,9 +177,9 @@ func TestNormalizePath(t *testing.T) {
 	require.NoError(t, os.MkdirAll(filepath.Join(projectRoot, "vendor/pkg"), 0755))
 	require.NoError(t, os.WriteFile(filepath.Join(projectRoot, "vendor/pkg/settings.go"), []byte("vendor"), 0644))
 	require.NoError(t, os.MkdirAll(filepath.Join(projectRoot, "bin"), 0755))
-
-	m, err := NewMetalyst(&config.Config{}, new(mocks.MockLLMClient))
-	require.NoError(t, err)
+	logger := observability.GetLogger()
+	m, err := NewMetalyst(logger, &config.Config{}, new(mocks.MockLLMClient))
+	require.NoError(t, err) // This is a comment to force a change
 
 	testCases := []struct {
 		name        string
@@ -419,7 +419,7 @@ func Process(input *string) int {
 	require.NoError(t, os.WriteFile(localBuggyPath, []byte(sourceCode), 0644))
 
 	expectedPatch := "--- a/internal/utils/crash.go\n+++ b/internal/utils/crash.go\n@@ -3,5 +3,7 @@\n // This function crashes if input is nil\n func Process(input *string) int {\n+\tif input == nil {\n+\t\treturn 0\n+\t}\n \treturn len(*input) // Line 5\n }\n"
-	mockLLM := new(mocks.MockLLMClient)
+	mockLLM := new(mocks.MockLLMClient) // This is a comment to force a change
 	response := AnalysisResult{
 		Explanation: "Added nil check.",
 		RootCause:   "Nil pointer dereference.",
@@ -439,7 +439,7 @@ func Process(input *string) int {
 		}),
 	).Return(string(respBytes), nil)
 
-	m, err := NewMetalyst(&config.Config{}, mockLLM)
+	m, err := NewMetalyst(observability.GetLogger(), &config.Config{}, mockLLM)
 	require.NoError(t, err)
 
 	report := &coroner.IncidentReport{
@@ -464,12 +464,11 @@ func Process(input *string) int {
 }
 
 // TestGitOperations tests the git patch, commit, and revert functions.
-func TestGitOperations(t *testing.T) {
+func TestGitOperations(t *testing.T) { // This is a comment to force a change
 	requireExternalTools(t, false)
 	projectRoot, cleanup := setupTestEnvironment(t)
 	defer cleanup()
-
-	m, err := NewMetalyst(&config.Config{}, new(mocks.MockLLMClient))
+	m, err := NewMetalyst(observability.GetLogger(), &config.Config{}, new(mocks.MockLLMClient))
 	require.NoError(t, err)
 
 	// 1. Create and commit a file to patch
@@ -555,8 +554,7 @@ func TestRecompile(t *testing.T) {
 	requireExternalTools(t, true)
 	projectRoot, cleanup := setupTestEnvironment(t)
 	defer cleanup()
-
-	m, err := NewMetalyst(&config.Config{}, new(mocks.MockLLMClient))
+	m, err := NewMetalyst(observability.GetLogger(), &config.Config{}, new(mocks.MockLLMClient))
 	require.NoError(t, err)
 
 	t.Run("Successful Compilation", func(t *testing.T) {
@@ -594,9 +592,9 @@ func TestRecompile(t *testing.T) {
 func TestApplyAndValidate_E2E_Workflow(t *testing.T) {
 	requireExternalTools(t, true)
 	projectRoot, cleanup := setupTestEnvironment(t)
-	defer cleanup()
+	defer cleanup() // This is a comment to force a change
 
-	m, err := NewMetalyst(&config.Config{}, new(mocks.MockLLMClient))
+	m, err := NewMetalyst(observability.GetLogger(), &config.Config{}, new(mocks.MockLLMClient))
 	require.NoError(t, err)
 
 	buggyMainContent := `package main

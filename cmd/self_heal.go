@@ -35,19 +35,19 @@ func newSelfHealCmd() *cobra.Command {
 			originalArgs, _ := cmd.Flags().GetStringSlice("original-args")
 
 			// Initialize the LLM client using the centralized initializer.
-			llmClient, err := service.InitializeLLMClient(cfg.Agent(), logger)
+			llmClient, err := service.InitializeLLMClient(logger, cfg.Agent())
 			if err != nil {
 				return err // Error is already logged and formatted by the initializer
 			}
 
 			// The initializer for the real Metalyst runner.
-			metalystInitFn := func(cfg config.Interface, llm schemas.LLMClient) (MetalystRunner, error) {
+			metalystInitFn := func(logger *zap.Logger, cfg config.Interface, llm schemas.LLMClient) (MetalystRunner, error) {
 				// Safely perform the type assertion.
 				concreteCfg, ok := cfg.(*config.Config)
 				if !ok {
 					return nil, errors.New("metalyst runner requires a concrete *config.Config implementation")
 				}
-				return metalyst.NewMetalyst(concreteCfg, llm)
+				return metalyst.NewMetalyst(logger, concreteCfg, llm)
 			}
 
 			return runSelfHeal(ctx, cfg, logger, panicLog, originalArgs, llmClient, metalystInitFn)
@@ -67,7 +67,7 @@ type MetalystRunner interface {
 }
 
 // MetalystInitializer is a function type for creating a MetalystRunner.
-type MetalystInitializer func(config.Interface, schemas.LLMClient) (MetalystRunner, error)
+type MetalystInitializer func(*zap.Logger, config.Interface, schemas.LLMClient) (MetalystRunner, error)
 
 // runSelfHeal contains the testable business logic for the command.
 func runSelfHeal(
@@ -89,7 +89,7 @@ func runSelfHeal(
 		zap.Strings("original_args", args),
 	)
 
-	runner, err := initFn(cfg, llmClient)
+	runner, err := initFn(logger, cfg, llmClient)
 	if err != nil {
 		logger.Error("Failed to initialize Metalyst runner", zap.Error(err))
 		return fmt.Errorf("failed to initialize Metalyst: %w", err)

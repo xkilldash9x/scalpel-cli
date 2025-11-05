@@ -102,7 +102,7 @@ func TestAnalyst_GracefulShutdownUnderLoad(t *testing.T) {
 		// Strategy 1.2: Must return context.Canceled.
 		assert.ErrorIs(t, err, context.Canceled)
 	case <-time.After(10 * time.Second): // Increased timeout for race detector overhead
-		t.Fatal("Analyst Run did not return promptly after cancellation under load. Potential deadlock during shutdown.")
+		t.Fatal("analyst did not return promptly after cancellation under load")
 	}
 
 	// goleak check ensures all components (Observer, Decider, etc.) terminated.
@@ -169,7 +169,7 @@ func TestAnalyst_RobustTimeoutPattern(t *testing.T) {
 	case err = <-runErrorChan:
 		// Proceed to assertions.
 	case <-time.After(maxTestDuration + 5*time.Second): // Timeout slightly longer than the context timeout
-		t.Fatal("Analyst Run did not return promptly after context timeout. Potential deadlock.")
+		t.Fatal("analyst did not return promptly after context timeout")
 	}
 
 	// Strategy 3.1 Benefit: Precise assertion that the application code returned the specific context error.
@@ -178,8 +178,8 @@ func TestAnalyst_RobustTimeoutPattern(t *testing.T) {
 	} else if testCtx.Err() == context.Canceled {
 		assert.ErrorIs(t, err, context.Canceled)
 	} else if err != nil {
-		t.Errorf("Expected context error (DeadlineExceeded or Canceled), but got: %v", err)
+		t.Errorf("expected context error, but got: %v", err)
 	} else {
-		t.Errorf("Expected context error, but got nil")
+		t.Error("expected context error, but got nil")
 	}
 }

@@ -2,17 +2,46 @@
 package jsoncompare
 
 import (
+	"os"
 	"strings"
 	"testing"
 
 	"github.com/google/go-cmp/cmp"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 )
+
+// TestMain sets up the global logger for all tests in this package.
+func TestMain(m *testing.M) {
+	// Reset to be able to initialize again (good for `go test -count=1 ...`)
+	observability.ResetForTest()
+
+	// Grab the default logger config
+	cfg := config.NewDefaultConfig().Logger()
+	// Tweak it for a better test experience
+	cfg.Level = "debug"    // Show all logs during tests
+	cfg.LogFile = ""       // Don't write to files
+	cfg.Format = "console" // Ensure console-friendly output
+
+	// Initialize the global logger
+	observability.InitializeLogger(cfg)
+
+	// Run all tests
+	code := m.Run()
+
+	// Flush the logger
+	observability.Sync()
+
+	// Exit with the correct status code
+	os.Exit(code)
+}
 
 // TestCompare_Integration performs end-to-end testing of the Compare function.
 func TestCompare_Integration(t *testing.T) {
 	t.Parallel()
 	opts := DefaultOptions()
-	service := NewService()
+	// Use the globally initialized logger
+	service := NewService(observability.GetLogger())
 
 	testCases := []struct {
 		name        string
@@ -39,7 +68,9 @@ func TestCompare_Integration(t *testing.T) {
 // TestCompare_Options verifies behavior when specific options are disabled.
 func TestCompare_Options(t *testing.T) {
 	t.Parallel()
-	service := NewService()
+	// Use the globally initialized logger
+	service := NewService(observability.GetLogger())
+
 	// IgnoreArrayOrder Disabled
 	optsStrictOrder := DefaultOptions()
 	optsStrictOrder.IgnoreArrayOrder = false
@@ -55,7 +86,8 @@ func TestCompare_Options(t *testing.T) {
 func TestCompare_ErrorHandling(t *testing.T) {
 	t.Parallel()
 	opts := DefaultOptions()
-	service := NewService()
+	// Use the globally initialized logger
+	service := NewService(observability.GetLogger())
 	jsonA := `{"key": "value"` // missing closing brace
 	jsonB := `{"key": "value"}`
 	result, err := service.CompareWithOptions([]byte(jsonA), []byte(jsonB), opts)
@@ -78,7 +110,9 @@ func FuzzCompare(f *testing.F) {
 	f.Add([]byte(`invalid json`), []byte(`{`))
 
 	opts := DefaultOptions()
-	service := NewService()
+	// Use the globally initialized logger
+	service := NewService(observability.GetLogger())
+
 	f.Fuzz(func(t *testing.T, dataA, dataB []byte) {
 		resAB, errA := service.CompareWithOptions(dataA, dataB, opts)
 		resBA, errB := service.CompareWithOptions(dataB, dataA, opts)
