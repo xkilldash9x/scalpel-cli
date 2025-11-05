@@ -40,7 +40,8 @@ func NewPostgresKG(pool DBPool, logger *zap.Logger) *PostgresKG {
 	// This check ensures that in a production environment, we are using the real pgxpool.Pool.
 	// During testing, a mock will be used, and this warning will be logged, which is expected.
 	if _, ok := pool.(*pgxpool.Pool); !ok {
-		logger.Warn("PostgresKG initialized with a non-production DBPool implementation. This is expected for tests.")
+		// Check if the underlying type is *pgxpool.Pool if wrapped (e.g., by instrumentation)
+		logger.Debug("PostgresKG initialized with a potentially non-standard DBPool implementation.")
 	}
 
 	return &PostgresKG{
@@ -58,6 +59,7 @@ func (p *PostgresKG) AddNode(ctx context.Context, node schemas.Node) error {
 		props = json.RawMessage("{}")
 	}
 
+	// NOTE: This assumes the table name is 'nodes'. This must match the actual database schema.
 	_, err := p.pool.Exec(ctx, `
         INSERT INTO nodes (id, type, label, status, properties, created_at, last_seen)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -87,6 +89,7 @@ func (p *PostgresKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 
 	// CORRECTED: ON CONFLICT on the natural key (from_node, to_node, type) prevents duplicate logical edges.
 	// This assumes a UNIQUE constraint exists on these three columns in the 'edges' table.
+	// NOTE: Assumes table name 'edges'.
 	_, err := p.pool.Exec(ctx, `
         INSERT INTO edges (id, from_node, to_node, type, label, properties, created_at, last_seen)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)

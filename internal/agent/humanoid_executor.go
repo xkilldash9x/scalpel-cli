@@ -11,8 +11,7 @@ import (
 	"go.uber.org/zap"
 )
 
-// HumanoidProvider is a function type that returns the active Humanoid instance.
-type HumanoidProvider func() *humanoid.Humanoid
+
 
 // HumanoidExecutor implements the ActionExecutor interface for complex, interactive browser tasks
 // that require human-like simulation (e.g., clicking, typing).

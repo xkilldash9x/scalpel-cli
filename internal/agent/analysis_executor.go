@@ -49,8 +49,14 @@ func (e *AnalysisExecutor) Execute(ctx context.Context, action Action) (*Executi
 	}
 
 	// 2. Preparation: Session requirements and Artifact collection.
-	session := e.sessionProvider()
+	// Use the context to get the session, as it might involve initialization.
+	session, sessionErr := e.sessionProvider(ctx)
 	var artifacts *schemas.Artifacts
+
+	// Check if session acquisition failed for active/agent types.
+	if (analyzer.Type() == core.TypeActive || analyzer.Type() == core.TypeAgent) && session == nil {
+		return e.fail(ErrCodeExecutionFailure, fmt.Sprintf("No active browser session available for active analysis: %v", sessionErr), nil), nil
+	}
 
 	if session != nil {
 		// Fail fast if the parent context is already cancelled before attempting a potentially long operation.
@@ -70,9 +76,6 @@ func (e *AnalysisExecutor) Execute(ctx context.Context, action Action) (*Executi
 			// Proceed without artifacts rather than failing the analysis.
 			artifacts = nil
 		}
-	} else if analyzer.Type() == core.TypeActive || analyzer.Type() == core.TypeAgent {
-		// Active analyzers require a session context.
-		return e.fail(ErrCodeExecutionFailure, "No active browser session available for active analysis.", nil), nil
 	}
 
 	// 3. Initialize AnalysisContext

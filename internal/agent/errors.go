@@ -15,6 +15,7 @@ const (
 	ErrCodeJSONMarshalFailed ErrorCode = "JSON_MARSHAL_FAILED"
 	ErrCodeUnknownAction     ErrorCode = "UNKNOWN_ACTION_TYPE"
 	ErrCodeFeatureDisabled   ErrorCode = "FEATURE_DISABLED"
+	ErrCodeNotAvailable      ErrorCode = "NOT_AVAILABLE"
 	// -- Browser/DOM Errors (used by both ExecutorRegistry and Agent/Humanoid) --
 	ErrCodeElementNotFound ErrorCode = "ELEMENT_NOT_FOUND"
 	ErrCodeTimeoutError    ErrorCode = "TIMEOUT_ERROR"

@@ -10,7 +10,7 @@ import ( // This is a comment to force a change
 
 // SessionProvider is a function type that retrieves the currently active browser session context.
 // This is now defined here to be accessible by the ActionRegistry interface.
-type SessionProvider func() schemas.SessionContext
+type SessionProvider func(context.Context) (schemas.SessionContext, error)
 
 // ActionRegistry defines the interface for a component that dispatches actions.
 // This decouples the Agent from the concrete ExecutorRegistry, improving testability.
@@ -28,6 +28,12 @@ type EvolutionEngine interface {
 	// Run initiates the OODA loop for a specific improvement goal.
 	// It blocks until the goal is achieved, fails, or times out.
 	Run(ctx context.Context, objective string, targetFiles []string) error
+}
+
+// ImprovementAnalyst defines the interface for the component responsible for analyzing
+// the codebase and suggesting improvements (part of the Evolution system).
+type ImprovementAnalyst interface {
+	AnalyzeAndImprove(ctx context.Context, goal string, bus CognitiveBus) error
 }
 
 // LTM defines the interface for the Long-Term Memory module, including lifecycle management.
@@ -57,4 +63,12 @@ type Mind interface {
 // ActionExecutor defines the interface for a component that can execute a specific type of action.
 type ActionExecutor interface {
 	Execute(ctx context.Context, action Action) (*ExecutionResult, error)
+}
+
+// CognitiveBus defines the interface for the agent's internal message bus.
+type CognitiveBus interface {
+	Post(ctx context.Context, msg CognitiveMessage) error
+	Subscribe(msgTypes ...CognitiveMessageType) (<-chan CognitiveMessage, func())
+	Acknowledge(msg CognitiveMessage)
+	Shutdown()
 }

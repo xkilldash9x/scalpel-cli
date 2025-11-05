@@ -1,8 +1,9 @@
-// File: internal/analysis/core/context.go
 package core
 
 import (
+	"context"
 	"net/url"
+	"time"
 
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
@@ -10,7 +11,13 @@ import (
 	"go.uber.org/zap"
 )
 
-// NEW: AdapterRegistry defines the map of task types to their corresponding analyzers.
+// Analyzer defines the standard interface for analysis modules (adapters).
+type Analyzer interface {
+	// Analyze performs the analysis task using the provided context.
+	Analyze(ctx context.Context, ac *AnalysisContext) error
+}
+
+// AdapterRegistry defines the map of task types to their corresponding analyzers.
 // It is populated by the worker and made available in the GlobalContext.
 type AdapterRegistry map[schemas.TaskType]Analyzer
 
@@ -22,8 +29,9 @@ type GlobalContext struct {
 	DBPool         *pgxpool.Pool
 	KGClient       schemas.KnowledgeGraphClient
 	OASTProvider   schemas.OASTProvider
-	FindingsChan   chan<- schemas.Finding
-	// NEW: Provides access to analysis adapters for dynamic invocation (e.g., by the Agent).
+	// FindingsChan is write-only for components using the GlobalContext.
+	FindingsChan chan<- schemas.Finding
+	// Provides access to analysis adapters for dynamic invocation (e.g., by the Agent).
 	Adapters AdapterRegistry
 }
 
@@ -37,7 +45,7 @@ type AnalysisContext struct {
 	Artifacts *schemas.Artifacts
 	Findings  []schemas.Finding
 	KGUpdates *schemas.KnowledgeGraphUpdate
-	// NEW: Optional existing browser session.
+	// Optional existing browser session.
 	Session schemas.SessionContext
 }
 
@@ -45,6 +53,10 @@ type AnalysisContext struct {
 func (ac *AnalysisContext) AddFinding(finding schemas.Finding) {
 	if finding.ScanID == "" && ac.Task.ScanID != "" {
 		finding.ScanID = ac.Task.ScanID
+	}
+	// Ensure Timestamp is set if it's zero
+	if finding.Timestamp.IsZero() {
+		finding.Timestamp = time.Now().UTC()
 	}
 	ac.Findings = append(ac.Findings, finding)
 }
