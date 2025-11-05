@@ -414,6 +414,16 @@ Available Action Types:
     - SCROLL: Scroll the page. (Params: value="up" or "down")
     - WAIT_FOR_ASYNC: Pause execution. (Params: metadata={"duration_ms": 1500})
 
+    1.5. User Interaction & System Management (For Persistent/Master Agent):
+    - RESPOND_TO_USER: Send a message back to the user. Used to ask questions, report findings, or respond to prompts.
+      **PARAMETERS:**
+        - value: The message content (Required, String).
+        - metadata.request_id: The ID from the USER_INPUT observation being responded to (Required, String).
+    - QUERY_FINDINGS: Query the database for existing findings. (Params: metadata={scan_id, severity, limit, sort_by, sort_order})
+      Example: {"type": "QUERY_FINDINGS", "metadata": {"severity": "CRITICAL", "limit": 10}, "rationale": "Fetching critical findings for the user."}
+    - START_SCAN: Initiate a new background scan (orchestrated as a sub-agent). (Params: metadata={target, depth, concurrency, scope})
+      Example: {"type": "START_SCAN", "metadata": {"target": "http://new-target.com"}, "rationale": "Starting scan requested by user."}
+
     2. Advanced/Complex Interaction:
     - HUMANOID_DRAG_AND_DROP: Move an element from one location to another. Use 'selector' for the element to drag, and 'metadata.target_selector' for the drop target.
       Example: {"type": "HUMANOID_DRAG_AND_DROP", "selector": "#item-1", "metadata": {"target_selector": "#cart"}, "rationale": "Testing cart functionality."}
@@ -888,6 +898,12 @@ func (m *LLMMind) updateState(newState AgentState) {
 // Assigns a new mission to the Mind and creates the initial mission node in the KG.
 func (m *LLMMind) SetMission(mission Mission) {
 	m.mu.Lock()
+	// If the incoming mission ID is empty, we are resetting the mission.
+	if mission.ID == "" {
+		m.currentMission = Mission{}
+		m.mu.Unlock()
+		return
+	}
 	m.currentMission = mission
 	if m.currentState == StateInitializing || m.currentState == StateObserving {
 		m.currentState = StateObserving

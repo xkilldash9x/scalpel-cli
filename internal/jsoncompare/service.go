@@ -14,7 +14,6 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"go.uber.org/zap"
 )
 
@@ -24,10 +23,9 @@ type service struct {
 }
 
 // NewService creates a new instance of the JSON comparison service.
-func NewService() JSONComparison {
+func NewService(logger *zap.Logger) JSONComparison {
 	return &service{
-		// Use the centralized logger configuration.
-		logger: observability.GetLogger().Named("jsoncompare"),
+		logger: logger.Named("jsoncompare"),
 	}
 }
 

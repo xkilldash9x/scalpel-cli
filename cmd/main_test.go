@@ -40,7 +40,8 @@ func newPristineRootCmd() *cobra.Command {
 			// 2. Create the configuration object from viper.
 			cfg, err := config.NewConfigFromViper(v)
 			if err != nil {
-				observability.InitializeLogger(config.LoggerConfig{Level: "info", Format: "console", ServiceName: "scalpel-cli"})
+				// Use ResetForTest to ensure a silent, valid logger is available.
+				observability.ResetForTest()
 				return fmt.Errorf("failed to load or validate config: %w", err)
 			}
 

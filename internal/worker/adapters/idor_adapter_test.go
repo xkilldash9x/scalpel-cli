@@ -45,7 +45,7 @@ func setupIDORContext(t *testing.T, targetURL string, task schemas.Task) *core.A
 }
 
 func TestIDORAdapter_Analyze_ParameterValidation(t *testing.T) {
-	adapter := adapters.NewIDORAdapter()
+	adapter := adapters.NewIDORAdapter(zaptest.NewLogger(t))
 	ctx := context.Background()
 
 	// Dummy server for valid cases (as the adapter needs to make a baseline request)
@@ -121,7 +121,7 @@ func TestIDORAdapter_Analyze_BaselineRequestBehavior(t *testing.T) {
 			}))
 			defer ts.Close()
 
-			adapter := adapters.NewIDORAdapter()
+			adapter := adapters.NewIDORAdapter(zaptest.NewLogger(t))
 			// Inject the specific client for this test server.
 			adapter.SetHttpClient(ts.Client())
 
@@ -225,7 +225,7 @@ func TestIDORAdapter_Analyze_DetectionScenarios(t *testing.T) {
 			ts := httptest.NewServer(handler(tt.isVulnerable, tt.useSemanticEquivalence))
 			defer ts.Close()
 
-			adapter := adapters.NewIDORAdapter()
+			adapter := adapters.NewIDORAdapter(zaptest.NewLogger(t))
 			adapter.SetHttpClient(ts.Client())
 
 			targetURL := ts.URL + tt.path
@@ -271,7 +271,7 @@ func TestIDORAdapter_Analyze_ContextCancellation(t *testing.T) {
 	}))
 	defer ts.Close()
 
-	adapter := adapters.NewIDORAdapter()
+	adapter := adapters.NewIDORAdapter(zaptest.NewLogger(t))
 	adapter.SetHttpClient(ts.Client())
 
 	task := schemas.Task{
@@ -292,39 +292,28 @@ func TestIDORAdapter_Analyze_ContextCancellation(t *testing.T) {
 	assert.True(t, errors.Is(err, context.DeadlineExceeded) || errors.Is(err, context.Canceled))
 }
 
-// MockTransport to simulate network errors during the testing phase (not baseline).
-type MockTransport struct {
-	InjectErr bool
-}
-
-func (m *MockTransport) RoundTrip(req *http.Request) (*http.Response, error) {
-	// Inject error only during the testing phase (when the body is modified)
-	if m.InjectErr && req.Method == "POST" {
-		// Clone the body before reading, as http.Request.Body can only be read once.
-		bodyBytes, _ := io.ReadAll(req.Body)
-		req.Body = io.NopCloser(bytes.NewBuffer(bodyBytes)) // Restore body for subsequent processing if needed
-
-		if string(bodyBytes) != `{"id":1}` { // Check if it's not the baseline request (i.e., it's the test request)
-			return nil, errors.New("simulated network error during test request")
-		}
-	}
-	// Return a basic response for the baseline request.
-	return &http.Response{
-		StatusCode: http.StatusOK,
-		Body:       io.NopCloser(bytes.NewBufferString(`{"id": 1, "status": "ok"}`)),
-		Header:     make(http.Header),
-		Request:    req, // Must set the request field
-	}, nil
-}
-
 // Test case added to increase coverage: Handling network errors during the testing phase.
 func TestIDORAdapter_Analyze_NetworkErrorDuringTest(t *testing.T) {
-	adapter := adapters.NewIDORAdapter()
+	adapter := adapters.NewIDORAdapter(zaptest.NewLogger(t))
 	ctx := context.Background()
 
-	// Use the MockTransport
-	mockTransport := &MockTransport{InjectErr: true}
-	client := &http.Client{Transport: mockTransport}
+	// Use the shared mock transport helper
+	client := newMockClient(func(req *http.Request) (*http.Response, error) {
+		// Inject error only during the testing phase (when the body is modified)
+		if req.Method == "POST" {
+			bodyBytes, _ := io.ReadAll(req.Body)
+			if string(bodyBytes) != `{"id":1}` { // Check if it's not the baseline request
+				return nil, errors.New("simulated network error during test request")
+			}
+		}
+		// Return a basic response for the baseline request.
+		return &http.Response{
+			StatusCode: http.StatusOK,
+			Body:       io.NopCloser(bytes.NewBufferString(`{"id": 1, "status": "ok"}`)),
+			Header:     make(http.Header),
+			Request:    req,
+		}, nil
+	})
 	adapter.SetHttpClient(client)
 
 	targetURL := "http://mockserver/test"

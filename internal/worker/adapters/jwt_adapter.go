@@ -19,7 +19,9 @@ type JWTAdapter struct {
 // NewJWTAdapter creates a new adapter for JWT analysis.
 func NewJWTAdapter() *JWTAdapter {
 	return &JWTAdapter{
-		BaseAnalyzer: *core.NewBaseAnalyzer("JWT Adapter", "Scans artifacts (e.g., HAR files) for JWTs and analyzes them for common vulnerabilities.", core.TypeStatic, zap.NewNop()),
+		// Pass nil for the logger; it will be retrieved from the AnalysisContext during Analyze.
+		// This prevents issues with global logger initialization order.
+		BaseAnalyzer: *core.NewBaseAnalyzer("JWT Adapter", "Scans artifacts (e.g., HAR files) for JWTs and analyzes them for common vulnerabilities.", core.TypeStatic, nil),
 	}
 }
 

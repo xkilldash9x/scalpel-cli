@@ -56,7 +56,7 @@ WARNING: This process modifies the local codebase. Ensure your working directory
 			}
 
 			// Initialize the LLM client using the centralized initializer.
-			llmClient, err := service.InitializeLLMClient(cfg.Agent(), logger)
+			llmClient, err := service.InitializeLLMClient(logger, cfg.Agent())
 			if err != nil {
 				return err // Error is already logged and formatted by the initializer
 			}

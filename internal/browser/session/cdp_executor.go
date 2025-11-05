@@ -247,7 +247,7 @@ func (e *cdpExecutor) GetElementGeometry(ctx context.Context, selector string) (
 
 	// Check for explicit null return from JS, indicating element not found or not visible
 	if string(res) == "null" {
-		e.logger.Debug("Element geometry JS evaluation returned null (not found or not visible).", zap.String("selector", selector))
+		e.logger.Debug("Element not found or not visible.", zap.String("selector", selector), zap.String("reason", "JS evaluation returned null"))
 		// Distinguish between not found and not visible if possible? For now, treat same.
 		return nil, fmt.Errorf("element '%s' not found or not visible", selector)
 	}

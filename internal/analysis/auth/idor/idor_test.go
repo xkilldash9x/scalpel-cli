@@ -7,7 +7,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -19,6 +18,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/xkilldash9x/scalpel-cli/internal/jsoncompare"
 	"go.uber.org/goleak"
+	"go.uber.org/zap"
 )
 
 // MockSession implements the Session interface for testing.
@@ -124,7 +124,7 @@ func createTestPair(t *testing.T, client *http.Client, req *http.Request, sessio
 	var reqBody []byte
 	var err error
 	if req.Body != nil {
-		reqBody, err = io.ReadAll(req.Body)
+		reqBody, err = io.ReadAll(req.Body) // This is a comment to force a change
 		if err != nil {
 			return RequestResponsePair{}, fmt.Errorf("failed to read request body for pair creation: %w", err)
 		}
@@ -166,8 +166,7 @@ func TestDetect_Integration(t *testing.T) {
 	server := SetupTestAPI(t)
 	client := server.Client()
 	t.Cleanup(client.CloseIdleConnections)
-	logger := log.New(io.Discard, "", 0)
-	comparer := jsoncompare.NewService()
+	comparer := jsoncompare.NewService(zap.NewNop())
 
 	userA := &MockSession{UserID: "UserA", Authenticated: true}
 	userB := &MockSession{UserID: "UserB", Authenticated: true}
@@ -191,6 +190,7 @@ func TestDetect_Integration(t *testing.T) {
 		HttpClient:        client,
 	}
 
+	logger := zap.NewNop().Sugar()
 	findings, err := Detect(context.Background(), traffic, config, logger, comparer)
 	require.NoError(t, err, "Detect returned an unexpected error")
 
@@ -219,9 +219,7 @@ func TestDetect_ConcurrencyAndCancellation(t *testing.T) {
 	server := SetupTestAPI(t)
 	userA := &MockSession{UserID: "UserA", Authenticated: true}
 	testClient := server.Client()
-	t.Cleanup(testClient.CloseIdleConnections)
-	comparer := jsoncompare.NewService()
-
+	comparer := jsoncompare.NewService(zap.NewNop())
 	config := Config{
 		Session:           userA,
 		SecondSession:     userA,
@@ -243,7 +241,7 @@ func TestDetect_ConcurrencyAndCancellation(t *testing.T) {
 		traffic = append(traffic, pair)
 	}
 
-	logger := log.New(io.Discard, "", 0)
+	logger := zap.NewNop().Sugar()
 	startTime := time.Now()
 	_, err := Detect(ctx, traffic, config, logger, comparer)
 	duration := time.Since(startTime)
@@ -276,7 +274,7 @@ func TestDetect_Robustness_tDeadlinePattern(t *testing.T) {
 	userA := &MockSession{UserID: "UserA", Authenticated: true}
 	client := server.Client()
 	t.Cleanup(client.CloseIdleConnections)
-	comparer := jsoncompare.NewService()
+	comparer := jsoncompare.NewService(zap.NewNop())
 
 	config := Config{
 		Session:           userA,
@@ -295,7 +293,7 @@ func TestDetect_Robustness_tDeadlinePattern(t *testing.T) {
 		traffic = append(traffic, pair)
 	}
 
-	logger := log.New(io.Discard, "", 0)
+	logger := zap.NewNop().Sugar()
 	_, err := Detect(ctx, traffic, config, logger, comparer)
 
 	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
@@ -316,7 +314,7 @@ func TestDetect_ConcurrencySafety(t *testing.T) {
 	userB := &MockSession{UserID: "UserB", Authenticated: true}
 	client := server.Client()
 	t.Cleanup(client.CloseIdleConnections)
-	comparer := jsoncompare.NewService()
+	comparer := jsoncompare.NewService(zap.NewNop())
 
 	config := Config{
 		Session:           userA,
@@ -358,7 +356,7 @@ func TestDetect_ConcurrencySafety(t *testing.T) {
 		return false // Stop iteration on first error
 	})
 
-	logger := log.New(io.Discard, "", 0)
+	logger := zap.NewNop().Sugar()
 	_, err := Detect(context.Background(), traffic, config, logger, comparer)
 	require.NoError(t, err, "Detect() returned unexpected error")
 }

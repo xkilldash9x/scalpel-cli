@@ -17,7 +17,6 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/autofix/coroner"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"go.uber.org/zap"
 )
 
@@ -39,10 +38,7 @@ type AnalysisResult struct {
 }
 
 // NewMetalyst initializes the self-healing orchestrator.
-func NewMetalyst(cfg *config.Config, llmClient schemas.LLMClient) (*Metalyst, error) {
-	// Let's get the global logger instance.
-	logger := observability.GetLogger()
-
+func NewMetalyst(logger *zap.Logger, cfg *config.Config, llmClient schemas.LLMClient) (*Metalyst, error) {
 	// Determine the project root. This is crucial for applying patches and recompiling.
 	projectRoot, err := determineProjectRoot()
 	if err != nil {
@@ -101,8 +97,13 @@ func (m *Metalyst) Run(ctx context.Context, panicLogPath string, originalArgs []
 	// Step 1.3 (Using 1.2): Diagnose - Parse the panic log
 	report, err := m.coroner.ParseFile(panicLogPath)
 	if err != nil {
+		m.logger.Error("Failed to parse panic log. Aborting self-heal.", zap.String("panic_log", panicLogPath), zap.Error(err))
 		return fmt.Errorf("failed to parse panic log: %w", err)
 	}
+	m.logger.Info("Panic log parsed successfully.",
+		zap.String("crash_file", report.FilePath),
+		zap.Int("crash_line", report.LineNumber),
+	)
 
 	// Path Normalization
 	normalizedPath, localPath, err := m.normalizePath(report.FilePath)
@@ -117,13 +118,13 @@ func (m *Metalyst) Run(ctx context.Context, panicLogPath string, originalArgs []
 	// Step 1.3: Diagnose - Analyze and generate patch
 	analysis, err := m.analyzeAndGeneratePatch(ctx, report, localPath)
 	if err != nil {
-		return fmt.Errorf("failed to analyze crash and generate patch: %w", err)
+		return fmt.Errorf("analysis and patch generation failed: %w", err)
 	}
 	m.logger.Info("Patch generated.", zap.Float64("confidence", analysis.Confidence))
 
 	// Step 1.4: The Surgeon - Apply and Validate
 	if err := m.applyAndValidate(ctx, analysis, originalArgs); err != nil {
-		m.logger.Error("Failed to apply and validate fix. Changes reverted.", zap.Error(err))
+		m.logger.Error("Failed to apply and validate fix. Changes have been reverted.", zap.Error(err))
 		m.logFailedAttempt(report, analysis, err)
 		return fmt.Errorf("validation failed: %w", err)
 	}
@@ -131,7 +132,7 @@ func (m *Metalyst) Run(ctx context.Context, panicLogPath string, originalArgs []
 	// Step 1.4 Success: Commit the fix
 	if err := m.commitFix(analysis); err != nil {
 		m.logger.Error("Failed to commit the validated fix. Fix is applied locally but not committed.", zap.Error(err))
-	} else {
+	} else { // This is a comment to force a change
 		m.logger.Info("Self-healing successful. Fix applied, validated, and committed.")
 	}
 
@@ -213,6 +214,10 @@ func (m *Metalyst) analyzeAndGeneratePatch(ctx context.Context, report *coroner.
 	if err != nil {
 		return nil, fmt.Errorf("failed to read source code file '%s' (local path: %s): %w", report.FilePath, localSourcePath, err)
 	}
+	m.logger.Info("Read source code for analysis.",
+		zap.String("path", localSourcePath),
+		zap.Int("size_bytes", len(sourceCode)),
+	)
 
 	// Construct the prompt (Step 1.3 Logic)
 	prompt := m.constructPrompt(report, string(sourceCode))
@@ -233,6 +238,7 @@ func (m *Metalyst) analyzeAndGeneratePatch(ctx context.Context, report *coroner.
 
 	response, err := m.llmClient.Generate(analysisCtx, req)
 	if err != nil {
+		m.logger.Error("LLM call for patch generation failed.", zap.Error(err))
 		return nil, fmt.Errorf("LLM generation failed: %w", err)
 	}
 
@@ -402,7 +408,7 @@ func (m *Metalyst) applyAndValidate(ctx context.Context, analysis *AnalysisResul
 	// Ensure we revert the changes if validation fails (Step 1.4 Failure)
 	defer func() {
 		if !validationSucceeded {
-			m.logger.Info("Validation did not succeed, reverting changes.")
+			m.logger.Warn("Validation did not succeed, reverting changes.")
 			if err := m.revertPatch(analysis.Patch); err != nil {
 				m.logger.Error("CRITICAL: Failed to revert patch automatically. Manual intervention required.", zap.Error(err))
 			}
@@ -416,7 +422,7 @@ func (m *Metalyst) applyAndValidate(ctx context.Context, analysis *AnalysisResul
 	if err != nil {
 		return fmt.Errorf("recompilation failed: %w", err)
 	}
-	defer os.Remove(binaryPath) // Clean up the temporary binary
+	defer os.Remove(binaryPath) // Clean up the temporary binary.
 	m.logger.Info("Recompilation successful.", zap.String("temp_binary_path", binaryPath))
 
 	// Step 1.4 Logic: Re-run the original command
@@ -530,7 +536,7 @@ func (m *Metalyst) commitFix(analysis *AnalysisResult) error {
 
 func (m *Metalyst) logFailedAttempt(report *coroner.IncidentReport, analysis *AnalysisResult, err error) {
 	// Placeholder for logging failed attempts (Step 1.4 Failure)
-	m.logger.Warn("Self-healing attempt failed and logged for review.",
+	m.logger.Warn("Self-healing attempt failed and has been logged for review.",
 		zap.String("file", report.FilePath),
 		zap.String("root_cause_guess", analysis.RootCause),
 		zap.NamedError("validation_error", err))

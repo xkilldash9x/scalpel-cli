@@ -124,7 +124,7 @@ func (s *Session) Initialize(ctx context.Context, taintTemplate, taintConfig str
 	if err := s.harvester.Start(s.ctx); err != nil {
 		// If harvester fails to start, log and potentially disable HAR/console collection?
 		// For now, return the error as it might indicate deeper CDP issues.
-		s.logger.Error("Failed to start harvester.", zap.Error(err))
+		s.logger.Error("Failed to start harvester", zap.Error(err))
 		return fmt.Errorf("failed to start harvester: %w", err)
 	}
 	s.logger.Debug("Harvester initialized and started.")
@@ -146,7 +146,7 @@ func (s *Session) Initialize(ctx context.Context, taintTemplate, taintConfig str
 		s.logger.Debug("Controllers not pre-initialized. Running standard initialization (initializeControllers).")
 		if err := s.initializeControllers(); err != nil {
 			// Log the error but continue; interactions might still work without humanoid.
-			s.logger.Error("Failed to initialize controllers (humanoid/interactor).", zap.Error(err))
+			s.logger.Error("Failed to initialize controllers (humanoid/interactor)", zap.Error(err))
 			// Clear humanoid reference if initialization failed
 			s.humanoid = nil
 
@@ -189,7 +189,7 @@ func (s *Session) Initialize(ctx context.Context, taintTemplate, taintConfig str
 		// Use the operational context (ctx) for setup actions.
 		if err := s.initializeTaintShim(ctx, taintTemplate, taintConfig); err != nil {
 			// Log as warning, maybe non-fatal depending on requirements.
-			s.logger.Warn("Failed to initialize IAST Taint Shim.", zap.Error(err))
+			s.logger.Warn("Failed to initialize IAST Taint Shim", zap.Error(err))
 		}
 	}
 
@@ -205,7 +205,7 @@ func (s *Session) Initialize(ctx context.Context, taintTemplate, taintConfig str
 	}
 
 	// Execute all remaining initialization tasks sequentially for improved stability and diagnostics.
-	s.logger.Debug("Executing initialization tasks sequentially.", zap.Int("num_tasks", len(tasks)))
+	s.logger.Debug("Executing initialization tasks sequentially", zap.Int("num_tasks", len(tasks)))
 	for i, task := range tasks {
 		// Log the type of the task for better diagnostics if it fails.
 		// Use reflection to get the underlying type if it's an interface or pointer.
@@ -214,7 +214,7 @@ func (s *Session) Initialize(ctx context.Context, taintTemplate, taintConfig str
 		// Ensure the task is valid before attempting reflection or running.
 		val := reflect.ValueOf(task)
 		if !val.IsValid() || (val.Kind() == reflect.Ptr && val.IsNil()) {
-			s.logger.Warn("Skipping nil or invalid initialization task.", zap.Int("task_index", i), zap.String("task_type", taskType))
+			s.logger.Warn("Skipping nil or invalid initialization task", zap.Int("task_index", i), zap.String("task_type", taskType))
 			continue
 		}
 
@@ -227,7 +227,7 @@ func (s *Session) Initialize(ctx context.Context, taintTemplate, taintConfig str
 			}
 		}
 
-		s.logger.Debug("Running initialization task.", zap.Int("task_index", i), zap.String("task_type", taskType))
+		s.logger.Debug("Running initialization task", zap.Int("task_index", i), zap.String("task_type", taskType))
 
 		// Use chromedp.Run with the operational context (ctx) to enforce the initialization deadline.
 		if err := chromedp.Run(ctx, task); err != nil {
@@ -242,7 +242,7 @@ func (s *Session) Initialize(ctx context.Context, taintTemplate, taintConfig str
 		// Use operational context for the initial move.
 		if err := s.initializeCursorPosition(ctx); err != nil {
 			// Log as debug, failure here is likely not critical.
-			s.logger.Debug("Could not set initial cursor position.", zap.Error(err))
+			s.logger.Debug("Could not set initial cursor position", zap.Error(err))
 		}
 	}
 
@@ -322,7 +322,7 @@ func (s *Session) RunBackgroundActions(ctx context.Context, actions ...chromedp.
 
 // stabilize waits for the page state to settle (DOM ready and network idle).
 func (s *Session) stabilize(ctx context.Context, quietPeriod time.Duration) error {
-	s.logger.Debug("Stabilizing page state.", zap.Duration("quietPeriod", quietPeriod))
+	s.logger.Debug("Stabilizing page state", zap.Duration("quietPeriod", quietPeriod))
 	// Use a timeout specific to stabilization, combined with the incoming context (ctx)
 	// and the session context (s.ctx).
 	stabCtx, cancel := context.WithTimeout(ctx, 90*time.Second) // Stabilization timeout
@@ -332,20 +332,20 @@ func (s *Session) stabilize(ctx context.Context, quietPeriod time.Duration) erro
 	if err := s.RunActions(stabCtx, chromedp.WaitReady("body", chromedp.ByQuery)); err != nil {
 		// Check original context errors before logging/returning stabilization error
 		if ctx.Err() != nil {
-			s.logger.Debug("Stabilization WaitReady interrupted by incoming context.", zap.Error(ctx.Err()))
+			s.logger.Debug("Stabilization WaitReady interrupted by incoming context", zap.Error(ctx.Err()))
 			return ctx.Err()
 		}
 		if s.ctx.Err() != nil {
-			s.logger.Debug("Stabilization WaitReady interrupted by session context.", zap.Error(s.ctx.Err()))
+			s.logger.Debug("Stabilization WaitReady interrupted by session context", zap.Error(s.ctx.Err()))
 			return s.ctx.Err()
 		}
 		// Log WaitReady failure if not due to context cancel
 		if stabCtx.Err() == nil {
-			s.logger.Warn("WaitReady failed during stabilization.", zap.Error(err))
+			s.logger.Warn("WaitReady failed during stabilization", zap.Error(err))
 		} else {
-			s.logger.Warn("WaitReady timed out during stabilization.", zap.Error(stabCtx.Err()))
+			s.logger.Warn("WaitReady timed out during stabilization", zap.Error(stabCtx.Err()))
 		}
-		return fmt.Errorf("stabilize WaitReady failed: %w", err) // Return the specific error
+		return fmt.Errorf("stabilize: WaitReady failed: %w", err) // Return the specific error
 	}
 
 	// Wait for network idle using harvester, passing the stabilization context
@@ -356,16 +356,16 @@ func (s *Session) stabilize(ctx context.Context, quietPeriod time.Duration) erro
 				return ctx.Err()
 			}
 			if s.ctx.Err() != nil {
-				s.logger.Debug("Stabilization WaitNetworkIdle interrupted by session context.", zap.Error(s.ctx.Err()))
+				s.logger.Debug("Stabilization WaitNetworkIdle interrupted by session context", zap.Error(s.ctx.Err()))
 				return s.ctx.Err()
 			}
 			// Log network idle failure if not due to context cancel
 			if stabCtx.Err() == nil {
-				s.logger.Warn("Network idle wait failed during stabilization.", zap.Error(err))
+				s.logger.Warn("Network idle wait failed during stabilization", zap.Error(err))
 			} else {
-				s.logger.Warn("Network idle wait timed out during stabilization.", zap.Error(stabCtx.Err()))
+				s.logger.Warn("Network idle wait timed out during stabilization", zap.Error(stabCtx.Err()))
 			}
-			return fmt.Errorf("stabilize WaitNetworkIdle failed: %w", err) // Return the specific error
+			return fmt.Errorf("stabilize: WaitNetworkIdle failed: %w", err) // Return the specific error
 		}
 	}
 
@@ -381,21 +381,21 @@ func (s *Session) stabilize(ctx context.Context, quietPeriod time.Duration) erro
 	// A longer delay provides more buffer for the DOM to update (TestInteractor/DepthLimiting failure).
 	const settleDelay = 750 * time.Millisecond
 
-	s.logger.Debug("Applying post-stabilization settle delay.", zap.Duration("duration", settleDelay))
+	s.logger.Debug("Applying post-stabilization settle delay", zap.Duration("duration", settleDelay))
 	select {
 	case <-time.After(settleDelay):
 		// Proceed
 	case <-stabCtx.Done():
 		// If stabilization context times out during the settle delay.
-		s.logger.Debug("Settle delay interrupted by stabilization context.", zap.Error(stabCtx.Err()))
+		s.logger.Debug("Settle delay interrupted by stabilization context", zap.Error(stabCtx.Err()))
 		return stabCtx.Err()
 	case <-ctx.Done():
 		// If the operational context is cancelled during the settle delay.
-		s.logger.Debug("Settle delay interrupted by incoming context.", zap.Error(ctx.Err()))
+		s.logger.Debug("Settle delay interrupted by incoming context", zap.Error(ctx.Err()))
 		return ctx.Err()
 	case <-s.ctx.Done():
 		// If the session context is cancelled during the settle delay.
-		s.logger.Debug("Settle delay interrupted by session context.", zap.Error(s.ctx.Err()))
+		s.logger.Debug("Settle delay interrupted by session context", zap.Error(s.ctx.Err()))
 		return s.ctx.Err()
 	}
 
@@ -483,13 +483,13 @@ func (s *Session) initializeCursorPosition(ctx context.Context) error {
 		if visualViewport.ClientWidth > 0 && visualViewport.ClientHeight > 0 {
 			width = int64(visualViewport.ClientWidth)
 			height = int64(visualViewport.ClientHeight)
-			s.logger.Debug("Using VisualViewport dimensions for initial cursor.", zap.Int64("width", width), zap.Int64("height", height))
+			s.logger.Debug("Using VisualViewport dimensions for initial cursor", zap.Int64("width", width), zap.Int64("height", height))
 		} else if layoutViewport.ClientWidth > 0 && layoutViewport.ClientHeight > 0 {
 			width = int64(layoutViewport.ClientWidth)
 			height = int64(layoutViewport.ClientHeight)
-			s.logger.Debug("Falling back to LayoutViewport dimensions for initial cursor.", zap.Int64("width", width), zap.Int64("height", height))
+			s.logger.Debug("Falling back to LayoutViewport dimensions for initial cursor", zap.Int64("width", width), zap.Int64("height", height))
 		} else {
-			return fmt.Errorf("retrieved viewport dimensions are invalid (width=%v, height=%v)", width, height)
+			return fmt.Errorf("retrieved viewport dimensions are invalid (width=%d, height=%d)", width, height)
 		}
 	}
 
@@ -501,7 +501,7 @@ func (s *Session) initializeCursorPosition(ctx context.Context) error {
 	//  Pass context as the first argument, remove invalid .Do()
 	err := s.humanoid.MoveToVector(ctx, startVec, nil)
 	if err != nil {
-		s.logger.Warn("Failed to move cursor to initial position.", zap.Error(err))
+		s.logger.Warn("Failed to move cursor to initial position", zap.Error(err))
 		return err // Still return the error
 	}
 	s.logger.Debug("Initial cursor position set.")
@@ -553,11 +553,9 @@ func (s *Session) handleTaintEvent(eventData map[string]interface{}) {
 		return
 	}
 	eventType, _ := eventData["type"].(string)
-	// Detail might be complex JSON, handle potential unmarshalling later if needed
-	detailBytes, _ := json.Marshal(eventData["detail"]) // Marshal detail for logging/storage
-	detailStr := string(detailBytes)
+	detail := eventData["detail"]
 
-	s.logger.Info("IAST Sink Triggered", zap.String("type", eventType), zap.String("detail_json", detailStr))
+	s.logger.Info("IAST Sink Triggered", zap.String("type", eventType), zap.Any("detail", detail))
 
 	//  Prepare evidence. Assuming schemas.Finding.Evidence is a string (e.g., JSON string) to fix IncompatibleAssign.
 	evidenceDataMap := map[string]interface{}{
@@ -568,7 +566,7 @@ func (s *Session) handleTaintEvent(eventData map[string]interface{}) {
 	evidenceBytes, marshalErr := json.Marshal(evidenceDataMap)
 	evidenceStr := "{}" // Fallback empty JSON object string
 	if marshalErr == nil {
-		evidenceStr = string(evidenceBytes)
+		evidenceStr = string(evidenceBytes) // Use the marshaled string
 	} else {
 		s.logger.Warn("Failed to marshal IAST evidence data.", zap.Error(marshalErr))
 		// Fallback logic if needed...
@@ -592,7 +590,7 @@ func (s *Session) handleTaintEvent(eventData map[string]interface{}) {
 	}
 
 	if err := s.AddFinding(findingCtx, finding); err != nil {
-		s.logger.Error("Failed to add IAST finding.", zap.Error(err))
+		s.logger.Error("Failed to add IAST finding", zap.Error(err))
 	}
 }
 
@@ -697,9 +695,9 @@ func (s *Session) CollectArtifacts(ctx context.Context) (*schemas.Artifacts, err
 	if err != nil {
 		// Log errors not caused by expected cancellation
 		if collectCtx.Err() == nil && ctx.Err() == nil && s.ctx.Err() == nil {
-			s.logger.Warn("Could not fully collect browser artifacts (DOM/Storage).", zap.Error(err))
+			s.logger.Warn("Could not fully collect browser artifacts (DOM/Storage)", zap.Error(err))
 		} else {
-			s.logger.Debug("Artifact collection (DOM/Storage) interrupted.", zap.Error(err))
+			s.logger.Debug("Artifact collection (DOM/Storage) interrupted", zap.Error(err))
 		}
 		// Continue to return partial artifacts
 	}
@@ -712,7 +710,7 @@ func (s *Session) CollectArtifacts(ctx context.Context) (*schemas.Artifacts, err
 			msg := json.RawMessage(raw)
 			harRaw = &msg
 		} else {
-			s.logger.Warn("Failed to serialize HAR data.", zap.Error(err))
+			s.logger.Warn("Failed to serialize HAR data", zap.Error(err))
 			raw := json.RawMessage("null") // Explicitly null on error
 			harRaw = &raw
 		}
@@ -745,7 +743,7 @@ func (s *Session) captureStorage(ctx context.Context, state *schemas.StorageStat
 		if err != nil {
 			// Check context before logging warning
 			if ctx.Err() == nil && s.ctx.Err() == nil {
-				s.logger.Debug("Failed to get cookies via CDP.", zap.Error(err))
+				s.logger.Debug("Failed to get cookies via CDP", zap.Error(err))
 			}
 			cookiesErr = err // Store error
 		}
@@ -760,7 +758,7 @@ func (s *Session) captureStorage(ctx context.Context, state *schemas.StorageStat
 		// instead of calling runActions again.
 		lsErr = chromedp.Evaluate(js, &state.LocalStorage).Do(ctx)
 		if lsErr != nil && ctx.Err() == nil {
-			s.logger.Warn("Could not capture Local storage via JS.", zap.Error(lsErr))
+			s.logger.Warn("Could not capture Local storage via JS", zap.Error(lsErr))
 		}
 	}()
 
@@ -772,7 +770,7 @@ func (s *Session) captureStorage(ctx context.Context, state *schemas.StorageStat
 		// Use .Do(ctx) as we are inside an ActionFunc.
 		ssErr = chromedp.Evaluate(js, &state.SessionStorage).Do(ctx)
 		if ssErr != nil && ctx.Err() == nil {
-			s.logger.Warn("Could not capture Session storage via JS.", zap.Error(ssErr))
+			s.logger.Warn("Could not capture Session storage via JS", zap.Error(ssErr))
 		}
 	}()
 
@@ -874,7 +872,7 @@ func (s *Session) AddFinding(ctx context.Context, finding schemas.Finding) error
 			findingIdentifier = "(unknown type)"
 		}
 
-		s.logger.Warn("Cannot add finding.", zap.String("reason", msg), zap.String("finding_type", findingIdentifier))
+		s.logger.Warn("Cannot add finding", zap.String("reason", msg), zap.String("finding_type", findingIdentifier))
 		return fmt.Errorf("cannot add finding: %s", msg)
 	}
 	// Make a shallow copy of the channel under the lock to use outside
@@ -905,10 +903,10 @@ func (s *Session) AddFinding(ctx context.Context, finding schemas.Finding) error
 		if findingIdentifier == "" {
 			findingIdentifier = "(unknown type)"
 		}
-		s.logger.Debug("Finding added.", zap.String("finding_type", findingIdentifier))
+		s.logger.Debug("Finding added", zap.String("finding_type", findingIdentifier))
 		return nil
 	case <-ctx.Done(): // Check operational context first
-		s.logger.Warn("Operational context cancelled before finding could be added.", zap.Error(ctx.Err()), zap.String("finding_type", finding.Vulnerability.Name))
+		s.logger.Warn("Context cancelled before finding could be added", zap.Error(ctx.Err()), zap.String("context_type", "operational"), zap.String("finding_type", finding.Vulnerability.Name))
 		return ctx.Err()
 	case <-s.ctx.Done(): // Then check session context
 		s.logger.Warn("Session context cancelled before finding could be added.", zap.Error(s.ctx.Err()), zap.String("finding_type", finding.Vulnerability.Name))
@@ -921,7 +919,7 @@ func (s *Session) AddFinding(ctx context.Context, finding schemas.Finding) error
 
 // Sleep pauses execution for a specified duration (convenience wrapper respecting context).
 func (s *Session) Sleep(ctx context.Context, d time.Duration) error {
-	s.logger.Debug("Sleeping.", zap.Duration("duration", d))
+	s.logger.Debug("Sleeping", zap.Duration("duration", d))
 
 	// Use RunActions to execute the sleep. This centralizes context combination.
 	return s.RunActions(ctx, chromedp.Sleep(d))
@@ -970,7 +968,7 @@ func (s *Session) ExposeFunction(ctx context.Context, name string, function inte
 	fnVal := reflect.ValueOf(function)
 	fnType := fnVal.Type()
 	if fnType.Kind() != reflect.Func {
-		s.logger.Error("Exposed implementation is not a function.", zap.String("name", name))
+		s.logger.Error("Exposed implementation is not a function", zap.String("name", name))
 		return fmt.Errorf("provided implementation for '%s' is not a function", name)
 	}
 
@@ -993,7 +991,7 @@ func (s *Session) ExposeFunction(ctx context.Context, name string, function inte
 	if err := s.RunActions(ctx, chromedp.Evaluate(wrapperScript, nil)); err != nil {
 		// If immediate evaluation fails (e.g., no execution context yet), it's often non-fatal
 		// as the persistent injection will handle subsequent navigations.
-		s.logger.Debug("Failed to evaluate JS serialization shim immediately (non-fatal).", zap.String("name", name), zap.Error(err))
+		s.logger.Debug("Failed to evaluate JS serialization shim immediately (non-fatal)", zap.String("name", name), zap.Error(err))
 	}
 
 	// Listen on the session's master context (s.ctx)
@@ -1011,7 +1009,7 @@ func (s *Session) ExposeFunction(ctx context.Context, name string, function inte
 				// Defer panic recovery for the goroutine
 				defer func() {
 					if r := recover(); r != nil {
-						s.logger.Error("Panic during exposed function callback processing.",
+						s.logger.Error("Panic during exposed function callback processing",
 							zap.String("name", name),
 							zap.Any("panic_reason", r),
 							zap.String("stack", string(debug.Stack())))
@@ -1028,7 +1026,7 @@ func (s *Session) ExposeFunction(ctx context.Context, name string, function inte
 				//  The payload is expected to be a JSON array string (handled by bindingWrapperJS).
 				var args []interface{}
 				if err := json.Unmarshal([]byte(payload), &args); err != nil {
-					s.logger.Error("Could not unmarshal payload for exposed function.", zap.String("name", name), zap.Error(err), zap.String("payload", payload))
+					s.logger.Error("Could not unmarshal payload for exposed function", zap.String("name", name), zap.Error(err), zap.String("payload", payload))
 					return
 				}
 
@@ -1040,7 +1038,7 @@ func (s *Session) ExposeFunction(ctx context.Context, name string, function inte
 				}
 
 				if len(args) != numIn {
-					s.logger.Error("Mismatch in JS argument count for exposed function.", zap.String("name", name), zap.Int("expected", numIn), zap.Int("got", len(args)))
+					s.logger.Error("Mismatch in JS argument count for exposed function", zap.String("name", name), zap.Int("expected", numIn), zap.Int("got", len(args)))
 					return
 				}
 
@@ -1056,9 +1054,9 @@ func (s *Session) ExposeFunction(ctx context.Context, name string, function inte
 				for i := 0; i < numIn; i++ {
 					goArg, err := s.convertJSToGoType(args[i], fnType.In(argIdx+i))
 					if err != nil {
-						s.logger.Error("Incompatible argument type for exposed function.",
+						s.logger.Error("Incompatible argument type for exposed function",
 							zap.String("name", name),
-							zap.Int("arg_index", i),
+							zap.Int("arg_index", argIdx+i),
 							zap.String("expected", fnType.In(argIdx+i).String()),
 							zap.String("got", fmt.Sprintf("%T", args[i])),
 							zap.Any("value", args[i]),
@@ -1106,7 +1104,7 @@ func (s *Session) convertJSToGoType(jsArg interface{}, goType reflect.Type) (ref
 		if goKind >= reflect.Int && goKind <= reflect.Int64 {
 			intVal := int64(floatVal)
 			// Check for potential precision loss or overflow if float wasn't an integer
-			if floatVal != float64(intVal) || floatVal > math.MaxInt64 || floatVal < math.MinInt64 {
+			if floatVal != float64(intVal) {
 				s.logger.Warn("Potential precision loss or overflow converting JS float to Go int.", zap.Float64("js_float", floatVal), zap.String("go_type", goType.String()))
 				// Decide whether to error out or allow truncation based on requirements
 				// return reflect.Value{}, fmt.Errorf("unsafe conversion from float64 %f to %s", floatVal, goType.String())
@@ -1120,7 +1118,7 @@ func (s *Session) convertJSToGoType(jsArg interface{}, goType reflect.Type) (ref
 				return reflect.Value{}, fmt.Errorf("cannot assign negative JS number %.f to Go unsigned type %s", floatVal, goType.String())
 			}
 			uintVal := uint64(floatVal)
-			if floatVal != float64(uintVal) || floatVal > math.MaxUint64 {
+			if floatVal != float64(uintVal) {
 				s.logger.Warn("Potential precision loss or overflow converting JS float to Go uint.", zap.Float64("js_float", floatVal), zap.String("go_type", goType.String()))
 				// return reflect.Value{}, fmt.Errorf("unsafe conversion from float64 %f to %s", floatVal, goType.String())
 			}
@@ -1139,7 +1137,7 @@ func (s *Session) convertJSToGoType(jsArg interface{}, goType reflect.Type) (ref
 
 	// Basic type conversion? (e.g., string alias)
 	if jsType.ConvertibleTo(goType) {
-		s.logger.Debug("Attempting direct Go type conversion.", zap.String("from", jsType.String()), zap.String("to", goType.String()))
+		s.logger.Debug("Attempting direct Go type conversion", zap.String("from", jsType.String()), zap.String("to", goType.String()))
 		// This conversion can panic if types are fundamentally incompatible despite ConvertibleTo returning true (rare).
 		// Consider adding a recover block if needed, but usually this is safe for simple types.
 		return jsVal.Convert(goType), nil
@@ -1147,7 +1145,7 @@ func (s *Session) convertJSToGoType(jsArg interface{}, goType reflect.Type) (ref
 
 	// Special case: map[string]interface{} from JS to Go struct (via JSON marshal/unmarshal)
 	if goType.Kind() == reflect.Struct && jsType.Kind() == reflect.Map && jsType.Key().Kind() == reflect.String {
-		s.logger.Debug("Attempting map-to-struct conversion via JSON.", zap.String("struct_type", goType.String()))
+		s.logger.Debug("Attempting map-to-struct conversion via JSON", zap.String("struct_type", goType.String()))
 		mapData, ok := jsArg.(map[string]interface{})
 		if ok {
 			jsonData, jsonErr := json.Marshal(mapData)
@@ -1189,7 +1187,7 @@ func (s *Session) InjectScriptPersistently(ctx context.Context, script string) e
 		}
 		return fmt.Errorf("could not inject persistent script: %w", err)
 	}
-	s.logger.Debug("Injected persistent script.", zap.String("scriptID", string(scriptID)))
+	s.logger.Debug("Injected persistent script", zap.String("scriptID", string(scriptID)))
 	return nil
 }
 

@@ -21,7 +21,9 @@ type AgentAdapter struct {
 func NewAgentAdapter() *AgentAdapter {
 	return &AgentAdapter{
 		// Initialize the embedded struct by dereferencing the pointer from the constructor.
-		BaseAnalyzer: *core.NewBaseAnalyzer("AgentAdapter", "Executes autonomous agent missions", core.TypeAgent, zap.NewNop()),
+		// Pass nil for the logger; it will be retrieved from the AnalysisContext during Analyze.
+		// This prevents issues with global logger initialization order.
+		BaseAnalyzer: *core.NewBaseAnalyzer("AgentAdapter", "Executes autonomous agent missions", core.TypeAgent, nil),
 	}
 }
 
@@ -41,11 +43,11 @@ func (a *AgentAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 		}
 		params = *p
 	default:
-		actualType := fmt.Sprintf("%T", analysisCtx.Task.Parameters)
+		actualType := fmt.Sprintf("%T", p)
 		logger.Error("Invalid parameter type assertion for Agent mission",
 			zap.String("expected", "schemas.AgentMissionParams or pointer"),
 			zap.String("actual", actualType))
-		return fmt.Errorf("invalid parameters type for Agent mission; expected schemas.AgentMissionParams or *schemas.AgentMissionParams, got %s", actualType)
+		return fmt.Errorf("invalid parameters type for Agent mission; expected schemas.AgentMissionParams or *schemas.AgentMissionParams, got %T", p)
 	}
 
 	if params.MissionBrief == "" {

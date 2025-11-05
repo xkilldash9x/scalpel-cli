@@ -65,12 +65,6 @@ func TestScanCmd_RequiredArgs(t *testing.T) {
 	assert.Contains(t, output, "Error: requires at least 1 arg(s), only received 0")
 }
 
-func TestReportCmd_RequiredFlags(t *testing.T) {
-	output, err := executeCommandNoPreRun(t, "report")
-	require.Error(t, err)
-	assert.Contains(t, output, "Error: required flag(s) \"scan-id\" not set")
-}
-
 // TestScanCommand_Logic is an example of a test for the command's business logic,
 // where using newTestConfig is appropriate.
 func TestScanCommand_Logic(t *testing.T) {

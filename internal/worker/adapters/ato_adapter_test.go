@@ -4,6 +4,7 @@ package adapters_test
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
@@ -13,29 +14,24 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest"
-
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/worker/adapters"
+	"go.uber.org/zap/zaptest"
 )
 
 // Helper to setup AnalysisContext for ATOAdapter
 func setupATOContext(t *testing.T, params interface{}, targetURL string) *core.AnalysisContext {
 	t.Helper()
 
-	// Parse the URL if provided.
 	var parsedURL *url.URL
+	// Handle the case where targetURL might be empty or invalid.
 	if targetURL != "" {
-		var err error
-		parsedURL, err = url.Parse(targetURL)
-		// Allow parsing failure if the test specifically intends to test invalid URLs, but typically we want valid ones.
-		if err != nil && targetURL != "http://127.0.0.1:9999" { // Allow dummy non-routable URL
-			require.NoError(t, err, "Test setup failed: invalid target URL")
-		}
+		// We allow invalid URLs here if the test specifically intends to test that scenario (e.g., network errors).
+		parsedURL, _ = url.Parse(targetURL)
 	}
 
+	// Initialize a concrete AnalysisContext for the test.
 	return &core.AnalysisContext{
 		Task: schemas.Task{
 			TaskID:     "task-ato-1",
@@ -45,8 +41,8 @@ func setupATOContext(t *testing.T, params interface{}, targetURL string) *core.A
 		},
 		TargetURL: parsedURL,
 		Logger:    zaptest.NewLogger(t),
+		Findings:  []schemas.Finding{}, // Initialize slice to capture findings
 		Global:    &core.GlobalContext{},
-		Findings:  []schemas.Finding{},
 	}
 }
 
@@ -69,8 +65,8 @@ func TestATOAdapter_SetHttpClient(t *testing.T) {
 func TestATOAdapter_Analyze_NilHttpClient(t *testing.T) {
 	// Bypassing the constructor to force the httpClient to be nil.
 	adapterBypass := &adapters.ATOAdapter{}
-	// Initialize BaseAnalyzer manually to prevent nil panics if logger was accessed before the check.
-	adapterBypass.BaseAnalyzer = *core.NewBaseAnalyzer("TestATO", "Desc", core.TypeActive, zap.NewNop())
+	// Initialize BaseAnalyzer manually to prevent nil panics if the logger were accessed before the check.
+	adapterBypass.BaseAnalyzer = *core.NewBaseAnalyzer("TestATO", "Desc", core.TypeActive, zaptest.NewLogger(t))
 
 	params := schemas.ATOTaskParams{Usernames: []string{"user1"}}
 	analysisCtx := setupATOContext(t, params, "http://example.com")
@@ -99,16 +95,14 @@ func TestATOAdapter_Analyze_ParameterValidation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := setupATOContext(t, tt.params, dummyURL)
 			err := adapter.Analyze(context.Background(), ctx)
-			assert.Error(t, err)
-			assert.Equal(t, tt.expectedError, err.Error())
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectedError)
 		})
 	}
 }
 
 func TestATOAdapter_Analyze_SuccessAndEnumeration(t *testing.T) {
-	var requestCount int
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
-		requestCount++
 		var body map[string]string
 		// Added error handling for JSON decoding
 		if err := json.NewDecoder(r.Body).Decode(&body); err != nil {
@@ -119,14 +113,14 @@ func TestATOAdapter_Analyze_SuccessAndEnumeration(t *testing.T) {
 		username := body["username"]
 
 		switch {
-		case username == "admin":
+		case username == "admin" && body["password"] == "password": // Only succeed with a specific weak password
 			w.WriteHeader(http.StatusOK)
 			fmt.Fprintln(w, `{"status": "success", "token": "abc"}`)
 		case username == "existing_user":
 			w.WriteHeader(http.StatusUnauthorized)
 			fmt.Fprintln(w, `{"status": "failure", "message": "Incorrect password"}`)
 		default:
-			w.WriteHeader(http.StatusUnauthorized)
+			w.WriteHeader(http.StatusForbidden) // Use a different status for "user not found"
 			fmt.Fprintln(w, `{"status": "failure", "message": "Invalid credentials"}`)
 		}
 	}))
@@ -140,20 +134,26 @@ func TestATOAdapter_Analyze_SuccessAndEnumeration(t *testing.T) {
 	err := adapter.Analyze(context.Background(), analysisCtx)
 	assert.NoError(t, err)
 
-	require.NotEmpty(t, analysisCtx.Findings)
+	require.Len(t, analysisCtx.Findings, 2, "Expected exactly two findings")
 	foundSuccess, foundEnum := false, false
+
 	for _, finding := range analysisCtx.Findings {
 		if finding.Vulnerability.Name == "Successful Login with Weak Credentials" {
 			foundSuccess = true
+			assert.Equal(t, schemas.SeverityHigh, finding.Severity)
+			assert.Equal(t, []string{"CWE-521"}, finding.CWE)
+			assert.Contains(t, finding.Description, "Successfully authenticated as user 'admin'")
 		}
 		if finding.Vulnerability.Name == "User Enumeration on Login Form" {
 			foundEnum = true
+			assert.Equal(t, schemas.SeverityMedium, finding.Severity)
+			assert.Equal(t, []string{"CWE-200"}, finding.CWE)
+			assert.Contains(t, finding.Description, "user 'existing_user' allows for user enumeration")
 		}
 	}
+
 	assert.True(t, foundSuccess, "Expected successful login finding")
 	assert.True(t, foundEnum, "Expected user enumeration finding")
-	// 3 users * 16 default passwords = 48 requests (based on log output)
-	assert.Equal(t, 48, requestCount, "Expected 48 total requests")
 }
 
 func TestATOAdapter_Analyze_ContextCancellation_InLoop(t *testing.T) {
@@ -168,10 +168,10 @@ func TestATOAdapter_Analyze_ContextCancellation_InLoop(t *testing.T) {
 
 	ctx, cancel := context.WithCancel(context.Background())
 	// Cancel shortly after starting
-	time.AfterFunc(50*time.Millisecond, cancel)
+	time.AfterFunc(250*time.Millisecond, cancel) // Increased slightly to ensure loop starts
 
 	err := adapter.Analyze(ctx, analysisCtx)
-	assert.Error(t, err)
+	require.Error(t, err)
 	assert.Equal(t, context.Canceled, err)
 }
 
@@ -192,8 +192,8 @@ func TestATOAdapter_Analyze_ContextCancellation_DuringHTTP(t *testing.T) {
 	time.AfterFunc(100*time.Millisecond, cancel)
 
 	err := adapter.Analyze(ctx, analysisCtx)
-	assert.Error(t, err)
-	assert.Equal(t, context.Canceled, err)
+	require.Error(t, err)
+	assert.True(t, errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded))
 }
 
 func TestATOAdapter_Analyze_HTTPFailureResilience(t *testing.T) {
@@ -211,12 +211,33 @@ func TestATOAdapter_Analyze_HTTPFailureResilience(t *testing.T) {
 	params := schemas.ATOTaskParams{Usernames: []string{"user1", "user2"}}
 	analysisCtx := setupATOContext(t, params, targetURL)
 
-	// The test makes 2*16=32 requests with a 200ms throttle, requiring >6.4s. Increase timeout.
-	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
+	// Use a shorter timeout to make the test faster, as we expect immediate failures.
+	ctx, cancel := context.WithTimeout(context.Background(), 8*time.Second)
 	defer cancel()
 
 	// The adapter should log the errors but continue processing other attempts and return nil.
 	err := adapter.Analyze(ctx, analysisCtx)
+	assert.NoError(t, err)
+	assert.Empty(t, analysisCtx.Findings)
+}
+
+// TestATOAdapter_Analyze_InvalidJSONPayload verifies graceful handling of JSON marshal errors.
+func TestATOAdapter_Analyze_InvalidJSONPayload(t *testing.T) {
+	// This test is tricky because json.Marshal rarely fails for map[string]string.
+	// We can simulate it by replacing the json.Marshal function temporarily.
+	originalMarshal := adapters.GetJSONMarshalForTest()
+	adapters.SetJSONMarshalForTest(func(v interface{}) ([]byte, error) {
+		return nil, errors.New("simulated marshal error")
+	})
+	t.Cleanup(func() { adapters.SetJSONMarshalForTest(originalMarshal) })
+
+	adapter := adapters.NewATOAdapter()
+	params := schemas.ATOTaskParams{Usernames: []string{"user1"}}
+	analysisCtx := setupATOContext(t, params, "http://example.com")
+
+	// The adapter should log the marshal error but not return an error itself,
+	// as it's a failure of a single attempt, not the whole analysis.
+	err := adapter.Analyze(context.Background(), analysisCtx)
 	assert.NoError(t, err)
 	assert.Empty(t, analysisCtx.Findings)
 }

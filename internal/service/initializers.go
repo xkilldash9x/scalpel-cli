@@ -74,7 +74,7 @@ func InitializeKGClient(ctx context.Context, cfg config.KnowledgeGraphConfig, lo
 
 // InitializeLLMClient creates a new LLM client based on the configuration.
 // This helper centralizes LLM initialization for commands like 'evolve' and 'self-heal'.
-func InitializeLLMClient(cfg config.AgentConfig, logger *zap.Logger) (schemas.LLMClient, error) {
+func InitializeLLMClient(logger *zap.Logger, cfg config.AgentConfig) (schemas.LLMClient, error) {
 	llmClient, err := llmclient.NewClient(cfg, logger)
 	if err != nil {
 		logger.Error("Failed to initialize LLM client. Features requiring AI agents will fail.", zap.Error(err))

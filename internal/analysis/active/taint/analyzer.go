@@ -6,9 +6,11 @@ import (
 	"context"
 	"embed"
 	"encoding/json"
+	"errors" // <-- Added
 	"fmt"
 	"net/url"
 	"regexp"
+	"runtime/debug" // <-- Added
 	"strings"
 	"sync"
 	"text/template"
@@ -27,65 +29,62 @@ var taintShimFS embed.FS
 const taintShimFilename = "taint_shim.js"
 
 // Canary format: SCALPEL_{Prefix}_{Type}_{UUID_Short}
-var canaryRegex = regexp.MustCompile(`SCALPEL_[A-Z0-9]+_[A-Z_]+_[a-f0-9]{8}`)
+// Robust regex allowing underscores in both the Prefix and Type segments.
+var canaryRegex = regexp.MustCompile(`SCALPEL_[A-Z0-9_]+_[A-Z_]+_[a-f0-9]{8}`) // <-- Updated Regex
 
-// HumanoidProvider defines an interface for duck-typing the SessionContext
-// to check if it provides access to the Humanoid controller.
+// HumanoidProvider defines an interface for optional integration with the Humanoid controller.
 type HumanoidProvider interface {
 	GetHumanoid() *humanoid.Humanoid
 }
 
-// REFACTOR: Removed BrowserContextProvider interface as GetContext() is deprecated and anti-pattern.
-
-// Analyzer is the central nervous system of the IAST operation. It orchestrates probe
-// injection, event collection, and vulnerability correlation.
+// Analyzer is the central component of the IAST system. It orchestrates probe
+// injection, event collection, correlation, and reporting.
 type Analyzer struct {
 	config       Config
 	reporter     ResultsReporter
 	oastProvider OASTProvider
 	logger       *zap.Logger
-	shimTemplate string // <-- Changed from *template.Template to string
+	shimTemplate string
 
 	// -- State Management --
 	activeProbes map[string]ActiveProbe
-	probesMutex  sync.RWMutex // Protects activeProbes. Optimized for many concurrent reads from correlation workers.
+	// probesMutex protects concurrent access to activeProbes.
+	probesMutex sync.RWMutex
 
-	// -- Concurrency Control --
-	// The primary communication channel from producers (JS callbacks, OAST poller) to consumers (correlation workers).
-	eventsChan chan Event
-
-	// FIX: Add a mutex to protect concurrent access to the taint flow rules.
+	// rulesMutex protects the local copy of validTaintFlows.
 	rulesMutex      sync.RWMutex
 	validTaintFlows map[TaintFlowPath]bool
 
+	// -- Concurrency Control --
+	// eventsChan is the central channel from producers to consumers.
+	eventsChan chan Event
+
 	// wg tracks the lifecycle of the correlation worker pool.
 	wg sync.WaitGroup
-	// producersWG tracks the background producer goroutines (probe cleanup, OAST polling).
+	// producersWG tracks the background producer goroutines (cleanup, OAST polling).
 	producersWG sync.WaitGroup
 
-	// backgroundCtx and backgroundCancel are used to signal a graceful shutdown to the producer goroutines.
+	// backgroundCtx and backgroundCancel manage the lifecycle of background routines.
 	backgroundCtx    context.Context
 	backgroundCancel context.CancelFunc
 }
 
 // NewAnalyzer initializes the analyzer, applies configuration defaults,
-// and prepares the instrumentation shim template.
+// loads the shim template, and prepares the rules engine.
 func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvider, logger *zap.Logger) (*Analyzer, error) {
 	taskLogger := logger.Named("taint_analyzer").With(zap.String("task_id", config.TaskID))
 
-	// Read the raw template content directly
-	templateBytes, err := taintShimFS.ReadFile(taintShimFilename)
+	// 1. Load the embedded JavaScript shim template.
+	templateContent, err := loadShimTemplate()
 	if err != nil {
-		taskLogger.Error("Failed to read embedded taint shim file.", zap.Error(err))
-		return nil, fmt.Errorf("failed to read embedded shim: %w", err)
+		taskLogger.Error("Failed to load embedded taint shim.", zap.Error(err))
+		return nil, err
 	}
-	templateContent := string(templateBytes)
 
-	// Apply robust defaults for performance and stability.
+	// 2. Apply robust defaults for tuning parameters.
 	config = applyConfigDefaults(config)
 
-	// FIX: Create a local copy of the global taint flow rules to prevent data races.
-	// The analyzer will use its own copy, which can be safely modified for testing.
+	// 3. Initialize the rules engine with a local copy for thread safety.
 	localValidTaintFlows := make(map[TaintFlowPath]bool, len(ValidTaintFlows))
 	for k, v := range ValidTaintFlows {
 		localValidTaintFlows[k] = v
@@ -97,10 +96,19 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 		oastProvider:    oastProvider,
 		logger:          taskLogger,
 		activeProbes:    make(map[string]ActiveProbe),
-		eventsChan:      make(chan Event, config.EventChannelBuffer),
-		shimTemplate:    templateContent, // <-- Store the raw string
+		eventsChan:      make(chan Event, config.Tuning.EventChannelBuffer), // <-- Updated path
+		shimTemplate:    templateContent,
 		validTaintFlows: localValidTaintFlows,
 	}, nil
+}
+
+// loadShimTemplate reads the embedded JS template file.
+func loadShimTemplate() (string, error) {
+	templateBytes, err := taintShimFS.ReadFile(taintShimFilename)
+	if err != nil {
+		return "", fmt.Errorf("failed to read embedded shim file %s: %w", taintShimFilename, err)
+	}
+	return string(templateBytes), nil
 }
 
 // UpdateTaintFlowRuleForTesting provides a thread-safe way to modify a rule for a specific test.
@@ -141,109 +149,126 @@ func BuildTaintShim(templateContent string, configJSON string) (string, error) {
 	return buf.String(), nil
 }
 
-// applyConfigDefaults ensures that critical configuration parameters have sane default values.
+// applyConfigDefaults ensures that critical configuration parameters have sensible default values.
 func applyConfigDefaults(cfg Config) Config {
-	if cfg.EventChannelBuffer == 0 {
-		// A larger buffer is a good default for a worker pool model to absorb bursts.
-		cfg.EventChannelBuffer = 1000
+	// Define defaults within the TuningConfig struct.
+	if cfg.Tuning.EventChannelBuffer <= 0 {
+		cfg.Tuning.EventChannelBuffer = 1000
 	}
-	if cfg.FinalizationGracePeriod == 0 {
-		cfg.FinalizationGracePeriod = 10 * time.Second
+	if cfg.Tuning.FinalizationGracePeriod <= 0 {
+		cfg.Tuning.FinalizationGracePeriod = 10 * time.Second
 	}
-	if cfg.ProbeExpirationDuration == 0 {
-		cfg.ProbeExpirationDuration = 10 * time.Minute
+	if cfg.Tuning.ProbeExpirationDuration <= 0 {
+		cfg.Tuning.ProbeExpirationDuration = 15 * time.Minute
 	}
-	if cfg.CleanupInterval == 0 {
-		cfg.CleanupInterval = 1 * time.Minute
+	if cfg.Tuning.CleanupInterval <= 0 {
+		cfg.Tuning.CleanupInterval = 2 * time.Minute
 	}
-	if cfg.OASTPollingInterval == 0 {
-		cfg.OASTPollingInterval = 20 * time.Second
+	if cfg.Tuning.OASTPollingInterval <= 0 {
+		cfg.Tuning.OASTPollingInterval = 30 * time.Second
 	}
-	if cfg.CorrelationWorkers == 0 {
-		// Default to a small pool of concurrent workers for processing events.
-		cfg.CorrelationWorkers = 5
+	if cfg.Tuning.CorrelationWorkers <= 0 {
+		cfg.Tuning.CorrelationWorkers = 5
+	}
+	if cfg.AnalysisTimeout <= 0 {
+		cfg.AnalysisTimeout = 10 * time.Minute
 	}
 	return cfg
 }
 
-// Analyze executes the IAST analysis for a target URL using a provided browser session.
-// It orchestrates instrumentation, probing, and the graceful shutdown of background workers.
+// Analyze executes the comprehensive IAST analysis workflow.
 func (a *Analyzer) Analyze(ctx context.Context, session SessionContext) error {
 	a.logger.Info("Starting IAST analysis",
 		zap.String("target", a.config.Target.String()),
-		zap.Int("correlation_workers", a.config.CorrelationWorkers),
+		zap.Int("correlation_workers", a.config.Tuning.CorrelationWorkers),
 	)
 
-	analysisCtx, cancel := context.WithTimeout(ctx, a.config.AnalysisTimeout)
-	defer cancel()
+	// Create a derived context with the analysis timeout.
+	analysisCtx, cancelAnalysis := context.WithTimeout(ctx, a.config.AnalysisTimeout)
+	defer cancelAnalysis()
 
+	// Initialize the background context used for graceful shutdown of workers.
+	// Derived from context.Background() to allow workers to finish processing even if analysisCtx times out.
 	a.backgroundCtx, a.backgroundCancel = context.WithCancel(context.Background())
+	// Ensure shutdown is always called when Analyze returns.
+	defer a.shutdown()
 
-	// -- Humanoid Integration: Retrieve Controller --
 	var h *humanoid.Humanoid
 	if provider, ok := session.(HumanoidProvider); ok {
 		h = provider.GetHumanoid()
 	}
 
-	// REFACTOR: We no longer attempt to retrieve BrowserContext via GetContext().
-	// The operation context (analysisCtx) will be used for all actions including Humanoid pauses.
-	// -----------------------------------------------------------
-
+	// Instrument the browser session.
 	if err := a.instrument(analysisCtx, session); err != nil {
-		return fmt.Errorf("failed to instrument browser: %w", err)
+		return fmt.Errorf("failed to instrument browser session: %w", err)
 	}
 
-	// Launch the concurrent machinery: the correlation worker pool and background producers.
+	// Launch the concurrent machinery.
 	a.startBackgroundWorkers()
 
-	// Execute the attack vectors and user interactions.
-	// REFACTOR: Pass Humanoid controller. Removed browser context argument.
+	// Execute the attack vectors and interactions.
 	if err := a.executeProbes(analysisCtx, session, h); err != nil {
-		// Only log as error if the failure wasn't simply due to the analysis context timeout/cancellation.
-		if analysisCtx.Err() == nil {
+		// Log errors unless the error was simply the analysis context timing out.
+		if !errors.Is(err, context.Canceled) && !errors.Is(err, context.DeadlineExceeded) {
 			a.logger.Error("Error encountered during probing phase", zap.Error(err))
 		}
 	}
 
-	a.logger.Debug("Probing finished. Waiting for asynchronous events.", zap.Duration("grace_period", a.config.FinalizationGracePeriod))
-
-	select {
-	case <-time.After(a.config.FinalizationGracePeriod):
-		a.logger.Debug("Grace period concluded.")
-	case <-analysisCtx.Done():
-		a.logger.Warn("Analysis timeout reached during finalization grace period.")
-	}
-
-	// Initiate a graceful shutdown of all background processes.
-	a.shutdown()
+	// Wait for asynchronous events.
+	a.waitForFinalization(analysisCtx)
 
 	a.logger.Info("IAST analysis completed")
 	return nil
 }
 
-// shutdown handles the ordered, graceful shutdown of all goroutines.
-// This ensures that all events are processed and no data is lost.
+// waitForFinalization blocks until the grace period is over or the analysis context is done.
+func (a *Analyzer) waitForFinalization(analysisCtx context.Context) {
+	a.logger.Debug("Probing finished. Waiting for asynchronous events.", zap.Duration("grace_period", a.config.Tuning.FinalizationGracePeriod))
+
+	select {
+	case <-time.After(a.config.Tuning.FinalizationGracePeriod):
+		a.logger.Debug("Grace period concluded.")
+	case <-analysisCtx.Done():
+		a.logger.Warn("Analysis timeout reached during finalization grace period.")
+	}
+}
+
+// shutdown handles the ordered, graceful shutdown of all goroutines, ensuring all events are processed.
 func (a *Analyzer) shutdown() {
+	if a.backgroundCancel == nil {
+		return
+	}
+
 	a.logger.Debug("Initiating graceful shutdown.")
-	// 1. Signal background producers (OAST, Cleanup) to stop their work.
+
+	// 1. Signal background producers (OAST, Cleanup) to stop.
 	a.backgroundCancel()
-	// 2. Wait for producers to finish their final cycles (e.g., one last OAST poll).
+
+	// 2. Wait for producers to complete their final cycles.
 	a.producersWG.Wait()
 	a.logger.Debug("All event producers have stopped.")
 
-	// 3. Close the event channel. This is the signal for the correlation workers to drain the channel and terminate.
-	close(a.eventsChan)
-	// 4. Wait for all correlation workers to complete processing any remaining events in the buffer.
+	// 3. Close the event channel. This signals the correlation workers to drain the channel and terminate.
+	func() {
+		defer func() {
+			if r := recover(); r != nil {
+				a.logger.Debug("Events channel already closed during shutdown.")
+			}
+		}()
+		close(a.eventsChan)
+	}()
+
+	// 4. Wait for all correlation workers to finish processing the remaining events.
 	a.wg.Wait()
-	a.logger.Debug("All correlation workers have finished.")
+	a.logger.Debug("All correlation workers have finished. Shutdown complete.")
 }
 
 // startBackgroundWorkers launches the correlation worker pool and other background tasks.
 func (a *Analyzer) startBackgroundWorkers() {
-	a.logger.Debug("Starting background workers.", zap.Int("correlation_workers", a.config.CorrelationWorkers))
+	a.logger.Debug("Starting background workers.", zap.Int("correlation_workers", a.config.Tuning.CorrelationWorkers))
 	// -- Consumers --
 	// Launch the Correlation Worker Pool to process events concurrently.
-	for i := 0; i < a.config.CorrelationWorkers; i++ {
+	for i := 0; i < a.config.Tuning.CorrelationWorkers; i++ {
 		a.wg.Add(1)
 		go a.correlateWorker(i)
 	}
@@ -286,7 +311,6 @@ func (a *Analyzer) instrument(ctx context.Context, session SessionContext) error
 }
 
 // generateShim creates the javascript instrumentation code from the embedded template.
-// REFACTOR: This function now uses the pre-loaded template string.
 func (a *Analyzer) generateShim() (string, error) {
 	// 1. Marshal the sinks config specific to this analyzer instance.
 	sinksJSON, err := json.Marshal(a.config.Sinks)
@@ -298,25 +322,23 @@ func (a *Analyzer) generateShim() (string, error) {
 	return BuildTaintShim(a.shimTemplate, string(sinksJSON))
 }
 
-// enqueueEvent provides a safe, non blocking mechanism for sending an event to the correlation engine.
-// It handles shutdown signals and channel backpressure gracefully.
+// enqueueEvent provides a safe, non-blocking mechanism for sending events. Handles shutdown and backpressure.
 func (a *Analyzer) enqueueEvent(event Event, eventType string) {
-	// First, check if a shutdown has been initiated. If so, don't accept new events.
+	// 1. Check for shutdown signal.
 	select {
 	case <-a.backgroundCtx.Done():
 		a.logger.Debug("Dropping event during shutdown.", zap.String("type", eventType))
 		return
 	default:
-		// The context is still active, proceed to send the event.
 	}
 
-	// Attempt to send the event, but drop it if the channel is full to prevent blocking the producer.
+	// 2. Attempt to send, handle backpressure if the channel is full.
 	select {
 	case a.eventsChan <- event:
-		// The event was successfully enqueued.
 	default:
-		// This case handles backpressure, which is critical for system stability.
-		a.logger.Warn("Event channel full, dropping event. Consider increasing CorrelationWorkers or EventChannelBuffer.", zap.String("type", eventType))
+		a.logger.Warn("Event channel full (backpressure), dropping event. System may be overloaded.",
+			zap.String("type", eventType),
+			zap.Int("buffer_size", a.config.Tuning.EventChannelBuffer))
 	}
 }
 
@@ -343,7 +365,6 @@ func (a *Analyzer) handleShimError(event ShimErrorEvent) {
 
 // executePause attempts to execute a Humanoid cognitive pause using the provided context.
 // If Humanoid is nil, it skips the pause silently.
-// REFACTOR: Updated signature and implementation. Now relies only on the operation context (ctx).
 func (a *Analyzer) executePause(ctx context.Context, h *humanoid.Humanoid, meanMs, stdDevMs float64) error {
 	// Check if the operation context (ctx) is done.
 	if ctx.Err() != nil {
@@ -366,10 +387,8 @@ func (a *Analyzer) executePause(ctx context.Context, h *humanoid.Humanoid, meanM
 }
 
 // executeProbes orchestrates the various probing strategies against the target.
-// REFACTOR: Updated signature to remove BrowserContext. Integrated pauses using operation context.
 func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h *humanoid.Humanoid) error {
 
-	// REFACTOR: Pause before initial navigation. Use operation context.
 	if err := a.executePause(ctx, h, 500, 200); err != nil {
 		return err // Return if context cancelled during pause
 	}
@@ -378,12 +397,10 @@ func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h 
 		a.logger.Warn("Initial navigation failed, attempting to continue probes.", zap.Error(err))
 	}
 
-	// REFACTOR: Pause after initial navigation. Use operation context.
 	if err := a.executePause(ctx, h, 800, 300); err != nil {
 		return err
 	}
 
-	// REFACTOR: Pass Humanoid and context down.
 	if err := a.probePersistentSources(ctx, session, h); err != nil {
 		// Check if the context was cancelled before logging the error.
 		if ctx.Err() == nil {
@@ -391,12 +408,10 @@ func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h 
 		}
 	}
 
-	// REFACTOR: Pause between probing phases. Use operation context.
 	if err := a.executePause(ctx, h, 400, 150); err != nil {
 		return err
 	}
 
-	// REFACTOR: Pass Humanoid and context down.
 	if err := a.probeURLSources(ctx, session, h); err != nil {
 		// Check if the context was cancelled before logging the error.
 		if ctx.Err() == nil {
@@ -406,7 +421,6 @@ func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h 
 
 	a.logger.Info("Starting interactive probing phase.")
 
-	// REFACTOR: Pause before starting interaction phase. Use operation context.
 	if err := a.executePause(ctx, h, 600, 250); err != nil {
 		return err
 	}
@@ -419,7 +433,6 @@ func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h 
 		}
 	}
 
-	// REFACTOR: Pause after interaction phase concludes. Use operation context.
 	if err := a.executePause(ctx, h, 1000, 400); err != nil {
 		// We don't return error here as probing is done, we just log if the final pause failed.
 		if ctx.Err() == nil {
@@ -454,7 +467,6 @@ func (a *Analyzer) preparePayload(probeDef ProbeDefinition, canary string) strin
 }
 
 // probePersistentSources injects probes into Cookies, LocalStorage, and SessionStorage.
-// REFACTOR: Updated signature to remove BrowserContext. Integrated pauses using operation context.
 func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionContext, h *humanoid.Humanoid) error {
 	a.logger.Debug("Starting persistent source probing (Storage/Cookies).")
 	storageKeyPrefix := "sc_store_"
@@ -467,8 +479,6 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 	}
 
 	for i, probeDef := range a.config.Probes {
-		// FIX: Generate a unique canary and payload for each storage type to prevent overwrites in the activeProbes map.
-
 		// -- LocalStorage --
 		lsCanary := a.generateCanary("P", probeDef.Type)
 		lsPayload := a.preparePayload(probeDef, lsCanary)
@@ -542,38 +552,31 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 		return nil
 	}
 
-	// REFACTOR: Pause before executing the injection script. Use operation context.
 	if err := a.executePause(ctx, h, 300, 100); err != nil {
 		return err
 	}
 
-	// FIX: The ExecuteScript function now requires a third 'options' argument. Pass nil.
 	if _, err := session.ExecuteScript(ctx, injectionScript, nil); err != nil {
 		a.logger.Warn("Failed to inject persistent probes via JavaScript", zap.Error(err))
 	}
 
 	a.logger.Debug("Persistent probes injected. Refreshing page.")
 
-	// REFACTOR: Pause before refreshing the page. Use operation context.
 	if err := a.executePause(ctx, h, 200, 80); err != nil {
 		return err
 	}
 
 	if err := session.Navigate(ctx, a.config.Target.String()); err != nil {
 		a.logger.Warn("Navigation (refresh) failed after persistent probe injection", zap.Error(err))
-		// We don't return the error immediately, allowing the post-navigation pause to occur if possible.
 	}
 
-	// REFACTOR: Pause after refresh. Use operation context.
 	if err := a.executePause(ctx, h, 700, 300); err != nil {
 		return err
 	}
 	return nil
 }
 
-//	injects probes into URL query parameters and the hash fragment.
-//
-// REFACTOR: Updated signature to remove BrowserContext. Integrated pauses using operation context.
+// probeURLSources injects probes into URL query parameters and the hash fragment.
 func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, h *humanoid.Humanoid) error {
 	baseURL := *a.config.Target
 	paramPrefix := "sc_test_"
@@ -605,7 +608,6 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, 
 		targetURL.RawQuery = q.Encode()
 		a.logger.Debug("Navigating with combined URL parameter probes", zap.Int("probe_count", probesInjected))
 
-		// REFACTOR: Pause before navigating with query params. Use operation context.
 		if err := a.executePause(ctx, h, 400, 150); err != nil {
 			return err
 		}
@@ -614,7 +616,6 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, 
 			a.logger.Warn("Navigation failed during combined URL probing", zap.Error(err))
 		}
 
-		// REFACTOR: Pause after navigation. Use operation context.
 		if err := a.executePause(ctx, h, 700, 300); err != nil {
 			return err
 		}
@@ -647,7 +648,6 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, 
 		targetURL.Fragment = strings.Join(hashFragments, "&")
 		a.logger.Debug("Navigating with combined Hash fragment probes", zap.Int("probe_count", probesInjected))
 
-		// REFACTOR: Pause before navigating with hash fragments. Use operation context.
 		if err := a.executePause(ctx, h, 400, 150); err != nil {
 			return err
 		}
@@ -656,7 +656,6 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, 
 			a.logger.Warn("Navigation failed during combined Hash probing", zap.Error(err))
 		}
 
-		// REFACTOR: Pause after navigation. Use operation context.
 		if err := a.executePause(ctx, h, 700, 300); err != nil {
 			return err
 		}
@@ -671,26 +670,38 @@ func (a *Analyzer) registerProbe(probe ActiveProbe) {
 	a.activeProbes[probe.Canary] = probe
 }
 
-// correlateWorker is a single worker in the pool. It continuously processes events
-// from the events channel until the channel is closed.
+// correlateWorker is a single worker responsible for processing events from the channel.
 func (a *Analyzer) correlateWorker(id int) {
 	defer a.wg.Done()
 	a.logger.Debug("Correlation worker started.", zap.Int("worker_id", id))
 
-	// This loop will naturally terminate when the `eventsChan` is closed by the shutdown() method.
+	// The loop iterates over the channel. It terminates when the channel is closed during shutdown.
+	// We use the backgroundCtx for reporting findings, ensuring reports can complete during shutdown.
 	for event := range a.eventsChan {
-		a.processEvent(event)
+		// Wrap processing in a panic recovery block for production robustness.
+		func() {
+			defer func() {
+				if r := recover(); r != nil {
+					a.logger.Error("Panic recovered in correlation worker",
+						zap.Any("panic_value", r),
+						zap.Int("worker_id", id),
+						zap.ByteString("stack", debug.Stack()), // Capture stack trace
+					)
+				}
+			}()
+			a.processEvent(a.backgroundCtx, event)
+		}()
 	}
-	a.logger.Debug("Correlation worker finished.", zap.Int("worker_id", id))
+	a.logger.Debug("Correlation worker finished (channel closed).", zap.Int("worker_id", id))
 }
 
 // cleanupExpiredProbes is a background goroutine that periodically removes old probes
 // from the activeProbes map to prevent unbounded memory growth.
 func (a *Analyzer) cleanupExpiredProbes() {
 	defer a.producersWG.Done()
-	ticker := time.NewTicker(a.config.CleanupInterval)
+	ticker := time.NewTicker(a.config.Tuning.CleanupInterval)
 	defer ticker.Stop()
-	a.logger.Debug("Probe expiration cleanup routine started.", zap.Duration("interval", a.config.CleanupInterval), zap.Duration("expiration", a.config.ProbeExpirationDuration))
+	a.logger.Debug("Probe expiration cleanup routine started.", zap.Duration("interval", a.config.Tuning.CleanupInterval), zap.Duration("expiration", a.config.Tuning.ProbeExpirationDuration))
 
 	for {
 		select {
@@ -705,7 +716,7 @@ func (a *Analyzer) cleanupExpiredProbes() {
 
 // executeCleanup performs the actual work of finding and deleting expired probes.
 func (a *Analyzer) executeCleanup() {
-	expirationTime := time.Now().Add(-a.config.ProbeExpirationDuration)
+	expirationTime := time.Now().Add(-a.config.Tuning.ProbeExpirationDuration)
 	var expiredCanaries []string
 
 	// Use a read lock to identify expired probes without blocking writers for long.
@@ -734,9 +745,9 @@ func (a *Analyzer) executeCleanup() {
 // OAST provider for out of band callbacks.
 func (a *Analyzer) pollOASTInteractions() {
 	defer a.producersWG.Done()
-	ticker := time.NewTicker(a.config.OASTPollingInterval)
+	ticker := time.NewTicker(a.config.Tuning.OASTPollingInterval)
 	defer ticker.Stop()
-	a.logger.Debug("OAST polling routine started.", zap.Duration("interval", a.config.OASTPollingInterval))
+	a.logger.Debug("OAST polling routine started.", zap.Duration("interval", a.config.Tuning.OASTPollingInterval))
 
 	for {
 		select {
@@ -755,7 +766,6 @@ func (a *Analyzer) fetchAndEnqueueOAST() {
 	a.probesMutex.RLock()
 	var relevantCanaries []string
 
-	// MODIFICATION: Check if oastProvider is nil before accessing it.
 	if a.oastProvider == nil {
 		a.probesMutex.RUnlock()
 		return
@@ -773,7 +783,7 @@ func (a *Analyzer) fetchAndEnqueueOAST() {
 		return
 	}
 
-	fetchCtx, cancel := context.WithTimeout(context.Background(), a.config.OASTPollingInterval)
+	fetchCtx, cancel := context.WithTimeout(context.Background(), a.config.Tuning.OASTPollingInterval)
 	defer cancel()
 
 	interactions, err := a.oastProvider.GetInteractions(fetchCtx, relevantCanaries)
@@ -799,24 +809,22 @@ func (a *Analyzer) fetchAndEnqueueOAST() {
 	}
 }
 
-//	main dispatcher for incoming events. It routes events
-//
-// to the appropriate handler based on their type.
-func (a *Analyzer) processEvent(event Event) {
+// processEvent is the main dispatcher for incoming events.
+func (a *Analyzer) processEvent(ctx context.Context, event Event) {
 	switch e := event.(type) {
 	case SinkEvent:
-		a.processSinkEvent(e)
+		a.processSinkEvent(ctx, e)
 	case ExecutionProofEvent:
-		a.processExecutionProof(e)
+		a.processExecutionProof(ctx, e)
 	case OASTInteraction:
-		a.processOASTInteraction(e)
+		a.processOASTInteraction(ctx, e)
 	default:
 		a.logger.Warn("Received unknown event type in correlation engine", zap.Any("event", event))
 	}
 }
 
-// handles confirmed out of band callbacks and reports a finding.
-func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
+// processOASTInteraction handles confirmed out-of-band callbacks and reports a finding.
+func (a *Analyzer) processOASTInteraction(ctx context.Context, interaction OASTInteraction) {
 	a.probesMutex.RLock()
 	probe, ok := a.activeProbes[interaction.Canary]
 	a.probesMutex.RUnlock()
@@ -854,11 +862,11 @@ func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
 		StackTrace:        "N/A (Out of Band)",
 		OASTDetails:       &interaction,
 	}
-	a.reporter.Report(finding)
+	a.reporter.Report(ctx, finding) // <-- Pass context
 }
 
 // processExecutionProof handles confirmed payload executions and reports a finding.
-func (a *Analyzer) processExecutionProof(proof ExecutionProofEvent) {
+func (a *Analyzer) processExecutionProof(ctx context.Context, proof ExecutionProofEvent) {
 	a.probesMutex.RLock()
 	probe, ok := a.activeProbes[proof.Canary]
 	a.probesMutex.RUnlock()
@@ -896,13 +904,13 @@ func (a *Analyzer) processExecutionProof(proof ExecutionProofEvent) {
 		SanitizationLevel: SanitizationNone,
 		StackTrace:        proof.StackTrace,
 	}
-	a.reporter.Report(finding)
+	a.reporter.Report(ctx, finding) // <-- Pass context
 }
 
-// processSinkEvent checks a sink event for our canaries and, if found, reports a potential finding.
-func (a *Analyzer) processSinkEvent(event SinkEvent) {
+// processSinkEvent analyzes a sink event, validates context, checks sanitization, and reports findings.
+func (a *Analyzer) processSinkEvent(ctx context.Context, event SinkEvent) {
 	if event.Type == schemas.SinkPrototypePollution {
-		a.processPrototypePollutionConfirmation(event)
+		a.processPrototypePollutionConfirmation(ctx, event) // <-- Pass context
 		return
 	}
 
@@ -942,7 +950,7 @@ func (a *Analyzer) processSinkEvent(event SinkEvent) {
 				SanitizationLevel: sanitizationLevel,
 				StackTrace:        event.StackTrace,
 			}
-			a.reporter.Report(finding)
+			a.reporter.Report(ctx, finding) // <-- Pass context
 		} else {
 			a.logger.Debug("Context mismatch: Taint flow suppressed (False Positive).",
 				zap.String("canary", canary),
@@ -954,7 +962,7 @@ func (a *Analyzer) processSinkEvent(event SinkEvent) {
 }
 
 // processPrototypePollutionConfirmation handles the specific confirmation event for Prototype Pollution.
-func (a *Analyzer) processPrototypePollutionConfirmation(event SinkEvent) {
+func (a *Analyzer) processPrototypePollutionConfirmation(ctx context.Context, event SinkEvent) {
 	a.probesMutex.RLock()
 	defer a.probesMutex.RUnlock()
 
@@ -988,7 +996,7 @@ func (a *Analyzer) processPrototypePollutionConfirmation(event SinkEvent) {
 		SanitizationLevel: SanitizationNone,
 		StackTrace:        event.StackTrace,
 	}
-	a.reporter.Report(finding)
+	a.reporter.Report(ctx, finding) // <-- Pass context
 }
 
 // checkSanitization compares the value seen at the sink with the original probe payload
@@ -1015,32 +1023,46 @@ func (a *Analyzer) checkSanitization(sinkValue string, probe ActiveProbe) (Sanit
 	return SanitizationPartial, " (Potential Sanitization: Payload modified)"
 }
 
-// isContextValid implements the rules engine for reducing false positives by checking
-// if a detected taint flow from a source to a sink is logical.
+// isContextValid implements the rules engine (ValidTaintFlows) to verify if the flow context is valid.
 func (a *Analyzer) isContextValid(event SinkEvent, probe ActiveProbe) bool {
 	flow := TaintFlowPath{ProbeType: probe.Type, SinkType: event.Type}
-	// FIX: Use the analyzer's local, mutex-protected copy of the rules.
+
+	// Use the analyzer's local, mutex-protected copy of the rules.
 	a.rulesMutex.RLock()
 	defer a.rulesMutex.RUnlock()
 
-	// Normalize probe types for broader rule matching.
+	// 1. Normalize probe types for broader rule matching.
+	// SQLi and CmdInjection probes detected via reflection follow XSS rules.
+	normalizedProbeType := probe.Type
 	probeTypeString := string(probe.Type)
-	if strings.Contains(probeTypeString, "XSS") || strings.Contains(probeTypeString, "SQLi") || strings.Contains(probeTypeString, "CmdInjection") {
-		flow.ProbeType = schemas.ProbeTypeXSS
+
+	if strings.Contains(probeTypeString, "SQLi") || strings.Contains(probeTypeString, "CmdInjection") {
+		normalizedProbeType = schemas.ProbeTypeXSS
 	}
 
-	// Read from the local map.
-	if !a.validTaintFlows[flow] {
+	// Check against the normalized flow path first.
+	normalizedFlow := TaintFlowPath{ProbeType: normalizedProbeType, SinkType: event.Type}
+	isValid := a.validTaintFlows[normalizedFlow]
+
+	// If the normalized flow is invalid, check the original flow as a fallback (for specific overrides).
+	if !isValid && normalizedProbeType != probe.Type {
+		isValid = a.validTaintFlows[flow]
+	}
+
+	if !isValid {
 		return false
 	}
 
-	// Add specific logic for potentially noisy sinks like navigation.
-	if (flow.ProbeType == schemas.ProbeTypeXSS || flow.ProbeType == schemas.ProbeTypeDOMClobbering) && event.Type == schemas.SinkNavigation {
+	// 2. Apply dynamic logic for ambiguous sinks.
+
+	// Rule: Navigation Sink Protocol Validation
+	if (normalizedProbeType == schemas.ProbeTypeXSS || probe.Type == schemas.ProbeTypeDOMClobbering) && event.Type == schemas.SinkNavigation {
 		normalizedValue := strings.ToLower(strings.TrimSpace(event.Value))
-		// Only consider `javascript:` or `data:` protocols as valid XSS vectors in a navigation sink.
+		// Only consider `javascript:` or `data:` protocols as valid XSS vectors in navigation sinks.
 		if strings.HasPrefix(normalizedValue, "javascript:") || strings.HasPrefix(normalizedValue, "data:text/html") {
 			return true
 		}
+		// Suppress if it's a standard URL navigation triggered by the payload.
 		return false
 	}
 

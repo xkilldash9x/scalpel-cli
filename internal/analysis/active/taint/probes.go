@@ -1,58 +1,68 @@
+// File: internal/analysis/active/taint/probes.go
 package taint
 
 import "github.com/xkilldash9x/scalpel-cli/api/schemas"
 
-// TaintFlowPath defines a specific source-to-sink path for taint analysis.
+// TaintFlowPath defines a specific combination of Probe Type and Sink Type.
 type TaintFlowPath struct {
 	ProbeType schemas.ProbeType
 	SinkType  schemas.TaintSink
 }
 
-// ValidTaintFlows defines the set of acceptable source-to-sink paths to reduce false positives.
+// ValidTaintFlows acts as a rules engine to reduce false positives.
+// It defines which combinations of Probe Types flowing into Sink Types represent valid security vulnerabilities.
+// Note: The Analyzer normalizes certain types (e.g., SQLi/CmdInjection reflected) to ProbeTypeXSS before lookup.
 var ValidTaintFlows = map[TaintFlowPath]bool{
-	{schemas.ProbeTypeXSS, schemas.SinkEval}:              true,
-	{schemas.ProbeTypeXSS, schemas.SinkInnerHTML}:         true,
-	{schemas.ProbeTypeXSS, schemas.SinkOuterHTML}:         true,
-	{schemas.ProbeTypeXSS, schemas.SinkDocumentWrite}:     true,
-	{schemas.ProbeTypeXSS, schemas.SinkIframeSrcDoc}:      true,
+	// -- XSS/SSTI -> Execution/DOM Sinks --
+	{schemas.ProbeTypeXSS, schemas.SinkEval}:                true,
 	{schemas.ProbeTypeXSS, schemas.SinkFunctionConstructor}: true,
-	{schemas.ProbeTypeXSS, schemas.SinkScriptSrc}:         true,
-	{schemas.ProbeTypeXSS, schemas.SinkIframeSrc}:         true,
-	{schemas.ProbeTypeXSS, schemas.SinkNavigation}:        true,
-	{schemas.ProbeTypeXSS, schemas.SinkPostMessage}:       true,
-	{schemas.ProbeTypeXSS, schemas.SinkWorkerPostMessage}: true,
+	{schemas.ProbeTypeXSS, schemas.SinkSetTimeout}:          true,
+	{schemas.ProbeTypeXSS, schemas.SinkSetInterval}:         true,
+	{schemas.ProbeTypeXSS, schemas.SinkInnerHTML}:           true,
+	{schemas.ProbeTypeXSS, schemas.SinkOuterHTML}:           true,
+	{schemas.ProbeTypeXSS, schemas.SinkInsertAdjacentHTML}:  true,
+	{schemas.ProbeTypeXSS, schemas.SinkDocumentWrite}:       true,
+	{schemas.ProbeTypeXSS, schemas.SinkScriptSrc}:           true,
+	{schemas.ProbeTypeXSS, schemas.SinkIframeSrc}:           true,
+	{schemas.ProbeTypeXSS, schemas.SinkIframeSrcDoc}:        true,
+	{schemas.ProbeTypeXSS, schemas.SinkNavigation}:          true, // Requires protocol check (javascript:, data:)
+	{schemas.ProbeTypeXSS, schemas.SinkPostMessage}:         true,
+	{schemas.ProbeTypeXSS, schemas.SinkWorkerPostMessage}:   true,
+	{schemas.ProbeTypeXSS, schemas.SinkStyleCSS}:            true,
+	{schemas.ProbeTypeXSS, schemas.SinkStyleInsertRule}:     true,
 
-	{schemas.ProbeTypeDOMClobbering, schemas.SinkEval}:      true,
-	{schemas.ProbeTypeDOMClobbering, schemas.SinkInnerHTML}: true,
+	{schemas.ProbeTypeSSTI, schemas.SinkEval}:          true,
+	{schemas.ProbeTypeSSTI, schemas.SinkInnerHTML}:     true,
+	{schemas.ProbeTypeSSTI, schemas.SinkDocumentWrite}: true,
+
+	// -- DOM Clobbering -> Execution/DOM Sinks --
+	{schemas.ProbeTypeDOMClobbering, schemas.SinkEval}:       true,
+	{schemas.ProbeTypeDOMClobbering, schemas.SinkInnerHTML}:  true,
 	{schemas.ProbeTypeDOMClobbering, schemas.SinkNavigation}: true,
 
-	{schemas.ProbeTypeSSTI, schemas.SinkEval}:              true,
-	{schemas.ProbeTypeSSTI, schemas.SinkInnerHTML}:         true,
-	{schemas.ProbeTypeSSTI, schemas.SinkOuterHTML}:         true,
-	{schemas.ProbeTypeSSTI, schemas.SinkDocumentWrite}:     true,
-	{schemas.ProbeTypeSSTI, schemas.SinkIframeSrcDoc}:      true,
-	{schemas.ProbeTypeSSTI, schemas.SinkFunctionConstructor}: true,
-
-	{schemas.ProbeTypeSQLi, schemas.SinkInnerHTML}:       true,
+	// -- Backend Injections (Reflected) -> DOM Sinks --
+	// Handled by normalization in the analyzer (treated as XSS).
+	{schemas.ProbeTypeSQLi, schemas.SinkInnerHTML}:         true,
 	{schemas.ProbeTypeCmdInjection, schemas.SinkInnerHTML}: true,
 
+	// -- Generic Data Flow & OAST -> Network/Exfiltration/Resource Sinks --
 	{schemas.ProbeTypeGeneric, schemas.SinkWebSocketSend}:     true,
 	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequest}:    true,
 	{schemas.ProbeTypeGeneric, schemas.SinkXMLHTTPRequestURL}: true,
 	{schemas.ProbeTypeGeneric, schemas.SinkFetch}:             true,
 	{schemas.ProbeTypeGeneric, schemas.SinkFetchURL}:          true,
-	{schemas.ProbeTypeGeneric, schemas.SinkNavigation}:        true,
+	{schemas.ProbeTypeGeneric, schemas.SinkNavigation}:        true, // Open Redirect / Leakage
 	{schemas.ProbeTypeGeneric, schemas.SinkSendBeacon}:        true,
 	{schemas.ProbeTypeGeneric, schemas.SinkWorkerSrc}:         true,
+	{schemas.ProbeTypeGeneric, schemas.SinkBaseHref}:          true,
 
-	{schemas.ProbeTypeOAST, schemas.SinkWebSocketSend}:     true,
-	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequest}:    true,
 	{schemas.ProbeTypeOAST, schemas.SinkXMLHTTPRequestURL}: true,
-	{schemas.ProbeTypeOAST, schemas.SinkFetch}:             true,
 	{schemas.ProbeTypeOAST, schemas.SinkFetchURL}:          true,
 	{schemas.ProbeTypeOAST, schemas.SinkNavigation}:        true,
-	{schemas.ProbeTypeOAST, schemas.SinkSendBeacon}:        true,
 	{schemas.ProbeTypeOAST, schemas.SinkWorkerSrc}:         true,
+	{schemas.ProbeTypeOAST, schemas.SinkIframeSrc}:         true,
+	{schemas.ProbeTypeOAST, schemas.SinkEmbedSrc}:          true,
+	{schemas.ProbeTypeOAST, schemas.SinkObjectData}:        true,
 }
 
 // DefaultProbes returns a comprehensive list of attack payloads for various vulnerability classes.
@@ -194,7 +204,7 @@ func DefaultProbes() []ProbeDefinition {
 			Type:    schemas.ProbeTypePrototypePollution,
 			Context: "MERGE_CLONE",
 			// Pollution via constructor.prototype (sometimes bypasses filters).
-			Payload:     `{"constructor":{"prototype":{"scalpelPolluted":"{{.Canary}}"}}}` ,
+			Payload:     `{"constructor":{"prototype":{"scalpelPolluted":"{{.Canary}}"}}}`,
 			Description: "Prototype Pollution via constructor.prototype injection.",
 		},
 
@@ -203,7 +213,7 @@ func DefaultProbes() []ProbeDefinition {
 		{
 			Type:        schemas.ProbeTypeSSTI,
 			Context:     "TEMPLATE_EVAL_XSS",
-			Payload:     `${7*7}<img src=x onerror=` + executionProofCall + `>`,
+			Payload:     `${7 * 7}<img src=x onerror=` + executionProofCall + `>`,
 			Description: "SSTI leading to XSS (JSP/EL/Velocity/Spring).",
 		},
 		{
