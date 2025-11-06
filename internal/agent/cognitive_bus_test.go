@@ -150,7 +150,8 @@ func TestCognitiveBus_SubscribeMultipleTypes(t *testing.T) {
 	defer unsub()
 
 	require.NoError(t, bus.Post(ctx, CognitiveMessage{Type: MessageTypeAction, Payload: "A1"}))
-	require.NoError(t, bus.Post(ctx, CognitiveMessage{Type: MessageTypeStateChange, Payload: "S1"})) // Should be ignored
+	// FIX: Use the correct constant name
+	require.NoError(t, bus.Post(ctx, CognitiveMessage{Type: MessageTypeStateUpdate, Payload: "S1"})) // Should be ignored
 	require.NoError(t, bus.Post(ctx, CognitiveMessage{Type: MessageTypeObservation, Payload: "O1"}))
 
 	// Receive A1

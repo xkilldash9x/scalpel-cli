@@ -8,6 +8,9 @@ import (
 	"sync"
 	"sync/atomic"
 
+	"net/http"
+	"time"
+
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -209,4 +212,54 @@ func Sync() {
 			}
 		}
 	}
+}
+
+// ZapLogger is a chi middleware that logs requests using Zap.
+func ZapLogger(logger *zap.Logger) func(http.Handler) http.Handler {
+	return func(next http.Handler) http.Handler {
+		return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			// Create a logger specific to this request, adding request details.
+			reqLogger := logger.With(
+				zap.String("method", r.Method),
+				zap.String("url", r.URL.String()),
+				zap.String("remote_addr", r.RemoteAddr),
+				zap.String("user_agent", r.UserAgent()),
+			)
+
+			// Use a custom response writer to capture status code.
+			ww := &loggingResponseWriter{ResponseWriter: w, statusCode: http.StatusOK}
+
+			start := time.Now()
+			defer func() {
+				// Log the request completion.
+				reqLogger.Info("Request completed",
+					zap.Int("status", ww.statusCode),
+					zap.Duration("duration", time.Since(start)),
+				)
+			}()
+
+			// Serve the request.
+			next.ServeHTTP(ww, r)
+		})
+	}
+}
+
+// loggingResponseWriter captures the status code written to the header.
+type loggingResponseWriter struct {
+	http.ResponseWriter
+	statusCode int
+}
+
+// WriteHeader captures the status code and calls the original WriteHeader.
+func (lrw *loggingResponseWriter) WriteHeader(statusCode int) {
+	lrw.statusCode = statusCode
+	lrw.ResponseWriter.WriteHeader(statusCode)
+}
+
+// Write calls the original Write, ensuring WriteHeader is called if it hasn't been.
+func (lrw *loggingResponseWriter) Write(b []byte) (int, error) {
+	// If WriteHeader has not been called, the default status is http.StatusOK.
+	// We don't need to do anything special here, as the status code is
+	// already set to OK by default or captured by WriteHeader.
+	return lrw.ResponseWriter.Write(b)
 }

@@ -100,7 +100,7 @@ func (h *Handlers) handleQueryFindings(w http.ResponseWriter, r *http.Request, p
 }
 
 // handleStartScan processes the "start_scan" command (Use Case 1).
-func (h *Handlers) handleStartScan(w http.ResponseWriter, r *http.Request, paramsMap map[string]interface{}) {
+func (h *Handlers) handleStartScan(w http.ResponseWriter, _ *http.Request, paramsMap map[string]interface{}) {
 	// Use Case 1 example: "Hey Gemini, run a full taint analysis on https://example.com."
 	// Gemini sends: {"command": "start_scan", "params": {"target": "https://example.com", "type": "taint"}}
 

@@ -107,3 +107,34 @@ type HumanoidSequenceParams struct {
 	// Persona allows overriding the default browser fingerprint for the sequence (Improvement: Flexibility).
 	Persona *Persona `json:"persona,omitempty"`
 }
+
+// -- ADDED: Task Registry Definition --
+
+// TaskInfo holds metadata about a specific task type.
+type TaskInfo struct {
+	// Type indicates the analyzer category (e.g., "ACTIVE", "PASSIVE", "AGENT").
+	// This is a string to avoid importing internal/analysis/core.
+	Type string
+	// Add other metadata as needed, e.g., Description string
+}
+
+// TaskRegistry maps TaskType constants to their metadata.
+// This is used by executors to determine task properties, like whether a
+// browser session is required (TypeActive).
+var TaskRegistry = map[TaskType]TaskInfo{
+	// core.TypeAgent
+	TaskAgentMission:     {Type: "AGENT"},
+	TaskHumanoidSequence: {Type: "AGENT"},
+
+	// core.TypeActive
+	TaskAnalyzeWebPageTaint:   {Type: "ACTIVE"},
+	TaskAnalyzeWebPageProtoPP: {Type: "ACTIVE"},
+	TaskTestRaceCondition:     {Type: "ACTIVE"},
+	TaskTestAuthATO:           {Type: "ACTIVE"},
+	TaskTestAuthIDOR:          {Type: "ACTIVE"},
+
+	// core.TypePassive
+	TaskAnalyzeHeaders: {Type: "PASSIVE"},
+	TaskAnalyzeJWT:     {Type: "PASSIVE"},
+	TaskAnalyzeJSFile:  {Type: "PASSIVE"},
+}

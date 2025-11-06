@@ -102,7 +102,9 @@ func (m *MockConfig) Discovery() config.DiscoveryConfig {
 func (m *MockConfig) Autofix() config.AutofixConfig {
 	return safeGet[config.AutofixConfig](m.Called(), 0)
 }
-
+func (m *MockConfig) MCP() config.MCPConfig {
+	return safeGet[config.MCPConfig](m.Called(), 0)
+}
 func (m *MockConfig) Scan() config.ScanConfig {
 	return safeGet[config.ScanConfig](m.Called(), 0)
 }

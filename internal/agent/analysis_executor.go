@@ -48,13 +48,21 @@ func (e *AnalysisExecutor) Execute(ctx context.Context, action Action) (*Executi
 		return e.fail(ErrCodeNotImplemented, fmt.Sprintf("Adapter not found for task type: %s (Action: %s)", taskType, action.Type), nil), nil
 	}
 
+	taskInfo, infoOk := schemas.TaskRegistry[taskType]
+	if !infoOk {
+		return e.fail(ErrCodeNotImplemented, fmt.Sprintf("Task info not found in registry for task type: %s", taskType), nil), nil
+	}
+
 	// 2. Preparation: Session requirements and Artifact collection.
 	// Use the context to get the session, as it might involve initialization.
 	session, sessionErr := e.sessionProvider(ctx)
 	var artifacts *schemas.Artifacts
 
+	// FIX: Cast the string from taskInfo.Type to core.AnalyzerType for comparison.
+	taskInfoType := core.AnalyzerType(taskInfo.Type)
+
 	// Check if session acquisition failed for active/agent types.
-	if (analyzer.Type() == core.TypeActive || analyzer.Type() == core.TypeAgent) && session == nil {
+	if (taskInfoType == core.TypeActive || taskInfoType == core.TypeAgent) && session == nil {
 		return e.fail(ErrCodeExecutionFailure, fmt.Sprintf("No active browser session available for active analysis: %v", sessionErr), nil), nil
 	}
 
@@ -66,7 +74,7 @@ func (e *AnalysisExecutor) Execute(ctx context.Context, action Action) (*Executi
 		}
 
 		// If a session exists, collect artifacts to capture the current state (DOM, HAR, Storage).
-		e.logger.Debug("Collecting artifacts from current session before analysis", zap.String("analyzer", analyzer.Name()))
+		e.logger.Debug("Collecting artifacts from current session before analysis", zap.String("analyzer", string(taskType)))
 		// Use a timeout for artifact collection to avoid hanging the agent loop.
 		artifactCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 		defer cancel()
@@ -97,7 +105,7 @@ func (e *AnalysisExecutor) Execute(ctx context.Context, action Action) (*Executi
 		Global:    e.globalCtx,
 		Task:      pseudoTask,
 		TargetURL: parsedURL,
-		Logger:    e.logger.With(zap.String("task_id", action.ID), zap.String("analyzer", analyzer.Name())),
+		Logger:    e.logger.With(zap.String("task_id", action.ID), zap.String("analyzer", string(taskType))),
 		Artifacts: artifacts,
 		Session:   session, // CRUCIAL: Pass the existing session
 		Findings:  []schemas.Finding{},
@@ -108,11 +116,11 @@ func (e *AnalysisExecutor) Execute(ctx context.Context, action Action) (*Executi
 	}
 
 	// 4. Run the analyzer
-	e.logger.Info("Starting analysis adapter", zap.String("analyzer", analyzer.Name()))
+	e.logger.Info("Starting analysis adapter", zap.String("analyzer", string(taskType)))
 	startTime := time.Now()
 	err = analyzer.Analyze(ctx, analysisCtx)
 	duration := time.Since(startTime)
-	e.logger.Info("Analysis adapter finished", zap.String("analyzer", analyzer.Name()), zap.Duration("duration", duration), zap.Int("findings_count", len(analysisCtx.Findings)))
+	e.logger.Info("Analysis adapter finished", zap.String("analyzer", string(taskType)), zap.Duration("duration", duration), zap.Int("findings_count", len(analysisCtx.Findings)))
 
 	// 5. Process the results
 	if err != nil {
@@ -121,7 +129,7 @@ func (e *AnalysisExecutor) Execute(ctx context.Context, action Action) (*Executi
 
 	// Summary data for the Mind's observation node.
 	resultData := map[string]interface{}{
-		"analyzer_name":  analyzer.Name(),
+		"analyzer_name":  string(taskType),
 		"duration_ms":    duration.Milliseconds(),
 		"findings_count": len(analysisCtx.Findings),
 		"kg_nodes_added": len(analysisCtx.KGUpdates.NodesToAdd),

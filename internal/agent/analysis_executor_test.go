@@ -25,7 +25,9 @@ func setupAnalysisExecutorTest(t *testing.T) (*AnalysisExecutor, *mocks.MockSess
 	mockSession := new(mocks.MockSessionContext)
 	mockAnalyzer := new(mocks.MockAnalyzer)
 
-	provider := func() schemas.SessionContext { return mockSession }
+	provider := func(ctx context.Context) (schemas.SessionContext, error) {
+		return mockSession, nil
+	}
 
 	globalCtx := &core.GlobalContext{
 		Logger:   logger,
@@ -52,9 +54,6 @@ func TestAnalysisExecutor_Execute_Success(t *testing.T) {
 	}
 
 	// Expectations for a successful execution
-	mockAnalyzer.On("Name").Return("TestTaintAnalyzer").Maybe()
-	mockAnalyzer.On("Type").Return(core.TypeActive).Maybe()
-
 	// Expect artifact collection
 	harRaw := json.RawMessage("{}")
 	expectedArtifacts := &schemas.Artifacts{HAR: &harRaw}
@@ -112,8 +111,6 @@ func TestAnalysisExecutor_Execute_AnalyzerFailure(t *testing.T) {
 	action := Action{Type: ActionAnalyzeTaint}
 	expectedError := errors.New("internal analyzer error")
 
-	mockAnalyzer.On("Name").Return("TestTaintAnalyzer").Maybe()
-	mockAnalyzer.On("Type").Return(core.TypeActive).Maybe()
 	mockSession.On("CollectArtifacts", mock.Anything).Return(nil, nil).Once()
 	mockAnalyzer.On("Analyze", mock.Anything, mock.Anything).Return(expectedError).Once()
 
@@ -129,17 +126,15 @@ func TestAnalysisExecutor_Execute_AnalyzerFailure(t *testing.T) {
 
 // TestAnalysisExecutor_Execute_NoSessionForActiveAnalyzer verifies the session requirement for active analyzers.
 func TestAnalysisExecutor_Execute_NoSessionForActiveAnalyzer(t *testing.T) {
-	executor, _, _, mockAnalyzer := setupAnalysisExecutorTest(t)
+	executor, _, _, _ := setupAnalysisExecutorTest(t) // Discard the unused mockAnalyzer
 	ctx := context.Background()
 
 	// Configure the executor with a nil session provider
-	executor.sessionProvider = func() schemas.SessionContext { return nil }
+	executor.sessionProvider = func(ctx context.Context) (schemas.SessionContext, error) {
+		return nil, nil
+	}
 
 	action := Action{Type: ActionAnalyzeTaint}
-
-	// Configure the analyzer as Active
-	mockAnalyzer.On("Name").Return("TestTaintAnalyzer").Maybe()
-	mockAnalyzer.On("Type").Return(core.TypeActive).Once()
 
 	// Act
 	result, err := executor.Execute(ctx, action)
@@ -197,9 +192,6 @@ func TestAnalysisExecutor_Execute_ArtifactCollectionFailure(t *testing.T) {
 	ctx := context.Background()
 
 	action := Action{Type: ActionAnalyzeTaint}
-
-	mockAnalyzer.On("Name").Return("TestTaintAnalyzer").Maybe()
-	mockAnalyzer.On("Type").Return(core.TypeActive).Maybe()
 
 	// Mock artifact collection failure
 	expectedErr := errors.New("browser artifact timeout")

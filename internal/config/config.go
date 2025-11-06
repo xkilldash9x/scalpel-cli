@@ -23,6 +23,7 @@ type Interface interface {
 	Agent() AgentConfig
 	Discovery() DiscoveryConfig
 	Autofix() AutofixConfig
+	MCP() MCPConfig // <-- ADD THIS
 	Scan() ScanConfig
 	SetScanConfig(sc ScanConfig)
 
@@ -74,6 +75,7 @@ type Config struct {
 	AgentCfg     AgentConfig     `mapstructure:"agent" yaml:"agent"`
 	DiscoveryCfg DiscoveryConfig `mapstructure:"discovery" yaml:"discovery"`
 	AutofixCfg   AutofixConfig   `mapstructure:"autofix" yaml:"autofix"`
+	MCPCfg       MCPConfig       `mapstructure:"mcp" yaml:"mcp"` // <-- ADD THIS
 	// ScanCfg gets its marching orders from CLI flags, not the config file.
 	ScanCfg ScanConfig `mapstructure:"-" yaml:"-"`
 }
@@ -91,6 +93,7 @@ func (c *Config) JWT() JWTConfig             { return c.ScannersCfg.Static.JWT }
 func (c *Config) Agent() AgentConfig         { return c.AgentCfg }
 func (c *Config) Discovery() DiscoveryConfig { return c.DiscoveryCfg }
 func (c *Config) Autofix() AutofixConfig     { return c.AutofixCfg }
+func (c *Config) MCP() MCPConfig             { return c.MCPCfg } // <-- ADD THIS
 func (c *Config) Scan() ScanConfig           { return c.ScanCfg }
 
 // --- Interface Method Implementations (Setters) ---
@@ -172,6 +175,9 @@ type GitHubConfig struct {
 	RepoOwner  string `mapstructure:"repo_owner" yaml:"repo_owner"`
 	RepoName   string `mapstructure:"repo_name" yaml:"repo_name"`
 	BaseBranch string `mapstructure:"base_branch" yaml:"base_branch"`
+}
+type MCPConfig struct {
+	ListenAddr string `mapstructure:"listen_addr" yaml:"listen_addr"`
 }
 
 // LoggerConfig holds all the configuration for the logger.
@@ -379,12 +385,18 @@ type AgentConfig struct {
 	Evolution      EvolutionConfig      `mapstructure:"evolution" yaml:"evolution"`
 	KnowledgeGraph KnowledgeGraphConfig `mapstructure:"knowledge_graph" yaml:"knowledge_graph"`
 	LTM            LTMConfig            `mapstructure:"ltm" yaml:"ltm"`
+	Mind           MindConfig           `mapstructure:"mind" yaml:"mind"`
 }
 
 // LTMConfig holds the configuration for the Long-Term Memory module.
 type LTMConfig struct {
 	CacheTTLSeconds             int `mapstructure:"cache_ttl_seconds" yaml:"cache_ttl_seconds"`
 	CacheJanitorIntervalSeconds int `mapstructure:"cache_janitor_interval_seconds" yaml:"cache_janitor_interval_seconds"`
+}
+
+// MindConfig holds settings for the agent's cognitive core.
+type MindConfig struct {
+	ContextLookbackSteps int `mapstructure:"context_lookback_steps" yaml:"context_lookback_steps"`
 }
 
 // EvolutionConfig holds settings for the proactive self-improvement (evolution) subsystem.
@@ -502,6 +514,25 @@ func SetDefaults(v *viper.Viper) {
 	// FIX: Align the default model with the test expectation.
 	v.SetDefault("agent.llm.default_fast_model", "gemini-2.5-flash")
 	v.SetDefault("agent.llm.default_powerful_model", "gemini-2.5-pro")
+
+	// -- FIX: Add default model configurations to the map --
+	// This ensures the default models are "known" to the llmclient.
+	v.SetDefault("agent.llm.models", map[string]LLMModelConfig{
+		"gemini-2.5-flash": {
+			Provider:   ProviderGemini,
+			Model:      "gemini-2.5-flash",
+			APIKey:     "", // Should be set via env var
+			APITimeout: 60 * time.Second,
+		},
+		"gemini-2.5-pro": {
+			Provider:   ProviderGemini,
+			Model:      "gemini-2.5-pro",
+			APIKey:     "", // Should be set via env var
+			APITimeout: 120 * time.Second,
+		},
+	})
+	// ----------------------------------------------------
+
 	v.SetDefault("agent.knowledge_graph.type", "postgres")
 	v.SetDefault("agent.knowledge_graph.postgres.host", "localhost")
 	v.SetDefault("agent.knowledge_graph.postgres.port", 5432)
@@ -519,6 +550,9 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("agent.ltm.cache_ttl_seconds", 300)             // 5 minutes
 	v.SetDefault("agent.ltm.cache_janitor_interval_seconds", 60) // 1 minute
 
+	// -- Agent Mind --
+	v.SetDefault("agent.mind.context_lookback_steps", 10)
+
 	// -- Autofix --
 	v.SetDefault("autofix.enabled", false)
 	v.SetDefault("autofix.min_confidence_threshold", 0.75)
@@ -527,6 +561,7 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("autofix.git.author_name", "scalpel-autofix-bot")
 	v.SetDefault("autofix.git.author_email", "autofix@scalpel.security")
 	v.SetDefault("autofix.github.base_branch", "main")
+	v.SetDefault("mcp.listen_addr", "127.0.0.1:8080")
 }
 
 // setHumanoidDefaults provides a comprehensive set of default values for the humanoid simulation.
@@ -719,6 +754,10 @@ func (a *AgentConfig) Validate() error {
 	if err := a.LTM.Validate(); err != nil {
 		return err
 	}
+	// No validation needed for MindConfig yet, but we could add:
+	// if err := a.Mind.Validate(); err != nil {
+	// 	return err
+	// }
 	return nil
 }
 
