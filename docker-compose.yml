@@ -1,0 +1,33 @@
+version: '3.8'
+
+services:
+  db:
+    image: postgres:15-alpine
+    container_name: scalpel-db
+    restart: always
+    environment:
+      - POSTGRES_USER=scalpel
+      - POSTGRES_PASSWORD=mysecretpassword
+      - POSTGRES_DB=scalpel
+    ports:
+      - "5432:5432"
+    volumes:
+      - scalpel_db_data:/var/lib/postgresql/data
+
+  scalpel:
+    build:
+      context: .
+      dockerfile: Dockerfile
+    container_name: scalpel-cli
+    restart: on-failure
+    depends_on:
+      - db
+    environment:
+      - SCALPEL_DATABASE_URL=postgres://scalpel:mysecretpassword@db:5432/scalpel?sslmode=disable
+      # - SCALPEL_AGENT_LLM_MODELS_GEMINI_2_5_PRO_API_KEY=your-google-ai-api-key
+    ports:
+      - "8080:8080" # For the web UI
+    command: ["./scalpel-cli", "mcp"] # Example command to start the mission control platform
+
+volumes:
+  scalpel_db_data:

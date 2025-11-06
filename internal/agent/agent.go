@@ -473,6 +473,9 @@ func (a *Agent) Start(ctx context.Context) error {
 	if mission.ID != "" {
 		a.logger.Info("Agent commencing initial mission.", zap.String("objective", mission.Objective))
 		a.mind.SetMission(mission)
+	} else {
+		// If no mission is set, the agent is in interactive mode, waiting for input via WebSocket.
+		a.logger.Info("Agent started in interactive mode. Waiting for user input.")
 	}
 
 	// Main loop: Wait for mission results or agent termination signals.
@@ -642,6 +645,67 @@ func (a *Agent) executeEvolution(ctx context.Context, action Action) *ExecutionR
 		Status:          "success",
 		ObservationType: ObservedSystemState,
 		Data:            map[string]interface{}{"message": fmt.Sprintf("Initiated codebase evolution process with goal: %s. The process will run in the background.", goal)},
+	}
+}
+
+// handleRespondToUser sends the agent's response back to the user via WebSocket.
+func (a *Agent) handleRespondToUser(ctx context.Context, action Action) *ExecutionResult {
+	if a.wsManager == nil {
+		return &ExecutionResult{
+			Status:          "failed",
+			ObservationType: ObservedSystemState,
+			ErrorCode:       ErrCodeFeatureDisabled,
+			ErrorDetails:    map[string]interface{}{"message": "WebSocket manager not initialized. Cannot respond to user."},
+		}
+	}
+
+	// The response content is typically in Action.Value
+	responseContent := action.Value
+	if responseContent == "" {
+		return &ExecutionResult{
+			Status:          "failed",
+			ObservationType: ObservedSystemState,
+			ErrorCode:       ErrCodeInvalidParameters,
+			ErrorDetails:    map[string]interface{}{"message": "Response content (Action.Value) cannot be empty."},
+		}
+	}
+
+	// We need the original RequestID to correlate the response for the frontend's optimistic UI.
+	// The Mind must include this in the action metadata when generating the action.
+	requestID, ok := action.Metadata["request_id"].(string)
+	if !ok || requestID == "" {
+		// If the Mind failed to provide the request_id, we still try to send the response,
+		// but log a warning as the frontend might struggle to correlate it.
+		a.logger.Warn("ActionRespondToUser missing 'request_id' in metadata. Frontend correlation might fail.")
+		requestID = ""
+	}
+
+	// Construct the message payload (frontend expects 'content' key)
+	data := map[string]interface{}{
+		"content": responseContent,
+	}
+
+	// Use the WSManager to broadcast the message.
+	// We use Broadcast because the WSManager handles the connection pool.
+	// If the architecture evolves to support multiple simultaneous users per agent, this logic
+	// would need refinement (e.g., mapping requestID to a specific Client connection).
+	err := a.wsManager.BroadcastWSMessage(MsgTypeAgentResponse, requestID, data)
+
+	if err != nil {
+		a.logger.Error("Failed to broadcast agent response via WebSocket", zap.Error(err))
+		return &ExecutionResult{
+			Status:          "failed",
+			ObservationType: ObservedSystemState,
+			ErrorCode:       ErrCodeExecutionFailure,
+			ErrorDetails:    map[string]interface{}{"message": fmt.Sprintf("Failed to broadcast response: %v", err)},
+		}
+	}
+
+	return &ExecutionResult{
+		Status:          "success",
+		ObservationType: ObservedSystemState, // The observation is that the system successfully communicated externally.
+		Data:            map[string]interface{}{"message": fmt.Sprintf("Response successfully sent to user interface (RequestID: %s)", requestID)},
+		Rationale:       "Communicated response back to the user.",
 	}
 }
 
@@ -817,7 +881,9 @@ func (a *Agent) executeAction(ctx context.Context, action Action) {
 		result, err = a.handleConclude(actionCtx, action)
 	case ActionEvolveCodebase:
 		result = a.executeEvolution(actionCtx, action)
-	// case ActionRespondToUser: // TODO: Implement if needed
+	case ActionRespondToUser:
+		// Handle the response action (sending data back via WebSocket).
+		result = a.handleRespondToUser(actionCtx, action)
 	default:
 		// Default dispatch to the ExecutorRegistry.
 		result, err = a.executors.Execute(actionCtx, action)

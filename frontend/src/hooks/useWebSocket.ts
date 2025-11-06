@@ -42,13 +42,20 @@ export const useWebSocket = (onMessageReceived: (message: WSMessage) => void) =>
     };
 
     ws.onclose = (event: CloseEvent) => {
+      // This handler manages reconnection when the closure is unexpected.
+
       setStatus('CLOSED');
-      socketRef.current = null;
+
+      // Clear the reference only if this close event pertains to the current socket instance.
+      if (socketRef.current === ws) {
+        socketRef.current = null;
+      }
 
       // Robust Reconnection Logic with Exponential Backoff
+      // We check event.wasClean. If false, it was unexpected (e.g., network error, server crash), so we try to reconnect.
       if (!event.wasClean && retryTimeoutRef.current === null) {
         const delay = reconnectDelayRef.current;
-        console.log(`WebSocket closed unexpectedly. Reconnecting in ${delay}ms...`);
+        console.log(`WebSocket closed unexpectedly (Code: ${event.code}). Reconnecting in ${delay}ms...`);
 
         retryTimeoutRef.current = window.setTimeout(() => {
             connect();
@@ -57,12 +64,18 @@ export const useWebSocket = (onMessageReceived: (message: WSMessage) => void) =>
 
         // Increase delay for next attempt
         reconnectDelayRef.current = Math.min(delay * 2, MAX_RECONNECT_DELAY);
+      } else if (event.wasClean) {
+        console.log(`WebSocket closed cleanly (Code: ${event.code}).`);
       }
     };
 
-    ws.onerror = () => {
+    ws.onerror = (error: Event) => {
+      console.error('WebSocket error:', error);
       setStatus('ERROR');
-      ws.close(); // Trigger onclose to initiate reconnection
+      // The 'onclose' event handles the reconnection logic. Ensure the socket is closed if it's still active.
+      if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+        ws.close();
+      }
     };
 
     ws.onmessage = (event: MessageEvent) => {
@@ -83,13 +96,28 @@ export const useWebSocket = (onMessageReceived: (message: WSMessage) => void) =>
 
   useEffect(() => {
     connect();
+
+    // Cleanup function: Runs when the component unmounts.
     return () => {
-        if (socketRef.current) {
-            socketRef.current.onclose = null; // Prevent reconnect during cleanup
-            socketRef.current.close();
-        }
+        // Clear any pending reconnection timeouts.
         if (retryTimeoutRef.current) {
             window.clearTimeout(retryTimeoutRef.current);
+            retryTimeoutRef.current = null;
+        }
+
+        if (socketRef.current) {
+            const ws = socketRef.current;
+
+            // 1. Prevent the 'onclose' handler from running (which would trigger reconnection).
+            ws.onclose = null;
+
+            // 2. Close the connection cleanly (Code 1000: Normal Closure).
+            // This line (previously line 89) is correct and necessary.
+            if (ws.readyState === WebSocket.OPEN || ws.readyState === WebSocket.CONNECTING) {
+              // console.log("Cleaning up WebSocket connection on component unmount.");
+              ws.close(1000, "Component unmounted");
+            }
+            socketRef.current = null;
         }
     };
   }, [connect]);
@@ -98,6 +126,7 @@ export const useWebSocket = (onMessageReceived: (message: WSMessage) => void) =>
   // Accepts the full message (constructed optimistically in the context) and returns boolean success.
   const sendMessage = useCallback((message: WSMessage): boolean => {
     if (socketRef.current?.readyState !== WebSocket.OPEN) {
+      console.warn("WebSocket not open. Cannot send message.");
       return false;
     }
 
