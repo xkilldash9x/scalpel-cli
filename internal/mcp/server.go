@@ -15,7 +15,7 @@ import (
 	"github.com/chromedp/chromedp"
 	"github.com/go-chi/chi/v5"
 	"github.com/go-chi/chi/v5/middleware"
-	"github.com/gorilla/websocket" // Added import
+	// "github.com/gorilla/websocket" // Removed: WebSocket handling is now managed by internal/agent/websocket.go
 	"github.com/jackc/pgx/v5/pgxpool"
 	"github.com/spf13/viper"
 	"go.uber.org/zap"
@@ -26,73 +26,13 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/browser"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/findings"
-	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph" // Added import
+	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	// "github.com/xkilldash9x/scalpel-cli/internal/store" // Store is used implicitly via findings processor or explicit calls if needed.
 )
 
-// --- WebSocket Definitions and Configuration ---
-
-// WebSocket Upgrader configuration
-var upgrader = websocket.Upgrader{
-	ReadBufferSize:  1024,
-	WriteBufferSize: 1024,
-	// Security: Check the origin of the request.
-	// The existing CORS middleware (corsMiddleware) allows "*". To allow the WebSocket
-	// handshake to succeed in a cross-origin development environment (e.g., Vite dev server),
-	// we must configure the upgrader to skip the origin check.
-	CheckOrigin: func(r *http.Request) bool {
-		// WARNING: In a production environment, this MUST be restricted to allowed origins.
-		return true
-	},
-}
-
-// MessageType defines the kind of message being sent.
-// These constants MUST match the frontend definitions (WebSocketContext.tsx).
-type MessageType string
-
-const (
-	MsgTypeUserPrompt    MessageType = "UserPrompt"
-	MsgTypeAgentResponse MessageType = "AgentResponse"
-	MsgTypeStatusUpdate  MessageType = "StatusUpdate"
-	MsgTypeSystemError   MessageType = "SystemError"
-)
-
-// WSMessage defines the standardized structure for communication over the WebSocket.
-type WSMessage struct {
-	Type MessageType `json:"type"`
-	// Data payload. Using a generic map for flexibility; specific structures can be parsed from this.
-	Data map[string]interface{} `json:"data,omitempty"`
-	// Timestamp formatted as ISO 8601 (RFC3339) to match JS Date().toISOString().
-	Timestamp string `json:"timestamp"`
-	// RequestID is crucial for correlating requests/responses (used by the frontend's optimistic UI).
-	RequestID string `json:"request_id,omitempty"`
-}
-
-// Constants for WebSocket timeouts and limits (based on Gorilla WebSocket examples).
-const (
-	// Time allowed to write a message to the peer.
-	writeWait = 10 * time.Second
-	// Time allowed to read the next pong message from the peer.
-	pongWait = 60 * time.Second
-	// Send pings to peer with this period. Must be less than pongWait.
-	pingPeriod = (pongWait * 9) / 10
-	// Maximum message size allowed from peer.
-	maxMessageSize = 8192
-	// Send buffer size
-	sendChannelSize = 256
-)
-
-// wsClient represents a single active WebSocket connection.
-// It manages the connection lifecycle and message pumps.
-type wsClient struct {
-	server *Server
-	conn   *websocket.Conn
-	// Buffered channel of outgoing messages. The writePump reads from this.
-	send chan WSMessage
-}
-
-// --- End WebSocket Definitions ---
+// NOTE: All previous WebSocket definitions (upgrader, MessageType, WSMessage, wsClient, pumps) have been removed.
+// This functionality is now implemented in internal/agent/websocket.go and managed by the Agent.
 
 // Server is the main structure for the Master Control Program (MCP), hosting the persistent Agent and core services.
 type Server struct {
@@ -114,6 +54,7 @@ type Server struct {
 }
 
 // NewServer initializes the MCP server and its dependencies.
+// (NewServer implementation remains the same as provided in the prompt, as it correctly initializes the agent)
 func NewServer() (*Server, error) {
 	// Context for initialization phase
 	initCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
@@ -280,8 +221,20 @@ func (s *Server) Start() error {
 	// In production, this should be more restrictive.
 	r.Use(corsMiddleware)
 
-	// 2. Define WebSocket routes FIRST, without the problematic logger
-	r.Get("/ws/v1/interact", s.handleAgentInteract())
+	// 2. Define WebSocket and Agent routes FIRST, without the problematic logger
+
+	// Register Agent Interaction Routes (including /ws/v1/interact)
+	if s.agent != nil {
+		// This delegates the handling of specific routes (defined in agent.go) to the agent's internal WSManager.
+		// This replaces the previous direct call to s.handleAgentInteract().
+		s.agent.RegisterInteractionRoutes(r)
+		s.logger.Info("Agent interaction routes registered.")
+	} else {
+		// This should ideally not happen if NewServer() succeeded.
+		s.logger.Error("Agent not initialized, interaction routes (/ws/v1/interact) will not be served.")
+	}
+
+	// MCP specific WebSocket route
 	r.Get("/ws/v1/scan", s.handleScan())
 
 	// 3. Create a new router group for HTTP-only routes that *will* use the logger
@@ -340,7 +293,7 @@ func (s *Server) Start() error {
 	// We use context.Background() here as we manage shutdown explicitly via Stop().
 	go s.findingsProcessor.Start(context.Background())
 
-	// Start the Agent's cognitive loops
+	// Start the Agent's cognitive loops (This also starts the Agent's WSManager loop)
 	agentCtx, agentCancel := context.WithCancel(context.Background())
 	go func() {
 		if err := s.agent.Start(agentCtx); err != nil && !errors.Is(err, context.Canceled) {
@@ -358,7 +311,7 @@ func (s *Server) Start() error {
 
 		s.logger.Info("Received shutdown signal, shutting down gracefully...")
 
-		// 1. Stop the agent loops (Stops generation of new findings, allows agent to close its session)
+		// 1. Stop the agent loops (Stops generation of new findings, allows agent to close its session, stops WSManager)
 		agentCancel()
 
 		// Create the main shutdown context
@@ -440,239 +393,13 @@ func corsMiddleware(next http.Handler) http.Handler {
 	})
 }
 
-// handleAgentInteract manages the WebSocket lifecycle for real-time agent interaction.
-// It upgrades the connection and starts the necessary goroutines (pumps) to handle I/O.
-func (s *Server) handleAgentInteract() http.HandlerFunc {
-	return func(w http.ResponseWriter, r *http.Request) {
-		s.logger.Debug("Received request to upgrade connection for agent interaction.", zap.String("remoteAddr", r.RemoteAddr))
-
-		// 1. Upgrade the HTTP connection to a WebSocket connection
-		conn, err := upgrader.Upgrade(w, r, nil)
-		if err != nil {
-			// upgrader.Upgrade automatically sends an HTTP error response if it fails.
-			s.logger.Error("Failed to upgrade connection to WebSocket", zap.Error(err))
-			return
-		}
-
-		s.logger.Info("WebSocket connection established successfully (/ws/v1/interact).", zap.String("remoteAddr", r.RemoteAddr))
-
-		// 2. Initialize the client connection state
-		client := &wsClient{
-			server: s,
-			conn:   conn,
-			// Initialize the send channel. The writePump reads from this channel,
-			// ensuring synchronized writes to the connection.
-			send: make(chan WSMessage, sendChannelSize),
-		}
-
-		// 3. Start the pumps for handling I/O
-		// Start the write pump in a new goroutine (handles sending messages and pings)
-		go client.writePump()
-		// Start the read pump in the current goroutine (handles incoming messages and pongs)
-		// This function blocks until the connection is closed.
-		client.readPump()
-
-		// When readPump exits, the connection is closed and resources are cleaned up (handled by defers in the pumps).
-		s.logger.Debug("WebSocket interaction handler finished.", zap.String("remoteAddr", r.RemoteAddr))
-	}
-}
-
-// readPump pumps messages from the WebSocket connection to the server/agent.
-// A dedicated readPump ensures the application quickly processes incoming data
-// and control messages (like Pongs/Close), keeping the connection responsive.
-func (c *wsClient) readPump() {
-	// Ensure cleanup when the pump stops
-	defer func() {
-		// If integrating with an agent session manager, unregister the session here.
-		c.conn.Close()
-	}()
-
-	// Configure connection parameters
-	c.conn.SetReadLimit(maxMessageSize)
-	// Initialize the read deadline
-	if err := c.conn.SetReadDeadline(time.Now().Add(pongWait)); err != nil {
-		c.server.logger.Error("Failed to set initial read deadline", zap.Error(err))
-		return
-	}
-	// Handle incoming PONG messages (response to our PINGs) to keep the connection alive by resetting the deadline.
-	c.conn.SetPongHandler(func(string) error {
-		return c.conn.SetReadDeadline(time.Now().Add(pongWait))
-	})
-
-	// Main loop for reading incoming messages
-	for {
-		var incomingMsg WSMessage
-		// ReadJSON blocks until a message is received or an error occurs (including timeout or closure).
-		err := c.conn.ReadJSON(&incomingMsg)
-		if err != nil {
-			// Check if the closure was expected or unexpected
-			if websocket.IsUnexpectedCloseError(err, websocket.CloseGoingAway, websocket.CloseAbnormalClosure) {
-				c.server.logger.Error("WebSocket closed unexpectedly", zap.Error(err))
-			} else {
-				// Expected closures (e.g., user navigated away, or read timeout occurred)
-				c.server.logger.Info("WebSocket connection closed.")
-			}
-			// Break the loop on any error (including closure or timeout)
-			break
-		}
-
-		c.server.logger.Debug("Received message from client", zap.String("type", string(incomingMsg.Type)), zap.String("requestID", incomingMsg.RequestID))
-
-		// Process the incoming message
-		c.processMessage(incomingMsg)
-	}
-}
-
-// writePump pumps messages from the server/agent to the WebSocket connection.
-// It centralizes all writes, ensuring synchronized access (as required by Gorilla WebSocket),
-// and handles PING messages to keep the connection alive.
-func (c *wsClient) writePump() {
-	// Ticker for sending periodic PING messages.
-	ticker := time.NewTicker(pingPeriod)
-	defer func() {
-		ticker.Stop()
-		c.conn.Close()
-	}()
-
-	for {
-		select {
-		case message, ok := <-c.send:
-			// Set a deadline for the write operation.
-			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
-				c.server.logger.Error("Failed to set write deadline", zap.Error(err))
-				return
-			}
-
-			if !ok {
-				// The 'send' channel was closed (e.g., by the server during shutdown). Send a close message to the client and exit.
-				c.conn.WriteMessage(websocket.CloseMessage, []byte{})
-				return
-			}
-
-			// Write the JSON message to the connection.
-			if err := c.conn.WriteJSON(message); err != nil {
-				c.server.logger.Error("Error writing JSON message to WebSocket", zap.Error(err))
-				// If writing fails, the connection is likely broken. Stop the pump.
-				return
-			}
-
-		case <-ticker.C:
-			// Time to send a PING message.
-			if err := c.conn.SetWriteDeadline(time.Now().Add(writeWait)); err != nil {
-				c.server.logger.Error("Failed to set write deadline for PING", zap.Error(err))
-				return
-			}
-			if err := c.conn.WriteMessage(websocket.PingMessage, nil); err != nil {
-				c.server.logger.Error("Error sending PING message to WebSocket", zap.Error(err))
-				// If PING fails, the connection is likely broken. Stop the pump.
-				return
-			}
-		}
-	}
-}
-
-// processMessage handles the logic for different incoming message types.
-func (c *wsClient) processMessage(msg WSMessage) {
-	switch msg.Type {
-	case MsgTypeUserPrompt:
-		// 1. Validation
-		if msg.RequestID == "" {
-			// The frontend relies on request_id for optimistic updates.
-			c.sendError(msg.RequestID, "UserPrompt message requires a valid request_id.")
-			return
-		}
-
-		// Robustly extract the prompt from the generic Data field
-		promptRaw, ok := msg.Data["prompt"]
-		if !ok {
-			c.sendError(msg.RequestID, "Missing 'prompt' field in UserPrompt message.")
-			return
-		}
-		prompt, ok := promptRaw.(string)
-		if !ok || strings.TrimSpace(prompt) == "" {
-			c.sendError(msg.RequestID, "Invalid or empty 'prompt' provided.")
-			return
-		}
-
-		// 2. Offload Processing
-		// Handle the interaction asynchronously so we don't block the readPump.
-		// The readPump must remain responsive to handle control messages (Pongs/Close).
-		go c.handleAgentInteraction(msg.RequestID, prompt)
-
-	default:
-		// Handle unknown message types
-		c.server.logger.Warn("Received unknown message type from client", zap.String("type", string(msg.Type)))
-		c.sendError(msg.RequestID, fmt.Sprintf("Unknown or unsupported message type: %s", msg.Type))
-	}
-}
-
-// handleAgentInteraction is where the prompt is passed to the core agent logic.
-// This runs in its own goroutine.
-func (c *wsClient) handleAgentInteraction(requestID string, prompt string) {
-	c.server.logger.Info("Processing user prompt", zap.String("requestID", requestID), zap.String("prompt", prompt))
-
-	// TODO: Implement the actual interaction with the core agent (c.server.agent).
-	// This involves sending the prompt to the agent (e.g., c.server.agent.SubmitPrompt(prompt))
-	// and setting up a mechanism to stream the agent's responses back to this specific client.
-	// The agent's output stream should utilize c.sendMessage() to communicate back.
-
-	// --- Placeholder Implementation ---
-	c.sendStatus(requestID, "Prompt received. Simulating agent processing...")
-
-	// Simulate processing time
-	time.Sleep(1 * time.Second)
-
-	// Construct the response
-	responseText := fmt.Sprintf("Agent (Placeholder) processed: '%s'. Full integration pending.", prompt)
-
-	// Send the final response. The frontend might expect a specific key (e.g., 'content' or 'response').
-	c.sendMessage(MsgTypeAgentResponse, requestID, map[string]interface{}{
-		"content": responseText,
-	})
-}
-
-// sendMessage is a helper to construct and queue a message for sending via the writePump.
-func (c *wsClient) sendMessage(msgType MessageType, requestID string, data map[string]interface{}) {
-	msg := WSMessage{
-		Type:      msgType,
-		Data:      data,
-		Timestamp: time.Now().UTC().Format(time.RFC3339), // ISO 8601 format expected by frontend
-		RequestID: requestID,
-	}
-
-	// Queue the message safely.
-	select {
-	case c.send <- msg:
-		// Message queued successfully.
-	default:
-		// If the send buffer is full, it indicates the client is slow or the connection is dead.
-		// We log an error and drop the message to prevent blocking the sender (e.g., the agent).
-		c.server.logger.Error("WebSocket send buffer full, dropping message. Client may be unresponsive.",
-			zap.String("requestID", requestID), zap.String("type", string(msgType)))
-		// Optionally, we might want to initiate connection closure if the buffer remains full for too long.
-	}
-}
-
-// sendError is a helper function to send standardized SYSTEM_ERROR messages.
-func (c *wsClient) sendError(requestID string, errorMessage string) {
-	c.sendMessage(MsgTypeSystemError, requestID, map[string]interface{}{
-		"error": errorMessage,
-	})
-}
-
-// sendStatus is a helper function to send standardized STATUS_UPDATE messages.
-func (c *wsClient) sendStatus(requestID string, statusMessage string) {
-	c.sendMessage(MsgTypeStatusUpdate, requestID, map[string]interface{}{
-		"status": statusMessage,
-	})
-}
+// handleAgentInteract is removed. The implementation is now delegated to the Agent via RegisterInteractionRoutes.
 
 // handleScan is a placeholder for the WebSocket endpoint.
 // Resolves compilation error: s.handleScan undefined.
 func (s *Server) handleScan() http.HandlerFunc {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		s.logger.Warn("WebSocket /ws/v1/scan accessed but is not yet implemented.")
-		// Potential improvement: Upgrade and immediately close with a specific code if implemented via WebSocket later.
 		http.Error(w, "Not Implemented", http.StatusNotImplemented)
 	})
 }
