@@ -1,9 +1,12 @@
 import React, { useState, useCallback } from 'react';
-import { useWSContext } from '../context/WebSocketContext';
+import { useWebSocketActions, useWebSocketState } from '../context/WebSocketContext';
 
 export const ChatInput: React.FC = () => {
   const [input, setInput] = useState('');
-  const { sendPrompt, status } = useWSContext();
+  // 2. State Management: Use split contexts
+  const { status } = useWebSocketState();
+  const { sendPrompt } = useWebSocketActions();
+
   const isConnected = status === 'OPEN';
 
   const handleSubmit = useCallback((e: React.FormEvent) => {

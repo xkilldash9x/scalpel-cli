@@ -1,9 +1,10 @@
 import React, { useEffect, useRef } from 'react';
-import { useWSContext } from '../context/WebSocketContext';
+import { useWebSocketState } from '../context/WebSocketContext';
 import { ChatMessage } from './ChatMessage';
 
 export const ChatWindow: React.FC = () => {
-  const { history } = useWSContext();
+  // 2. State Management: Only subscribe to history changes
+  const { history } = useWebSocketState();
   const endOfMessagesRef = useRef<HTMLDivElement>(null);
 
   // Auto-scroll to bottom

@@ -28,12 +28,18 @@ func NewHandlers(logger *zap.Logger, queryService *QueryService, scanService *Sc
 }
 
 // RegisterRoutes sets up the routing for the MCP server.
+// This is called by the Server in internal/mcp/server.go.
 func (h *Handlers) RegisterRoutes(r chi.Router) {
-	// Primary endpoint for receiving commands
-	r.Post("/api/v1/command", h.HandleCommand)
-	// Endpoint for checking the status of an asynchronous scan
-	r.Get("/api/v1/scan/{scanID}/status", h.HandleGetScanStatus)
+	// Health check endpoint (unversioned)
 	r.Get("/healthz", h.HandleHealthCheck)
+
+	// API v1 Routes
+	r.Route("/api/v1", func(r chi.Router) {
+		// Primary endpoint for receiving commands
+		r.Post("/command", h.HandleCommand)
+		// Endpoint for checking the status of an asynchronous scan
+		r.Get("/scan/{scanID}/status", h.HandleGetScanStatus)
+	})
 }
 
 // HandleHealthCheck is a simple handler to confirm the server is responsive.
@@ -69,6 +75,11 @@ func (h *Handlers) HandleCommand(w http.ResponseWriter, r *http.Request) {
 // handleQueryFindings processes the "query_findings" command (Use Case 2).
 func (h *Handlers) handleQueryFindings(w http.ResponseWriter, r *http.Request, paramsMap map[string]interface{}) {
 	// Use Case 2 example: "Gemini, show me all critical findings from the last scan."
+	// Robustness: Check if the query service is available (it might be nil if the DB failed at startup).
+	if h.queryService == nil {
+		h.respondWithError(w, http.StatusServiceUnavailable, "Query service is unavailable (database not configured or connected).")
+		return
+	}
 	// Gemini sends: {"command": "query_findings", "params": {"severity": "critical"}}
 
 	// Convert the generic map into the specific struct.

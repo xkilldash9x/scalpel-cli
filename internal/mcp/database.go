@@ -19,6 +19,10 @@ type QueryService struct {
 
 // NewQueryService creates a new QueryService.
 func NewQueryService(pool DBPool, logger *zap.Logger) *QueryService {
+	// Robustness: Log if the service is initialized without an active connection.
+	if pool == nil {
+		logger.Warn("QueryService initialized with a nil DBPool. Database operations will fail.")
+	}
 	return &QueryService{
 		pool: pool,
 		log:  logger.Named("mcp_query_service"),
@@ -27,6 +31,10 @@ func NewQueryService(pool DBPool, logger *zap.Logger) *QueryService {
 
 // GetLatestScanID retrieves the ID of the scan with the most recent activity.
 func (s *QueryService) GetLatestScanID(ctx context.Context) (string, error) {
+	// Robustness: Ensure the database connection is available before querying.
+	if s.pool == nil {
+		return "", fmt.Errorf("database connection not available")
+	}
 	// Determined by the most recent finding recorded in the database.
 	query := `SELECT scan_id FROM findings ORDER BY observed_at DESC LIMIT 1;`
 	var scanID string
@@ -42,6 +50,10 @@ func (s *QueryService) GetLatestScanID(ctx context.Context) (string, error) {
 
 // QueryFindings retrieves findings safely based on parameters.
 func (s *QueryService) QueryFindings(ctx context.Context, params QueryParams) ([]schemas.Finding, error) {
+	// Robustness: Ensure the database connection is available before querying.
+	if s.pool == nil {
+		return nil, fmt.Errorf("database connection not available. Ensure SCALPEL_DATABASE_URL is configured.")
+	}
 	// 1. Initialize query base and arguments
 	queryBase := `
         SELECT id, scan_id, task_id, observed_at, target, module, vulnerability, severity, description, evidence, recommendation, cwe

@@ -42,8 +42,15 @@ export enum SenderType {
     System = 'system',
 }
 
+
+// 3. Enhance Optimistic UI: Define delivery status
+export type DeliveryStatus = 'sending' | 'sent' | 'failed';
+
 export interface ChatEntry {
   id: string;
   message: WSMessage;
   sender: SenderType;
+// Enhance Optimistic UI: Track status and errors
+status?: DeliveryStatus;
+error?: string;
 }

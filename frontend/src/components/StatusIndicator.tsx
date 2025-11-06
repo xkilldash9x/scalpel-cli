@@ -1,9 +1,10 @@
 import React from 'react';
-import { useWSContext } from '../context/WebSocketContext';
+import { useWebSocketState } from '../context/WebSocketContext';
 import { ConnectionStatus } from '../types';
 
 export const StatusIndicator: React.FC = () => {
-  const { status } = useWSContext();
+  // 2. State Management: Only subscribe to status changes, preventing re-renders when history updates
+  const { status } = useWebSocketState();
 
   const getStatusAppearance = (s: ConnectionStatus) => {
     switch (s) {

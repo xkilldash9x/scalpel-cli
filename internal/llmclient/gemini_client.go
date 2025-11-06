@@ -7,6 +7,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"os"
 	"time"
 
 	"github.com/cenkalti/backoff/v4"
@@ -89,7 +90,13 @@ func newDefaultBackOffFactory() func() backoff.BackOff {
 // NewGoogleClient initializes the client for the Gemini API.
 func NewGoogleClient(cfg config.LLMModelConfig, logger *zap.Logger) (*GoogleClient, error) {
 	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("Google/Gemini API Key is required")
+		// Fallback to the variable defined in .envrc
+		if keyFromEnv := os.Getenv("GEMINI_API_KEY"); keyFromEnv != "" {
+			cfg.APIKey = keyFromEnv
+		} else {
+			// Now it fails if both are missing
+			return nil, fmt.Errorf("Google/Gemini API Key is required (checked config and GEMINI_API_KEY env var)")
+		}
 	}
 
 	endpoint := cfg.Endpoint

@@ -3,6 +3,11 @@
     "target": "ESNext",
     "module": "ESNext",
     "jsx": "react-jsx",
+
+    /* --- New Output Configuration --- */
+    "outDir": "./dist",
+    "rootDir": "./src",
+
     /* Strictness and Linting */
     "strict": true,
     "noImplicitAny": true,
@@ -10,7 +15,18 @@
     "noUnusedLocals": true,
     "noUnusedParameters": true,
     "noFallthroughCasesInSwitch": true,
-    "moduleResolution": "bundler"
+    "moduleResolution": "bundler",
+    /* Point 4: Testing Configuration */
+    "types": [
+      "vitest/globals"
+    ]
   },
-  "include": ["src"]
+  "include": [
+    "src",
+    "src/setupTests.ts"
+  ],
+  "exclude": [
+    "node_modules",
+    "dist"
+  ]
 }

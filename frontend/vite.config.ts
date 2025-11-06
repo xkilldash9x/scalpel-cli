@@ -2,6 +2,7 @@
 import { defineConfig } from 'vite'
 import react from '@vitejs/plugin-react'
 
+// Note: Testing configuration is handled in vitest.config.ts
 export default defineConfig({
   plugins: [react()],
   server: {

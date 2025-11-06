@@ -1,5 +1,5 @@
 import { useState, useEffect, useRef, useCallback } from 'react';
-import { ConnectionStatus, WSMessage, MessageType } from '../types';
+import { ConnectionStatus, WSMessage } from '../types';
 
 const INITIAL_RECONNECT_DELAY = 1000;
 const MAX_RECONNECT_DELAY = 30000;
@@ -11,9 +11,7 @@ const getWsUrl = (): string => {
     return `${protocol}//${window.location.host}/ws/v1/interact`;
 };
 
-export type OutgoingMessagePayload =
-    | { type: MessageType.UserPrompt, data: { prompt: string } };
-
+// The hook now expects the full WSMessage structure when sending.
 export const useWebSocket = (onMessageReceived: (message: WSMessage) => void) => {
   const [status, setStatus] = useState<ConnectionStatus>('CONNECTING');
   const socketRef = useRef<WebSocket | null>(null);
@@ -96,24 +94,19 @@ export const useWebSocket = (onMessageReceived: (message: WSMessage) => void) =>
     };
   }, [connect]);
 
-  const sendMessage = useCallback((payload: OutgoingMessagePayload): WSMessage | null => {
+  // 3. Enhance Optimistic UI: Update signature.
+  // Accepts the full message (constructed optimistically in the context) and returns boolean success.
+  const sendMessage = useCallback((message: WSMessage): boolean => {
     if (socketRef.current?.readyState !== WebSocket.OPEN) {
-      return null;
+      return false;
     }
-    // Security: Use crypto API for strong UUIDs
-    const requestId = crypto.randomUUID();
-    const messageToSend: WSMessage = {
-        ...payload,
-        timestamp: new Date().toISOString(),
-        request_id: requestId,
-    } as WSMessage;
 
     try {
-        socketRef.current.send(JSON.stringify(messageToSend));
-        return messageToSend;
+        socketRef.current.send(JSON.stringify(message));
+        return true;
     } catch (error) {
         console.error("Failed to send WebSocket message", error);
-        return null;
+        return false;
     }
   }, []);
 
