@@ -288,6 +288,7 @@ func TestParseActionResponse(t *testing.T) {
 		{"Invalid JSON", `{"type": "NAVIGATE", "value": "http://missing_quote.com}`, true, ""},
 		{"Missing Type Field", `{"value": "http://example.com"}`, true, ""},
 		{"Empty Response", "", true, ""},
+		{"JSON with trailing curly braces", `Here is the action: {"type": "NAVIGATE", "value": "http://example.com"}. And here is some other text {with braces}.`, false, ActionNavigate},
 	}
 
 	for _, tt := range tests {

@@ -522,11 +522,28 @@ func (m *LLMMind) parseActionResponse(response string) (Action, error) {
 		jsonStringToParse = strings.TrimSpace(matches[1])
 	} else {
 		firstBracket := strings.Index(response, "{")
-		lastBracket := strings.LastIndex(response, "}")
-		if firstBracket != -1 && lastBracket != -1 && lastBracket > firstBracket {
-			jsonStringToParse = response[firstBracket : lastBracket+1]
-		} else {
+		if firstBracket == -1 {
 			jsonStringToParse = response
+		} else {
+			braceCount := 0
+			endIndex := -1
+			for i := firstBracket; i < len(response); i++ {
+				if response[i] == '{' {
+					braceCount++
+				} else if response[i] == '}' {
+					braceCount--
+					if braceCount == 0 {
+						endIndex = i
+						break
+					}
+				}
+			}
+
+			if endIndex != -1 {
+				jsonStringToParse = response[firstBracket : endIndex+1]
+			} else {
+				jsonStringToParse = response[firstBracket:]
+			}
 		}
 	}
 
