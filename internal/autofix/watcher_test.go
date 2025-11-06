@@ -26,6 +26,11 @@ type mockConfig struct {
 	// Add other config structs here if needed by other tests
 }
 
+// MCP implements config.Interface.
+func (m *mockConfig) MCP() config.MCPConfig {
+	panic("unimplemented")
+}
+
 // SetATOConfig implements config.Interface.
 func (m *mockConfig) SetATOConfig(atoCfg config.ATOConfig) {
 	panic("unimplemented")

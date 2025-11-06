@@ -245,3 +245,58 @@ func (m *Manager) Shutdown(ctx context.Context) error {
 	// m.allocCancel() // REFACTOR: Do not cancel the shared allocator context.
 	return nil
 }
+
+// DefaultAllocatorOptions translates the BrowserConfig into chromedp.ExecAllocatorOption
+// This function was added to fix an 'undefined' error in internal/mcp/server.go.
+func DefaultAllocatorOptions(cfg config.BrowserConfig) []chromedp.ExecAllocatorOption {
+	// Start by making a copy of chromedp's default allocator options
+	// vvv REPLACE THIS LINE vvv
+	// opts := append([]chromedp.ExecAllocatorOption(nil), chromedp.DefaultExecAllocatorOptions...)
+	// vvv WITH THIS LINE vvv
+	opts := append([]chromedp.ExecAllocatorOption{}, chromedp.DefaultExecAllocatorOptions[:]...)
+
+	// Apply config settings
+	if !cfg.Headless {
+		// The default is headless, so we add flags to disable it.
+		opts = append(opts,
+			chromedp.Flag("headless", false),
+		)
+	}
+
+	if cfg.DisableCache {
+		opts = append(opts,
+			chromedp.Flag("disk-cache-size", "0"),
+			chromedp.Flag("media-cache-size", "0"),
+			chromedp.Flag("disable-cache", true),
+		)
+	}
+
+	if cfg.IgnoreTLSErrors {
+		opts = append(opts,
+			chromedp.Flag("ignore-certificate-errors", true),
+			chromedp.Flag("allow-insecure-localhost", true),
+		)
+	}
+
+	// Add custom args from config
+	for _, arg := range cfg.Args {
+		// This assumes args are flags without values, like "disable-gpu"
+		opts = append(opts, chromedp.Flag(arg, true))
+	}
+
+	// Viewport
+	if w, ok := cfg.Viewport["width"]; ok {
+		if h, ok := cfg.Viewport["height"]; ok {
+			opts = append(opts, chromedp.WindowSize(w, h))
+		}
+	}
+
+	// Ensure common flags are present (some are in default, but safe)
+	opts = append(opts,
+		chromedp.Flag("no-sandbox", true),
+		chromedp.Flag("disable-dev-shm-usage", true),
+		chromedp.Flag("disable-setuid-sandbox", true),
+	)
+
+	return opts
+}

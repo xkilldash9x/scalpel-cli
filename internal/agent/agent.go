@@ -143,7 +143,7 @@ func New(ctx context.Context, mission *Mission, globalCtx *core.GlobalContext) (
 	}
 
 	if kgClient != nil {
-		// Initialize Mind (mind). (TODO implementation)
+		// Initialize Mind (mind).
 		mind = NewLLMMind(logger, llmRouter, agentCfg, kgClient, bus, ltm)
 	}
 
@@ -392,10 +392,14 @@ func (a *Agent) GetMission() Mission {
 	return a.mission
 }
 
+// GetResultChan returns a read-only channel for the agent's mission result.
+// This allows external components (like an adapter) to wait for the mission to conclude.
+func (a *Agent) GetResultChan() <-chan MissionResult {
+	return a.resultChan
+}
+
 // Start executes the agent's main cognitive loops.
 func (a *Agent) Start(ctx context.Context) error {
-	a.logger.Info("Agent is starting cognitive loops.")
-
 	// Check if critical components were initialized (reflects placeholders in New)
 	if a.mind == nil || a.ltm == nil || a.bus == nil || a.executors == nil {
 		// In a production system, this should be a fatal error.

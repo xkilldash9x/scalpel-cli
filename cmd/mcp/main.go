@@ -3,8 +3,8 @@
 package main
 
 import (
-	"flag"
-	"fmt"
+	// "flag" // Removed: Flags were not used by the server config
+	// "fmt"  // Removed: 'addr' variable is no longer built
 	"log"
 	"os"
 
@@ -12,13 +12,12 @@ import (
 )
 
 func main() {
-	// Define command-line flags
-	port := flag.Int("port", 8080, "Port for the MCP server to listen on")
-	// Default to localhost (127.0.0.1) for security, as this is intended as a local bridge.
-	host := flag.String("host", "127.0.0.1", "Host address for the MCP server to listen on (use 0.0.0.0 for all interfaces)")
-	flag.Parse()
-
-	addr := fmt.Sprintf("%s:%d", *host, *port)
+	// Command-line flags (port, host) were removed as they were
+	// not being used by mcp.NewServer(), which loads its own
+	// configuration from environment variables or config files.
+	//
+	// The 'addr' variable previously here was removed as it was
+	// unused and caused a compile error.
 
 	// Initialize the server and its dependencies (Config, DB, Logger)
 	// This will attempt to connect to the database using environment variables (e.g., SCALPEL_DATABASE_URL)
@@ -34,6 +33,7 @@ func main() {
 	}
 
 	// Start the server. This function blocks until the server is shut down (e.g., Ctrl+C).
+	// It uses the address defined in the server's internal configuration.
 	if err := server.Start(); err != nil {
 		// The server handles internal logging, but we exit with a non-zero status if it stops unexpectedly.
 		os.Exit(1)

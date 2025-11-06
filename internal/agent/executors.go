@@ -274,7 +274,7 @@ type CodebaseExecutor struct {
 var _ ActionExecutor = (*CodebaseExecutor)(nil) // Verify interface compliance.
 
 // NewCodebaseExecutor creates a new CodebaseExecutor.
-func NewCodebaseExecutor(logger *zap.Logger, projectRoot string) *CodeCodebaseExecutor {
+func NewCodebaseExecutor(logger *zap.Logger, projectRoot string) *CodebaseExecutor {
 	return &CodebaseExecutor{
 		logger:      logger.Named("codebase_executor"),
 		projectRoot: projectRoot,

@@ -13,6 +13,13 @@ import (
 
 // Analyzer defines the standard interface for analysis modules (adapters).
 type Analyzer interface {
+	// Name returns the name of the analyzer.
+	Name() string
+	// Description returns the description of the analyzer.
+	Description() string
+	// Type returns the type of the analyzer (Active/Passive/etc.).
+	Type() AnalyzerType
+
 	// Analyze performs the analysis task using the provided context.
 	Analyze(ctx context.Context, ac *AnalysisContext) error
 }

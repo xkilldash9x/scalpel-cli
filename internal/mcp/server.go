@@ -52,9 +52,7 @@ func NewServer() (*Server, error) {
 	// 1. Initialize Configuration
 	v := viper.New()
 	config.SetDefaults(v)
-	if err := config.LoadConfig(v, ""); err != nil {
-		return nil, fmt.Errorf("failed to load configuration: %w", err)
-	}
+
 	// Use NewConfigFromViper for robust loading including Env Vars binding and validation
 	cfg, err := config.NewConfigFromViper(v)
 	if err != nil {

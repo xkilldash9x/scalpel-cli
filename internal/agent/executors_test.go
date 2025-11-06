@@ -28,7 +28,10 @@ import ( // This is a comment to force a change
 func setupBrowserExecutorTest(t *testing.T) (*BrowserExecutor, *mocks.MockSessionContext) {
 	logger := zaptest.NewLogger(t)
 	mockSession := mocks.NewMockSessionContext()
-	provider := func() schemas.SessionContext { return mockSession }
+	// FIX 1: The provider function needs to return the mockSession and nil error.
+	provider := func(ctx context.Context) (schemas.SessionContext, error) {
+		return mockSession, nil
+	}
 	executor := NewBrowserExecutor(logger, provider)
 	return executor, mockSession
 }
@@ -37,8 +40,12 @@ func setupBrowserExecutorTest(t *testing.T) (*BrowserExecutor, *mocks.MockSessio
 func TestBrowserExecutor_Execute_GeneralCases(t *testing.T) {
 	t.Run("NoActiveSession", func(t *testing.T) {
 		executor, _ := setupBrowserExecutorTest(t)
-		// Override provider to return nil
-		executor.sessionProvider = func() schemas.SessionContext { return nil }
+		// Override provider to return an error
+		// FIX 2: This line was garbled. It's meant to override the sessionProvider
+		// to return an error, simulating a failed session acquisition.
+		executor.sessionProvider = func(ctx context.Context) (schemas.SessionContext, error) {
+			return nil, errors.New("no active browser session")
+		}
 
 		action := Action{Type: ActionNavigate}
 		result, err := executor.Execute(context.Background(), action)
@@ -172,8 +179,9 @@ func TestBrowserExecutor_HandleWaitForAsync(t *testing.T) {
 func TestExecutorRegistry_Execute(t *testing.T) {
 	logger := zap.NewNop()
 	mockSession := mocks.NewMockSessionContext()
-	provider := func() schemas.SessionContext { return mockSession }
-
+	provider := func(ctx context.Context) (schemas.SessionContext, error) {
+		return mockSession, nil
+	}
 	// Create a mock GlobalContext, which is now required by the registry.
 	mockGlobalCtx := &core.GlobalContext{
 		Config:   &config.Config{},
@@ -203,7 +211,7 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 		analysisAction := Action{Type: ActionAnalyzeHeaders}
 		mockSession.On("CollectArtifacts", mock.Anything).Return((*schemas.Artifacts)(nil), nil).Once()
 		// The analysis executor expects the Analyze method to be called.
-		mockAnalyzer.On("Name").Return("MockHeaderAnalyzer")
+		// FIX: Removed the "Name()" expectation as it's not called.
 		mockAnalyzer.On("Type").Return(core.TypePassive).Maybe()
 		mockAnalyzer.On("Analyze", mock.Anything, mock.Anything).Return(nil).Once()
 
@@ -283,26 +291,35 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 // NEW: TestExecutorRegistry_Providers tests the dynamic provider update mechanism.
 func TestExecutorRegistry_Providers(t *testing.T) {
 	logger := zap.NewNop()
-	registry := NewExecutorRegistry(logger, ".", nil)
+	// FIX: Pass a valid, non-nil GlobalContext to prevent panic
+	registry := NewExecutorRegistry(logger, ".", &core.GlobalContext{Logger: logger, Config: config.NewDefaultConfig()})
 
 	// 1. Test initial state (should return nil)
 	sessionGetter := registry.GetSessionProvider()
-	assert.Nil(t, sessionGetter())
+	session, err := sessionGetter(context.Background())
+	// The provider now returns an error by default, not nil session
+	assert.Error(t, err)
+	assert.Nil(t, session)
+	assert.Contains(t, err.Error(), "session provider not yet initialized")
 
 	humanoidGetter := registry.GetHumanoidProvider()
 	assert.Nil(t, humanoidGetter())
 
 	// 2. Update providers
 	mockSession := mocks.NewMockSessionContext()
-	sessionProvider := func() schemas.SessionContext { return mockSession }
-	registry.UpdateSessionProvider(sessionProvider)
+	sessionProvider := func(ctx context.Context) (schemas.SessionContext, error) {
+		return mockSession, nil
+	}
+	registry.UpdateSessionProvider(sessionProvider) // Update the registry
 
 	dummyHumanoid := &humanoid.Humanoid{}
 	humanoidProvider := func() *humanoid.Humanoid { return dummyHumanoid }
 	registry.UpdateHumanoidProvider(humanoidProvider)
 
 	// 3. Test updated state (use the original getters)
-	assert.Equal(t, mockSession, sessionGetter())
+	session, err = sessionGetter(context.Background())
+	assert.NoError(t, err)
+	assert.Equal(t, mockSession, session)
 	assert.Equal(t, dummyHumanoid, humanoidGetter())
 
 	// 4. Test concurrent access (simple race detector check)
@@ -312,7 +329,7 @@ func TestExecutorRegistry_Providers(t *testing.T) {
 		go func() {
 			defer wg.Done()
 			registry.UpdateSessionProvider(sessionProvider)
-			_ = registry.GetSessionProvider()()
+			_, _ = registry.GetSessionProvider()(context.Background())
 		}()
 	}
 	wg.Wait()
