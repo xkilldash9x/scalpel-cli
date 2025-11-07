@@ -124,4 +124,28 @@ func TestManager(t *testing.T) {
 		// Use ElementsMatch because the order of extracted links is not guaranteed.
 		assert.ElementsMatch(t, expectedHrefs, absHrefs, "Extracted links do not match expected links")
 	})
+
+	t.Run("NewManagerWithNilContext", func(t *testing.T) {
+		_, err := NewManager(nil, nil, nil)
+		require.Error(t, err)
+	})
+
+	t.Run("NewManagerWithCanceledContext", func(t *testing.T) {
+		ctx, cancel := context.WithCancel(context.Background())
+		cancel()
+		_, err := NewManager(ctx, nil, nil)
+		require.Error(t, err)
+	})
+
+	t.Run("NewAnalysisContextWithInvalidConfig", func(t *testing.T) {
+		fixture := newTestFixture(t)
+		_, err := fixture.Manager.NewAnalysisContext(context.Background(), "invalid", schemas.DefaultPersona, "", "", nil)
+		require.Error(t, err)
+	})
+
+	t.Run("NavigateAndExtractHandlesSessionCreationError", func(t *testing.T) {
+		fixture := newTestFixture(t)
+		_, err := fixture.Manager.NavigateAndExtract(context.Background(), "http://localhost:1234")
+		require.Error(t, err)
+	})
 }
