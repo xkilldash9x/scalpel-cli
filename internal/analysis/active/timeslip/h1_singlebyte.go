@@ -4,6 +4,7 @@ package timeslip
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"fmt"
 	"io"
 	"net"
@@ -16,6 +17,8 @@ import (
 )
 
 // ExecuteH1SingleByteSend implements the "single-byte send" strategy using HTTP Pipelining.
+// It constructs the entire pipelined stream (R1+R2+...RN) and sends everything except the very last byte.
+// The last byte is then sent, aiming for the server to process the entire batch nearly simultaneously.
 func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, config *Config, oracle *SuccessOracle, logger *zap.Logger) (*RaceResult, error) {
 	startTime := time.Now()
 
@@ -28,7 +31,7 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 	// Configure dialer.
 	dialerConfig := network.NewDialerConfig()
 	dialerConfig.Timeout = config.Timeout
-	dialerConfig.NoDelay = true // Disable Nagle's algorithm.
+	dialerConfig.NoDelay = true // Disable Nagle's algorithm for immediate transmission of the last byte.
 
 	address, err := setupConnectionDetails(targetURL, dialerConfig, config.InsecureSkipVerify)
 	if err != nil {
@@ -41,7 +44,7 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 	}
 	defer conn.Close()
 
-	// Set deadline.
+	// Set deadline for the entire operation (send + receive).
 	deadline := time.Now().Add(config.Timeout)
 	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
 		deadline = ctxDeadline
@@ -56,51 +59,70 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 		return nil, err
 	}
 
-	// 3. Send prefixes and prepare the final burst.
-	finalBurst := make([]byte, 0, config.Concurrency)
+	// 3. Construct the full pipelined stream.
+	// Use a pooled buffer for efficiency.
+	fullStreamBuf := getBuffer()
+	defer putBuffer(fullStreamBuf)
 
-	for i, req := range requests {
-		if len(req) < 1 {
-			return nil, fmt.Errorf("%w: generated request %d is empty", ErrConfigurationError, i)
+	for _, req := range requests {
+		if len(req) == 0 {
+			// Safety check, though preparePipelinedRequests should prevent this.
+			return nil, fmt.Errorf("%w: encountered an empty request during stream construction", ErrConfigurationError)
 		}
-		prefix := req[:len(req)-1]
-		lastByte := req[len(req)-1]
-
-		// Write the prefix.
-		if _, err := conn.Write(prefix); err != nil {
-			return nil, fmt.Errorf("%w: error writing prefix %d: %v", ErrPipeliningRejected, i, err)
-		}
-
-		finalBurst = append(finalBurst, lastByte)
+		fullStreamBuf.Write(req)
 	}
 
-	// 4. The gate. Fire all the last bytes at once.
-	if _, err := conn.Write(finalBurst); err != nil {
-		return nil, fmt.Errorf("%w: failed to write final byte burst: %v", ErrPipeliningRejected, err)
+	// We must copy the bytes from the buffer as the buffer will be returned to the pool.
+	pipelinedBytes := make([]byte, fullStreamBuf.Len())
+	copy(pipelinedBytes, fullStreamBuf.Bytes())
+
+	if len(pipelinedBytes) == 0 {
+		return nil, fmt.Errorf("%w: generated pipelined stream is empty", ErrConfigurationError)
 	}
 
-	// 5. Read and parse all the responses.
+	// 4. Apply the single-byte send technique.
+	// Send everything except the last byte.
+	prefix := pipelinedBytes[:len(pipelinedBytes)-1]
+	lastByte := pipelinedBytes[len(pipelinedBytes)-1:]
+
+	// Write the prefix.
+	if _, err := conn.Write(prefix); err != nil {
+		// If the server closes the connection during the write, it likely rejects pipelining or large requests.
+		return nil, fmt.Errorf("%w: error writing pipelined prefix: %v", ErrPipeliningRejected, err)
+	}
+
+	// 5. The gate. Fire the last byte.
+	if _, err := conn.Write(lastByte); err != nil {
+		return nil, fmt.Errorf("%w: failed to write final byte: %v", ErrPipeliningRejected, err)
+	}
+
+	// 6. Read and parse all the responses.
 	parser := network.NewHTTPParser(logger)
+	// The parser must read exactly N responses from the connection.
 	httpResponses, err := parser.ParsePipelinedResponses(conn, config.Concurrency)
 	duration := time.Since(startTime)
 
 	if err != nil {
-		logger.Warn("Warning: failed to parse all pipelined responses",
+		// It's expected that we might not get all responses if the server doesn't fully support pipelining
+		// or if timeouts occur during reading.
+		logger.Warn("Warning: failed to parse all pipelined responses (potential partial results)",
+			zap.Int("expected", config.Concurrency),
 			zap.Int("parsed", len(httpResponses)),
 			zap.Error(err))
 	}
 
 	if len(httpResponses) == 0 {
 		if err != nil {
-			return nil, fmt.Errorf("failed to parse any responses: %w", err)
+			// If we got 0 responses and an error occurred, report the underlying error.
+			return nil, fmt.Errorf("%w: failed to parse any responses: %v", ErrTargetUnreachable, err)
 		}
-		return nil, fmt.Errorf("no responses received")
+		return nil, fmt.Errorf("%w: no responses received", ErrTargetUnreachable)
 	}
 
 	// Get the exclusion map for fingerprinting.
 	excludeMap := config.GetExcludedHeaders()
 
-	// 6. Package the results.
+	// 7. Package the results.
 	result := &RaceResult{
 		Strategy:  H1SingleByteSend,
 		Responses: make([]*RaceResponse, 0, len(httpResponses)),
@@ -108,28 +130,29 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 	}
 
 	for _, httpResp := range httpResponses {
-		// FIX: Convert the standard *http.Response from the parser into our
-		// local *ParsedResponse type for analysis.
+		// Convert the standard *http.Response from the parser into our local *ParsedResponse type.
 
+		// Read body. The parser is expected to handle Content-Length/chunking and provide the body reader.
 		bodyBytes, readErr := io.ReadAll(httpResp.Body)
+		httpResp.Body.Close() // Close body reader immediately after reading.
+
 		if readErr != nil {
 			logger.Error("failed to read body from parsed pipelined response", zap.Error(readErr))
+			// Append a response indicating the read error instead of skipping.
 			result.Responses = append(result.Responses, &RaceResponse{Error: readErr})
 			continue
 		}
-		httpResp.Body.Close()
 
-		// Create the local ParsedResponse. Individual duration isn't available here.
+		// Create the local ParsedResponse.
 		localParsedResp := &ParsedResponse{
 			StatusCode: httpResp.StatusCode,
 			Headers:    httpResp.Header,
 			Body:       bodyBytes,
-			Duration:   0, // Individual duration is not meaningful in pipelining.
+			Duration:   0, // Individual request duration is not meaningful in pipelining.
 			Raw:        httpResp,
 		}
 
-		// Generate the composite fingerprint using the now-correct types.
-		// Use the excludeMap.
+		// Generate the composite fingerprint.
 		fingerprint := GenerateFingerprint(localParsedResp.StatusCode, localParsedResp.Headers, localParsedResp.Body, excludeMap)
 
 		raceResp := &RaceResponse{
@@ -148,6 +171,7 @@ func ExecuteH1SingleByteSend(ctx context.Context, candidate *RaceCandidate, conf
 }
 
 // setupConnectionDetails configures TLS settings specifically for HTTP/1.1 pipelining.
+// It ensures that ALPN negotiation forces HTTP/1.1 if TLS is used.
 func setupConnectionDetails(targetURL *url.URL, dialerConfig *network.DialerConfig, ignoreTLS bool) (string, error) {
 	scheme := targetURL.Scheme
 	port := targetURL.Port()
@@ -157,19 +181,26 @@ func setupConnectionDetails(targetURL *url.URL, dialerConfig *network.DialerConf
 		if port == "" {
 			port = "443"
 		}
-		if dialerConfig.TLSConfig != nil {
+		// Ensure TLSConfig is initialized or cloned if it exists.
+		if dialerConfig.TLSConfig == nil {
+			dialerConfig.TLSConfig = &tls.Config{}
+		} else {
 			dialerConfig.TLSConfig = dialerConfig.TLSConfig.Clone()
-			dialerConfig.TLSConfig.InsecureSkipVerify = ignoreTLS
-			// Force HTTP/1.1 for pipelining via ALPN.
-			dialerConfig.TLSConfig.NextProtos = []string{"http/1.1"}
 		}
+
+		dialerConfig.TLSConfig.InsecureSkipVerify = ignoreTLS
+		// CRITICAL: Force HTTP/1.1 for pipelining via ALPN. If H2 is negotiated, pipelining semantics don't apply.
+		dialerConfig.TLSConfig.NextProtos = []string{"http/1.1"}
+
 	case "http":
 		if port == "" {
 			port = "80"
 		}
+		// Ensure TLSConfig is nil for plain HTTP.
 		dialerConfig.TLSConfig = nil
 	default:
-		return "", fmt.Errorf("%w: unsupported scheme: %s", ErrConfigurationError, scheme)
+		// Use ErrConfigurationError for unsupported schemes in this context.
+		return "", fmt.Errorf("%w: unsupported scheme for pipelining: %s", ErrConfigurationError, scheme)
 	}
 
 	return net.JoinHostPort(targetURL.Hostname(), port), nil
@@ -181,9 +212,13 @@ func preparePipelinedRequests(candidate *RaceCandidate, count int, host string) 
 
 	for i := 0; i < count; i++ {
 		// 1. Apply mutations.
-		// Create a copy of the candidate for mutation to avoid side effects between iterations.
+		// Create a copy of the candidate for mutation to ensure thread safety and independence.
 		candidateCopy := *candidate
-		candidateCopy.Headers = candidate.Headers.Clone()
+		// Ensure Headers map is initialized before cloning if it's nil.
+		if candidateCopy.Headers == nil {
+			candidateCopy.Headers = make(http.Header)
+		}
+		candidateCopy.Headers = candidateCopy.Headers.Clone()
 
 		mutatedBody, mutatedHeaders, mutatedURL, err := MutateRequest(&candidateCopy)
 		if err != nil {
@@ -191,49 +226,53 @@ func preparePipelinedRequests(candidate *RaceCandidate, count int, host string) 
 		}
 
 		// 2. Create request object.
+		// We use bytes.NewReader for the body.
 		req, err := http.NewRequest(candidate.Method, mutatedURL, bytes.NewReader(mutatedBody))
 		if err != nil {
 			return nil, fmt.Errorf("failed to create request object %d: %w", i, err)
 		}
 		req.Header = mutatedHeaders
 		req.Host = host
-		// Ensure Connection: keep-alive is set for pipelining.
+		// Ensure Connection: keep-alive is set, which is essential for pipelining.
 		req.Header.Set("Connection", "keep-alive")
 
-		// IMPROVEMENT: Explicitly disable 'Expect: 100-continue'.
-		// If a request has a body, the Go client might automatically add this header,
-		// or the server might expect it by default.
-		// If the server honors it, it will pause and send a 100 Continue response
+		// Explicitly disable 'Expect: 100-continue'.
+		// If the server honors this header, it will pause and send a 100 Continue response
 		// before reading the body. This ruins the synchronization of the single-byte strategy
-		// by causing the server to process the stream prematurely.
+		// by causing the server to process the stream prematurely or introducing delays.
 		if len(mutatedBody) > 0 {
+			// Setting the Expect header to empty string prevents the Go client (used here for serialization) from adding it.
 			req.Header.Set("Expect", "")
 		}
 
 		// Ensure Content-Length is correct for the mutated body.
 		if len(mutatedBody) > 0 {
 			req.ContentLength = int64(len(mutatedBody))
-			// Note: req.Write() handles setting the Content-Length header if req.ContentLength is set.
+			// Note: req.Write() handles setting the Content-Length header based on req.ContentLength.
 		}
 
 		// 3. Serialize the request using a pooled buffer.
 		buf := getBuffer()
+		// We must return the buffer to the pool even if serialization fails.
+		// Ensure buffer is returned before returning from the function or continuing the loop.
 
 		if err := req.Write(buf); err != nil {
+			putBuffer(buf) // Return buffer on error
 			return nil, fmt.Errorf("failed to serialize request %d: %w", i, err)
 		}
 
 		if buf.Len() == 0 {
+			putBuffer(buf) // Return buffer on error
 			return nil, fmt.Errorf("%w: serialized request %d is empty", ErrConfigurationError, i)
 		}
 
-		// Copy bytes from the buffer, as the buffer will be reused.
+		// Copy bytes from the buffer, as the buffer will be reused in the next iteration.
 		reqBytes := make([]byte, buf.Len())
 		copy(reqBytes, buf.Bytes())
 
 		preparedRequests = append(preparedRequests, reqBytes)
 
-		// Return the buffer to the pool manually at the end of the loop iteration.
+		// Return the buffer to the pool at the end of the iteration.
 		putBuffer(buf)
 	}
 	return preparedRequests, nil
