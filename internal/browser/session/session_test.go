@@ -802,6 +802,39 @@ func TestSession(t *testing.T) {
 		}
 	})
 
+	// R10: Added test for timeout fix in cdp_executor.
+	t.Run("ExecutorRespectsParentTimeout", func(t *testing.T) {
+		fixture := newTestFixture(t)
+		session := fixture.Session
+
+		// Create a server that delays its response longer than the old internal timeouts.
+		// Old timeouts were 10s for geometry and 20s for script execution.
+		// We use a 22s delay.
+		delay := 22 * time.Second
+		server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+			time.Sleep(delay)
+			fmt.Fprintln(w, `<html><body><div id="belated_element">Hello</div></body></html>`)
+		}))
+
+		// The parent context timeout must be longer than the server delay.
+		// The test timeout is 45s, which is sufficient.
+		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+		defer cancel()
+
+		// The Navigate action itself should complete without timeout.
+		require.NoError(t, session.Navigate(ctx, server.URL))
+
+		// 1. Test GetElementGeometry
+		// This call would have previously timed out after 10s. Now it should succeed
+		// because the parent context `ctx` has a 45s timeout.
+		_, err := session.GetElementGeometry(ctx, "#belated_element")
+		require.NoError(t, err, "GetElementGeometry should not time out and respect the parent context's deadline")
+
+		// 2. Test ExecuteScript
+		// This call would have previously timed out after 20s. Now it should succeed.
+		_, err = session.ExecuteScript(ctx, `(() => { return 1 + 1; })();`, nil)
+		require.NoError(t, err, "ExecuteScript should not time out and respect the parent context's deadline")
+	})
 }
 
 // TestConvertJSToGoType focuses on the type conversion logic for exposed functions.
