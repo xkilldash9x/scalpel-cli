@@ -48,6 +48,9 @@ func setupAnalyzer(t *testing.T, config *Config) (*Analyzer, *MockReporter) {
 	// Tests for invalid config handle the error themselves.
 	if err == nil {
 		require.NotNil(t, analyzer)
+	} else if config == nil || (config.Success.BodyRegex == "" && config.Success.HeaderRegex == "") {
+		// If config is nil or valid (no regexes), setup should not error.
+		require.NoError(t, err, "Analyzer initialization failed unexpectedly")
 	}
 
 	return analyzer, reporter
@@ -120,8 +123,7 @@ func TestDetermineStrategies(t *testing.T) {
 		{
 			name:      "Standard HTTP",
 			candidate: RaceCandidate{IsGraphQL: false},
-			// FIX: Updated expectation to include H2Dependency first.
-			expected: []RaceStrategy{H2Dependency, H2Multiplexing, H1SingleByteSend, H1Concurrent},
+			expected:  []RaceStrategy{H2Dependency, H2Multiplexing, H1SingleByteSend, H1Concurrent},
 		},
 		{
 			name:      "GraphQL",
@@ -181,15 +183,30 @@ func TestAnalyzeResults_Heuristics(t *testing.T) {
 			expectDetails: "VULNERABLE: Confirmed TOCTOU race condition.",
 		},
 		{
-			name: "Differential State (High 0.8)",
+			// FIX: Update this test case. It was previously "Differential State (High 0.8)".
+			// Now it should be recognized as "State transition detected (Info 0.4)" because SuccessCount==1 and Unique==2.
+			name: "State Transition (Locked - Info 0.4)",
 			responses: []*RaceResponse{
 				mockResponse("FP_OK", true, 100),
 				mockResponse("FP_ERR_A", false, 110),
 			},
 			strategy:      H1Concurrent,
+			expectVuln:    false,
+			expectConf:    0.4,
+			expectDetails: "INFO: State transition detected (2 unique responses), but operation count matches expectation (1 successes).",
+		},
+		// FIX: Add a test case for Complex Differential State (Vulnerable 0.8) where Unique > 2.
+		{
+			name: "Complex Differential State (High 0.8)",
+			responses: []*RaceResponse{
+				mockResponse("FP_OK", true, 100),
+				mockResponse("FP_ERR_A", false, 110),
+				mockResponse("FP_ERR_B", false, 120), // 3 unique responses
+			},
+			strategy:      H1Concurrent,
 			expectVuln:    true,
 			expectConf:    0.8,
-			expectDetails: "VULNERABLE: Differential responses detected (2 unique responses)",
+			expectDetails: "VULNERABLE: Differential responses detected (3 unique responses)",
 		},
 		{
 			name: "State Flutter (Medium 0.6)",
@@ -197,15 +214,12 @@ func TestAnalyzeResults_Heuristics(t *testing.T) {
 				mockResponse("FP_ERR_A", false, 100),
 				mockResponse("FP_ERR_B", false, 110),
 			},
-			strategy:   H1Concurrent,
-			expectVuln: true,
-			expectConf: 0.6,
-			// FIX: Updated expectation to match the improved details
-			// (including CoV).
+			strategy:      H1Concurrent,
+			expectVuln:    true,
+			expectConf:    0.6,
 			expectDetails: "VULNERABLE: State flutter detected. 2 unique failure responses observed with low timing variation",
 		},
 		{
-			// FIX: Renamed to reflect the actual confidence level (0.2 due to insufficient data).
 			name: "Timing Anomaly (Insufficient Data 0.2)",
 			// This test case triggers the timing anomaly fallback when < 5 data points exist.
 			// It avoids "State Flutter" because the timing delta is large (600ms > 500ms).
@@ -213,11 +227,9 @@ func TestAnalyzeResults_Heuristics(t *testing.T) {
 				mockResponse("FP1", false, 100),
 				mockResponse("FP2", false, 700), // Delta 600ms > Threshold 500ms
 			},
-			strategy:   H1Concurrent,
-			expectVuln: false,
-			// FIX: Confidence is lowered to 0.2 when data points < 5.
-			expectConf: 0.2,
-			// FIX: Details updated to reflect insufficient data.
+			strategy:      H1Concurrent,
+			expectVuln:    false,
+			expectConf:    0.2,
 			expectDetails: "INFO: Timing delta detected (600ms), but insufficient data (2 points)",
 		},
 		{
@@ -241,6 +253,18 @@ func TestAnalyzeResults_Heuristics(t *testing.T) {
 			strategy:   H2Dependency, // Timing heuristic is ignored
 			expectVuln: true,         // Falls through to TOCTOU
 			expectConf: 1.0,
+		},
+		// FIX: Added test case for H1SingleByteSend strategy.
+		{
+			name: "Timing Anomaly Ignored for H1SingleByteSend (State Transition 0.4)",
+			responses: []*RaceResponse{
+				mockResponse("FP_OK", true, 0), // Durations are 0
+				mockResponse("FP_ERR", false, 0),
+			},
+			strategy:      H1SingleByteSend, // Timing heuristic is ignored
+			expectVuln:    false,            // State transition heuristic should catch it
+			expectConf:    0.4,
+			expectDetails: "INFO: State transition detected",
 		},
 		{
 			name:          "No Responses",
@@ -289,17 +313,20 @@ func TestAnalyzeResults_Heuristics_AdvancedTiming(t *testing.T) {
 		// FIX: Ensure only 1 success occurs to prevent the TOCTOU heuristic (1.0) from firing,
 		// allowing the timing heuristics (0.3-0.5) to be tested.
 		if n > 0 {
-			responses[0] = mockResponse("FP1", true, fastMs)
+			responses[0] = mockResponse("FP_OK", true, fastMs)
 		}
+
+		// Use a different fingerprint for failures so DifferentialState doesn't override Timing.
+		failureFP := "FP_ERR"
 
 		for i := 1; i < n-1; i++ {
 			// Add slight variation to fast responses, make them unsuccessful.
-			responses[i] = mockResponse("FP1", false, fastMs+int64(i%5))
+			responses[i] = mockResponse(failureFP, false, fastMs+int64(i%5))
 		}
 
 		if n > 1 {
 			// The slow response should also be unsuccessful.
-			responses[n-1] = mockResponse("FP1", false, slowMs)
+			responses[n-1] = mockResponse(failureFP, false, slowMs)
 		}
 		return responses
 	}
@@ -307,18 +334,25 @@ func TestAnalyzeResults_Heuristics_AdvancedTiming(t *testing.T) {
 	// Helper to generate a distribution with high variation but no clear outlier pattern
 	generateHighVariation := func(n int, baseMs int64) []*RaceResponse {
 		responses := make([]*RaceResponse, n)
+		failureFP := "FP_ERR"
 		for i := 0; i < n; i++ {
 			// FIX: Ensure only 1 success occurs.
 			isSuccess := (i == 0)
+			fp := failureFP
+			if isSuccess {
+				fp = "FP_OK"
+			}
 			// Spread out responses linearly
-			responses[i] = mockResponse("FP1", isSuccess, baseMs+int64(i*100))
+			responses[i] = mockResponse(fp, isSuccess, baseMs+int64(i*100))
 		}
 		return responses
 	}
 
 	tests := []struct {
-		name          string
-		responses     []*RaceResponse
+		name      string
+		responses []*RaceResponse
+		// FIX: Added strategy field to test timing exclusion
+		strategy      RaceStrategy
 		expectConf    float64
 		expectDetails string
 	}{
@@ -329,6 +363,7 @@ func TestAnalyzeResults_Heuristics_AdvancedTiming(t *testing.T) {
 			// StdDev will be significant enough (>10ms) and Median > 20ms.
 			// The pattern is clearly bimodal (1 outlier in >= 10 requests).
 			responses:     generateBimodal(10, 100, 400),
+			strategy:      H1Concurrent,
 			expectConf:    0.5,
 			expectDetails: "INFO: Significant timing anomaly (Lock-Wait pattern) detected.",
 		},
@@ -343,10 +378,11 @@ func TestAnalyzeResults_Heuristics_AdvancedTiming(t *testing.T) {
 				}
 				r := generateBimodal(20, 100, 400)
 				// Manually add a second slow outlier (ensure it's not the successful one at index 0)
-				// We modify index 1 to be the second outlier.
-				r[1] = mockResponse("FP1", false, 410)
+				// We modify index 1 to be the second outlier. Must use the failure FP.
+				r[1] = mockResponse("FP_ERR", false, 410)
 				return r
 			}(),
+			strategy:      H1Concurrent,
 			expectConf:    0.4, // Confidence 0.4 because multiple outliers (<15%)
 			expectDetails: "INFO: Significant timing anomaly (Lock-Wait pattern) detected.",
 		},
@@ -355,21 +391,35 @@ func TestAnalyzeResults_Heuristics_AdvancedTiming(t *testing.T) {
 			// High variation but no specific bimodal pattern.
 			// Delta > threshold (100 to 1000 = 900ms).
 			responses:     generateHighVariation(10, 100),
+			strategy:      H1Concurrent,
 			expectConf:    0.3,
 			expectDetails: "INFO: Significant timing delta detected",
 		},
 		{
 			name: "Low StdDev/Median (Ignored)",
 			// Delta is large (95ms), but StdDev and Median are too low (minStdDevMs=10, minMedianMs=20) for reliable stats.
-			responses:  generateBimodal(10, 5, 100),
-			expectConf: 0.0, // Ignored
+			responses: generateBimodal(10, 5, 100),
+			strategy:  H1Concurrent,
+			// Although timing is ignored, the State Transition heuristic (0.4) should still fire because Success=1 and Unique=2.
+			expectConf:    0.4,
+			expectDetails: "INFO: State transition detected",
+		},
+		// FIX: Added test case for H1SingleByteSend exclusion
+		{
+			name: "Timing Ignored for H1SingleByteSend (State Transition 0.4)",
+			// Use generateBimodal which sets durations, but they are ignored by the heuristic for this strategy.
+			responses:     generateBimodal(10, 100, 400),
+			strategy:      H1SingleByteSend,
+			expectConf:    0.4, // Detected by checkDifferentialState instead.
+			expectDetails: "INFO: State transition detected",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			result := &RaceResult{
-				Strategy:  H1Concurrent,
+				// FIX: Use the strategy defined in the test case.
+				Strategy:  tt.strategy,
 				Responses: tt.responses,
 			}
 
@@ -464,9 +514,11 @@ func TestReportFinding_SeverityMapping(t *testing.T) {
 		{"Critical", 1.0, true, schemas.SeverityCritical, []string{"CWE-367: Time-of-check Time-of-use (TOCTOU) Race Condition"}},
 		{"High", 0.8, true, schemas.SeverityHigh, []string{"CWE-362: Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')"}},
 		{"Medium", 0.6, true, schemas.SeverityMedium, []string{"CWE-362: Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')"}},
-		{"Low", 0.5, true, schemas.SeverityLow, []string{"CWE-362: Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')"}},
-		// Informational findings still use the simple CWE ID.
-		{"Informational", 0.3, false, schemas.SeverityInformational, []string{"CWE-362"}},
+		// Low is less common now but still possible if a heuristic assigns it.
+		{"Low", 0.55, true, schemas.SeverityLow, []string{"CWE-362: Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')"}},
+		// Informational findings (Confidence >= 0.3)
+		{"Informational (Timing)", 0.3, false, schemas.SeverityInformational, []string{"CWE-362"}},
+		{"Informational (State Transition)", 0.4, false, schemas.SeverityInformational, []string{"CWE-362"}},
 	}
 
 	for _, tt := range tests {
@@ -534,7 +586,12 @@ func TestSampleUniqueResponses_SamplingAndTruncation(t *testing.T) {
 		fp := fmt.Sprintf("U%d", i)
 		resp := mockResponse(fp, true, 100)
 		resp.SpecificBody = []byte(fmt.Sprintf("Unique %d", i))
-		resp.ParsedResponse = &ParsedResponse{StatusCode: 200}
+		// Ensure ParsedResponse is fully initialized for the test helper
+		if resp.ParsedResponse == nil {
+			resp.ParsedResponse = &ParsedResponse{StatusCode: 200}
+		} else {
+			resp.ParsedResponse.StatusCode = 200
+		}
 		manyUnique = append(manyUnique, resp)
 	}
 
@@ -635,7 +692,6 @@ func TestAnalyze_StrategyExecutionFlow_ContinueOnError(t *testing.T) {
 		// H1Concurrent will use the default behavior (success).
 	}
 
-	// FIX: Initialize mocks using the helper which includes H2Dependency.
 	executedStrategies := mockStrategies(t, behaviors)
 
 	// Execution
@@ -665,7 +721,6 @@ func TestAnalyze_HaltingOnConfigurationError(t *testing.T) {
 		},
 	}
 
-	// FIX: Initialize mocks.
 	executedStrategies := mockStrategies(t, behaviors)
 
 	// Execution
@@ -681,7 +736,7 @@ func TestAnalyze_HaltingOnConfigurationError(t *testing.T) {
 
 func TestAnalyze_HaltingOnConfirmedTOCTOU(t *testing.T) {
 	// Setup
-	config := &Config{ExpectedSuccesses: 1}
+	config := &Config{ExpectedSuccesses: 1, Concurrency: 2}
 	analyzer, reporter := setupAnalyzer(t, config)
 	candidate := &RaceCandidate{URL: "https://example.com", IsGraphQL: false}
 
@@ -698,7 +753,6 @@ func TestAnalyze_HaltingOnConfirmedTOCTOU(t *testing.T) {
 		},
 	}
 
-	// FIX: Initialize mocks.
 	executedStrategies := mockStrategies(t, behaviors)
 
 	// Execution
