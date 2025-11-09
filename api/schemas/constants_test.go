@@ -27,9 +27,9 @@ func TestConstants(t *testing.T) {
 		{"TaskAnalyzeJWT", schemas.TaskAnalyzeJWT, "ANALYZE_JWT"},
 
 		// Severities
-		{"SeverityCritical", schemas.SeverityCritical, "CRITICAL"},
-		{"SeverityHigh", schemas.SeverityHigh, "HIGH"},
-		{"SeverityInformational", schemas.SeverityInformational, "INFORMATIONAL"},
+		{"SeverityCritical", schemas.SeverityCritical, "critical"},
+		{"SeverityHigh", schemas.SeverityHigh, "high"},
+		{"SeverityInformational", schemas.SeverityInfo, "info"},
 
 		// LLM ModelTiers
 		{"TierFast", schemas.TierFast, "fast"},

@@ -197,7 +197,8 @@ func TestIDORAdapter_Analyze_DetectionScenarios(t *testing.T) {
 			if tt.wantFindings > 0 {
 				finding := analysisCtx.Findings[0]
 				assert.Equal(t, schemas.SeverityHigh, finding.Severity)
-				assert.Equal(t, "Insecure Direct Object Reference (IDOR)", finding.Vulnerability.Name)
+				// Refactored: Assert against VulnerabilityName
+				assert.Equal(t, "Insecure Direct Object Reference (IDOR)", finding.VulnerabilityName)
 				assert.Contains(t, finding.Description, "123")
 				// Assuming the internal idor logic increments the number (123 -> 124)
 				assert.Contains(t, finding.Description, "124")

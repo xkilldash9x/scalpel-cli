@@ -79,12 +79,13 @@ func (p *Pipeline) ProcessScanResults(ctx context.Context, scanID string) (*Repo
 
 func (p *Pipeline) prioritize(findings []schemas.Finding) {
 	// Sort findings by severity (Critical first)
+	// REFACTOR: Changed SeverityInformational to SeverityInfo to match findings.go
 	severityOrder := map[schemas.Severity]int{
-		schemas.SeverityCritical:      1,
-		schemas.SeverityHigh:          2,
-		schemas.SeverityMedium:        3,
-		schemas.SeverityLow:           4,
-		schemas.SeverityInformational: 5,
+		schemas.SeverityCritical: 1,
+		schemas.SeverityHigh:     2,
+		schemas.SeverityMedium:   3,
+		schemas.SeverityLow:      4,
+		schemas.SeverityInfo:     5,
 	}
 
 	sort.Slice(findings, func(i, j int) bool {
@@ -101,7 +102,8 @@ func (p *Pipeline) prioritize(findings []schemas.Finding) {
 			return orderI < orderJ
 		}
 		// Secondary sort by vulnerability name
-		return findings[i].Vulnerability.Name < findings[j].Vulnerability.Name
+		// REFACTOR: Use flattened findings[i].VulnerabilityName field
+		return findings[i].VulnerabilityName < findings[j].VulnerabilityName
 	})
 }
 

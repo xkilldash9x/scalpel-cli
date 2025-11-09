@@ -55,15 +55,17 @@ const (
 )
 
 // NodeStatus defines the state of a node, useful for tracking analysis progress.
+// This maps directly to the kg_node_status ENUM in Postgres.
 type NodeStatus string
 
 const (
-	StatusNew        NodeStatus = "NEW"
-	StatusProcessing NodeStatus = "PROCESSING"
-	StatusAnalyzed   NodeStatus = "ANALYZED"
-	StatusError      NodeStatus = "ERROR"
-	StatusSuccess    NodeStatus = "SUCCESS"
-	StatusFailure    NodeStatus = "FAILURE"
+	// Standardized to lowercase to match the Postgres ENUM definition.
+	StatusNew        NodeStatus = "new"
+	StatusProcessing NodeStatus = "processing"
+	StatusAnalyzed   NodeStatus = "analyzed"
+	StatusError      NodeStatus = "error"
+	StatusSuccess    NodeStatus = "success"
+	StatusFailure    NodeStatus = "failure"
 )
 
 // Node represents a single entity in the Knowledge Graph.
@@ -80,8 +82,8 @@ type Node struct {
 // Edge represents a directed, labeled relationship between two nodes.
 type Edge struct {
 	ID         string           `json:"id"`
-	From       string           `json:"from"`
-	To         string           `json:"to"`
+	From       string           `json:"from"` // DB column: from_node
+	To         string           `json:"to"`   // DB column: to_node
 	Type       RelationshipType `json:"type"`
 	Label      string           `json:"label"`
 	Properties json.RawMessage  `json:"properties"`

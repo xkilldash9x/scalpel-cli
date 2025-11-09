@@ -58,9 +58,27 @@ func TestPersistData(t *testing.T) {
 		require.NoError(t, err)
 
 		scanID := uuid.NewString()
-		finding := schemas.Finding{ID: "finding-1", Vulnerability: schemas.Vulnerability{Name: "XSS"}, Evidence: "{}"}
-		node := schemas.NodeInput{ID: "node-1", Type: schemas.NodeURL}
-		edge := schemas.EdgeInput{ID: "edge-1", From: "node-1", To: "node-2", Type: "LINKS_TO"}
+		// REFACTOR: Use flattened struct and json.RawMessage
+		finding := schemas.Finding{
+			ID:                "finding-1",
+			VulnerabilityName: "XSS",
+			Evidence:          json.RawMessage("{}"),
+		}
+		// REFACTOR: Use NodeInput fields from knowledge_graph.go
+		node := schemas.NodeInput{
+			ID:     "node-1",
+			Type:   schemas.NodeURL,
+			Label:  "node-1-label",
+			Status: schemas.StatusNew,
+		}
+		// REFACTOR: Use EdgeInput fields from knowledge_graph.go
+		edge := schemas.EdgeInput{
+			ID:    "edge-1",
+			From:  "node-1",
+			To:    "node-2",
+			Type:  "LINKS_TO",
+			Label: "edge-1-label",
+		}
 
 		envelope := &schemas.ResultEnvelope{
 			ScanID:   scanID,
@@ -74,31 +92,38 @@ func TestPersistData(t *testing.T) {
 		mockPool.ExpectBegin()
 
 		// -- findings (Uses CopyFrom) --
-		findingColumns := []string{"id", "scan_id", "task_id", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe", "observed_at"}
+		findingColumns := []string{"id", "scan_id", "task_id", "target", "module", "vulnerability_name", "severity", "description", "evidence", "recommendation", "cwe", "observed_at"}
 		mockPool.ExpectCopyFrom(pgx.Identifier{"findings"}, findingColumns).WillReturnResult(1)
 
 		// -- nodes (Uses Exec loop) --
+		// REFACTOR: Match SQL from postgres_kg.go
 		sqlNodes := `
-		INSERT INTO kg_nodes (id, type, properties, created_at, updated_at)
-		VALUES ($1, $2, $3, $4, $5)
+		INSERT INTO kg_nodes (id, type, label, status, properties, created_at, last_seen)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
 		ON CONFLICT (id) DO UPDATE SET
 			type = EXCLUDED.type,
-			properties = kg_nodes.properties || EXCLUDED.properties,
-			updated_at = EXCLUDED.updated_at;
+			label = EXCLUDED.label,
+			status = EXCLUDED.status,
+			properties = EXCLUDED.properties,
+			last_seen = EXCLUDED.last_seen;
 	`
 		mockPool.ExpectExec(flexibleSQLMatcher(sqlNodes)).
-			WithArgs(node.ID, string(node.Type), json.RawMessage("{}"), pgxmock.AnyArg(), pgxmock.AnyArg()).
+			WithArgs(node.ID, string(node.Type), node.Label, node.Status, json.RawMessage("{}"), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 		// -- edges (Uses Exec loop) --
+		// REFACTOR: Match SQL from postgres_kg.go
 		sqlEdges := `
-		INSERT INTO kg_edges (source_id, target_id, relationship, properties, "timestamp")
-		VALUES ($1, $2, $3, $4, $5)
-		ON CONFLICT (source_id, target_id, relationship) DO UPDATE SET
-			properties = kg_edges.properties || EXCLUDED.properties;
+		INSERT INTO kg_edges (id, from_node, to_node, type, label, properties, created_at, last_seen)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		ON CONFLICT (from_node, to_node, type) DO UPDATE SET
+			id = EXCLUDED.id,
+			label = EXCLUDED.label,
+			properties = EXCLUDED.properties,
+			last_seen = EXCLUDED.last_seen;
 	`
 		mockPool.ExpectExec(flexibleSQLMatcher(sqlEdges)).
-			WithArgs(edge.From, edge.To, string(edge.Type), json.RawMessage("{}"), pgxmock.AnyArg()).
+			WithArgs(edge.ID, edge.From, edge.To, string(edge.Type), edge.Label, json.RawMessage("{}"), pgxmock.AnyArg(), pgxmock.AnyArg()).
 			WillReturnResult(pgxmock.NewResult("INSERT", 1))
 
 		mockPool.ExpectCommit()
@@ -137,10 +162,19 @@ func TestPersistData(t *testing.T) {
 		require.NoError(t, err)
 
 		copyErr := errors.New("copy from failed")
-		envelope := &schemas.ResultEnvelope{Findings: []schemas.Finding{{ID: "f-1", Vulnerability: schemas.Vulnerability{Name: "Test"}, Evidence: "{}"}}}
+		// REFACTOR: Use flattened struct and json.RawMessage
+		envelope := &schemas.ResultEnvelope{
+			Findings: []schemas.Finding{
+				{
+					ID:                "f-1",
+					VulnerabilityName: "Test",
+					Evidence:          json.RawMessage("{}"),
+				},
+			},
+		}
 
 		mockPool.ExpectBegin()
-		findingColumns := []string{"id", "scan_id", "task_id", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe", "observed_at"}
+		findingColumns := []string{"id", "scan_id", "task_id", "target", "module", "vulnerability_name", "severity", "description", "evidence", "recommendation", "cwe", "observed_at"}
 		mockPool.ExpectCopyFrom(pgx.Identifier{"findings"}, findingColumns).
 			WillReturnError(copyErr)
 		mockPool.ExpectRollback()
@@ -165,7 +199,7 @@ func TestGetFindingsByScanID(t *testing.T) {
 		require.NoError(t, err)
 
 		sqlGetFindings := `
-		SELECT id, task_id, observed_at, target, module, vulnerability, severity, description, evidence, recommendation, cwe
+		SELECT id, task_id, observed_at, target, module, vulnerability_name, severity, description, evidence, recommendation, cwe
 		FROM findings
 		WHERE scan_id = $1
 		ORDER BY observed_at ASC;
@@ -174,7 +208,7 @@ func TestGetFindingsByScanID(t *testing.T) {
 		now := time.Now()
 		evidenceJSON := `{"detail": "some evidence"}`
 
-		columns := []string{"id", "task_id", "observed_at", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe"}
+		columns := []string{"id", "task_id", "observed_at", "target", "module", "vulnerability_name", "severity", "description", "evidence", "recommendation", "cwe"}
 		rows := pgxmock.NewRows(columns).
 			AddRow("finding-123", "task-abc", now, "https://example.com", "SQLAnalyzer", "SQLi", "High", "desc", evidenceJSON, "reco", []string{"CWE-89"})
 
@@ -189,8 +223,9 @@ func TestGetFindingsByScanID(t *testing.T) {
 
 		// Assertions for the retrieved finding.
 		assert.Equal(t, "finding-123", findings[0].ID)
-		assert.Equal(t, "SQLi", findings[0].Vulnerability.Name)
-		assert.JSONEq(t, evidenceJSON, findings[0].Evidence)
+		// REFACTOR: Use VulnerabilityName
+		assert.Equal(t, "SQLi", findings[0].VulnerabilityName)
+		assert.JSONEq(t, evidenceJSON, string(findings[0].Evidence)) // Compare string to json.RawMessage (as string)
 		assert.NoError(t, mockPool.ExpectationsWereMet())
 	})
 }

@@ -503,7 +503,7 @@ func TestAnalyze_Integration(t *testing.T) {
 	hasStuffing := false
 	hasEnumeration := false
 	for _, f := range findings {
-		if f.Vulnerability.Name == "Account Takeover (Credential Stuffing)" {
+		if f.VulnerabilityName == "Account Takeover (Credential Stuffing)" {
 			hasStuffing = true
 			assert.Equal(t, schemas.SeverityCritical, f.Severity)
 			assert.Equal(t, "https://api.example.com/login", f.Target)
@@ -514,7 +514,7 @@ func TestAnalyze_Integration(t *testing.T) {
 				assert.Fail(t, "Credential stuffing finding incorrectly mentioned enumeration.")
 			}
 		}
-		if f.Vulnerability.Name == "Username Enumeration" {
+		if f.VulnerabilityName == "Username Enumeration" {
 			hasEnumeration = true
 			assert.Equal(t, schemas.SeverityMedium, f.Severity)
 			assert.Equal(t, "https://example.com/signin", f.Target)

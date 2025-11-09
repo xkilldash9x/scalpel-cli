@@ -1,45 +1,55 @@
 package schemas
 
 import (
+	"encoding/json"
 	"time"
 )
 
 // -- Finding Schemas --
 
 // Severity defines the severity level of a finding.
+// Production Ready: Standardized to lowercase to match PostgreSQL ENUM conventions.
 type Severity string
 
 const (
-	SeverityCritical      Severity = "CRITICAL"
-	SeverityHigh          Severity = "HIGH"
-	SeverityMedium        Severity = "MEDIUM"
-	SeverityLow           Severity = "LOW"
-	SeverityInformational Severity = "INFORMATIONAL"
+	SeverityCritical Severity = "critical"
+	SeverityHigh     Severity = "high"
+	SeverityMedium   Severity = "medium"
+	SeverityLow      Severity = "low"
+	// Renamed Informational to Info to match standard terminology and the DB ENUM.
+	SeverityInfo Severity = "info"
 )
 
-// Vulnerability defines a general class of vulnerability.
-type Vulnerability struct {
-	Name        string `json:"name"`
-	Description string `json:"description"`
-}
-
 // Finding represents a specific instance of a vulnerability discovered during a scan.
+// Maps to the findings table.
 type Finding struct {
-	ID             string        `json:"id"`
-	ScanID         string        `json:"scan_id"`
-	TaskID         string        `json:"task_id"`
-	Timestamp      time.Time     `json:"timestamp"`
-	Target         string        `json:"target"`
-	Module         string        `json:"module"`
-	Vulnerability  Vulnerability `json:"vulnerability"`
-	Severity       Severity      `json:"severity"`
-	Description    string        `json:"description"`
-	Evidence       string        `json:"evidence"`
-	Recommendation string        `json:"recommendation"`
-	CWE            []string      `json:"cwe,omitempty"`
+	ID     string `json:"id"`
+	ScanID string `json:"scan_id"`
+	TaskID string `json:"task_id"`
+
+	// ObservedAt is when the finding was discovered (maps to DB column observed_at).
+	ObservedAt time.Time `json:"observed_at"` // Renamed from Timestamp
+
+	Target string `json:"target"`
+	Module string `json:"module"`
+
+	// VulnerabilityName is the identifier for the type of vulnerability found (e.g., "Reflected XSS").
+	// Maps to DB column vulnerability_name.
+	VulnerabilityName string `json:"vulnerability_name"` // Replaces Vulnerability struct
+
+	Severity    Severity `json:"severity"`
+	Description string   `json:"description"`
+
+	// Evidence holds structured proof of the vulnerability.
+	// Production Ready: Changed Evidence from string to json.RawMessage to support structured JSONB storage.
+	Evidence json.RawMessage `json:"evidence,omitempty"`
+
+	Recommendation string   `json:"recommendation"`
+	CWE            []string `json:"cwe,omitempty"` // Maps to TEXT[] in DB
 }
 
 // -- IAST (Interactive Application Security Testing) Schemas --
+// Note: The Vulnerability struct from the original file was removed as it was flattened into Finding.
 
 // ProbeType defines the category of the attack payload.
 type ProbeType string

@@ -80,27 +80,27 @@ func (s *Store) PersistData(ctx context.Context, envelope *schemas.ResultEnvelop
 func (s *Store) persistFindings(ctx context.Context, tx pgx.Tx, scanID string, findings []schemas.Finding) error {
 	rows := make([][]interface{}, len(findings))
 	for i, f := range findings {
-		// The Evidence field is already a string that should contain valid JSON.
-		// There's no need to marshal it again, which would incorrectly double-encode it.
-		// pgx's CopyFrom can handle passing a string to a jsonb column directly.
+		// REFACTOR: f.Evidence is json.RawMessage (). Check length.
 		evidence := f.Evidence
-		if evidence == "" {
-			evidence = "{}" // Ensure we don't insert a null or empty string which might violate JSON constraints.
+		if len(evidence) == 0 || string(evidence) == "null" {
+			evidence = json.RawMessage("{}") // Ensure we don't insert a null or empty string.
 		}
+
+		//  Use f.VulnerabilityName and f.ObservedAt
 		rows[i] = []interface{}{
 			f.ID, scanID, f.TaskID,
-			f.Target, f.Module, f.Vulnerability.Name,
+			f.Target, f.Module, f.VulnerabilityName, // <-- Use VulnerabilityName
 			string(f.Severity), f.Description,
-			evidence,
+			evidence, // <-- Pass the (potentially modified) json.RawMessage
 			f.Recommendation, f.CWE,
-			f.Timestamp,
+			f.ObservedAt, // <-- Use ObservedAt
 		}
 	}
 
 	copyCount, err := tx.CopyFrom(
 		ctx,
 		pgx.Identifier{"findings"},
-		[]string{"id", "scan_id", "task_id", "target", "module", "vulnerability", "severity", "description", "evidence", "recommendation", "cwe", "observed_at"},
+		[]string{"id", "scan_id", "task_id", "target", "module", "vulnerability_name", "severity", "description", "evidence", "recommendation", "cwe", "observed_at"},
 		pgx.CopyFromRows(rows),
 	)
 
@@ -114,15 +114,18 @@ func (s *Store) persistFindings(ctx context.Context, tx pgx.Tx, scanID string, f
 	return nil
 }
 
-// REFACTORED to use a simple loop of tx.Exec instead of SendBatch
+// use a simple loop of tx.Exec instead of SendBatch
 func (s *Store) persistNodes(ctx context.Context, tx pgx.Tx, nodes []schemas.NodeInput) error {
+
 	sql := `
-        INSERT INTO kg_nodes (id, type, properties, created_at, updated_at)
-        VALUES ($1, $2, $3, $4, $5)
+        INSERT INTO kg_nodes (id, type, label, status, properties, created_at, last_seen)
+        VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (id) DO UPDATE SET
             type = EXCLUDED.type,
-            properties = kg_nodes.properties || EXCLUDED.properties,
-            updated_at = EXCLUDED.updated_at;
+            label = EXCLUDED.label,
+            status = EXCLUDED.status,
+            properties = EXCLUDED.properties,
+            last_seen = EXCLUDED.last_seen;
     `
 	now := time.Now()
 
@@ -130,20 +133,23 @@ func (s *Store) persistNodes(ctx context.Context, tx pgx.Tx, nodes []schemas.Nod
 		if len(n.Properties) == 0 {
 			n.Properties = json.RawMessage("{}")
 		}
-		if _, err := tx.Exec(ctx, sql, n.ID, string(n.Type), n.Properties, now, now); err != nil {
+		// Match the columns to psql
+		if _, err := tx.Exec(ctx, sql, n.ID, string(n.Type), n.Label, n.Status, n.Properties, now, now); err != nil {
 			return fmt.Errorf("failed to execute insert for node %s: %w", n.ID, err)
 		}
 	}
 	return nil
 }
 
-// REFACTORED to use a simple loop of tx.Exec instead of SendBatch
 func (s *Store) persistEdges(ctx context.Context, tx pgx.Tx, edges []schemas.EdgeInput) error {
 	sql := `
-        INSERT INTO kg_edges (source_id, target_id, relationship, properties, "timestamp")
-        VALUES ($1, $2, $3, $4, $5)
-        ON CONFLICT (source_id, target_id, relationship) DO UPDATE SET
-            properties = kg_edges.properties || EXCLUDED.properties;
+        INSERT INTO kg_edges (id, from_node, to_node, type, label, properties, created_at, last_seen)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+        ON CONFLICT (from_node, to_node, type) DO UPDATE SET
+            id = EXCLUDED.id,
+            label = EXCLUDED.label,
+            properties = EXCLUDED.properties,
+            last_seen = EXCLUDED.last_seen;
     `
 	now := time.Now()
 
@@ -151,7 +157,7 @@ func (s *Store) persistEdges(ctx context.Context, tx pgx.Tx, edges []schemas.Edg
 		if len(e.Properties) == 0 {
 			e.Properties = json.RawMessage("{}")
 		}
-		if _, err := tx.Exec(ctx, sql, e.From, e.To, string(e.Type), e.Properties, now); err != nil {
+		if _, err := tx.Exec(ctx, sql, e.ID, e.From, e.To, string(e.Type), e.Label, e.Properties, now, now); err != nil {
 			return fmt.Errorf("failed to execute insert for edge from %s to %s: %w", e.From, e.To, err)
 		}
 	}
@@ -160,7 +166,7 @@ func (s *Store) persistEdges(ctx context.Context, tx pgx.Tx, edges []schemas.Edg
 
 func (s *Store) GetFindingsByScanID(ctx context.Context, scanID string) ([]schemas.Finding, error) {
 	query := `
-        SELECT id, task_id, observed_at, target, module, vulnerability, severity, description, evidence, recommendation, cwe
+        SELECT id, task_id, observed_at, target, module, vulnerability_name, severity, description, evidence, recommendation, cwe
         FROM findings
         WHERE scan_id = $1
         ORDER BY observed_at ASC;
@@ -174,13 +180,11 @@ func (s *Store) GetFindingsByScanID(ctx context.Context, scanID string) ([]schem
 	var findings []schemas.Finding
 	for rows.Next() {
 		var f schemas.Finding
-		var vulnName string
 		var severityStr string
 
-		// The logic is now simpler: we scan directly into f.Evidence
 		err := rows.Scan(
-			&f.ID, &f.TaskID, &f.Timestamp, &f.Target, &f.Module,
-			&vulnName,
+			&f.ID, &f.TaskID, &f.ObservedAt, &f.Target, &f.Module,
+			&f.VulnerabilityName,
 			&severityStr,
 			&f.Description, &f.Evidence, &f.Recommendation,
 			&f.CWE,
@@ -190,7 +194,6 @@ func (s *Store) GetFindingsByScanID(ctx context.Context, scanID string) ([]schem
 		}
 
 		f.Severity = schemas.Severity(severityStr)
-		f.Vulnerability.Name = vulnName
 		f.ScanID = scanID
 		findings = append(findings, f)
 	}

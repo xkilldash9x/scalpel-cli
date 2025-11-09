@@ -58,7 +58,7 @@ func (p *PostgresKG) AddNode(ctx context.Context, node schemas.Node) error {
 		props = json.RawMessage("{}")
 	}
 
-	// CORRECTED: Changed table name from 'nodes' to 'kg_nodes'
+	// The query is synchronized with the kg_nodes table structure.
 	_, err := p.pool.Exec(ctx, `
         INSERT INTO kg_nodes (id, type, label, status, properties, created_at, last_seen)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
@@ -86,12 +86,13 @@ func (p *PostgresKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 		props = json.RawMessage("{}")
 	}
 
-	// CORRECTED: Changed table name from 'edges' to 'kg_edges'.
-	// This assumes a UNIQUE constraint exists on these three columns in the 'kg_edges' table.
+	// The query is synchronized with the kg_edges table structure.
+	// This relies on the PRIMARY KEY (from_node, to_node, type) defined in the migration.
 	_, err := p.pool.Exec(ctx, `
         INSERT INTO kg_edges (id, from_node, to_node, type, label, properties, created_at, last_seen)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT (from_node, to_node, type) DO UPDATE SET
+            id = EXCLUDED.id, -- Ensure the application-provided ID is updated on conflict
             label = EXCLUDED.label,
             properties = EXCLUDED.properties,
             last_seen = EXCLUDED.last_seen;
@@ -100,6 +101,7 @@ func (p *PostgresKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 	if err != nil {
 		p.log.Error(
 			"Failed to add or update edge",
+			zap.String("edge_id", edge.ID),
 			zap.String("from_node", edge.From),
 			zap.String("to_node", edge.To),
 			zap.String("edge_type", string(edge.Type)),
@@ -110,6 +112,7 @@ func (p *PostgresKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 
 	p.log.Debug(
 		"Edge added or updated successfully",
+		zap.String("edge_id", edge.ID),
 		zap.String("from_node", edge.From),
 		zap.String("to_node", edge.To),
 		zap.String("edge_type", string(edge.Type)),
@@ -121,7 +124,6 @@ func (p *PostgresKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 func (p *PostgresKG) GetNode(ctx context.Context, id string) (schemas.Node, error) {
 	var node schemas.Node
 
-	// CORRECTED: Changed table name from 'nodes' to 'kg_nodes'
 	err := p.pool.QueryRow(ctx, `
         SELECT id, type, label, status, properties, created_at, last_seen
         FROM kg_nodes WHERE id = $1;
@@ -130,7 +132,8 @@ func (p *PostgresKG) GetNode(ctx context.Context, id string) (schemas.Node, erro
 	if err != nil {
 		if errors.Is(err, pgx.ErrNoRows) {
 			p.log.Warn("Node not found", zap.String("node_id", id))
-			return schemas.Node{}, fmt.Errorf("node with id '%s' not found: %w", id, err)
+			// Match the error format used in InMemoryKG
+			return schemas.Node{}, fmt.Errorf("node with id '%s' not found", id)
 		}
 		p.log.Error("Failed to get node", zap.String("node_id", id), zap.Error(err))
 		return schemas.Node{}, fmt.Errorf("failed to scan node row: %w", err)
@@ -140,9 +143,32 @@ func (p *PostgresKG) GetNode(ctx context.Context, id string) (schemas.Node, erro
 	return node, nil
 }
 
+// GetEdge fetches a single edge from the database by its ID.
+func (p *PostgresKG) GetEdge(ctx context.Context, id string) (schemas.Edge, error) {
+	var edge schemas.Edge
+
+	// We query by the 'id' column, which is indexed via the UNIQUE constraint uq_edge_id.
+	err := p.pool.QueryRow(ctx, `
+        SELECT id, from_node, to_node, type, label, properties, created_at, last_seen
+        FROM kg_edges WHERE id = $1;
+    `, id).Scan(&edge.ID, &edge.From, &edge.To, &edge.Type, &edge.Label, &edge.Properties, &edge.CreatedAt, &edge.LastSeen)
+
+	if err != nil {
+		if errors.Is(err, pgx.ErrNoRows) {
+			p.log.Warn("Edge not found", zap.String("edge_id", id))
+			// Match the error format used in InMemoryKG
+			return schemas.Edge{}, fmt.Errorf("edge with id '%s' not found", id)
+		}
+		p.log.Error("Failed to get edge", zap.String("edge_id", id), zap.Error(err))
+		return schemas.Edge{}, fmt.Errorf("failed to scan edge row: %w", err)
+	}
+
+	p.log.Debug("Retrieved edge successfully", zap.String("edge_id", id))
+	return edge, nil
+}
+
 // GetNeighbors retrieves all nodes directly connected from a given node.
 func (p *PostgresKG) GetNeighbors(ctx context.Context, nodeID string) ([]schemas.Node, error) {
-	// CORRECTED: Changed table names from 'nodes' to 'kg_nodes' and 'edges' to 'kg_edges'
 	rows, err := p.pool.Query(ctx, `
         SELECT n.id, n.type, n.label, n.status, n.properties, n.created_at, n.last_seen
         FROM kg_nodes n
@@ -176,7 +202,6 @@ func (p *PostgresKG) GetNeighbors(ctx context.Context, nodeID string) ([]schemas
 
 // GetEdges finds all outgoing edges originating from a specific node.
 func (p *PostgresKG) GetEdges(ctx context.Context, nodeID string) ([]schemas.Edge, error) {
-	// CORRECTED: Changed table name from 'edges' to 'kg_edges'
 	rows, err := p.pool.Query(ctx, `
         SELECT id, from_node, to_node, type, label, properties, created_at, last_seen
         FROM kg_edges WHERE from_node = $1;
@@ -190,6 +215,7 @@ func (p *PostgresKG) GetEdges(ctx context.Context, nodeID string) ([]schemas.Edg
 	var edges []schemas.Edge
 	for rows.Next() {
 		var edge schemas.Edge
+		// Scanning database columns from_node and to_node into struct fields From and To.
 		if err := rows.Scan(&edge.ID, &edge.From, &edge.To, &edge.Type, &edge.Label, &edge.Properties, &edge.CreatedAt, &edge.LastSeen); err != nil {
 			p.log.Error("Failed to scan edge row", zap.Error(err))
 			return nil, fmt.Errorf("failed to scan edge row: %w", err)
@@ -209,8 +235,7 @@ func (p *PostgresKG) GetEdges(ctx context.Context, nodeID string) ([]schemas.Edg
 // QueryImprovementHistory retrieves past improvement attempts using efficient JSONB queries.
 func (p *PostgresKG) QueryImprovementHistory(ctx context.Context, goalObjective string, limit int) ([]schemas.Node, error) {
 	// Uses JSON path operator (->>) to efficiently query within the 'properties' JSONB column.
-	// An index on (type, (properties->>'goal_objective')) is recommended for performance.
-	// CORRECTED: Changed table name from 'nodes' to 'kg_nodes'
+	// This query is optimized by the specialized index (idx_kg_nodes_improvement_history).
 	query := `
         SELECT id, type, label, status, properties, created_at, last_seen
         FROM kg_nodes

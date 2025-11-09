@@ -95,10 +95,12 @@ func TestATOAdapter_Analyze_SuccessAndEnumeration(t *testing.T) {
 	require.NotEmpty(t, analysisCtx.Findings)
 	foundSuccess, foundEnum := false, false
 	for _, finding := range analysisCtx.Findings {
-		if finding.Vulnerability.Name == "Successful Login with Weak Credentials" {
+		// Refactored: Assert against VulnerabilityName
+		if finding.VulnerabilityName == "Successful Login with Weak Credentials" {
 			foundSuccess = true
 		}
-		if finding.Vulnerability.Name == "User Enumeration on Login Form" {
+		// Refactored: Assert against VulnerabilityName
+		if finding.VulnerabilityName == "User Enumeration on Login Form" {
 			foundEnum = true
 		}
 	}

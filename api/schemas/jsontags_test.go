@@ -23,19 +23,20 @@ func TestStructJSONTags(t *testing.T) {
 		{
 			name:      "Finding",
 			structRef: schemas.Finding{},
+			// FIX: Updated this map to match the refactored schemas.Finding struct
 			expectedTags: map[string]string{
-				"ID":             "id",
-				"ScanID":         "scan_id",
-				"TaskID":         "task_id",
-				"Timestamp":      "timestamp",
-				"Target":         "target",
-				"Module":         "module",
-				"Vulnerability":  "vulnerability",
-				"Severity":       "severity",
-				"Description":    "description",
-				"Evidence":       "evidence",
-				"Recommendation": "recommendation",
-				"CWE":            "cwe,omitempty",
+				"ID":                "id",
+				"ScanID":            "scan_id",
+				"TaskID":            "task_id",
+				"ObservedAt":        "observed_at", // Was Timestamp
+				"Target":            "target",
+				"Module":            "module",
+				"VulnerabilityName": "vulnerability_name", // Was Vulnerability
+				"Severity":          "severity",
+				"Description":       "description",
+				"Evidence":          "evidence,omitempty", // Was "evidence"
+				"Recommendation":    "recommendation",
+				"CWE":               "cwe,omitempty",
 			},
 		},
 		{

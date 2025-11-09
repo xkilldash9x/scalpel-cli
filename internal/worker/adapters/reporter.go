@@ -56,17 +56,18 @@ func (r *ContextReporter) Report(finding taint.CorrelatedFinding) {
 	}
 
 	genericFinding := schemas.Finding{
-		ID:        uuid.New().String(),
-		TaskID:    finding.TaskID,
-		Timestamp: time.Now().UTC(),
-		Target:    finding.TargetURL,
-		Module:    "TaintAnalyzer (IAST)",
-		Vulnerability: schemas.Vulnerability{
-			Name: vulnType,
-		},
-		Severity:       severity,
-		Description:    description,
-		Evidence:       string(evidence),
+		ID:     uuid.New().String(),
+		TaskID: finding.TaskID,
+		// Refactored: Renamed Timestamp to ObservedAt
+		ObservedAt: time.Now().UTC(),
+		Target:     finding.TargetURL,
+		Module:     "TaintAnalyzer (IAST)",
+		// Refactored: Flattened Vulnerability struct to VulnerabilityName
+		VulnerabilityName: vulnType,
+		Severity:          severity,
+		Description:       description,
+		// Refactored: Assign []byte directly to json.RawMessage
+		Evidence:       evidence,
 		Recommendation: r.getRecommendation(vulnType),
 		CWE:            []string{cwe},
 	}
@@ -76,12 +77,12 @@ func (r *ContextReporter) Report(finding taint.CorrelatedFinding) {
 }
 
 func (r *ContextReporter) classifyTaintFinding(finding taint.CorrelatedFinding) (string, schemas.Severity, string) {
-	// Changed taint.SinkExecution to schemas.SinkExecution as the constant moved.
+	// Refactored: Use schemas.SinkExecution constant
 	if finding.Sink == schemas.SinkExecution {
 		return r.classifyConfirmedExecution(finding)
 	}
 	switch finding.Sink {
-	// Changed all taint.Sink... constants to schemas.Sink...
+	// Refactored: Use schemas constants for all sinks
 	case schemas.SinkInnerHTML, schemas.SinkOuterHTML, schemas.SinkDocumentWrite, schemas.SinkIframeSrcDoc:
 		return "DOM-Based Cross-Site Scripting (Potential)", schemas.SeverityHigh, "CWE-79"
 	case schemas.SinkEval, schemas.SinkFunctionConstructor:
@@ -89,7 +90,7 @@ func (r *ContextReporter) classifyTaintFinding(finding taint.CorrelatedFinding) 
 	case schemas.SinkScriptSrc, schemas.SinkIframeSrc:
 		return "Tainted Resource Loading (Potential XSS/Injection)", schemas.SeverityHigh, "CWE-829"
 	case schemas.SinkNavigation:
-		// Changed taint.ProbeType... to schemas.ProbeType...
+		// Refactored: Use schemas constants for probe types
 		if finding.Probe.Type == schemas.ProbeTypeXSS || finding.Probe.Type == schemas.ProbeTypeSSTI {
 			return "DOM-Based Cross-Site Scripting (Navigation) (Potential)", schemas.SeverityHigh, "CWE-79"
 		}
@@ -97,13 +98,14 @@ func (r *ContextReporter) classifyTaintFinding(finding taint.CorrelatedFinding) 
 	case schemas.SinkFetch, schemas.SinkFetchURL, schemas.SinkWebSocketSend, schemas.SinkXMLHTTPRequest, schemas.SinkXMLHTTPRequestURL, schemas.SinkSendBeacon:
 		return "Data Exfiltration / Information Disclosure (Potential)", schemas.SeverityMedium, "CWE-200"
 	default:
-		return "Unclassified Taint Flow", schemas.SeverityInformational, "CWE-20"
+		// Refactored: Use schemas.SeverityInfo
+		return "Unclassified Taint Flow", schemas.SeverityInfo, "CWE-20"
 	}
 }
 
 func (r *ContextReporter) classifyConfirmedExecution(finding taint.CorrelatedFinding) (string, schemas.Severity, string) {
 	switch finding.Probe.Type {
-	// Changed all taint.ProbeType... constants to schemas.ProbeType...
+	// Refactored: Use schemas constants for all probe types
 	case schemas.ProbeTypeXSS, schemas.ProbeTypeDOMClobbering:
 		return "Confirmed Cross-Site Scripting", schemas.SeverityCritical, "CWE-79"
 	case schemas.ProbeTypeSSTI:

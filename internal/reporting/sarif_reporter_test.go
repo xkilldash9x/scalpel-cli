@@ -16,6 +16,7 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/reporting"
+
 	// Assuming the internal sarif definitions are located here
 	"github.com/xkilldash9x/scalpel-cli/internal/reporting/sarif"
 )
@@ -59,10 +60,10 @@ func TestSARIFReporter_Initialization(t *testing.T) {
 	require.NoError(t, err)
 
 	rawOutput := writer.Buffer.Bytes()
-	
-    // DEBUG: Print the raw JSON output to see if the "tool" block is present.
-    t.Logf("-- Debug JSON Output --\n%s\n-- End Debug --", rawOutput) 
-    
+
+	// DEBUG: Print the raw JSON output to see if the "tool" block is present.
+	t.Logf("-- Debug JSON Output --\n%s\n-- End Debug --", rawOutput)
+
 	var log sarif.Log
 	err = json.Unmarshal(rawOutput, &log)
 	require.NoError(t, err, "Output should be valid SARIF JSON")
@@ -71,64 +72,60 @@ func TestSARIFReporter_Initialization(t *testing.T) {
 	require.Len(t, log.Runs, 1)
 	run := log.Runs[0]
 
-    // DEBUG: Check the state of the pointers after unmarshalling.
-    t.Logf("Debug: run.Tool is nil? %t", run.Tool == nil)
-    if run.Tool != nil {
-        t.Logf("Debug: run.Tool.Driver is nil? %t", run.Tool.Driver == nil)
-    }
+	// DEBUG: Check the state of the pointers after unmarshalling.
+	t.Logf("Debug: run.Tool is nil? %t", run.Tool == nil)
+	if run.Tool != nil {
+		t.Logf("Debug: run.Tool.Driver is nil? %t", run.Tool.Driver == nil)
+	}
 
-	// The debug logs confirm run.Tool and run.Tool.Driver pointers are correctly initialized 
-    // and survive the unmarshal process in your Go environment.
-    require.NotNil(t, run.Tool) 
-    require.NotNil(t, run.Tool.Driver) 
-    
-    // Check the required version field
+	// The debug logs confirm run.Tool and run.Tool.Driver pointers are correctly initialized
+	// and survive the unmarshal process in your Go environment.
+	require.NotNil(t, run.Tool)
+	require.NotNil(t, run.Tool.Driver)
+
+	// Check the required version field
 	assert.Equal(t, "v1.2.3-test", *run.Tool.Driver.Version)
 
 	// Ensure Results slice is initialized (JSON "[]") not null
-    require.NotNil(t, run.Results)
+	require.NotNil(t, run.Results)
 	assert.Empty(t, run.Results)
-    
+
 	// FIX: The Rules slice is empty and may be unmarshalled as nil due to JSON omission.
-    // We only assert that its logical content is empty. This is the resilient check.
-    assert.Empty(t, run.Tool.Driver.Rules) 
-    
+	// We only assert that its logical content is empty. This is the resilient check.
+	assert.Empty(t, run.Tool.Driver.Rules)
+
 	// If the Rules slice is nil, it can't be dereferenced, but assert.Empty() handles nil slices.
-    // Since we don't need to check its capacity, the assert.Empty is sufficient and robust.
+	// Since we don't need to check its capacity, the assert.Empty is sufficient and robust.
 }
-	
 
 // TestSARIFReporter_WriteAndClose verifies the end-to-end process, including rule deduplication and severity mapping.
 func TestSARIFReporter_WriteAndClose(t *testing.T) {
 	reporter, writer := setupSARIFTest(t)
 
 	// Define findings
+	// REFACTOR: Updated to use the flattened schemas.Finding struct
 	finding1 := schemas.Finding{
-		Target: "http://example.com/1",
-		Severity: schemas.SeverityHigh,
-		Vulnerability: schemas.Vulnerability{
-			Name:        "Cross-Site Scripting (XSS)",
-			Description: "Details about XSS.",
-		},
-		Recommendation: "Encode output.",
-		CWE:            []string{"CWE-79"},
+		Target:            "http://example.com/1",
+		Severity:          schemas.SeverityHigh,
+		VulnerabilityName: "Cross-Site Scripting (XSS)",
+		Description:       "Details about XSS.",
+		Recommendation:    "Encode output.",
+		CWE:               []string{"CWE-79"},
 	}
 	// Finding 2 uses a new rule and tests Critical severity
+	// REFACTOR: Updated to use the flattened schemas.Finding struct
 	finding2 := schemas.Finding{
-		Target: "http://example.com/2",
-		Severity: schemas.SeverityCritical,
-		Vulnerability: schemas.Vulnerability{
-			Name: "SQL Injection",
-		},
+		Target:            "http://example.com/2",
+		Severity:          schemas.SeverityCritical,
+		VulnerabilityName: "SQL Injection",
 	}
 	// Finding 3 reuses the rule from Finding 1, tests Medium severity and empty description fallback.
+	// REFACTOR: Updated to use the flattened schemas.Finding struct
 	finding3 := schemas.Finding{
-		Target: "http://example.com/3",
-		Severity: schemas.SeverityMedium,
-		Vulnerability: schemas.Vulnerability{
-			Name: "Cross-Site Scripting (XSS)",
-			// Empty description to test fallback
-		},
+		Target:            "http://example.com/3",
+		Severity:          schemas.SeverityMedium,
+		VulnerabilityName: "Cross-Site Scripting (XSS)",
+		// Empty description to test fallback
 	}
 
 	envelope := &schemas.ResultEnvelope{Findings: []schemas.Finding{finding1, finding2, finding3}}
@@ -174,7 +171,7 @@ func TestSARIFReporter_WriteAndClose(t *testing.T) {
 	require.NotNil(t, xssRule)
 	assert.Equal(t, "Encode output.", *xssRule.Help.Text)
 	assert.Contains(t, *xssRule.Help.Markdown, "**Recommendation:**\nEncode output.")
-	
+
 	// Handles Go's JSON unmarshalling behavior.
 	cweValue := (*xssRule.Properties)["CWE"]
 	cweList, ok := cweValue.([]interface{})
@@ -212,8 +209,9 @@ func TestSARIFReporter_RuleIDSanitization(t *testing.T) {
 	uniqueIDs := make(map[string]bool)
 
 	for _, tt := range tests {
+		// REFACTOR: Updated to use the flattened schemas.Finding struct
 		finding := schemas.Finding{
-			Vulnerability: schemas.Vulnerability{Name: tt.vulnName},
+			VulnerabilityName: tt.vulnName,
 		}
 		reporter.Write(&schemas.ResultEnvelope{Findings: []schemas.Finding{finding}})
 		uniqueIDs[tt.expectedID] = true
@@ -249,8 +247,9 @@ func TestSARIFReporter_Concurrency(t *testing.T) {
 			for j := 0; j < findingsPerGoroutine; j++ {
 				// Use a limited set of rule IDs to test concurrent map access/writes
 				vulnName := fmt.Sprintf("Concurrent Vuln %d", (id+j)%numUniqueRules)
+				// REFACTOR: Updated to use the flattened schemas.Finding struct
 				finding := schemas.Finding{
-					Vulnerability: schemas.Vulnerability{Name: vulnName},
+					VulnerabilityName: vulnName,
 				}
 				// The Write method must be safe due to the internal mutex
 				err := reporter.Write(&schemas.ResultEnvelope{Findings: []schemas.Finding{finding}})
@@ -309,8 +308,8 @@ func TestMapSeverityToSARIFLevel(t *testing.T) {
 			return string(sarif.LevelError)
 		case "medium":
 			return string(sarif.LevelWarning)
-		// Added "informational" to the low/note case for comprehensive testing.
-		case "low", "informational":
+		// REFACTOR: Changed "informational" to "info" to match schemas.findings.go
+		case "low", "info":
 			return string(sarif.LevelNote)
 		default:
 			return string(sarif.LevelNote)
@@ -325,7 +324,8 @@ func TestMapSeverityToSARIFLevel(t *testing.T) {
 		{schemas.SeverityHigh, string(sarif.LevelError)},
 		{schemas.SeverityMedium, string(sarif.LevelWarning)},
 		{schemas.SeverityLow, string(sarif.LevelNote)},
-		{schemas.SeverityInformational, string(sarif.LevelNote)},
+		// REFACTOR: Changed const from SeverityInformational to SeverityInfo
+		{schemas.SeverityInfo, string(sarif.LevelNote)},
 		{"HIGH", string(sarif.LevelError)}, // Case insensitivity
 		{"Unknown", string(sarif.LevelNote)},
 	}

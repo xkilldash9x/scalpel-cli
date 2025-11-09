@@ -154,7 +154,7 @@ func TestE2E_TOCTOU_Vulnerable(t *testing.T) {
 	for _, f := range findings {
 		if f.Severity == schemas.SeverityCritical {
 			foundCritical = true
-			assert.Contains(t, f.Vulnerability.Name, "Critical TOCTOU Race Condition Detected")
+			assert.Contains(t, f.VulnerabilityName, "Critical TOCTOU Race Condition Detected")
 			assert.Contains(t, f.Description, "Confirmed TOCTOU race condition")
 			break
 		}
@@ -178,12 +178,12 @@ func TestE2E_TOCTOU_Vulnerable(t *testing.T) {
 		if !foundVulnerable {
 			foundInformational := false
 			for _, f := range findings {
-				if f.Severity == schemas.SeverityInformational {
+				if f.Severity == schemas.SeverityInfo {
 					foundInformational = true
 					break
 				}
 			}
-			assert.True(t, foundInformational, "Expected at least an INFORMATIONAL finding if CRITICAL/HIGH/MEDIUM was missed due to timing.")
+			assert.True(t, foundInformational, "Expected at least an INFO finding if CRITICAL/HIGH/MEDIUM was missed due to timing.")
 		}
 	}
 }
@@ -217,7 +217,7 @@ func TestE2E_Patched_WithLocking(t *testing.T) {
 
 	// We should NOT find any Critical/High/Medium vulnerabilities.
 	for _, f := range findings {
-		if f.Severity != schemas.SeverityInformational && f.Severity != schemas.SeverityLow {
+		if f.Severity != schemas.SeverityInfo && f.Severity != schemas.SeverityLow {
 			// FIX: This is where the failure occurred previously (Severity HIGH was reported).
 			t.Errorf("Found unexpected vulnerability (%s) in a patched server: %s", f.Severity, f.Description)
 		}
@@ -227,7 +227,7 @@ func TestE2E_Patched_WithLocking(t *testing.T) {
 	// either due to timing anomalies (if H1Concurrent runs) or detected state transition (if H1SingleByteSend runs).
 	foundInformational := false
 	for _, f := range findings {
-		if f.Severity == schemas.SeverityInformational {
+		if f.Severity == schemas.SeverityInfo {
 			foundInformational = true
 
 			// The message can indicate timing anomalies or successful serialization via state transition.

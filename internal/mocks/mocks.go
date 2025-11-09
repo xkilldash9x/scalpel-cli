@@ -243,6 +243,14 @@ func (m *MockKGClient) QueryImprovementHistory(ctx context.Context, goal string,
 	return nil, args.Error(1)
 }
 
+func (m *MockKGClient) GetEdge(ctx context.Context, id string) (schemas.Edge, error) {
+	args := m.Called(ctx, id)
+	if edge, ok := args.Get(0).(schemas.Edge); ok {
+		return edge, args.Error(1)
+	}
+	return schemas.Edge{}, args.Error(1)
+}
+
 // -- LTM Mock --
 
 // MockLTM mocks the long-term memory interface.
