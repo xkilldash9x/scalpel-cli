@@ -141,6 +141,10 @@ func (a *Analyzer) Analyze(ctx context.Context, candidate *RaceCandidate) error 
 			if errors.Is(execErr, ErrH2Unsupported) || errors.Is(execErr, ErrPipeliningRejected) || errors.Is(execErr, ErrH2FrameError) {
 				a.logger.Info("Strategy not supported by target or encountered protocol error.", zap.String("strategy", string(strategy)), zap.Error(execErr))
 			} else if errors.Is(execErr, ErrTargetUnreachable) {
+				// Allow stress tests to continue even if target is unreachable under load
+				if ctx.Err() != nil {
+					return ctx.Err()
+				}
 				a.logger.Warn("Strategy failed due to target being unreachable or timing out.", zap.String("strategy", string(strategy)), zap.Error(execErr))
 				// Could consider breaking here if the target seems completely down.
 			} else if errors.Is(execErr, ErrConfigurationError) || errors.Is(execErr, ErrPayloadMutationFail) {
@@ -186,8 +190,11 @@ func (a *Analyzer) determineStrategies(candidate *RaceCandidate) []RaceStrategy 
 	// Test hook to force H1 strategies.
 	if a.testOnlyHTTP1 {
 		return []RaceStrategy{
-			H1SingleByteSend,
+			// H1Concurrent *must* run first in tests, as it's the only H1 strategy
+			// that accurately measures individual response durations, which is
+			// required for the timing anomaly heuristic in the patched E2E test.
 			H1Concurrent,
+			H1SingleByteSend,
 		}
 	}
 	// For standard HTTP endpoints, we attempt all applicable strategies in order of preference (most precise first).
@@ -312,6 +319,7 @@ func (a *Analyzer) sampleUniqueResponses(responses []*RaceResponse) []core.Seria
 		}
 
 		// Skip if we already sampled this fingerprint, or if the response is invalid or errored out.
+		// We require a ParsedResponse to extract details, and we skip explicit errors.
 		if resp.Fingerprint == "" || sampledFingerprints[resp.Fingerprint] || resp.ParsedResponse == nil || resp.Error != nil {
 			continue
 		}
@@ -326,11 +334,18 @@ func (a *Analyzer) sampleUniqueResponses(responses []*RaceResponse) []core.Seria
 
 			// Ensure we don't slice in the middle of a UTF-8 character.
 			// Indexing a string (bodyStr[endIndex]) yields the byte value.
-			for ; endIndex > 0 && !utf8.RuneStart(bodyStr[endIndex]); endIndex-- {
+			for ; endIndex > 0 && endIndex < len(bodyStr) && !utf8.RuneStart(bodyStr[endIndex]); endIndex-- {
 				// Backtrack until we find the start of a rune.
 			}
 
-			// If endIndex is 0, the first rune is longer than maxBodyLen; we truncate it entirely.
+			// Handle edge case where backtracking might go past the start or end
+			if endIndex > len(bodyStr) {
+				endIndex = len(bodyStr)
+			} else if endIndex < 0 {
+				endIndex = 0
+			}
+
+			// If endIndex is 0, the first rune might be longer than maxBodyLen; we truncate it entirely if needed.
 			truncatedBody := bodyStr[:endIndex]
 
 			// Create a more informative suffix.
@@ -338,8 +353,14 @@ func (a *Analyzer) sampleUniqueResponses(responses []*RaceResponse) []core.Seria
 			bodyStr = truncatedBody + suffix
 		}
 
+		// Handle cases where StatusCode might be 0 (e.g., synthetic responses for H2 RST_STREAM)
+		statusCode := 0
+		if resp.ParsedResponse != nil {
+			statusCode = resp.ParsedResponse.StatusCode
+		}
+
 		samples = append(samples, core.SerializedResponse{
-			StatusCode: resp.ParsedResponse.StatusCode,
+			StatusCode: statusCode,
 			Headers:    resp.ParsedResponse.Headers,
 			Body:       bodyStr,
 		})
@@ -393,11 +414,18 @@ func (a *Analyzer) prepareAndAggregate(result *RaceResult, analysis *AnalysisRes
 	validResponses := make([]*RaceResponse, 0, len(result.Responses))
 
 	for _, resp := range result.Responses {
+		// Check for errors or invalid responses (e.g. missing ParsedResponse)
 		if resp.Error != nil || resp.ParsedResponse == nil {
 			continue
 		}
 
+		// Specific check for responses that might lack a fingerprint (should be rare if ParsedResponse exists)
 		if resp.Fingerprint == "" {
+			continue
+		}
+
+		// Specific check for H2 RST_STREAM responses (StatusCode 0) - these are handled as errors upstream but filtered here too.
+		if resp.ParsedResponse.StatusCode == 0 {
 			continue
 		}
 
@@ -416,7 +444,7 @@ func (a *Analyzer) calculateStatistics(responses []*RaceResponse) ResponseStatis
 	durationsMs := make([]int64, 0, len(responses))
 
 	for _, resp := range responses {
-		// **FIXED**: Accessing Duration from the correct nested struct.
+		// Accessing Duration from the correct nested struct and ignoring zero values.
 		if resp.ParsedResponse != nil && resp.ParsedResponse.Duration > 0 {
 			durationsMs = append(durationsMs, resp.ParsedResponse.Duration.Milliseconds())
 		}

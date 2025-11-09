@@ -28,7 +28,7 @@ func NewSuccessOracle(config *Config, isGraphQL bool) (*SuccessOracle, error) {
 	}
 
 	// Compile regexes during initialization for performance.
-	if config.Success.BodyRegex != "" {
+	if config != nil && config.Success.BodyRegex != "" {
 		rx, err := regexp.Compile(config.Success.BodyRegex)
 		if err != nil {
 			return nil, fmt.Errorf("invalid BodyRegex: %w", err)
@@ -37,7 +37,7 @@ func NewSuccessOracle(config *Config, isGraphQL bool) (*SuccessOracle, error) {
 		oracle.bodyRx = rx
 	}
 
-	if config.Success.HeaderRegex != "" {
+	if config != nil && config.Success.HeaderRegex != "" {
 		rx, err := regexp.Compile(config.Success.HeaderRegex)
 		if err != nil {
 			return nil, fmt.Errorf("invalid HeaderRegex: %w", err)
@@ -89,6 +89,11 @@ func (o *SuccessOracle) IsSuccess(resp *RaceResponse) bool {
 }
 
 func (o *SuccessOracle) checkStatusCode(statusCode int) bool {
+	// Handle case where config might be nil (though NewAnalyzer prevents this, defensive coding is good).
+	if o.config == nil {
+		return (statusCode >= 200 && statusCode < 400)
+	}
+
 	configuredCodes := o.config.Success.StatusCodes
 	if len(configuredCodes) > 0 {
 		for _, code := range configuredCodes {
