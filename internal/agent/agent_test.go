@@ -560,6 +560,33 @@ func TestAgent_ActionLoop(t *testing.T) {
 			t.Fatal("Timeout waiting for observation of nil/nil result")
 		}
 	})
+
+	// NEW: Test for PerformComplexTask being dispatched to the executor
+	t.Run("PerformComplexTaskAction_DispatchedToExecutor", func(t *testing.T) {
+		agent, bus, cancelRoot, _ := setupActionLoop(t)
+		defer cancelRoot()
+		mockExecutors := agent.executors.(*MockExecutorRegistry)
+
+		action := Action{Type: ActionPerformComplexTask, Value: "some complex task"}
+		obsChan, unsub := bus.Subscribe(MessageTypeObservation)
+		defer unsub()
+
+		execResult := &ExecutionResult{Status: "success", ObservationType: ObservedSystemState}
+		mockExecutors.On("Execute", mock.Anything, action).Return(execResult, nil).Once()
+
+		// Act
+		err := bus.Post(context.Background(), CognitiveMessage{ID: "complex-task-msg", Type: MessageTypeAction, Payload: action})
+		require.NoError(t, err)
+
+		// Assert
+		select {
+		case msg := <-obsChan:
+			bus.Acknowledge(msg)
+			mockExecutors.AssertExpectations(t)
+		case <-time.After(2 * time.Second):
+			t.Fatal("Timeout waiting for PerformComplexTask action to be dispatched to executor")
+		}
+	})
 }
 
 // TestExecuteEvolution covers the logic within the agent's evolution handler.
