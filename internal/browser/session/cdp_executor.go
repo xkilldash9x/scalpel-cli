@@ -216,14 +216,13 @@ func (e *cdpExecutor) GetElementGeometry(ctx context.Context, selector string) (
 
 	var res json.RawMessage
 
-	// Apply timeout for geometry retrieval to the operational context.
-	// This is correct, as geometry lookups should be fast.
-	timeout := 10 * time.Second
-	opCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	// R10 FIX: Removed internal timeout (10s). The overall operation timeout is controlled
+	// by the incoming context (ctx). For example, a `Click` action might have a 30s timeout,
+	// and this geometry lookup is just one part of it. It must respect the parent context's deadline.
+	// opCtx, cancel := context.WithTimeout(ctx, timeout) // OLD
 
 	// Use the session's runActionsFunc (RunActions).
-	err := e.runActionsFunc(opCtx,
+	err := e.runActionsFunc(ctx, // Use the original context
 		// Evaluate the script and expect a result back
 		chromedp.Evaluate(script, &res, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
 			// Ensure promises resolve, return actual value, handle exceptions silently in JS
@@ -233,8 +232,8 @@ func (e *cdpExecutor) GetElementGeometry(ctx context.Context, selector string) (
 
 	if err != nil {
 		// Check if it was specifically a timeout error
-		if opCtx.Err() == context.DeadlineExceeded {
-			return nil, fmt.Errorf("timeout getting geometry for '%s': %w", selector, opCtx.Err())
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("timeout getting geometry for '%s': %w", selector, ctx.Err())
 		}
 		// Check if the error is a context cancellation (from ctx or e.ctx)
 		if ctx.Err() != nil || e.ctx.Err() != nil {
@@ -281,14 +280,12 @@ func (e *cdpExecutor) ExecuteScript(ctx context.Context, script string, args []i
 
 	var res json.RawMessage
 
-	// Apply a suitable timeout for script execution to the operational context.
-	// This is correct, as script execution should be relatively fast.
-	timeout := 20 * time.Second
-	opCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	// R10 FIX: Removed internal timeout (20s). Script execution must respect the deadline
+	// of the parent context (ctx) that it is a part of.
+	// opCtx, cancel := context.WithTimeout(ctx, timeout) // OLD
 
 	// Use the session's runActionsFunc (RunActions).
-	err := e.runActionsFunc(opCtx,
+	err := e.runActionsFunc(ctx, // Use the original context
 		chromedp.Evaluate(script, &res, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
 			// Ensure we get the actual result, await promises, handle exceptions silently in JS
 			return p.WithReturnByValue(true).WithAwaitPromise(true).WithSilent(true)
