@@ -133,6 +133,10 @@ func (m *MockConfig) SetBrowserDisableCache(b bool) {
 	m.Called(b)
 }
 
+func (m *MockConfig) SetBrowserDisableGPU(b bool) {
+	m.Called(b)
+}
+
 func (m *MockConfig) SetBrowserIgnoreTLSErrors(b bool) {
 	m.Called(b)
 }

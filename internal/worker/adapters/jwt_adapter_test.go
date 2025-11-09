@@ -24,7 +24,7 @@ func TestNewJWTAdapter(t *testing.T) {
 
 // Helper to create a JWT AnalysisContext with a mock configuration.
 // This now uses the mock to avoid initializing a concrete config struct with private fields.
-func setupJWTContext(t *testing.T, harData []byte, jwtConf config.JWTConfig) *core.AnalysisContext {
+func setupJWTContext(_ *testing.T, harData []byte, jwtConf config.JWTConfig) *core.AnalysisContext {
 	mockConfig := new(mocks.MockConfig)
 
 	// Set up the expectation: when the adapter calls Config.JWT(), return our test config.

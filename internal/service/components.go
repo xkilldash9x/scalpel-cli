@@ -30,6 +30,9 @@ type Components struct {
 
 	// consumerWG is used to ensure the findings consumer has finished draining the channel.
 	consumerWG *sync.WaitGroup
+
+	// BrowserAllocatorCancel is the cancel function for the browser's root allocator context.
+	BrowserAllocatorCancel context.CancelFunc
 }
 
 // Shutdown gracefully closes all components, ensuring resources are released in the correct order.
@@ -76,7 +79,13 @@ func (c *Components) Shutdown() {
 		}
 	}
 
-	// 5. Close the database connection pool.
+	// 5. Cancel the root browser allocator context. This will terminate the browser process.
+	if c.BrowserAllocatorCancel != nil {
+		c.BrowserAllocatorCancel()
+		logger.Debug("Browser allocator context canceled.")
+	}
+
+	// 6. Close the database connection pool.
 	// This is closed here if the pool was created by the ComponentFactory (i.e., during a scan).
 	// If a component initializes the KG independently (e.g., 'evolve'), it is responsible for its cleanup.
 	if c.DBPool != nil {
