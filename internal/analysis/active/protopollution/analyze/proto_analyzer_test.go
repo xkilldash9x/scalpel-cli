@@ -118,7 +118,7 @@ func TestAnalyze_FindingFound(t *testing.T) {
 		t.Fatal("Test timed out waiting for finding to be reported")
 	}
 
-	assert.Equal(t, "Client-Side Prototype Pollution", reportedFinding.Vulnerability.Name)
+	assert.Equal(t, "Client-Side Prototype Pollution", reportedFinding.VulnerabilityName)
 	assert.Equal(t, schemas.SeverityHigh, reportedFinding.Severity)
 	assert.Equal(t, "task-1", reportedFinding.TaskID)
 	assert.Equal(t, testURL, reportedFinding.Target)

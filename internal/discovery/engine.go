@@ -116,6 +116,7 @@ func (e *Engine) Start(ctx context.Context, initialTargets []string) (<-chan sch
 				ID:    rootDomain,
 				Type:  schemas.NodeDomain,
 				Label: rootDomain,
+				Status: schemas.StatusNew,
 			}); err != nil {
 				log.Warn("Failed to add root domain to Knowledge Graph", zap.Error(err))
 			}
@@ -250,6 +251,7 @@ func (e *Engine) processAsset(ctx context.Context, u *url.URL, depth int, source
 		ID:         urlString,
 		Type:       schemas.NodeURL,
 		Label:      urlString,
+		Status:     schemas.StatusNew,
 		Properties: props,
 	}); err != nil {
 		e.logger.Warn("Failed to add URL node to KG", zap.Error(err), zap.String("url", urlString))
@@ -260,6 +262,7 @@ func (e *Engine) processAsset(ctx context.Context, u *url.URL, depth int, source
 		ID:    hostname,
 		Type:  schemas.NodeDomain,
 		Label: hostname,
+		Status: schemas.StatusNew,
 	}); err != nil {
 		e.logger.Warn("Failed to add/update Domain node in KG", zap.Error(err), zap.String("hostname", hostname))
 	}

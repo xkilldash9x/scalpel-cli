@@ -220,7 +220,6 @@ func (a *Analyzer) reportFinding(candidate *RaceCandidate, analysis *AnalysisRes
 
 	// Initialize CWEs and vulnerability description
 	var cwes []string
-	vulnDescription := "The application processes concurrent requests in a way that leads to an inconsistent or exploitable state, violating intended synchronization or atomicity."
 
 	// Determine severity based on the Confidence Score and Vulnerability status.
 	var severity schemas.Severity
@@ -244,9 +243,9 @@ func (a *Analyzer) reportFinding(candidate *RaceCandidate, analysis *AnalysisRes
 		}
 	} else {
 		// Informational findings (e.g., timing anomalies, Confidence >= 0.3 but Vulnerable=false)
-		severity = schemas.SeverityInformational
+		severity = schemas.SeverityInfo
 		title = fmt.Sprintf("Informational: Concurrency Anomaly Detected (%s)", analysis.Strategy)
-		vulnDescription = "Observed behavior suggests potential resource contention or sequential locking under load, but a direct security vulnerability was not confirmed."
+		description = "Observed behavior suggests potential resource contention or sequential locking under load, but a direct security vulnerability was not confirmed."
 		cwes = append(cwes, "CWE-362") // Contextual CWE
 	}
 
@@ -266,23 +265,17 @@ func (a *Analyzer) reportFinding(candidate *RaceCandidate, analysis *AnalysisRes
 		evidenceBytes = []byte(fmt.Sprintf("{\"error\": \"Failed to serialize evidence: %v\"}", err))
 	}
 
-	// Define the vulnerability details (using the schemas.Vulnerability struct).
-	vulnerability := schemas.Vulnerability{
-		Name:        title,
-		Description: vulnDescription,
-	}
-
 	finding := schemas.Finding{
-		ID:             uuid.NewString(),
-		Timestamp:      time.Now().UTC(),
-		Target:         candidate.URL,
-		Module:         "TimeSlipAnalyzer",
-		Vulnerability:  vulnerability, // Use the struct
-		Severity:       severity,
-		Description:    description,
-		Evidence:       string(evidenceBytes), // Use the string representation
-		Recommendation: "Implement proper synchronization mechanisms such as atomic transactions, database constraints (e.g., uniqueness constraints), or pessimistic/optimistic locking to ensure operations on shared resources are processed safely and consistently.",
-		CWE:            cwes, // Use the slice
+		ID:                uuid.NewString(),
+		ObservedAt:        time.Now().UTC(),
+		Target:            candidate.URL,
+		Module:            "TimeSlipAnalyzer",
+		VulnerabilityName: title,
+		Severity:          severity,
+		Description:       description,
+		Evidence:          json.RawMessage(evidenceBytes),
+		Recommendation:    "Implement proper synchronization mechanisms such as atomic transactions, database constraints (e.g., uniqueness constraints), or pessimistic/optimistic locking to ensure operations on shared resources are processed safely and consistently.",
+		CWE:               cwes,
 	}
 
 	// If a reporter is configured, this is where we use it.

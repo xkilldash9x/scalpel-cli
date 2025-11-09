@@ -517,8 +517,8 @@ func TestReportFinding_SeverityMapping(t *testing.T) {
 		// Low is less common now but still possible if a heuristic assigns it.
 		{"Low", 0.55, true, schemas.SeverityLow, []string{"CWE-362: Concurrent Execution using Shared Resource with Improper Synchronization ('Race Condition')"}},
 		// Informational findings (Confidence >= 0.3)
-		{"Informational (Timing)", 0.3, false, schemas.SeverityInformational, []string{"CWE-362"}},
-		{"Informational (State Transition)", 0.4, false, schemas.SeverityInformational, []string{"CWE-362"}},
+		{"Informational (Timing)", 0.3, false, schemas.SeverityInfo, []string{"CWE-362"}},
+		{"Informational (State Transition)", 0.4, false, schemas.SeverityInfo, []string{"CWE-362"}},
 	}
 
 	for _, tt := range tests {

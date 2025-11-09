@@ -45,7 +45,8 @@ func createTestContext(t *testing.T, targetURL string, har *schemas.HAR, logger 
 // findFindingByVulnName searches for a finding with a specific vulnerability name.
 func findFindingByVulnName(findings []schemas.Finding, name string) *schemas.Finding {
 	for i, f := range findings {
-		if f.Vulnerability.Name == name {
+		// Refactored: Check VulnerabilityName instead of Vulnerability.Name
+		if f.VulnerabilityName == name {
 			return &findings[i]
 		}
 	}
@@ -160,7 +161,8 @@ func TestHSTSChecks(t *testing.T) {
 				assert.Equal(t, tc.expectedSeverity, finding.Severity, "Severity level mismatch")
 			} else {
 				for _, f := range ctx.Findings {
-					assert.NotContains(t, f.Vulnerability.Name, "HSTS")
+					// Refactored: Check VulnerabilityName
+					assert.NotContains(t, f.VulnerabilityName, "HSTS")
 				}
 			}
 		})

@@ -161,17 +161,18 @@ func (a *ATOAdapter) createAtoFinding(analysisCtx *core.AnalysisContext, vulnNam
 	}
 
 	finding := schemas.Finding{
-		ID:        uuid.New().String(),
-		TaskID:    analysisCtx.Task.TaskID,
-		Timestamp: time.Now().UTC(),
-		Target:    analysisCtx.TargetURL.String(),
-		Module:    a.Name(),
-		Vulnerability: schemas.Vulnerability{
-			Name: vulnName,
-		},
-		Severity:       severity,
-		Description:    desc,
-		Evidence:       string(evidence),
+		ID:     uuid.New().String(),
+		TaskID: analysisCtx.Task.TaskID,
+		// Refactored: Renamed Timestamp to ObservedAt
+		ObservedAt: time.Now().UTC(),
+		Target:     analysisCtx.TargetURL.String(),
+		Module:     a.Name(),
+		// Refactored: Flattened Vulnerability struct to VulnerabilityName
+		VulnerabilityName: vulnName,
+		Severity:          severity,
+		Description:       desc,
+		// Refactored: Assign []byte directly to json.RawMessage
+		Evidence:       evidence,
 		Recommendation: "Implement rate limiting, account lockouts, and CAPTCHA. Ensure login responses are generic and do not disclose whether a username or password was correct. Implement MFA.",
 		CWE:            []string{cwe},
 	}

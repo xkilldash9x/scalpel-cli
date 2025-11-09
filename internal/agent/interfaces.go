@@ -37,6 +37,8 @@ type GraphStore interface {
 	AddNode(ctx context.Context, node schemas.Node) error
 	GetNode(ctx context.Context, id string) (schemas.Node, error)
 	AddEdge(ctx context.Context, edge schemas.Edge) error
+	// GetEdge retrieves an edge by its unique ID. Added for feature parity across implementations.
+	GetEdge(ctx context.Context, id string) (schemas.Edge, error)
 	GetEdges(ctx context.Context, nodeID string) ([]schemas.Edge, error)
 	GetNeighbors(ctx context.Context, nodeID string) ([]schemas.Node, error)
 	QueryImprovementHistory(ctx context.Context, goalObjective string, limit int) ([]schemas.Node, error)

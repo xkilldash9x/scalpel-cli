@@ -31,15 +31,22 @@ func testJSONRoundTrip(t *testing.T, original interface{}, emptyTarget func() in
 	t.Helper()
 
 	// 1. Marshal the original object to JSON
-	data, err := json.Marshal(original)
-	if err != nil {
+	// FIX: Use an Encoder with SetEscapeHTML(false) to prevent
+	// "<script>" from becoming "\u003cscript\u003e" during the test.
+	// This ensures the raw bytes of the Evidence field match after the round trip.
+	buf := new(bytes.Buffer)
+	enc := json.NewEncoder(buf)
+	enc.SetEscapeHTML(false)
+	if err := enc.Encode(original); err != nil {
 		t.Fatalf("Failed to marshal object (%T): %v", original, err)
 	}
+	data := buf.Bytes()
 
 	// 2. Unmarshal the JSON back into a new object
 	target := emptyTarget()
 	if err := json.Unmarshal(data, target); err != nil {
-		t.Fatalf("Failed to unmarshal object (%T): %v\nJSON: %s", target, err, string(data))
+		// Trim whitespace from data for cleaner error logging, as Encode adds a newline.
+		t.Fatalf("Failed to unmarshal object (%T): %v\nJSON: %s", target, err, string(bytes.TrimSpace(data)))
 	}
 
 	// 3. Compare the original and the round-tripped object
@@ -151,19 +158,17 @@ func TestTaskSerialization(t *testing.T) {
 func TestFindingSerialization(t *testing.T) {
 	now := getTestTime(t)
 	finding := &schemas.Finding{
-		ID:        "finding-1",
-		ScanID:    "scan-1",
-		TaskID:    "task-1",
-		Timestamp: now,
-		Target:    "https://example.com",
-		Module:    "XSSAnalyzer",
-		Vulnerability: schemas.Vulnerability{
-			Name:        "Reflected XSS",
-			Description: "Input reflected without encoding.",
-		},
-		Severity:       schemas.SeverityHigh,
-		Description:    "Found XSS in 'q' parameter.",
-		Evidence:       "<script>alert(1)</script>",
+		ID:                "finding-1",
+		ScanID:            "scan-1",
+		TaskID:            "task-1",
+		ObservedAt:        now,
+		Target:            "https://example.com",
+		Module:            "XSSAnalyzer",
+		VulnerabilityName: "Reflected XSS",
+		Severity:          schemas.SeverityHigh,
+		Description:       "Found XSS in 'q' parameter.",
+		// This is the field that was causing the failure
+		Evidence:       json.RawMessage(`"<script>alert(1)</script>"`),
 		Recommendation: "Encode user input.",
 		CWE:            []string{"CWE-79"},
 	}
@@ -240,7 +245,7 @@ func TestResultEnvelopeSerialization(t *testing.T) {
 		TaskID:    "task-1",
 		Timestamp: now,
 		Findings: []schemas.Finding{
-			{ID: "f1", Severity: schemas.SeverityLow, Timestamp: now},
+			{ID: "f1", Severity: schemas.SeverityLow, ObservedAt: now},
 		},
 		KGUpdates: &schemas.KnowledgeGraphUpdate{
 			NodesToAdd: []schemas.NodeInput{

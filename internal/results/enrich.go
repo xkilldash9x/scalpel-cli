@@ -42,17 +42,21 @@ func (e *Enricher) enrichCWE(finding *schemas.Finding) {
 		return
 	}
 
+	// REFACTOR: Use flattened finding.VulnerabilityName field.
 	// Update the vulnerability name/description if the current one is generic and we have a better one from CWE data.
-	isGenericName := finding.Vulnerability.Name == "" || finding.Vulnerability.Name == "Unclassified Vulnerability"
+	isGenericName := finding.VulnerabilityName == "" || finding.VulnerabilityName == "Unclassified Vulnerability"
 	// Example of a specific name from HeadersAnalyzer: "Missing Security Header: X-Frame-Options"
 
 	// If the name is very generic, replace it. If it's specific (like the header example), keep it but enrich description.
 	if isGenericName && entry.Name != "" {
-		finding.Vulnerability.Name = entry.Name
+		// REFACTOR: Use flattened finding.VulnerabilityName field.
+		finding.VulnerabilityName = entry.Name
 	}
 
 	// Enrich description if the current one is empty or very short.
-	if len(finding.Vulnerability.Description) < 20 && entry.Description != "" {
-		finding.Vulnerability.Description = entry.Description
+	// REFACTOR: Use flattened finding.Description field.
+	if len(finding.Description) < 20 && entry.Description != "" {
+		// REFACTOR: Use flattened finding.Description field.
+		finding.Description = entry.Description
 	}
 }

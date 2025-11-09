@@ -169,17 +169,18 @@ func (a *IDORAdapter) createIdorFinding(analysisCtx *core.AnalysisContext, ident
 	})
 
 	finding := schemas.Finding{
-		ID:        uuid.New().String(),
-		TaskID:    analysisCtx.Task.TaskID,
-		Timestamp: time.Now().UTC(),
-		Target:    analysisCtx.TargetURL.String(),
-		Module:    a.Name(),
-		Vulnerability: schemas.Vulnerability{
-			Name: "Insecure Direct Object Reference (IDOR)",
-		},
-		Severity:       schemas.SeverityHigh,
-		Description:    desc,
-		Evidence:       string(evidence),
+		ID:     uuid.New().String(),
+		TaskID: analysisCtx.Task.TaskID,
+		// Refactored: Renamed Timestamp to ObservedAt
+		ObservedAt: time.Now().UTC(),
+		Target:     analysisCtx.TargetURL.String(),
+		Module:     a.Name(),
+		// Refactored: Flattened Vulnerability struct to VulnerabilityName
+		VulnerabilityName: "Insecure Direct Object Reference (IDOR)",
+		Severity:          schemas.SeverityHigh,
+		Description:       desc,
+		// Refactored: Assign []byte directly to json.RawMessage
+		Evidence:       evidence,
 		Recommendation: "Verify that the current authenticated user is authorized to access or modify the requested resource ID on the server-side before performing any action.",
 		CWE:            []string{"CWE-639"},
 	}

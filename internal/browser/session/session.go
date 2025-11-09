@@ -559,19 +559,16 @@ func (s *Session) handleTaintEvent(eventData map[string]interface{}) {
 
 	s.logger.Info("IAST Sink Triggered", zap.String("type", eventType), zap.String("detail_json", detailStr))
 
-	//  Prepare evidence. Assuming schemas.Finding.Evidence is a string (e.g., JSON string) to fix IncompatibleAssign.
+	//  Prepare evidence.
 	evidenceDataMap := map[string]interface{}{
 		"sink_type": eventType,
 		"details":   eventData["detail"], // Store raw detail map
 	}
 	// Marshal the full evidenceDataMap for consistency.
 	evidenceBytes, marshalErr := json.Marshal(evidenceDataMap)
-	evidenceStr := "{}" // Fallback empty JSON object string
-	if marshalErr == nil {
-		evidenceStr = string(evidenceBytes)
-	} else {
+	if marshalErr != nil {
 		s.logger.Warn("Failed to marshal IAST evidence data.", zap.Error(marshalErr))
-		// Fallback logic if needed...
+		evidenceBytes = json.RawMessage("{}") // Fallback empty JSON object
 	}
 
 	//  Update finding creation to match current schemas.Finding structure
@@ -579,15 +576,16 @@ func (s *Session) handleTaintEvent(eventData map[string]interface{}) {
 		// ID, ScanID, TaskID are usually set by the engine/manager calling AddFinding
 		// Target URL might be retrieved from context if available, or passed in eventData
 		Module: "IAST",
-		Vulnerability: schemas.Vulnerability{
-			Name:        fmt.Sprintf("IAST Sink: %s", eventType),
-			Description: "Interactive analysis detected data flow into a potentially sensitive sink.",
-		},
-		Severity:       "Info", // Default, could be adjusted based on eventType
-		Description:    fmt.Sprintf("IAST Sink '%s' triggered.", eventType),
-		Evidence:       evidenceStr, // Changed from map[string]interface{}
+		// REFACTOR: Flattened Vulnerability struct
+		VulnerabilityName: fmt.Sprintf("IAST Sink: %s", eventType),
+		// REFACTOR: Use schema constant
+		Severity:    schemas.SeverityInfo,
+		Description: fmt.Sprintf("IAST Sink '%s' triggered.", eventType),
+		// REFACTOR: Assign json.RawMessage (bytes)
+		Evidence:       evidenceBytes,
 		Recommendation: "Review the source of the data and the context of the sink to determine if this represents a vulnerability (e.g., XSS, SQLi). Sanitize or validate input appropriately.",
-		Timestamp:      time.Now().UTC(),
+		// REFACTOR: Changed Timestamp to ObservedAt
+		ObservedAt: time.Now().UTC(),
 		// Add other necessary fields based on the current schemas.Finding definition
 	}
 
@@ -865,8 +863,8 @@ func (s *Session) AddFinding(ctx context.Context, finding schemas.Finding) error
 		if s.findingsChan == nil && !s.isClosed {
 			msg = "findings channel is nil"
 		}
-		//  Use finding.Vulnerability.Name if available, else Description, else fallback
-		findingIdentifier := finding.Vulnerability.Name
+		//  Use finding.VulnerabilityName if available, else Description, else fallback
+		findingIdentifier := finding.VulnerabilityName // REFACTOR
 		if findingIdentifier == "" {
 			findingIdentifier = finding.Description
 		}
@@ -893,25 +891,25 @@ func (s *Session) AddFinding(ctx context.Context, finding schemas.Finding) error
 	*/
 
 	// Add timestamp if missing
-	if finding.Timestamp.IsZero() {
-		finding.Timestamp = time.Now().UTC()
+	if finding.ObservedAt.IsZero() { // REFACTOR
+		finding.ObservedAt = time.Now().UTC() // REFACTOR
 	}
 
 	// Use a select to send non-blockingly, respecting contexts.
 	select {
 	case ch <- finding:
-		//  Use finding.Vulnerability.Name if available for logging
-		findingIdentifier := finding.Vulnerability.Name
+		//  Use finding.VulnerabilityName if available for logging
+		findingIdentifier := finding.VulnerabilityName // REFACTOR
 		if findingIdentifier == "" {
 			findingIdentifier = "(unknown type)"
 		}
 		s.logger.Debug("Finding added.", zap.String("finding_type", findingIdentifier))
 		return nil
 	case <-ctx.Done(): // Check operational context first
-		s.logger.Warn("Operational context cancelled before finding could be added.", zap.Error(ctx.Err()), zap.String("finding_type", finding.Vulnerability.Name))
+		s.logger.Warn("Operational context cancelled before finding could be added.", zap.Error(ctx.Err()), zap.String("finding_type", finding.VulnerabilityName)) // REFACTOR
 		return ctx.Err()
 	case <-s.ctx.Done(): // Then check session context
-		s.logger.Warn("Session context cancelled before finding could be added.", zap.Error(s.ctx.Err()), zap.String("finding_type", finding.Vulnerability.Name))
+		s.logger.Warn("Session context cancelled before finding could be added.", zap.Error(s.ctx.Err()), zap.String("finding_type", finding.VulnerabilityName)) // REFACTOR
 		return s.ctx.Err()
 	}
 }

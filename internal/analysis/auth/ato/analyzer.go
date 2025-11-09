@@ -330,7 +330,7 @@ func (a *ATOAnalyzer) testEndpoint(ctx context.Context, analysisCtx schemas.Sess
 		if err := a.executePause(ctx, h); err != nil {
 			// Check if the error was due to context cancellation.
 			if ctx.Err() != nil {
-				a.Logger.Warn("ATO analysis cancelled during pause.", zap.Error(err))
+				a.Logger.Warn("ATO analysis cancelled during pause.", zap.Error(ctx.Err()))
 				return findings
 			}
 			// Log other potential errors during the pause execution, but continue.
@@ -732,17 +732,27 @@ func (a *ATOAnalyzer) createCredentialStuffingFinding(attempt *loginAttempt, evi
 	if enumerated {
 		desc += " The endpoint also leaks information about valid usernames, making targeted attacks more effective."
 	}
+
+	// Create a structured object for the evidence
+	evidencePayload := map[string]string{"details": evidence}
+	evidenceJSON, err := json.Marshal(evidencePayload)
+	if err != nil {
+		// This should realistically never fail for this map
+		a.Logger.Error("Failed to marshal finding evidence", zap.String("id", id), zap.Error(err))
+		evidenceJSON = json.RawMessage(`{"details":"failed to marshal evidence"}`)
+	}
+
 	return schemas.Finding{
-		ID:             hex.EncodeToString(hash[:]),
-		Timestamp:      time.Now().UTC(),
-		Target:         attempt.URL,
-		Module:         a.Name(),
-		Description:    desc,
-		Severity:       schemas.SeverityCritical,
-		Evidence:       evidence,
-		Recommendation: "Implement multi-layered anti-automation controls: strict rate-limiting per IP/username, CAPTCHA challenges after several failed attempts, and an anomaly detection system to block suspicious login patterns.",
-		Vulnerability:  schemas.Vulnerability{Name: "Account Takeover (Credential Stuffing)"},
-		CWE:            []string{"CWE-307"},
+		ID:                hex.EncodeToString(hash[:]),
+		ObservedAt:        time.Now().UTC(),
+		Target:            attempt.URL,
+		Module:            a.Name(),
+		Description:       desc,
+		Severity:          schemas.SeverityCritical,
+		Evidence:          evidenceJSON,
+		Recommendation:    "Implement multi-layered anti-automation controls: strict rate-limiting per IP/username, CAPTCHA challenges after several failed attempts, and an anomaly detection system to block suspicious login patterns.",
+		VulnerabilityName: "Account Takeover (Credential Stuffing)",
+		CWE:               []string{"CWE-307"},
 	}
 }
 
@@ -750,16 +760,26 @@ func (a *ATOAnalyzer) createCredentialStuffingFinding(attempt *loginAttempt, evi
 func (a *ATOAnalyzer) createUserEnumerationFinding(attempt *loginAttempt, evidence string) schemas.Finding {
 	id := fmt.Sprintf("ato-enumeration-%s", attempt.endpointIdentifier())
 	hash := sha256.Sum256([]byte(id))
+
+	// Create a structured object for the evidence
+	evidencePayload := map[string]string{"details": evidence}
+	evidenceJSON, err := json.Marshal(evidencePayload)
+	if err != nil {
+		// This should realistically never fail for this map
+		a.Logger.Error("Failed to marshal finding evidence", zap.String("id", id), zap.Error(err))
+		evidenceJSON = json.RawMessage(`{"details":"failed to marshal evidence"}`)
+	}
+
 	return schemas.Finding{
-		ID:             hex.EncodeToString(hash[:]),
-		Timestamp:      time.Now().UTC(),
-		Target:         attempt.URL,
-		Module:         a.Name(),
-		Description:    "The login endpoint's responses allow for username enumeration. The server provides a distinct response when a username exists but the password is incorrect versus when the username does not exist. This allows an attacker to build a list of valid usernames.",
-		Severity:       schemas.SeverityMedium,
-		Evidence:       evidence,
-		Recommendation: "Modify the login failure logic to return a single, generic error message (e.g., 'Invalid username or password') regardless of the reason for failure. Ensure the HTTP status code and response body are identical in all failure cases.",
-		Vulnerability:  schemas.Vulnerability{Name: "Username Enumeration"},
-		CWE:            []string{"CWE-203"},
+		ID:                hex.EncodeToString(hash[:]),
+		ObservedAt:        time.Now().UTC(),
+		Target:            attempt.URL,
+		Module:            a.Name(),
+		Description:       "The login endpoint's responses allow for username enumeration. The server provides a distinct response when a username exists but the password is incorrect versus when the username does not exist. This allows an attacker to build a list of valid usernames.",
+		Severity:          schemas.SeverityMedium,
+		Evidence:          evidenceJSON,
+		Recommendation:    "Modify the login failure logic to return a single, generic error message (e.g., 'Invalid username or password') regardless of the reason for failure. Ensure the HTTP status code and response body are identical in all failure cases.",
+		VulnerabilityName: "Username Enumeration",
+		CWE:               []string{"CWE-203"},
 	}
 }

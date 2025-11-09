@@ -7,6 +7,7 @@ import (
 	"os"
 	"sync"
 	"testing"
+
 	// "time" // Removed unused import.
 
 	"github.com/google/uuid"
@@ -117,7 +118,7 @@ func TestAnalysisContext(t *testing.T) {
 			Logger: globalFixture.Logger,
 		},
 		Task: schemas.Task{
-			ScanID:  uuid.NewString(),
+			ScanID: uuid.NewString(),
 			// FIX: Timeout field removed as it's no longer in schemas.Task.
 		},
 		TargetURL: &url.URL{
@@ -133,23 +134,23 @@ func TestAnalysisContext(t *testing.T) {
 		ac := *baseAc
 		ac.Findings = nil
 
-		// FIX: Updated to use Vulnerability struct instead of Title field.
+		// FIX: Updated to use VulnerabilityName, as the Vulnerability struct was flattened.
 		finding1 := schemas.Finding{
-			Vulnerability: schemas.Vulnerability{Name: "First Test Finding"},
+			VulnerabilityName: "First Test Finding",
 		}
 		ac.AddFinding(finding1)
 
 		require.Len(t, ac.Findings, 1)
-		// FIX: Updated assertion to check Vulnerability.Name instead of Title.
-		assert.Equal(t, "First Test Finding", ac.Findings[0].Vulnerability.Name)
+		// FIX: Updated assertion to check VulnerabilityName.
+		assert.Equal(t, "First Test Finding", ac.Findings[0].VulnerabilityName)
 
 		finding2 := schemas.Finding{
-			Vulnerability: schemas.Vulnerability{Name: "Second Test Finding"},
+			VulnerabilityName: "Second Test Finding",
 		}
 		ac.AddFinding(finding2)
 
 		require.Len(t, ac.Findings, 2)
-		assert.Equal(t, "Second Test Finding", ac.Findings[1].Vulnerability.Name)
+		assert.Equal(t, "Second Test Finding", ac.Findings[1].VulnerabilityName)
 	})
 
 	t.Run("AddFinding should populate ScanID from task if missing", func(t *testing.T) {
@@ -158,7 +159,7 @@ func TestAnalysisContext(t *testing.T) {
 		ac.Findings = nil
 
 		finding := schemas.Finding{
-			Vulnerability: schemas.Vulnerability{Name: "Finding without ScanID"},
+			VulnerabilityName: "Finding without ScanID",
 		}
 		ac.AddFinding(finding)
 
@@ -173,8 +174,8 @@ func TestAnalysisContext(t *testing.T) {
 
 		customScanID := "custom-" + uuid.NewString()
 		finding := schemas.Finding{
-			Vulnerability: schemas.Vulnerability{Name: "Finding with custom ScanID"},
-			ScanID: customScanID,
+			VulnerabilityName: "Finding with custom ScanID",
+			ScanID:            customScanID,
 		}
 		ac.AddFinding(finding)
 

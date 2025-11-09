@@ -157,6 +157,8 @@ func (a *JWTAnalyzer) reportFinding(analysisCtx *core.AnalysisContext, targetURL
 		}
 	}
 
+	// The marshal error is intentionally ignored here for brevity in this analyzer.
+	// A production system might handle this more gracefully.
 	evidenceBytes, _ := json.Marshal(evidenceData)
 
 	var vulnName, cwe string
@@ -176,14 +178,17 @@ func (a *JWTAnalyzer) reportFinding(analysisCtx *core.AnalysisContext, targetURL
 	}
 
 	schemaFinding := schemas.Finding{
-		ID:             uuid.New().String(),
-		Timestamp:      time.Now().UTC(),
-		Target:         targetURL,
-		Module:         a.Name(),
-		Vulnerability:  schemas.Vulnerability{Name: vulnName},
-		Severity:       schemas.Severity(finding.Severity),
-		Description:    finding.Description,
-		Evidence:       string(evidenceBytes),
+		ID:     uuid.New().String(),
+		// REFACTOR: Changed Timestamp to ObservedAt
+		ObservedAt: time.Now().UTC(),
+		Target:     targetURL,
+		Module:     a.Name(),
+		// REFACTOR: Flattened Vulnerability struct
+		VulnerabilityName: vulnName,
+		Severity:          schemas.Severity(finding.Severity),
+		Description:       finding.Description,
+		// REFACTOR: Assign raw bytes (json.RawMessage) instead of string
+		Evidence:       evidenceBytes,
 		Recommendation: "Review JWT implementation: enforce strong algorithms (e.g., RS256), use strong secrets, ensure tokens have an expiration ('exp'), and avoid placing sensitive data in claims.",
 		CWE:            []string{cwe},
 	}

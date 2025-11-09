@@ -110,7 +110,7 @@ func (a *HeadersAnalyzer) checkMissingSecurityHeaders(analysisCtx *core.Analysis
 	}
 }
 
-//performs a detailed analysis of the Strict-Transport-Security header.
+// performs a detailed analysis of the Strict-Transport-Security header.
 func (a *HeadersAnalyzer) checkHSTS(analysisCtx *core.AnalysisContext, headers map[string]string) {
 	headerName := "strict-transport-security"
 	hstsValue, exists := headers[headerName]
@@ -212,19 +212,28 @@ func (a *HeadersAnalyzer) checkInformationDisclosure(analysisCtx *core.AnalysisC
 
 // reportMissingHeader is a helper to generate a finding specifically for a missing header.
 func (a *HeadersAnalyzer) reportMissingHeader(analysisCtx *core.AnalysisContext, headerName string, cwe string) {
+	// REFACTOR: Marshal string evidence to json.RawMessage
+	evidenceString := fmt.Sprintf("Header not present in response: %s", headerName)
+	evidencePayload := map[string]string{"details": evidenceString}
+	evidenceBytes, err := json.Marshal(evidencePayload)
+	if err != nil {
+		a.Logger.Error("Failed to marshal evidence for missing header", zap.Error(err), zap.String("header", headerName))
+		evidenceBytes = json.RawMessage(`{"error": "failed to marshal evidence"}`) // Fallback
+	}
+
 	finding := schemas.Finding{
-		ID:        uuid.New().String(),
-		TaskID:    analysisCtx.Task.TaskID,
-		Timestamp: time.Now().UTC(),
-		Target:    analysisCtx.TargetURL.String(),
-		Module:    a.Name(),
-		Vulnerability: schemas.Vulnerability{
-			Name:        fmt.Sprintf("Missing Security Header: %s", headerName),
-			Description: "A recommended security header is missing from the HTTP response.",
-		},
-		Severity:       schemas.SeverityMedium,
-		Description:    fmt.Sprintf("The response is missing the '%s' security header. This header is important for protecting against various web vulnerabilities.", headerName),
-		Evidence:       fmt.Sprintf("Header not present in response: %s", headerName),
+		ID:     uuid.New().String(),
+		TaskID: analysisCtx.Task.TaskID,
+		// REFACTOR: Changed Timestamp to ObservedAt
+		ObservedAt: time.Now().UTC(),
+		Target:     analysisCtx.TargetURL.String(),
+		Module:     a.Name(),
+		// REFACTOR: Flattened Vulnerability struct
+		VulnerabilityName: fmt.Sprintf("Missing Security Header: %s", headerName),
+		Severity:          schemas.SeverityMedium,
+		Description:       fmt.Sprintf("The response is missing the '%s' security header. This header is important for protecting against various web vulnerabilities.", headerName),
+		// REFACTOR: Assign marshaled JSON
+		Evidence:       evidenceBytes,
 		Recommendation: fmt.Sprintf("Configure the web server or application framework to include the '%s' header in all relevant HTTP responses.", headerName),
 		CWE:            []string{cwe},
 	}
@@ -233,19 +242,27 @@ func (a *HeadersAnalyzer) reportMissingHeader(analysisCtx *core.AnalysisContext,
 
 // reportFinding is a generic helper to generate a finding.
 func (a *HeadersAnalyzer) reportFinding(analysisCtx *core.AnalysisContext, vulnName string, severity schemas.Severity, cwe string, description string, evidence string, recommendation string) {
+	// REFACTOR: Marshal string evidence to json.RawMessage
+	evidencePayload := map[string]string{"details": evidence}
+	evidenceBytes, err := json.Marshal(evidencePayload)
+	if err != nil {
+		a.Logger.Error("Failed to marshal evidence for finding", zap.Error(err), zap.String("evidence", evidence))
+		evidenceBytes = json.RawMessage(`{"error": "failed to marshal evidence"}`) // Fallback
+	}
+
 	finding := schemas.Finding{
-		ID:        uuid.New().String(),
-		TaskID:    analysisCtx.Task.TaskID,
-		Timestamp: time.Now().UTC(),
-		Target:    analysisCtx.TargetURL.String(),
-		Module:    a.Name(),
-		Vulnerability: schemas.Vulnerability{
-			Name:        vulnName,
-			Description: description,
-		},
-		Severity:       severity,
-		Description:    description,
-		Evidence:       evidence,
+		ID:     uuid.New().String(),
+		TaskID: analysisCtx.Task.TaskID,
+		// REFACTOR: Changed Timestamp to ObservedAt
+		ObservedAt: time.Now().UTC(),
+		Target:     analysisCtx.TargetURL.String(),
+		Module:     a.Name(),
+		// REFACTOR: Flattened Vulnerability struct
+		VulnerabilityName: vulnName,
+		Severity:          severity,
+		Description:       description,
+		// REFACTOR: Assign marshaled JSON
+		Evidence:       evidenceBytes,
 		Recommendation: recommendation,
 		CWE:            []string{cwe},
 	}

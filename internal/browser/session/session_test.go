@@ -366,35 +366,40 @@ func TestSession(t *testing.T) {
 		ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
 		defer cancel()
 
-		// FIX: Prepare evidence. Assuming schemas.Finding.Evidence is a string (e.g., JSON string) to fix IncompatibleAssign.
+		// FIX: Prepare evidence.
 		evidenceData := map[string]interface{}{"key": "value"}
 		evidenceBytes, marshalErr := json.Marshal(evidenceData)
 		if marshalErr != nil {
 			t.Fatalf("Failed to marshal test evidence data: %v", marshalErr)
 		}
 
-		// FIX: Use fields from current schemas.Finding definition
+		// REFACTOR: Use fields from current schemas.Finding definition
 		finding := schemas.Finding{
-			Target:         "https://example.com",
-			Module:         "TestModule",
-			Vulnerability:  schemas.Vulnerability{Name: "TestFindingVuln", Description: "Desc"},
-			Severity:       schemas.SeverityLow,
-			Description:    "This is a test finding",
-			Evidence:       string(evidenceBytes), // Changed from map[string]interface{}
+			Target: "https://example.com",
+			Module: "TestModule",
+			// REFACTOR: Flattened Vulnerability struct
+			VulnerabilityName: "TestFindingVuln",
+			Severity:          schemas.SeverityLow,
+			Description:       "This is a test finding",
+			// REFACTOR: Assign []byte (json.RawMessage) directly
+			Evidence:       evidenceBytes,
 			Recommendation: "Fix it",
-			// Metadata is added by AddFinding
+			// Metadata is added by AddFinding (in the original, but not anymore)
+			// ObservedAt and ID are added by AddFinding
 		}
 
 		require.NoError(t, fixture.Session.AddFinding(ctx, finding))
 
 		select {
 		case receivedFinding := <-fixture.FindingsChan:
-			// FIX: Assert fields from current schemas.Finding definition
-			assert.Equal(t, "TestFindingVuln", receivedFinding.Vulnerability.Name)
+			// REFACTOR: Assert fields from current schemas.Finding definition
+			assert.Equal(t, "TestFindingVuln", receivedFinding.VulnerabilityName)
 			// FIX: Removed assertions for Metadata as the field does not exist in schemas.Finding (MissingFieldOrMethod error).
 			// require.NotNil(t, receivedFinding.Metadata, "Metadata should not be nil")
 			// assert.Equal(t, session.ID(), receivedFinding.Metadata["session_id"], "Session ID should be added to finding metadata")
-			assert.False(t, receivedFinding.Timestamp.IsZero(), "Timestamp should be added")
+			
+			// REFACTOR: Check for ObservedAt instead of Timestamp
+			assert.False(t, receivedFinding.ObservedAt.IsZero(), "ObservedAt should be added")
 		case <-time.After(2 * time.Second):
 			t.Fatal("Timed out waiting for finding")
 		}
@@ -778,11 +783,13 @@ func TestSession(t *testing.T) {
 		select {
 		case receivedFinding := <-fixture.FindingsChan:
 			assert.Equal(t, "IAST", receivedFinding.Module)
-			assert.Equal(t, "IAST Sink: TestXSS", receivedFinding.Vulnerability.Name)
+			// REFACTOR: Assert flattened VulnerabilityName
+			assert.Equal(t, "IAST Sink: TestXSS", receivedFinding.VulnerabilityName)
 
 			// Check the evidence structure
 			var evidenceMap map[string]interface{}
-			err := json.Unmarshal([]byte(receivedFinding.Evidence), &evidenceMap)
+			// REFACTOR: Unmarshal Evidence (json.RawMessage) directly
+			err := json.Unmarshal(receivedFinding.Evidence, &evidenceMap)
 			require.NoError(t, err, "Failed to unmarshal evidence JSON")
 
 			assert.Equal(t, "TestXSS", evidenceMap["sink_type"])
@@ -790,7 +797,7 @@ func TestSession(t *testing.T) {
 			require.True(t, ok, "Details should be an object")
 			assert.Equal(t, "<script>alert(1)</script>", details["value"])
 
-		case <-time.After(5 * time.Second):
+		case <-time.After(5. * time.Second):
 			t.Fatal("Timed out waiting for IAST finding")
 		}
 	})

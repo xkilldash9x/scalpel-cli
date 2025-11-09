@@ -247,8 +247,8 @@ func TestObservation_JSONRoundTrip(t *testing.T) {
 					Status:          "success",
 					ObservationType: agent.ObservedVulnerability,
 					Findings: []schemas.Finding{
-						// Changed to use the correct nested Vulnerability struct
-						{ID: "finding-xss-1", Vulnerability: schemas.Vulnerability{Name: "Reflected XSS"}},
+						// FIX: Changed to use VulnerabilityName string
+						{ID: "finding-xss-1", VulnerabilityName: "Reflected XSS"},
 					},
 					KGUpdates: &schemas.KnowledgeGraphUpdate{
 						NodesToAdd: []schemas.NodeInput{{ID: "vuln-node-1", Type: schemas.NodeVulnerability}},
@@ -292,6 +292,9 @@ func TestObservation_JSONRoundTrip(t *testing.T) {
 				}
 			}
 
+			// This is a special case for the Finding struct in the round-trip test.
+			// The `ObservedAt` field will be a zero-value time.Time, which is
+			// fine and expected, so DeepEqual will pass.
 			if !reflect.DeepEqual(newObs, expectedObs) {
 				t.Errorf("Round trip failed. Diff:\n%s", cmp.Diff(expectedObs, newObs))
 			}
@@ -313,8 +316,9 @@ func TestExecutionResult_JSONMarshaling(t *testing.T) {
 				Status:          "success",
 				ObservationType: agent.ObservedAnalysisResult,
 				Data:            map[string]interface{}{"items_found": float64(3)},
-				Findings: []schemas.Finding{ // We initialize the nested structs to ensure all fields are present for the comparison.
-					{ID: "finding-1", Vulnerability: schemas.Vulnerability{Name: "XSS", Description: ""}},
+				Findings: []schemas.Finding{
+					// FIX: Changed to use VulnerabilityName string
+					{ID: "finding-1", VulnerabilityName: "XSS"},
 				},
 				KGUpdates: &schemas.KnowledgeGraphUpdate{
 					NodesToAdd: []schemas.NodeInput{
@@ -323,9 +327,11 @@ func TestExecutionResult_JSONMarshaling(t *testing.T) {
 					EdgesToAdd: nil,
 				},
 			},
-			// `error_code` and `error_details` should be omitted.
-			// The nested schemas do not have omitempty tags on all fields, causing zero values to be serialized.
-			expectedJSON: `{"status":"success","observation_type":"ANALYSIS_RESULT","data":{"items_found":3},"findings":[{"id":"finding-1","scan_id":"","task_id":"","timestamp":"0001-01-01T00:00:00Z","target":"","module":"","vulnerability":{"name":"XSS","description":""},"severity":"","description":"","evidence":"","recommendation":""}],"kg_updates":{"nodes_to_add":[{"id":"node-1","type":"","label":"Vulnerable Page","status":"","properties":null}],"edges_to_add":null}}`,
+			// FIX: Corrected expectedJSON to match the real Finding struct
+			// - Replaced "timestamp" with "observed_at"
+			// - Replaced "vulnerability":{...} with "vulnerability_name":"XSS"
+			// - Removed "evidence" (nil + omitempty)
+			expectedJSON: `{"status":"success","observation_type":"ANALYSIS_RESULT","data":{"items_found":3},"findings":[{"id":"finding-1","scan_id":"","task_id":"","observed_at":"0001-01-01T00:00:00Z","target":"","module":"","vulnerability_name":"XSS","severity":"","description":"","recommendation":""}],"kg_updates":{"nodes_to_add":[{"id":"node-1","type":"","label":"Vulnerable Page","status":"","properties":null}],"edges_to_add":null}}`,
 		},
 		{
 			name: "failed result with error details",

@@ -37,10 +37,14 @@ type Orchestrator interface {
 // -- Centralized Core Service Interfaces --
 
 // KnowledgeGraphClient defines the canonical interface for interacting with the Knowledge Graph.
+//
+//go:generate mockery --name KnowledgeGraphClient --output ../../internal/mocks --outpkg mocks
 type KnowledgeGraphClient interface {
 	AddNode(ctx context.Context, node Node) error
 	AddEdge(ctx context.Context, edge Edge) error
 	GetNode(ctx context.Context, id string) (Node, error)
+	// GetEdge retrieves an edge by its unique ID. Added for feature parity across implementations.
+	GetEdge(ctx context.Context, id string) (Edge, error)
 	GetEdges(ctx context.Context, nodeID string) ([]Edge, error)
 	GetNeighbors(ctx context.Context, nodeID string) ([]Node, error)
 	QueryImprovementHistory(ctx context.Context, goalObjective string, limit int) ([]Node, error)

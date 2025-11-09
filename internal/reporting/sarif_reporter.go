@@ -32,9 +32,9 @@ var ruleIDSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_.-]+`)
 // SARIFReporter implements the Reporter interface for the SARIF 2.1.0 format.
 // It is thread safe.
 type SARIFReporter struct {
-	writer    io.WriteCloser
-	logger    *zap.Logger
-	log       *sarif.Log
+	writer io.WriteCloser
+	logger *zap.Logger
+	log    *sarif.Log
 	// mu protects the log structure and rulesSeen map.
 	mu        sync.Mutex
 	rulesSeen map[string]struct{} // Cache for rule IDs
@@ -87,10 +87,10 @@ func (r *SARIFReporter) Write(result *schemas.ResultEnvelope) error {
 	for _, finding := range result.Findings {
 		ruleID := r.ensureRule(finding)
 
-		// Determine the message text, falling back to the vulnerability name if description is empty.
-		messageText := finding.Vulnerability.Description
+		// REFACTOR: Use flattened finding.Description and finding.VulnerabilityName fields.
+		messageText := finding.Description
 		if messageText == "" {
-			messageText = finding.Vulnerability.Name
+			messageText = finding.VulnerabilityName
 		}
 
 		sarifResult := &sarif.Result{
@@ -163,8 +163,8 @@ func (r *SARIFReporter) Close() error {
 // Implements robust sanitization for the Rule ID.
 // NOTE: Must be called while holding the mutex.
 func (r *SARIFReporter) ensureRule(finding schemas.Finding) string {
-	// Use the structured vulnerability ID if available, otherwise fall back to its name.
-	baseID := finding.Vulnerability.Name
+	// REFACTOR: Use flattened finding.VulnerabilityName field.
+	baseID := finding.VulnerabilityName
 	if baseID == "" {
 		baseID = "Unnamed-Vulnerability"
 	}
@@ -194,14 +194,16 @@ func (r *SARIFReporter) ensureRule(finding schemas.Finding) string {
 	driver := r.log.Runs[0].Tool.Driver
 
 	// Create enhanced Markdown help text.
+	// REFACTOR: Use flattened finding.VulnerabilityName and finding.Description fields.
 	markdownHelp := fmt.Sprintf("**Vulnerability:** %s\n\n**Description:**\n%s\n\n**Recommendation:**\n%s",
-		finding.Vulnerability.Name, finding.Vulnerability.Description, finding.Recommendation)
+		finding.VulnerabilityName, finding.Description, finding.Recommendation)
 
 	// Create a new rule.
+	// REFACTOR: Use flattened finding.VulnerabilityName field.
 	newRule := &sarif.ReportingDescriptor{
 		ID:               ruleID,
-		Name:             pString(finding.Vulnerability.Name),
-		ShortDescription: &sarif.MultiformatMessageString{Text: pString(finding.Vulnerability.Name)},
+		Name:             pString(finding.VulnerabilityName),
+		ShortDescription: &sarif.MultiformatMessageString{Text: pString(finding.VulnerabilityName)},
 		FullDescription:  &sarif.MultiformatMessageString{Text: pString(finding.Recommendation)},
 		Help: &sarif.MultiformatMessageString{
 			Text:     pString(finding.Recommendation),
@@ -211,7 +213,7 @@ func (r *SARIFReporter) ensureRule(finding schemas.Finding) string {
 			"tags":      []string{"security", "scalpel"},
 			"precision": "high",
 			// This conversion is correct and necessary to store []string in map[string]interface{}.
-			"CWE":       finding.CWE, 
+			"CWE": finding.CWE,
 		},
 	}
 	driver.Rules = append(driver.Rules, newRule)
@@ -243,7 +245,8 @@ func mapSeverityToSARIFLevel(severity schemas.Severity) string {
 		return string(sarif.LevelError)
 	case "medium":
 		return string(sarif.LevelWarning)
-	case "low", "informational":
+	// REFACTOR: Updated "informational" to "info" to match schemas.findings.go
+	case "low", "info":
 		return string(sarif.LevelNote)
 	default:
 		return string(sarif.LevelNote)
