@@ -36,6 +36,7 @@ type Interface interface {
 	// Browser Setters
 	SetBrowserHeadless(bool)
 	SetBrowserDisableCache(bool)
+	SetBrowserDisableGPU(bool)
 	SetBrowserIgnoreTLSErrors(bool)
 	SetBrowserDebug(bool)
 
@@ -109,6 +110,7 @@ func (c *Config) SetEngineWorkerConcurrency(w int) { c.EngineCfg.WorkerConcurren
 // Browser Setters
 func (c *Config) SetBrowserHeadless(b bool)        { c.BrowserCfg.Headless = b }
 func (c *Config) SetBrowserDisableCache(b bool)    { c.BrowserCfg.DisableCache = b }
+func (c *Config) SetBrowserDisableGPU(b bool)      { c.BrowserCfg.DisableGPU = b }
 func (c *Config) SetBrowserIgnoreTLSErrors(b bool) { c.BrowserCfg.IgnoreTLSErrors = b }
 func (c *Config) SetBrowserDebug(b bool)           { c.BrowserCfg.Debug = b }
 
@@ -217,6 +219,7 @@ type EngineConfig struct {
 type BrowserConfig struct {
 	Headless        bool           `mapstructure:"headless" yaml:"headless"`
 	DisableCache    bool           `mapstructure:"disable_cache" yaml:"disable_cache"`
+	DisableGPU      bool           `mapstructure:"disable_gpu" yaml:"disable_gpu"`
 	IgnoreTLSErrors bool           `mapstructure:"ignore_tls_errors" yaml:"ignore_tls_errors"`
 	Concurrency     int            `mapstructure:"concurrency" yaml:"concurrency"`
 	Debug           bool           `mapstructure:"debug" yaml:"debug"`
@@ -461,6 +464,7 @@ func SetDefaults(v *viper.Viper) {
 	// -- Browser --
 	v.SetDefault("browser.headless", true)
 	v.SetDefault("browser.disable_cache", true)
+	v.SetDefault("browser.disable_gpu", true)
 	v.SetDefault("browser.ignore_tls_errors", false)
 	v.SetDefault("browser.concurrency", 4)
 	v.SetDefault("browser.debug", true)

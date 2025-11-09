@@ -10,30 +10,30 @@ type TaintFlowPath struct {
 
 // ValidTaintFlows defines the set of acceptable source-to-sink paths to reduce false positives.
 var ValidTaintFlows = map[TaintFlowPath]bool{
-	{schemas.ProbeTypeXSS, schemas.SinkEval}:              true,
-	{schemas.ProbeTypeXSS, schemas.SinkInnerHTML}:         true,
-	{schemas.ProbeTypeXSS, schemas.SinkOuterHTML}:         true,
-	{schemas.ProbeTypeXSS, schemas.SinkDocumentWrite}:     true,
-	{schemas.ProbeTypeXSS, schemas.SinkIframeSrcDoc}:      true,
+	{schemas.ProbeTypeXSS, schemas.SinkEval}:                true,
+	{schemas.ProbeTypeXSS, schemas.SinkInnerHTML}:           true,
+	{schemas.ProbeTypeXSS, schemas.SinkOuterHTML}:           true,
+	{schemas.ProbeTypeXSS, schemas.SinkDocumentWrite}:       true,
+	{schemas.ProbeTypeXSS, schemas.SinkIframeSrcDoc}:        true,
 	{schemas.ProbeTypeXSS, schemas.SinkFunctionConstructor}: true,
-	{schemas.ProbeTypeXSS, schemas.SinkScriptSrc}:         true,
-	{schemas.ProbeTypeXSS, schemas.SinkIframeSrc}:         true,
-	{schemas.ProbeTypeXSS, schemas.SinkNavigation}:        true,
-	{schemas.ProbeTypeXSS, schemas.SinkPostMessage}:       true,
-	{schemas.ProbeTypeXSS, schemas.SinkWorkerPostMessage}: true,
+	{schemas.ProbeTypeXSS, schemas.SinkScriptSrc}:           true,
+	{schemas.ProbeTypeXSS, schemas.SinkIframeSrc}:           true,
+	{schemas.ProbeTypeXSS, schemas.SinkNavigation}:          true,
+	{schemas.ProbeTypeXSS, schemas.SinkPostMessage}:         true,
+	{schemas.ProbeTypeXSS, schemas.SinkWorkerPostMessage}:   true,
 
-	{schemas.ProbeTypeDOMClobbering, schemas.SinkEval}:      true,
-	{schemas.ProbeTypeDOMClobbering, schemas.SinkInnerHTML}: true,
+	{schemas.ProbeTypeDOMClobbering, schemas.SinkEval}:       true,
+	{schemas.ProbeTypeDOMClobbering, schemas.SinkInnerHTML}:  true,
 	{schemas.ProbeTypeDOMClobbering, schemas.SinkNavigation}: true,
 
-	{schemas.ProbeTypeSSTI, schemas.SinkEval}:              true,
-	{schemas.ProbeTypeSSTI, schemas.SinkInnerHTML}:         true,
-	{schemas.ProbeTypeSSTI, schemas.SinkOuterHTML}:         true,
-	{schemas.ProbeTypeSSTI, schemas.SinkDocumentWrite}:     true,
-	{schemas.ProbeTypeSSTI, schemas.SinkIframeSrcDoc}:      true,
+	{schemas.ProbeTypeSSTI, schemas.SinkEval}:                true,
+	{schemas.ProbeTypeSSTI, schemas.SinkInnerHTML}:           true,
+	{schemas.ProbeTypeSSTI, schemas.SinkOuterHTML}:           true,
+	{schemas.ProbeTypeSSTI, schemas.SinkDocumentWrite}:       true,
+	{schemas.ProbeTypeSSTI, schemas.SinkIframeSrcDoc}:        true,
 	{schemas.ProbeTypeSSTI, schemas.SinkFunctionConstructor}: true,
 
-	{schemas.ProbeTypeSQLi, schemas.SinkInnerHTML}:       true,
+	{schemas.ProbeTypeSQLi, schemas.SinkInnerHTML}:         true,
 	{schemas.ProbeTypeCmdInjection, schemas.SinkInnerHTML}: true,
 
 	{schemas.ProbeTypeGeneric, schemas.SinkWebSocketSend}:     true,
@@ -194,7 +194,7 @@ func DefaultProbes() []ProbeDefinition {
 			Type:    schemas.ProbeTypePrototypePollution,
 			Context: "MERGE_CLONE",
 			// Pollution via constructor.prototype (sometimes bypasses filters).
-			Payload:     `{"constructor":{"prototype":{"scalpelPolluted":"{{.Canary}}"}}}` ,
+			Payload:     `{"constructor":{"prototype":{"scalpelPolluted":"{{.Canary}}"}}}`,
 			Description: "Prototype Pollution via constructor.prototype injection.",
 		},
 
@@ -203,7 +203,7 @@ func DefaultProbes() []ProbeDefinition {
 		{
 			Type:        schemas.ProbeTypeSSTI,
 			Context:     "TEMPLATE_EVAL_XSS",
-			Payload:     `${7*7}<img src=x onerror=` + executionProofCall + `>`,
+			Payload:     `${7 * 7}<img src=x onerror=` + executionProofCall + `>`,
 			Description: "SSTI leading to XSS (JSP/EL/Velocity/Spring).",
 		},
 		{
@@ -288,12 +288,24 @@ func DefaultSinks() []SinkDefinition {
 		{Name: "jQuery.globalEval", Type: schemas.SinkEval, Setter: false, ArgIndex: 0},
 		{Name: "jQuery.parseHTML", Type: schemas.SinkInnerHTML, Setter: false, ArgIndex: 0},
 
-		// -- Navigation Sinks (Open Redirect / Protocol-based XSS) --
-		{Name: "location.href", Type: schemas.SinkNavigation, Setter: true},
-		{Name: "location", Type: schemas.SinkNavigation, Setter: true},
-		{Name: "location.assign", Type: schemas.SinkNavigation, Setter: false, ArgIndex: 0},
-		{Name: "location.replace", Type: schemas.SinkNavigation, Setter: false, ArgIndex: 0},
-		{Name: "open", Type: schemas.SinkNavigation, Setter: false, ArgIndex: 0}, // Global open
+		// -- Navigation Sinks (Open Redirect / Protocol-based XSS / SPA Routing) --
+		/*
+			FIX: Instrument Location.prototype instead of the 'location' instance (e.g., window.location).
+			Browsers lock down the 'location' object instance ([LegacyUnforgeable] attributes in WebIDL),
+			preventing modification of its methods/properties directly on the instance.
+			Instrumenting the prototype is allowed and effective across modern browsers.
+		*/
+		// Instrumenting the 'href' setter on the prototype covers both `location.href = X` and `location = X`.
+		{Name: "Location.prototype.href", Type: schemas.SinkNavigation, Setter: true},
+		{Name: "Location.prototype.assign", Type: schemas.SinkNavigation, Setter: false, ArgIndex: 0},
+		{Name: "Location.prototype.replace", Type: schemas.SinkNavigation, Setter: false, ArgIndex: 0},
+
+		{Name: "open", Type: schemas.SinkNavigation, Setter: false, ArgIndex: 0}, // Global open (window.open)
+
+		// History API (SPA Navigation/DOM XSS vectors) - Added for increased effectiveness in SPAs.
+		// The URL is the 3rd argument (index 2).
+		{Name: "History.prototype.pushState", Type: schemas.SinkNavigation, Setter: false, ArgIndex: 2},
+		{Name: "History.prototype.replaceState", Type: schemas.SinkNavigation, Setter: false, ArgIndex: 2},
 
 		// -- Resource Loading Sinks --
 		{Name: "HTMLScriptElement.prototype.src", Type: schemas.SinkScriptSrc, Setter: true},

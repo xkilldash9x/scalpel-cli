@@ -56,7 +56,7 @@ func setupTaintAdapterTest(t *testing.T) (*adapters.TaintAdapter, *core.Analysis
 func TestTaintAdapter_Analyze_SuccessOrchestration(t *testing.T) {
 	adapter, ctx, mockBM, mockSession, mockOAST := setupTaintAdapterTest(t)
 
-	mockBM.On("NewAnalysisContext", mock.Anything, ctx.Task, schemas.DefaultPersona, "", "", ctx.Global.FindingsChan).Return(mockSession, nil)
+	mockBM.On("NewAnalysisContext", mock.Anything, ctx.Global.Config, schemas.DefaultPersona, "", "", ctx.Global.FindingsChan).Return(mockSession, nil)
 	mockOAST.On("GetServerURL").Return("http://oast.com")
 	mockOAST.On("GetInteractions", mock.Anything, mock.Anything).Return([]schemas.OASTInteraction{}, nil)
 	mockSession.On("ExposeFunction", mock.Anything, mock.Anything, mock.Anything).Return(nil)

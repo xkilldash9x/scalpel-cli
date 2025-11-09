@@ -4,11 +4,11 @@ package service
 import (
 	"context"
 	"fmt"
+	"strings"
 	"sync"
 
+	"github.com/chromedp/chromedp"
 	"github.com/jackc/pgx/v5/pgxpool"
-	"go.uber.org/zap"
-
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser"
@@ -20,6 +20,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/orchestrator"
 	"github.com/xkilldash9x/scalpel-cli/internal/store"
 	"github.com/xkilldash9x/scalpel-cli/internal/worker"
+	"go.uber.org/zap"
 )
 
 // ComponentFactory defines the interface for creating the set of components needed for a scan.
@@ -36,6 +37,53 @@ type concreteFactory struct{}
 // NewComponentFactory creates a new production-ready component factory.
 func NewComponentFactory() ComponentFactory {
 	return &concreteFactory{}
+}
+
+// getBrowserExecOptions translates the application config into chromedp allocator options.
+func getBrowserExecOptions(cfg config.Interface) []chromedp.ExecAllocatorOption {
+	// Start with chromedp defaults
+	opts := append(chromedp.DefaultExecAllocatorOptions[:],
+		// This is the fix for the "Permission denied" error on hardened systems.
+		chromedp.NoSandbox,
+		// This flag is also recommended for stability in containers/headless envs
+		chromedp.Flag("disable-dev-shm-usage", true),
+	)
+
+	// Apply Headless configuration.
+	if cfg.Browser().Headless {
+		opts = append(opts, chromedp.Headless)
+	}
+
+	// Apply DisableGPU
+	if cfg.Browser().DisableGPU {
+		opts = append(opts, chromedp.DisableGPU)
+	}
+
+	// Add additional flags from the config file's 'args' slice.
+	for _, arg := range cfg.Browser().Args {
+		// Handle boolean flags (e.g., --no-zygote)
+		if !strings.Contains(arg, "=") {
+			// Ensure -- is prefixed if missing, for safety
+			if !strings.HasPrefix(arg, "--") {
+				arg = "--" + arg
+			}
+			opts = append(opts, chromedp.Flag(arg, true))
+			continue
+		}
+
+		// Handle key=value flags
+		parts := strings.SplitN(arg, "=", 2)
+		if len(parts) == 2 {
+			key := parts[0]
+			value := parts[1]
+			// Ensure -- is prefixed if missing
+			if !strings.HasPrefix(key, "--") {
+				key = "--" + key
+			}
+			opts = append(opts, chromedp.Flag(key, value))
+		}
+	}
+	return opts
 }
 
 // Create handles the full dependency injection and initialization of scan components.
@@ -93,12 +141,19 @@ func (f *concreteFactory) Create(ctx context.Context, cfg config.Interface, targ
 	logger.Debug("Findings consumer started (with batching).")
 
 	// 4. Browser Manager
-	// FIX: Swapped cfg and logger to match the function signature.
-	browserManager, err := browser.NewManager(ctx, cfg, logger)
+	// Create a new root allocator context for the browser lifecycle.
+	allocatorOpts := getBrowserExecOptions(cfg)
+	allocCtx, allocCancel := chromedp.NewExecAllocator(ctx, allocatorOpts...)
+
+	// Assign the cancel function to the components struct so it can be called during shutdown.
+	components.BrowserAllocatorCancel = allocCancel
+
+	browserManager, err := browser.NewManager(allocCtx, cfg, logger)
 	if err != nil {
 		initializationErr = fmt.Errorf("failed to initialize browser manager: %w", err)
 		return nil, initializationErr
 	}
+
 	// Add manager immediately so deferred Shutdown can close browsers.
 	components.BrowserManager = browserManager
 	logger.Debug("Browser manager initialized.")
@@ -189,3 +244,4 @@ func (f *concreteFactory) Create(ctx context.Context, cfg config.Interface, targ
 	// Return the components. The deferred function will not trigger Shutdown as initializationErr is nil.
 	return components, nil
 }
+

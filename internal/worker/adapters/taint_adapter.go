@@ -58,7 +58,7 @@ func (a *TaintAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 	// The NewAnalysisContext function expects the task object to configure the session.
 	session, err := analysisCtx.Global.BrowserManager.NewAnalysisContext(
 		ctx,
-		analysisCtx.Task, // Correctly pass the task object
+		analysisCtx.Global.Config, // Correctly pass the task object
 		schemas.DefaultPersona,
 		"",
 		"",

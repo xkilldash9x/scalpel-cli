@@ -37,6 +37,8 @@ type LLMMind struct {
 	// stopOnce ensures the Stop method is idempotent and safe for concurrent calls.
 	stopOnce       sync.Once
 	stateReadyChan chan struct{}
+	// observerReadyChan signals when the runObserverLoop has successfully started and subscribed to the bus.
+	observerReadyChan chan struct{}
 
 	contextLookbackSteps int
 }
@@ -69,6 +71,7 @@ func NewLLMMind(
 		currentState:         StateInitializing,
 		stopChan:             make(chan struct{}),
 		stateReadyChan:       make(chan struct{}, 1),
+		observerReadyChan:    make(chan struct{}),
 		contextLookbackSteps: contextLookbackSteps,
 	}
 
@@ -85,6 +88,24 @@ func (m *LLMMind) Start(ctx context.Context) error {
 
 	m.wg.Add(1)
 	go m.runObserverLoop(ctx)
+
+	// Wait for the observer loop to be ready (subscribed) before entering the decision loop.
+	// This prevents race conditions, especially in tests, where observations or even the first
+	// decision cycle might race with the observer loop's initialization.
+	select {
+	case <-m.observerReadyChan:
+		// Observer is ready.
+		m.logger.Debug("Observer loop signaled readiness.")
+	case <-ctx.Done():
+		m.logger.Info("Context cancelled while waiting for observer loop to start.")
+		m.wg.Wait()
+		return ctx.Err()
+	case <-m.stopChan:
+		// Stop might have been called before the observer loop even started.
+		m.logger.Info("Stop signal received while waiting for observer loop to start.")
+		m.wg.Wait()
+		return nil
+	}
 
 	m.mu.RLock()
 	initialState := m.currentState
@@ -128,9 +149,14 @@ func (m *LLMMind) Start(ctx context.Context) error {
 // observations from the CognitiveBus and processes them.
 func (m *LLMMind) runObserverLoop(ctx context.Context) {
 	defer m.wg.Done()
-	m.logger.Info("Observer loop started.")
+	// m.logger.Info("Observer loop started."); // Moved down slightly
 	obsChan, unsubscribe := m.bus.Subscribe(MessageTypeObservation)
 	defer unsubscribe()
+
+	m.logger.Info("Observer loop started and subscribed.")
+
+	// Signal that the loop is ready and subscribed.
+	close(m.observerReadyChan)
 
 	for {
 		select {

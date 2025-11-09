@@ -42,6 +42,7 @@ func (m *mockConfig) SetJWTBruteForceEnabled(b bool)              { panic("unimp
 func (m *mockConfig) SetJWTEnabled(b bool)                        { panic("unimplemented") }
 func (m *mockConfig) SetBrowserDebug(b bool)                      { panic("unimplemented") }
 func (m *mockConfig) SetBrowserDisableCache(b bool)               { panic("unimplemented") }
+func (m *mockConfig) SetBrowserDisableGPU(b bool)                   { panic("unimplemented") }
 func (m *mockConfig) SetBrowserHeadless(b bool)                   { panic("unimplemented") }
 func (m *mockConfig) SetBrowserHumanoidClickHoldMaxMs(ms int)     { panic("unimplemented") }
 func (m *mockConfig) SetBrowserHumanoidClickHoldMinMs(ms int)     { panic("unimplemented") }

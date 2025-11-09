@@ -58,8 +58,9 @@ func (p *PostgresKG) AddNode(ctx context.Context, node schemas.Node) error {
 		props = json.RawMessage("{}")
 	}
 
+	// CORRECTED: Changed table name from 'nodes' to 'kg_nodes'
 	_, err := p.pool.Exec(ctx, `
-        INSERT INTO nodes (id, type, label, status, properties, created_at, last_seen)
+        INSERT INTO kg_nodes (id, type, label, status, properties, created_at, last_seen)
         VALUES ($1, $2, $3, $4, $5, $6, $7)
         ON CONFLICT (id) DO UPDATE SET
             type = EXCLUDED.type,
@@ -85,10 +86,10 @@ func (p *PostgresKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 		props = json.RawMessage("{}")
 	}
 
-	// CORRECTED: ON CONFLICT on the natural key (from_node, to_node, type) prevents duplicate logical edges.
-	// This assumes a UNIQUE constraint exists on these three columns in the 'edges' table.
+	// CORRECTED: Changed table name from 'edges' to 'kg_edges'.
+	// This assumes a UNIQUE constraint exists on these three columns in the 'kg_edges' table.
 	_, err := p.pool.Exec(ctx, `
-        INSERT INTO edges (id, from_node, to_node, type, label, properties, created_at, last_seen)
+        INSERT INTO kg_edges (id, from_node, to_node, type, label, properties, created_at, last_seen)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
         ON CONFLICT (from_node, to_node, type) DO UPDATE SET
             label = EXCLUDED.label,
@@ -120,9 +121,10 @@ func (p *PostgresKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 func (p *PostgresKG) GetNode(ctx context.Context, id string) (schemas.Node, error) {
 	var node schemas.Node
 
+	// CORRECTED: Changed table name from 'nodes' to 'kg_nodes'
 	err := p.pool.QueryRow(ctx, `
         SELECT id, type, label, status, properties, created_at, last_seen
-        FROM nodes WHERE id = $1;
+        FROM kg_nodes WHERE id = $1;
     `, id).Scan(&node.ID, &node.Type, &node.Label, &node.Status, &node.Properties, &node.CreatedAt, &node.LastSeen)
 
 	if err != nil {
@@ -140,10 +142,11 @@ func (p *PostgresKG) GetNode(ctx context.Context, id string) (schemas.Node, erro
 
 // GetNeighbors retrieves all nodes directly connected from a given node.
 func (p *PostgresKG) GetNeighbors(ctx context.Context, nodeID string) ([]schemas.Node, error) {
+	// CORRECTED: Changed table names from 'nodes' to 'kg_nodes' and 'edges' to 'kg_edges'
 	rows, err := p.pool.Query(ctx, `
         SELECT n.id, n.type, n.label, n.status, n.properties, n.created_at, n.last_seen
-        FROM nodes n
-        JOIN edges e ON n.id = e.to_node
+        FROM kg_nodes n
+        JOIN kg_edges e ON n.id = e.to_node
         WHERE e.from_node = $1;
     `, nodeID)
 	if err != nil {
@@ -173,9 +176,10 @@ func (p *PostgresKG) GetNeighbors(ctx context.Context, nodeID string) ([]schemas
 
 // GetEdges finds all outgoing edges originating from a specific node.
 func (p *PostgresKG) GetEdges(ctx context.Context, nodeID string) ([]schemas.Edge, error) {
+	// CORRECTED: Changed table name from 'edges' to 'kg_edges'
 	rows, err := p.pool.Query(ctx, `
         SELECT id, from_node, to_node, type, label, properties, created_at, last_seen
-        FROM edges WHERE from_node = $1;
+        FROM kg_edges WHERE from_node = $1;
     `, nodeID)
 	if err != nil {
 		p.log.Error("Failed to query for edges", zap.String("node_id", nodeID), zap.Error(err))
@@ -206,9 +210,10 @@ func (p *PostgresKG) GetEdges(ctx context.Context, nodeID string) ([]schemas.Edg
 func (p *PostgresKG) QueryImprovementHistory(ctx context.Context, goalObjective string, limit int) ([]schemas.Node, error) {
 	// Uses JSON path operator (->>) to efficiently query within the 'properties' JSONB column.
 	// An index on (type, (properties->>'goal_objective')) is recommended for performance.
+	// CORRECTED: Changed table name from 'nodes' to 'kg_nodes'
 	query := `
         SELECT id, type, label, status, properties, created_at, last_seen
-        FROM nodes
+        FROM kg_nodes
         WHERE type = $1 AND properties->>'goal_objective' = $2
         ORDER BY created_at DESC
     `

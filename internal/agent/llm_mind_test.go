@@ -361,6 +361,7 @@ func mockObservationProcessing(
 	mockLTM.On("ProcessAndFlagObservation", mock.Anything, obs).Return(nil).Once()
 
 	// Mocks for recordObservationKG
+	// Use mock.Anything for the context to avoid type mismatch panics
 	mockKG.On("AddNode", mock.Anything, mock.MatchedBy(func(n schemas.Node) bool { return n.Type == schemas.NodeObservation && n.ID == obs.ID })).Return(nil).Once()
 	// Validate the edge ID as well.
 	mockKG.On("AddEdge", mock.Anything, mock.MatchedBy(func(e schemas.Edge) bool {
@@ -394,8 +395,10 @@ func TestOODALoop_HappyPath(t *testing.T) {
 
 	// --- Test Data and Configuration ---
 	missionID := "mission-ooda-happy"
+	obs1ID := "obs-1" // Observation IDs are provided externally.
 
 	// Define UUIDs for all generated entities in the correct sequence.
+	// Sequence: A1 ID, Edge M->A1 ID, Edge A1->O1 ID, A2 ID, Edge M->A2 ID
 	action1ID, edgeM_A1_ID, edgeA1_O1_ID, action2ID, edgeM_A2_ID := "action-1", "edge-M-A1", "edge-A1-O1", "action-2", "edge-M-A2"
 	mockUUIDGenerator(t, action1ID, edgeM_A1_ID, edgeA1_O1_ID, action2ID, edgeM_A2_ID)
 
@@ -409,25 +412,22 @@ func TestOODALoop_HappyPath(t *testing.T) {
 	actionChan, unsubscribeActions := bus.Subscribe(MessageTypeAction)
 	defer unsubscribeActions()
 
-	// --- 1. Set Mission ---
+	// --- 1. Set up mocks for Mission Initialization AND First Decision Cycle ---
 	mockMissionInitialization(t, mockKG, missionID)
-	mind.SetMission(Mission{ID: missionID, Objective: "Test OODA Happy Path"})
-
-	// --- 2. First Decision Cycle (Triggered by SetMission) ---
-	// Pass the expected Edge ID for the action recording.
 	mockDecisionCycle(mockKG, mockLLM, missionID, []schemas.Node{}, Action{Type: ActionNavigate}, action1ID, edgeM_A1_ID)
+
+	// --- 2. Trigger First Cycle by Setting Mission ---
+	mind.SetMission(Mission{ID: missionID, Objective: "Test OODA Happy Path"})
 	assertActionReceived(t, bus, actionChan, action1ID, "Timeout waiting for Cycle 1 Action")
 
-	// --- 3. Post Observation for First Action ---
-	observation := Observation{ID: "obs-1", SourceActionID: action1ID, Data: "success data", Result: ExecutionResult{Status: "success"}}
-	// Pass the expected Edge ID for the observation recording.
+	// --- 3. Set up mocks for Observation Processing AND Second Decision Cycle ---
+	observation := Observation{ID: obs1ID, SourceActionID: action1ID, Data: "success data", Result: ExecutionResult{Status: "success"}}
 	mockObservationProcessing(mockKG, mockLTM, observation, action1ID, edgeA1_O1_ID)
-	require.NoError(t, bus.Post(ctx, CognitiveMessage{Type: MessageTypeObservation, Payload: observation}))
-
-	// --- 4. Second Decision Cycle (Triggered by Observation) ---
 	action1Node := schemas.Node{ID: action1ID, Type: schemas.NodeAction}
-	// Pass the expected Edge ID for the second action recording.
 	mockDecisionCycle(mockKG, mockLLM, missionID, []schemas.Node{action1Node}, Action{Type: ActionConclude}, action2ID, edgeM_A2_ID)
+
+	// --- 4. Trigger Second Cycle by Posting Observation ---
+	require.NoError(t, bus.Post(ctx, CognitiveMessage{Type: MessageTypeObservation, Payload: observation}))
 	assertActionReceived(t, bus, actionChan, action2ID, "Timeout waiting for Cycle 2 Action")
 
 	// --- 5. Final Assertions ---
