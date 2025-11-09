@@ -289,16 +289,6 @@ func (a *Agent) actionLoop(ctx context.Context, actionChan <-chan CognitiveMessa
 				a.logger.Info("Agent decided to initiate self-improvement (Evolution).", zap.String("rationale", action.Rationale))
 				execResult = a.executeEvolution(ctx, action)
 
-			case ActionPerformComplexTask:
-				a.logger.Info("Agent is orchestrating a complex task (Placeholder)", zap.Any("metadata", action.Metadata))
-				taskName, _ := action.Metadata["task_name"].(string)
-				execResult = &ExecutionResult{
-					Status:          "failed",
-					ObservationType: ObservedSystemState,
-					ErrorCode:       ErrCodeNotImplemented,
-					ErrorDetails:    map[string]interface{}{"task_name": taskName},
-				}
-				// FIX: Removed the default case that was incorrectly handling all other actions.
 			}
 
 			// If execResult is not yet set, it means the action should be handled by the ExecutorRegistry.
