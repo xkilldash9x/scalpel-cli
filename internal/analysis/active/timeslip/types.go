@@ -14,7 +14,7 @@ import (
 // Define custom error types for better classification.
 var (
 	ErrH2Unsupported       = errors.New("H2 strategy failed: server did not utilize HTTP/2 (downgraded or unsupported)")
-	ErrPipeliningRejected  = errors.New("pipelining rejected by server (connection closed during write)")
+	ErrPipeliningRejected  = errors.New("pipelining rejected by server (connection closed during write or early response)")
 	ErrTargetUnreachable   = errors.New("target unreachable or timed out")
 	ErrConfigurationError  = errors.New("configuration or input data error")
 	ErrPayloadMutationFail = errors.New("payload mutation failed")
