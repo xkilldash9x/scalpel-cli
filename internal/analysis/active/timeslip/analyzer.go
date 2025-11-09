@@ -7,6 +7,7 @@ import (
 	"errors"
 	"fmt"
 	"math"
+	"net/http"
 	"sort"
 	"time"
 	"unicode/utf8"
@@ -141,8 +142,9 @@ func (a *Analyzer) Analyze(ctx context.Context, candidate *RaceCandidate) error 
 			if errors.Is(execErr, ErrH2Unsupported) || errors.Is(execErr, ErrPipeliningRejected) || errors.Is(execErr, ErrH2FrameError) {
 				a.logger.Info("Strategy not supported by target or encountered protocol error.", zap.String("strategy", string(strategy)), zap.Error(execErr))
 			} else if errors.Is(execErr, ErrTargetUnreachable) {
-				// Allow stress tests to continue even if target is unreachable under load
+				// Allow stress tests or long runs to continue even if target is temporarily unreachable under load
 				if ctx.Err() != nil {
+					// But if the context was cancelled, we must return immediately.
 					return ctx.Err()
 				}
 				a.logger.Warn("Strategy failed due to target being unreachable or timing out.", zap.String("strategy", string(strategy)), zap.Error(execErr))
@@ -190,11 +192,8 @@ func (a *Analyzer) determineStrategies(candidate *RaceCandidate) []RaceStrategy 
 	// Test hook to force H1 strategies.
 	if a.testOnlyHTTP1 {
 		return []RaceStrategy{
-			// H1Concurrent *must* run first in tests, as it's the only H1 strategy
-			// that accurately measures individual response durations, which is
-			// required for the timing anomaly heuristic in the patched E2E test.
-			H1Concurrent,
 			H1SingleByteSend,
+			H1Concurrent,
 		}
 	}
 	// For standard HTTP endpoints, we attempt all applicable strategies in order of preference (most precise first).
@@ -334,11 +333,12 @@ func (a *Analyzer) sampleUniqueResponses(responses []*RaceResponse) []core.Seria
 
 			// Ensure we don't slice in the middle of a UTF-8 character.
 			// Indexing a string (bodyStr[endIndex]) yields the byte value.
+			// We need to check bounds before accessing bodyStr[endIndex].
 			for ; endIndex > 0 && endIndex < len(bodyStr) && !utf8.RuneStart(bodyStr[endIndex]); endIndex-- {
 				// Backtrack until we find the start of a rune.
 			}
 
-			// Handle edge case where backtracking might go past the start or end
+			// Handle edge case where backtracking might go past the start or end (though less likely with the bounds check)
 			if endIndex > len(bodyStr) {
 				endIndex = len(bodyStr)
 			} else if endIndex < 0 {
@@ -353,15 +353,17 @@ func (a *Analyzer) sampleUniqueResponses(responses []*RaceResponse) []core.Seria
 			bodyStr = truncatedBody + suffix
 		}
 
-		// Handle cases where StatusCode might be 0 (e.g., synthetic responses for H2 RST_STREAM)
+		// Handle cases where StatusCode might be 0 (e.g., synthetic responses for H2 RST_STREAM, though filtered earlier)
 		statusCode := 0
+		headers := http.Header{}
 		if resp.ParsedResponse != nil {
 			statusCode = resp.ParsedResponse.StatusCode
+			headers = resp.ParsedResponse.Headers
 		}
 
 		samples = append(samples, core.SerializedResponse{
 			StatusCode: statusCode,
-			Headers:    resp.ParsedResponse.Headers,
+			Headers:    headers,
 			Body:       bodyStr,
 		})
 		sampledFingerprints[resp.Fingerprint] = true
@@ -523,8 +525,39 @@ func checkTOCTOU(result *RaceResult, config *Config, analysis *AnalysisResult) b
 	return false
 }
 
+// checkDifferentialState analyzes if multiple unique responses were received, including at least one success.
+// FIX: Refined logic to distinguish between expected serialization and inconsistent state.
 func checkDifferentialState(result *RaceResult, config *Config, analysis *AnalysisResult) bool {
 	if len(analysis.UniqueResponses) > 1 && analysis.SuccessCount >= 1 {
+
+		expectedSuccesses := 1
+		// Use the configured value if present. Check config safely.
+		if config != nil && config.ExpectedSuccesses > 0 {
+			expectedSuccesses = config.ExpectedSuccesses
+		}
+
+		// Scenario 1: Expected Serialization (Patched System)
+		// If the number of successes exactly matches the expected number AND there are exactly 2 unique responses
+		// (one success state, one failure state), this is expected behavior resulting from correct serialization.
+		if analysis.SuccessCount == expectedSuccesses && len(analysis.UniqueResponses) == 2 {
+			// It's not a vulnerability, but it confirms the state transition happened under concurrency.
+			// We assign an informational confidence level. This is crucial when timing data is unavailable (e.g., H1SingleByteSend).
+
+			// We only assign this if a higher confidence finding (e.g. from timing analysis which runs before this) hasn't already been set.
+			// If details are already present, it means a previous heuristic fired.
+			if analysis.Details != "" {
+				return true // Stop analysis, conclusion already reached by a prior heuristic (likely timing).
+			}
+
+			analysis.Vulnerable = false
+			analysis.Confidence = 0.4 // Informational confidence.
+			analysis.Details = fmt.Sprintf("INFO: State transition detected (%d unique responses), but operation count matches expectation (%d successes). Indicates successful serialization.", len(analysis.UniqueResponses), analysis.SuccessCount)
+			return true // Stop analysis, conclusion reached (Informational).
+		}
+
+		// Scenario 2: Inconsistent State (Vulnerable)
+		// Either > 2 unique responses OR SuccessCount != ExpectedSuccesses (and > 0).
+		// Note: If SuccessCount > ExpectedSuccesses, checkTOCTOU (which runs earlier) would have already caught it.
 		analysis.Vulnerable = true
 		analysis.Confidence = 0.8
 		analysis.Details = fmt.Sprintf("VULNERABLE: Differential responses detected (%d unique responses) including successful operations. Indicates inconsistent state during concurrent processing.", len(analysis.UniqueResponses))
@@ -567,7 +600,8 @@ func checkStateFlutter(result *RaceResult, config *Config, analysis *AnalysisRes
 func checkTimingAnomalies(result *RaceResult, config *Config, analysis *AnalysisResult) bool {
 	// Timing anomalies are unreliable for strategies where individual request timing is obscured or artificial.
 	// H2Dependency timing is not measured per request in the current implementation.
-	if result.Strategy == AsyncGraphQL || result.Strategy == H2Dependency {
+	// FIX: Pipelining (H1SingleByteSend) also does not provide reliable per-request timing.
+	if result.Strategy == AsyncGraphQL || result.Strategy == H2Dependency || result.Strategy == H1SingleByteSend {
 		return false
 	}
 
