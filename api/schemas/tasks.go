@@ -58,8 +58,15 @@ type AgentMissionParams struct {
 
 // JSFileTaskParams provides the parameters for a JavaScript file analysis task.
 type JSFileTaskParams struct {
-	FilePath string `json:"file_path"`        // The path or URL of the JavaScript file.
+	FilePath string `json:"file_path"`         // The path or URL of the JavaScript file.
 	Content  string `json:"content,omitempty"` // The content of the file, if already available.
+}
+
+// RaceConditionParams defines parameters for the Race Condition task.
+type RaceConditionParams struct {
+	Method  string              `json:"method"`
+	Headers map[string][]string `json:"headers"`
+	Body    []byte              `json:"body"`
 }
 
 // -- Humanoid Task Parameter Definitions --

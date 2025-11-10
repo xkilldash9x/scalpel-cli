@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/network/customhttp"
 	"go.uber.org/zap"
 )
 
@@ -25,16 +25,12 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 	}
 
 	// 1. Configure the client for H2.
-	// FIX: Renamed function and updated field names for consistency with network package refactor.
-	clientConfig := network.NewBrowserClientConfig()
+	clientConfig := customhttp.NewBrowserClientConfig()
 	clientConfig.RequestTimeout = config.Timeout
 	clientConfig.InsecureSkipVerify = config.InsecureSkipVerify
-	// The new transport automatically attempts H2, so ForceHTTP2 is no longer needed.
-	// Optimize for single connection reuse.
-	clientConfig.MaxIdleConnsPerHost = 1
-	clientConfig.MaxConnsPerHost = 1
+	// The customhttp client is already optimized for connection reuse, so no special config is needed.
 
-	client := network.NewClient(clientConfig)
+	client := customhttp.NewCustomClient(clientConfig, logger)
 
 	// 2. Prepare for concurrent execution.
 	resultsChan := make(chan *RaceResponse, config.Concurrency)
@@ -94,7 +90,7 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 			}
 			req.Header = mutatedHeaders
 
-			resp, err := client.Do(req)
+			resp, err := client.Do(ctx, req)
 			reqDuration := time.Since(reqStart)
 
 			if err != nil {

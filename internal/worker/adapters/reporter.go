@@ -76,6 +76,16 @@ func (r *ContextReporter) Report(finding taint.CorrelatedFinding) {
 	r.logger.Info("Taint finding recorded", zap.String("vulnerability", vulnType), zap.String("severity", string(severity)), zap.Bool("confirmed", finding.IsConfirmed))
 }
 
+func (r *ContextReporter) Write(envelope *schemas.ResultEnvelope) error {
+	if envelope == nil {
+		return nil
+	}
+	for _, finding := range envelope.Findings {
+		r.Ctx.AddFinding(finding)
+	}
+	return nil
+}
+
 func (r *ContextReporter) classifyTaintFinding(finding taint.CorrelatedFinding) (string, schemas.Severity, string) {
 	// Refactored: Use schemas.SinkExecution constant
 	if finding.Sink == schemas.SinkExecution {
