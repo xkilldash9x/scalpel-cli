@@ -25,7 +25,7 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 	// CRITICAL: Set a very short idle timeout to approximate disabling keep-alives.
 	clientConfig.IdleConnTimeout = 1 * time.Millisecond
 	client := customhttp.NewCustomClient(clientConfig, logger)
-
+	defer client.CloseAll()
 	// Get the exclusion map once for use in all goroutines.
 	excludeMap := config.GetExcludedHeaders()
 

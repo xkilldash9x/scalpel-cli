@@ -42,7 +42,7 @@ func (a *TimeslipAdapter) Analyze(ctx context.Context, analysisCtx *core.Analysi
 	analyzer, err := timeslip.NewAnalyzer(
 		scanID,
 		timeslipConfig,
-		logger,
+		// logger, // Removed logger as it's now embedded in the Analyzer struct.
 		NewContextReporter(analysisCtx),
 	)
 	if err != nil {

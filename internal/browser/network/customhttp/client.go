@@ -1,4 +1,3 @@
-// internal/browser/network/customhttp/client.go
 package customhttp
 
 import (
@@ -17,6 +16,7 @@ import (
 	"sync"
 	"time"
 
+	"github.com/xkilldash9x/scalpel-cli/internal/observability" // Added import
 	"go.uber.org/zap"
 )
 
@@ -29,7 +29,7 @@ type ConnectionPool interface {
 	IsIdle(timeout time.Duration) bool
 }
 
-// CustomClient is a sophisticated, low-level HTTP client designed for fine-grained
+// CustomClient is a sophisticated, low level HTTP client designed for fine grained
 // control over HTTP/1.1 and HTTP/2 connections. It is the core of the browser's
 // networking stack, managing persistent connections on a per-host basis and handling
 // the full request lifecycle, including cookies, redirects, retries, and authentication.
@@ -41,7 +41,10 @@ type CustomClient struct {
 	Config *ClientConfig
 	Logger *zap.Logger
 
-	mu        sync.Mutex
+	// mu protects the client maps (h1Clients, h2Clients).
+	// Changed from sync.Mutex to sync.RWMutex to allow concurrent reads (e.g., getting connection count)
+	// and optimize connection lookup.
+	mu        sync.RWMutex
 	h1Clients map[string]*H1Client // key: "host:port"
 	h2Clients map[string]*H2Client // key: "host:port"
 
@@ -59,8 +62,9 @@ func NewCustomClient(config *ClientConfig, logger *zap.Logger) *CustomClient {
 	if config == nil {
 		config = NewBrowserClientConfig()
 	}
+	// If no logger is provided, fetch the global logger.
 	if logger == nil {
-		logger = zap.NewNop()
+		logger = observability.GetLogger()
 	}
 
 	client := &CustomClient{
@@ -77,6 +81,14 @@ func NewCustomClient(config *ClientConfig, logger *zap.Logger) *CustomClient {
 	go client.connectionEvictor()
 
 	return client
+}
+
+// ConnectionCount returns the total number of active connections (H1 + H2).
+// This method is thread-safe and primarily intended for testing purposes.
+func (c *CustomClient) ConnectionCount() int {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return len(c.h1Clients) + len(c.h2Clients)
 }
 
 // Do executes a single HTTP request and returns the response. This is the main
@@ -160,6 +172,14 @@ func (c *CustomClient) executeWithRetries(ctx context.Context, req *http.Request
 	attempt := 0
 
 	for {
+		// CRITICAL FIX: Clear the response from the previous attempt if this is a retry.
+		// If the previous attempt returned a retryable status code (e.g., 503), 'resp' is non-nil.
+		// The execution logic (like H1 fallback check `if resp == nil`) requires resp to be nil
+		// to correctly execute the request again.
+		if attempt > 0 {
+			resp = nil
+		}
+
 		// Clone the request context for this attempt.
 		reqAttempt := req.Clone(ctx)
 
@@ -173,7 +193,7 @@ func (c *CustomClient) executeWithRetries(ctx context.Context, req *http.Request
 			reqAttempt.Body = body
 		}
 
-		// --- Execute the request (single attempt) ---
+		// -- Execute the request (single attempt) --
 		useH2 := c.shouldAttemptH2(reqAttempt.URL)
 		attemptErr := error(nil)
 
@@ -181,9 +201,18 @@ func (c *CustomClient) executeWithRetries(ctx context.Context, req *http.Request
 			resp, attemptErr = c.executeH2(ctx, reqAttempt)
 			if attemptErr != nil {
 				// If H2 fails, determine if fallback to H1 is appropriate for this attempt.
-				if strings.Contains(attemptErr.Error(), "did not negotiate HTTP/2") {
-					c.Logger.Info("H2 negotiation failed, falling back to H1", zap.String("url", req.URL.String()))
+
+				// Check for ALPN negotiation failures both during the TLS handshake (e.g. "tls: no application protocol")
+				// and after the handshake if the server didn't select "h2" (e.g. "did not negotiate HTTP/2").
+				isNegotiationFailure := strings.Contains(attemptErr.Error(), "did not negotiate HTTP/2") ||
+					strings.Contains(attemptErr.Error(), "tls: no application protocol")
+
+				if isNegotiationFailure {
+					c.Logger.Info("H2 negotiation failed, falling back to H1", zap.String("url", req.URL.String()), zap.Error(attemptErr))
 					useH2 = false
+					// Crucial: Clear the attempt error. We successfully detected the need to fallback,
+					// so this attempt shouldn't count as a failure unless the H1 execution also fails.
+					attemptErr = nil
 					// No need to explicitly close H2 client as connection failed.
 				} else {
 					// Other H2 errors (connection closed, stream error).
@@ -208,14 +237,15 @@ func (c *CustomClient) executeWithRetries(ctx context.Context, req *http.Request
 
 		err = attemptErr // Update the overall error state
 
-		// --- Check if we should retry ---
+		// -- Check if we should retry --
 		shouldRetry, retryAfter := c.shouldRetry(ctx, req, resp, err, policy, attempt)
 		if !shouldRetry {
 			break
 		}
 
 		attempt++
-		c.Logger.Warn("Retrying request", zap.Int("attempt", attempt), zap.Error(err), zap.String("url", req.URL.String()))
+		retryCount := attempt // 1-based count of the upcoming retry
+		c.Logger.Warn("Retrying request", zap.Int("attempt", retryCount), zap.Error(err), zap.String("url", req.URL.String()))
 
 		// If retrying, consume and close the response body (if present).
 		if resp != nil && resp.Body != nil {
@@ -226,7 +256,8 @@ func (c *CustomClient) executeWithRetries(ctx context.Context, req *http.Request
 		// Calculate backoff duration.
 		backoff := retryAfter
 		if backoff == 0 {
-			backoff = calculateBackoff(policy, attempt)
+			// Pass the 1-based retry count to calculateBackoff.
+			backoff = calculateBackoff(policy, retryCount)
 		}
 
 		// Wait for backoff or context cancellation.
@@ -238,6 +269,10 @@ func (c *CustomClient) executeWithRetries(ctx context.Context, req *http.Request
 			if err != nil {
 				return resp, err
 			}
+			// If we have a response but context was cancelled during backoff, return the response.
+			if resp != nil {
+				return resp, nil
+			}
 			return nil, ctx.Err()
 		}
 	}
@@ -247,6 +282,7 @@ func (c *CustomClient) executeWithRetries(ctx context.Context, req *http.Request
 
 // shouldRetry determines if the request should be retried based on the response, error, and policy.
 func (c *CustomClient) shouldRetry(ctx context.Context, req *http.Request, resp *http.Response, err error, policy *RetryPolicy, attempt int) (bool, time.Duration) {
+	// attempt is the 0-based index of the attempt that just completed.
 	if attempt >= policy.MaxRetries {
 		return false, 0
 	}
@@ -270,20 +306,28 @@ func (c *CustomClient) shouldRetry(ctx context.Context, req *http.Request, resp 
 			}
 		}
 		// Specific errors indicating connection closure (EOF, "connection closed"). Often happens with keep-alive race conditions.
-		if err == io.EOF || strings.Contains(err.Error(), "connection closed unexpectedly") || strings.Contains(err.Error(), "connection closed") {
+		if err == io.EOF || strings.Contains(err.Error(), "unexpected EOF") ||
+			strings.Contains(err.Error(), "connection closed unexpectedly") || strings.Contains(err.Error(), "connection closed") {
 			return true, 0
 		}
 
-		// Do not retry non-transient errors (e.g., TLS handshake failures, invalid request serialization, protocol errors).
+		// Do not retry non-transient errors (e.g., TLS handshake failures, invalid request serialization, definitive protocol errors).
 		return false, 0
 	}
 
-	// 3. Check HTTP status codes (only for idempotent methods).
+	// 3. Check HTTP status codes
 	isIdempotent := req.Method == http.MethodGet || req.Method == http.MethodHead ||
 		req.Method == http.MethodOptions || req.Method == http.MethodTrace ||
 		req.Method == http.MethodPut || req.Method == http.MethodDelete
 
-	if isIdempotent && policy.RetryableStatusCodes[resp.StatusCode] {
+	// Allow retry on status code if method is idempotent
+	// OR if it's not (like POST) but has a replayable body.
+	canRetryStatus := isIdempotent
+	if !canRetryStatus && req.GetBody != nil {
+		canRetryStatus = true
+	}
+
+	if canRetryStatus && policy.RetryableStatusCodes[resp.StatusCode] {
 		// Handle 429 Too Many Requests or 503 Service Unavailable with Retry-After header.
 		if resp.StatusCode == http.StatusTooManyRequests || resp.StatusCode == http.StatusServiceUnavailable {
 			if retryAfter := resp.Header.Get("Retry-After"); retryAfter != "" {
@@ -308,13 +352,19 @@ func (c *CustomClient) shouldRetry(ctx context.Context, req *http.Request, resp 
 }
 
 // calculateBackoff determines the backoff duration based on the policy and attempt number.
-func calculateBackoff(policy *RetryPolicy, attempt int) time.Duration {
-	// Exponential backoff: initial * (factor ^ (attempt-1))
-	// Attempt is 1-based here for calculation.
-	backoff := float64(policy.InitialBackoff) * math.Pow(policy.BackoffFactor, float64(attempt-1))
+// attemptNum is the 1-based index of the upcoming retry attempt.
+func calculateBackoff(policy *RetryPolicy, attemptNum int) time.Duration {
+	// Exponential backoff: initial * (factor ^ (attemptNum-1))
+	backoff := float64(policy.InitialBackoff) * math.Pow(policy.BackoffFactor, float64(attemptNum-1))
 
 	if backoff > float64(policy.MaxBackoff) || backoff <= 0 {
-		backoff = float64(policy.MaxBackoff)
+		// Handle overflow or zero/negative max backoff.
+		if policy.MaxBackoff > 0 {
+			backoff = float64(policy.MaxBackoff)
+		} else {
+			// Fallback if MaxBackoff is invalid, though default policy validation prevents this.
+			return policy.InitialBackoff
+		}
 	}
 
 	duration := time.Duration(backoff)
@@ -333,7 +383,7 @@ func calculateBackoff(policy *RetryPolicy, attempt int) time.Duration {
 	return duration
 }
 
-// --- Protocol Execution ---
+// -- Protocol Execution --
 
 // shouldAttemptH2 determines the protocol preference.
 func (c *CustomClient) shouldAttemptH2(targetURL *url.URL) bool {
@@ -362,21 +412,31 @@ func (c *CustomClient) executeH2(ctx context.Context, req *http.Request) (*http.
 	return client.Do(ctx, req)
 }
 
-// --- Connection Management ---
+// -- Connection Management --
 
 // getH1Client retrieves or creates a persistent H1Client.
 func (c *CustomClient) getH1Client(targetURL *url.URL) (*H1Client, error) {
+	// Optimization: Use RLock for lookup first.
+	c.mu.RLock()
+	key := targetURL.Host
+	client, exists := c.h1Clients[key]
+	c.mu.RUnlock()
+
+	if exists {
+		return client, nil
+	}
+
+	// If not found, acquire Write Lock to create and insert.
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	// Use Host (which includes port) as the key.
-	key := targetURL.Host
-
+	// Double-check existence after acquiring Write Lock, as another goroutine might have created it.
 	if client, exists := c.h1Clients[key]; exists {
 		return client, nil
 	}
 
-	client, err := NewH1Client(targetURL, c.Config, c.Logger)
+	var err error
+	client, err = NewH1Client(targetURL, c.Config, c.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -386,16 +446,27 @@ func (c *CustomClient) getH1Client(targetURL *url.URL) (*H1Client, error) {
 
 // getH2Client retrieves or creates a persistent H2Client.
 func (c *CustomClient) getH2Client(targetURL *url.URL) (*H2Client, error) {
+	// Optimization: Use RLock for lookup first.
+	c.mu.RLock()
+	key := targetURL.Host
+	client, exists := c.h2Clients[key]
+	c.mu.RUnlock()
+
+	if exists {
+		return client, nil
+	}
+
+	// If not found, acquire Write Lock to create and insert.
 	c.mu.Lock()
 	defer c.mu.Unlock()
 
-	key := targetURL.Host
-
+	// Double-check existence after acquiring Write Lock.
 	if client, exists := c.h2Clients[key]; exists {
 		return client, nil
 	}
 
-	client, err := NewH2Client(targetURL, c.Config, c.Logger)
+	var err error
+	client, err = NewH2Client(targetURL, c.Config, c.Logger)
 	if err != nil {
 		return nil, err
 	}
@@ -439,8 +510,8 @@ func (c *CustomClient) connectionEvictor() {
 
 	// Check interval (e.g., half the idle timeout, but not excessively frequent).
 	checkInterval := idleTimeout / 2
-	if checkInterval < 10*time.Second {
-		checkInterval = 10 * time.Second
+	if checkInterval < 1*time.Second {
+		checkInterval = 1 * time.Second
 	}
 
 	ticker := time.NewTicker(checkInterval)
@@ -513,7 +584,7 @@ func (c *CustomClient) CloseAll() {
 	}
 }
 
-// --- Cookie Handling ---
+// -- Cookie Handling --
 
 func (c *CustomClient) addCookies(req *http.Request) {
 	if c.Config.CookieJar != nil {
@@ -545,7 +616,7 @@ func (c *CustomClient) storeCookies(u *url.URL, resp *http.Response) {
 	}
 }
 
-// --- Authentication Handling ---
+// -- Authentication Handling --
 
 // handleAuthentication processes a 401 Unauthorized or 407 Proxy Auth Required response and attempts to retrieve credentials.
 func (c *CustomClient) handleAuthentication(ctx context.Context, req *http.Request, resp *http.Response) (bool, *http.Request, error) {
@@ -589,7 +660,8 @@ func (c *CustomClient) handleAuthentication(ctx context.Context, req *http.Reque
 
 	// Get credentials using the provider callback.
 	host := req.URL.Host
-	if isProxy && c.Config.DialerConfig.ProxyURL != nil {
+	// Ensure DialerConfig exists before accessing ProxyURL
+	if isProxy && c.Config.DialerConfig != nil && c.Config.DialerConfig.ProxyURL != nil {
 		host = c.Config.DialerConfig.ProxyURL.Host
 	}
 
@@ -613,7 +685,7 @@ func (c *CustomClient) handleAuthentication(ctx context.Context, req *http.Reque
 	return true, nextReq, nil
 }
 
-// --- Redirect Handling ---
+// -- Redirect Handling --
 
 func isRedirect(statusCode int) bool {
 	switch statusCode {
