@@ -22,7 +22,10 @@ var (
 	numericRegex = regexp.MustCompile(`\b\d{1,19}\b`)
 )
 
-// ExtractIdentifiers scans a request and its body for potential identifiers.
+// ExtractIdentifiers scans all parts of an HTTP request—including the URL path,
+// query parameters, headers, and JSON body—to find potential resource
+// identifiers like UUIDs and numeric IDs. It returns a slice of
+// `ObservedIdentifier`, each detailing the found value and its location.
 func ExtractIdentifiers(req *http.Request, body []byte) []ObservedIdentifier {
 	var identifiers []ObservedIdentifier
 
@@ -127,7 +130,9 @@ func extractFromJSON(data interface{}, prefix string, identifiers *[]ObservedIde
 	}
 }
 
-// GenerateTestValue creates a predictable, modified version of an identifier for testing unauthorized access.
+// GenerateTestValue creates a new, predictable value based on an observed
+// identifier, to be used in testing for unauthorized access. For numeric IDs, it
+// increments the value. For UUIDs, it generates a new random UUID.
 func GenerateTestValue(ident ObservedIdentifier) (string, error) {
 	switch ident.Type {
 	case TypeNumericID:
@@ -145,9 +150,10 @@ func GenerateTestValue(ident ObservedIdentifier) (string, error) {
 	}
 }
 
-// ApplyTestValue creates a new request with the identifier replaced by the test value.
-// This function must handle the complexity of modifying nested JSON structures.
-// Updated the signature to accept a context.Context.
+// ApplyTestValue takes an original HTTP request, an observed identifier, and a
+// new test value, and returns a new `http.Request` with the identifier's value
+// replaced. It correctly handles replacement in all supported locations,
+// including URL paths, query parameters, headers, and nested JSON bodies.
 func ApplyTestValue(ctx context.Context, req *http.Request, body []byte, ident ObservedIdentifier, testValue string) (*http.Request, []byte, error) {
 	// Clone the request using the provided context (ctx) to ensure cancellation is respected.
 	newReq := req.Clone(ctx)

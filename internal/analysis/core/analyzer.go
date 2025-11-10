@@ -21,8 +21,10 @@ const (
 	TypeAgent AnalyzerType = "AGENT"
 )
 
-// Analyzer defines the standard interface for all analysis modules.
-// This is the contract that the MonolithicWorker uses to manage and dispatch tasks to different adapters.
+// Analyzer is the core interface that all security analysis modules must
+// implement. It defines the standard contract for how the analysis engine
+// interacts with a specific scanner, regardless of whether it's active, passive,
+// or static.
 type Analyzer interface {
 	Name() string
 	Description() string
@@ -30,38 +32,39 @@ type Analyzer interface {
 	Analyze(ctx context.Context, analysisCtx *AnalysisContext) error
 }
 
-// BaseAnalyzer provides foundational fields and methods for all analysis modules.
-// It is intended to be embedded in specific analyzer implementations.
+// BaseAnalyzer provides a foundational implementation of the `Analyzer` interface,
+// handling common fields like name, description, and type. It is intended to be
+// embedded within specific analyzer implementations to reduce boilerplate code.
 type BaseAnalyzer struct {
 	name         string
 	description  string
 	analyzerType AnalyzerType
-	// Logger is exposed so implementing analyzers can use a structured logger.
-	Logger *zap.Logger
+	Logger       *zap.Logger // Exposed for use in specific analyzer implementations.
 }
 
-// NewBaseAnalyzer creates a new BaseAnalyzer instance.
+// NewBaseAnalyzer creates and initializes a new BaseAnalyzer, which can be
+// embedded in other analyzer structs to provide default implementations of the
+// Analyzer interface methods.
 func NewBaseAnalyzer(name, description string, analyzerType AnalyzerType, logger *zap.Logger) *BaseAnalyzer {
 	return &BaseAnalyzer{
 		name:         name,
 		description:  description,
 		analyzerType: analyzerType,
-		// Automatically name the logger based on the analyzer name.
-		Logger: logger.Named(name),
+		Logger:       logger.Named(name), // Automatically create a named sub-logger.
 	}
 }
 
-// Name returns the name of the analyzer.
+// Name returns the analyzer's name.
 func (b *BaseAnalyzer) Name() string {
 	return b.name
 }
 
-// Description returns the description of the analyzer.
+// Description returns the analyzer's description.
 func (b *BaseAnalyzer) Description() string {
 	return b.description
 }
 
-// Type returns the type of the analyzer (Active/Passive).
+// Type returns the analyzer's type (e.g., ACTIVE, PASSIVE).
 func (b *BaseAnalyzer) Type() AnalyzerType {
 	return b.analyzerType
 }

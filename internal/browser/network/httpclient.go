@@ -11,20 +11,35 @@ import (
 	"time"
 )
 
-// Logger defines a simple interface for logging.
+// Logger defines a minimal logging interface that this package uses to report
+// warnings, errors, and informational messages. This allows users to integrate
+// the client with their own logging framework (e.g., zap, logrus).
 type Logger interface {
+	// Warn logs a warning message.
 	Warn(msg string, args ...interface{})
+	// Info logs an informational message.
 	Info(msg string, args ...interface{})
+	// Debug logs a debug message.
 	Debug(msg string, args ...interface{})
+	// Error logs an error message.
 	Error(msg string, args ...interface{})
 }
 
-// NopLogger is a default logger that does nothing.
+// NopLogger is a no-op implementation of the Logger interface that discards
+// all log messages. It is used as the default logger to prevent nil panics if
+// no logger is provided.
 type NopLogger struct{}
 
-func (n *NopLogger) Warn(msg string, args ...interface{})  {}
-func (n *NopLogger) Info(msg string, args ...interface{})  {}
+// Warn does nothing.
+func (n *NopLogger) Warn(msg string, args ...interface{}) {}
+
+// Info does nothing.
+func (n *NopLogger) Info(msg string, args ...interface{}) {}
+
+// Debug does nothing.
 func (n *NopLogger) Debug(msg string, args ...interface{}) {}
+
+// Error does nothing.
 func (n *NopLogger) Error(msg string, args ...interface{}) {}
 
 // Constants optimized for browser behavior.
@@ -45,40 +60,55 @@ const (
 // SecureMinTLSVersion defines the lowest TLS version considered secure by default.
 const SecureMinTLSVersion = tls.VersionTLS12
 
-// ClientConfig holds the configuration for the browser's HTTP client.
+// ClientConfig holds the high-level configuration for creating a customized
+// HTTP client. It consolidates settings for security, timeouts, connection pooling,
+// proxying, and state management (cookies).
 type ClientConfig struct {
-	// Security
+	// InsecureSkipVerify controls whether the client will skip TLS certificate
+	// verification. Setting this to true is insecure and should only be used in
+	// controlled testing environments.
 	InsecureSkipVerify bool
-	TLSConfig          *tls.Config
+	// TLSConfig provides a custom TLS configuration for the client. If nil, a
+	// secure default configuration will be generated.
+	TLSConfig *tls.Config
 
-	// Timeouts
+	// RequestTimeout specifies the total time limit for a single HTTP request,
+	// including connection time, redirects, and reading the response body.
 	RequestTimeout time.Duration
 
-	// Dialer configuration (TCP Layer)
+	// DialerConfig provides the low-level configuration for establishing TCP
+	// connections.
 	DialerConfig *DialerConfig
 
-	// Connection pool and behavior
-	MaxIdleConns        int
+	// MaxIdleConns is the maximum number of idle (keep-alive) connections across all hosts.
+	MaxIdleConns int
+	// MaxIdleConnsPerHost is the maximum number of idle connections to a single host.
 	MaxIdleConnsPerHost int
-	MaxConnsPerHost     int
-	IdleConnTimeout     time.Duration
+	// MaxConnsPerHost is the maximum number of connections (idle + active) to a single host.
+	MaxConnsPerHost int
+	// IdleConnTimeout is the maximum amount of time an idle connection will remain
+	// in the pool before being closed.
+	IdleConnTimeout time.Duration
 
-	// DisableKeepAlives prevents the transport from reusing TCP connections (HTTP Keep-Alive).
-	// This is useful for specific testing scenarios like race condition "dogpiling".
+	// DisableKeepAlives, if true, prevents the transport from reusing TCP
+	// connections after a request has completed.
 	DisableKeepAlives bool
 
-	// ProxyURL specifies the primary proxy server to use.
-	// If nil, it may fall back to DialerConfig.ProxyURL if set.
+	// ProxyURL specifies the proxy server for the client to use.
 	ProxyURL *url.URL
 
-	// State Management
+	// CookieJar is the cookie jar used to store and send cookies for HTTP requests.
+	// If nil, cookies will not be handled automatically.
 	CookieJar http.CookieJar
 
-	// Logger
+	// Logger is the logger instance for the client to use.
 	Logger Logger
 }
 
-// NewBrowserClientConfig creates a configuration optimized for web browsing.
+// NewBrowserClientConfig creates a new ClientConfig with settings specifically
+// optimized for emulating a modern web browser. This includes a large connection
+// pool, aggressive keep-alives, a default in-memory cookie jar, and a secure
+// low-level dialer configuration.
 func NewBrowserClientConfig() *ClientConfig {
 	dialerCfg := NewDialerConfig()
 	dialerCfg.Timeout = DefaultDialTimeout
@@ -102,7 +132,14 @@ func NewBrowserClientConfig() *ClientConfig {
 	}
 }
 
-// NewHTTPTransport creates and configures the base http.Transport.
+// NewHTTPTransport creates a new `http.Transport` based on the provided
+// ClientConfig. It is the foundational layer of the HTTP client, responsible
+// for connection pooling, dialing, TLS handshakes, and proxying.
+//
+// This function configures the transport with the custom dialer (`DialTCPContext`),
+// a secure TLS configuration, and robust connection pool settings. It also
+// explicitly disables the transport's built-in compression handling, as that
+// functionality is managed by the `CompressionMiddleware` which wraps this transport.
 func NewHTTPTransport(config *ClientConfig) *http.Transport {
 	if config == nil {
 		config = NewBrowserClientConfig()
@@ -163,7 +200,14 @@ func NewHTTPTransport(config *ClientConfig) *http.Transport {
 	return transport
 }
 
-// NewClient creates the configured http.Client for the browser.
+// NewClient creates a new `http.Client` fully configured according to the
+// provided ClientConfig. It builds a layered transport stack, starting with the
+// base `http.Transport` from `NewHTTPTransport`, and wraps it with the
+// `CompressionMiddleware` to provide transparent decompression.
+//
+// The returned client is configured to not follow redirects automatically,
+// allowing the caller to inspect and handle redirect responses manually, which
+// is a common requirement in browser automation and security scanning.
 func NewClient(config *ClientConfig) *http.Client {
 	if config == nil {
 		config = NewBrowserClientConfig()

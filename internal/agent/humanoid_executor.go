@@ -11,23 +11,29 @@ import (
 	"go.uber.org/zap"
 )
 
-// HumanoidProvider is a function type that returns the active Humanoid instance.
+// HumanoidProvider is a function type that acts as a dynamic getter for the
+// active Humanoid controller instance. This allows the executor to be created
+// before the humanoid controller is fully initialized.
 type HumanoidProvider func() *humanoid.Humanoid
 
-// HumanoidExecutor implements the ActionExecutor interface for complex, interactive browser tasks
-// that require human-like simulation (e.g., clicking, typing).
+// HumanoidExecutor is a specialized action executor for handling complex,
+// interactive browser tasks that require human-like simulation, such as
+// intelligent clicks, typing, and drag-and-drop. It delegates these tasks to the
+// `humanoid.Humanoid` controller.
 type HumanoidExecutor struct {
 	logger           *zap.Logger
 	humanoidProvider HumanoidProvider
 	handlers         map[ActionType]humanoidActionHandler
 }
 
-// humanoidActionHandler defines the function signature for a specific humanoid action handler.
+// humanoidActionHandler defines the function signature for a method that handles
+// a specific type of humanoid action.
 type humanoidActionHandler func(ctx context.Context, h *humanoid.Humanoid, action Action) error
 
 var _ ActionExecutor = (*HumanoidExecutor)(nil) // Verify interface compliance.
 
-// NewHumanoidExecutor creates a new HumanoidExecutor.
+// NewHumanoidExecutor creates and initializes a new HumanoidExecutor,
+// registering all of its action handlers.
 func NewHumanoidExecutor(logger *zap.Logger, provider HumanoidProvider) *HumanoidExecutor {
 	e := &HumanoidExecutor{
 		logger:           logger.Named("humanoid_executor"),
@@ -38,7 +44,10 @@ func NewHumanoidExecutor(logger *zap.Logger, provider HumanoidProvider) *Humanoi
 	return e
 }
 
-// Execute looks up and runs the appropriate handler for a given humanoid action.
+// Execute retrieves the active humanoid controller, finds the correct handler
+// for the given action, and executes it. It is responsible for parsing any
+// resulting errors into a structured format that the agent's mind can use for
+// decision-making.
 func (e *HumanoidExecutor) Execute(ctx context.Context, action Action) (*ExecutionResult, error) {
 	h := e.humanoidProvider()
 	if h == nil {

@@ -11,16 +11,17 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 )
 
-// IDORAnalyzer implements the Analyzer interface and orchestrates the IDOR detection process.
+// IDORAnalyzer is the main orchestrator for the Insecure Direct Object Reference
+// (IDOR) detection process. It implements the `Analyzer` interface and uses a
+// JSON comparison service to semantically compare HTTP responses.
 type IDORAnalyzer struct {
-	// logger retained for compatibility, though zap logger is preferred.
-	logger *log.Logger
-	// comparer is the injected service used for semantic comparison of responses.
-	comparer jsoncompare.JSONComparison
+	logger   *log.Logger // Standard logger for compatibility.
+	comparer jsoncompare.JSONComparison // The injected service for semantic JSON comparison.
 }
 
-// NewIDORAnalyzer creates and returns a new instance of the IDORAnalyzer.
-// It requires a logger (for compatibility) and an implementation of the JSONComparison interface.
+// NewIDORAnalyzer creates a new instance of the IDORAnalyzer. It requires a
+// logger and an implementation of the `jsoncompare.JSONComparison` interface.
+// If the comparer is nil, it initializes a default instance with a warning.
 func NewIDORAnalyzer(logger *log.Logger, comparer jsoncompare.JSONComparison) Analyzer {
 	if logger == nil {
 		logger = log.Default()
@@ -38,7 +39,9 @@ func NewIDORAnalyzer(logger *log.Logger, comparer jsoncompare.JSONComparison) An
 	}
 }
 
-// AnalyzeTraffic is the main entry point for the analysis logic.
+// AnalyzeTraffic is the primary entry point for the IDOR analysis. It takes a
+// slice of HTTP traffic, validates the configuration, sets production-ready
+// defaults, and then invokes the core detection logic.
 func (a *IDORAnalyzer) AnalyzeTraffic(ctx context.Context, traffic []RequestResponsePair, config Config) ([]Finding, error) {
 	a.logger.Println("Starting IDOR analysis...")
 

@@ -210,7 +210,7 @@ func TestGetFindingsByScanID(t *testing.T) {
 
 		columns := []string{"id", "task_id", "observed_at", "target", "module", "vulnerability_name", "severity", "description", "evidence", "recommendation", "cwe"}
 		rows := pgxmock.NewRows(columns).
-			AddRow("finding-123", "task-abc", now, "https://example.com", "SQLAnalyzer", "SQLi", "High", "desc", evidenceJSON, "reco", []string{"CWE-89"})
+			AddRow("finding-123", "task-abc", now, "https://example.com", "SQLAnalyzer", "SQLi", "High", "desc", []byte(evidenceJSON), "reco", []string{"CWE-89"})
 
 		// Use the flexible SQL matcher for a robust test.
 		mockPool.ExpectQuery(flexibleSQLMatcher(sqlGetFindings)).

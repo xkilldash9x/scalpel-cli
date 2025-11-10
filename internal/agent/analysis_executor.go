@@ -13,7 +13,10 @@ import ( // This is a comment to force a change
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
-// AnalysisExecutor implements the ActionExecutor interface for running security analysis adapters.
+// AnalysisExecutor is a specialized action executor responsible for running
+// security analysis adapters. It translates high-level agent actions (like
+// "analyze for taint") into specific analysis tasks, executes the corresponding
+// adapter, and packages the results for the agent's mind.
 type AnalysisExecutor struct {
 	logger          *zap.Logger
 	globalCtx       *core.GlobalContext
@@ -22,7 +25,9 @@ type AnalysisExecutor struct {
 
 var _ ActionExecutor = (*AnalysisExecutor)(nil)
 
-// NewAnalysisExecutor creates a new AnalysisExecutor.
+// NewAnalysisExecutor creates a new instance of the AnalysisExecutor.
+// It requires a logger, the global context for access to adapters, and a
+// session provider to get the current browser session if needed.
 func NewAnalysisExecutor(logger *zap.Logger, globalCtx *core.GlobalContext, provider SessionProvider) *AnalysisExecutor {
 	return &AnalysisExecutor{
 		logger:          logger.Named("analysis_executor"),
@@ -31,7 +36,10 @@ func NewAnalysisExecutor(logger *zap.Logger, globalCtx *core.GlobalContext, prov
 	}
 }
 
-// Execute runs the specified analysis adapter.
+// Execute triggers the appropriate security analysis based on the incoming
+// action. It handles session and artifact collection, prepares an
+// AnalysisContext, runs the analysis adapter, and returns the findings and
+// knowledge graph updates.
 func (e *AnalysisExecutor) Execute(ctx context.Context, action Action) (*ExecutionResult, error) {
 	// 1. Map ActionType to TaskType and find the adapter
 	taskType, err := e.mapActionToTaskType(action.Type)

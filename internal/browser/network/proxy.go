@@ -30,20 +30,33 @@ var (
 	isMITMEnabled bool
 )
 
-// RequestHandler defines the signature for functions that inspect or modify requests.
+// RequestHandler is the function signature for a hook that can inspect and/or
+// modify an HTTP request as it passes through the proxy. It can either return a
+// modified request to be forwarded, or it can generate a response directly,
+// effectively blocking the request from reaching its destination.
 type RequestHandler func(*http.Request, *goproxy.ProxyCtx) (*http.Request, *http.Response)
 
-// ResponseHandler defines the signature for functions that inspect or modify responses.
+// ResponseHandler is the function signature for a hook that can inspect and/or
+// modify an HTTP response as it returns from the upstream server.
 type ResponseHandler func(*http.Response, *goproxy.ProxyCtx) *http.Response
 
-// ProxyTransportConfig defines the configuration required for the proxy's upstream connections.
-// This avoids circular dependencies with higher-level customhttp packages.
+// ProxyTransportConfig defines the configuration for the proxy's own upstream
+// connections. This allows for scenarios like proxy chaining, where the interception
+// proxy forwards its traffic through another downstream proxy.
 type ProxyTransportConfig struct {
+	// DialerConfig specifies the low-level dialing configuration for the proxy's
+	// outgoing connections.
 	DialerConfig *DialerConfig
-	// Add other transport related configurations if needed (e.g., specific timeouts).
 }
 
-// InterceptionProxy holds the state and configuration for the MITM proxy.
+// InterceptionProxy implements a full Man-in-the-Middle (MITM) proxy server that
+// can intercept, inspect, and modify both HTTP and HTTPS traffic. It uses a
+// dynamically-pluggable hook system to allow for custom processing of requests
+// and responses.
+//
+// When provided with a CA certificate and key, it can perform TLS interception
+// for HTTPS traffic. If not, it will operate as a simple tunneling proxy for
+// HTTPS requests.
 type InterceptionProxy struct {
 	proxy           *goproxy.ProxyHttpServer
 	server          *http.Server
@@ -55,7 +68,18 @@ type InterceptionProxy struct {
 	logger          *zap.Logger
 }
 
-// NewInterceptionProxy creates a new MITM proxy instance.
+// NewInterceptionProxy creates, configures, and returns a new InterceptionProxy.
+// It initializes the underlying `goproxy` server, sets up the transport for
+// upstream connections (including support for proxy chaining), and configures
+// the MITM capabilities if a CA certificate and key are provided.
+//
+// Parameters:
+//   - caCert: The PEM-encoded CA certificate for signing intercepted TLS connections.
+//   - caKey: The PEM-encoded private key for the CA certificate.
+//   - transportConfig: Configuration for the proxy's upstream connections.
+//   - logger: The logger for the proxy to use.
+//
+// Returns the configured InterceptionProxy or an error if configuration fails.
 func NewInterceptionProxy(caCert, caKey []byte, transportConfig *ProxyTransportConfig, logger *zap.Logger) (*InterceptionProxy, error) {
 	proxy := goproxy.NewProxyHttpServer()
 
@@ -139,14 +163,18 @@ func NewInterceptionProxy(caCert, caKey []byte, transportConfig *ProxyTransportC
 	return ip, nil
 }
 
-// AddRequestHook registers a new request handler function.
+// AddRequestHook registers a new RequestHandler to be executed on incoming
+// requests. Handlers are executed in the order they are added. This method is
+// thread-safe.
 func (ip *InterceptionProxy) AddRequestHook(handler RequestHandler) {
 	ip.hooksMutex.Lock()
 	defer ip.hooksMutex.Unlock()
 	ip.requestHooks = append(ip.requestHooks, handler)
 }
 
-// AddResponseHook registers a new response handler function.
+// AddResponseHook registers a new ResponseHandler to be executed on incoming
+// responses. Handlers are executed in the order they are added. This method is
+// thread-safe.
 func (ip *InterceptionProxy) AddResponseHook(handler ResponseHandler) {
 	ip.hooksMutex.Lock()
 	defer ip.hooksMutex.Unlock()

@@ -20,20 +20,28 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/store"
 )
 
-// storeProvider defines an interface for creating a store, allowing for easy mocking.
-// It returns the store, a cleanup function, and an error.
+// storeProvider defines an interface for components that can create a data store
+// (schemas.Store). This abstraction is crucial for testing, as it allows for
+// the injection of a mock store instead of a live database connection.
 type storeProvider interface {
+	// Create initializes and returns a schemas.Store, a cleanup function to release
+	// resources, and an error if the creation fails.
 	Create(ctx context.Context, cfg config.Interface) (schemas.Store, func(), error)
 }
 
-// defaultStoreProvider is the production implementation for creating a real store service.
+// defaultStoreProvider is the concrete implementation of storeProvider used in
+// production. It establishes a real connection to the PostgreSQL database.
 type defaultStoreProvider struct{}
 
-// NewStoreProvider creates a new production-ready store provider.
+// NewStoreProvider is a factory function that creates a new defaultStoreProvider.
+// It provides a clean way to instantiate the production store provider.
 func NewStoreProvider() storeProvider {
 	return &defaultStoreProvider{}
 }
 
+// Create connects to the PostgreSQL database using the provided configuration,
+// initializes the store service, and returns it along with a cleanup function
+// to close the database connection pool.
 func (p *defaultStoreProvider) Create(ctx context.Context, cfg config.Interface) (schemas.Store, func(), error) {
 	logger := observability.GetLogger()
 	if cfg.Database().URL == "" {

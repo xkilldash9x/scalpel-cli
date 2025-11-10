@@ -1,4 +1,14 @@
 // internal/browser/session/cdp_executor.go
+// This file implements the humanoid.Executor interface using the Chrome DevTools
+// Protocol (CDP). It acts as a bridge, translating the browser-agnostic commands
+// from the humanoid simulation (like "dispatch mouse event" or "get element geometry")
+// into concrete chromedp actions that can be executed by the browser session.
+//
+// The cdpExecutor is responsible for the low-level details of interacting with
+// the browser, such as constructing CDP command parameters and evaluating JavaScript
+// snippets for tasks like geometry retrieval. It ensures that all browser interactions
+// initiated by the humanoid are correctly executed and their results are returned
+// in the expected format.
 package session
 
 import (
@@ -29,21 +39,27 @@ type cdpExecutor struct {
 // ensure cdpExecutor implements the interface
 var _ humanoid.Executor = (*cdpExecutor)(nil)
 
-// Sleep pauses execution for the specified duration, respecting the context.
+// Sleep implements the humanoid.Executor interface, pausing execution for a
+// specified duration. It respects the provided context, allowing the sleep to be
+// cancelled.
 func (e *cdpExecutor) Sleep(ctx context.Context, d time.Duration) error {
 	// Use the provided runActionsFunc (Session.RunActions) to execute the sleep.
 	// This centralizes context combination (combining ctx and e.ctx) within RunActions.
 	return e.runActionsFunc(ctx, chromedp.Sleep(d))
 }
 
-// RunActions implements the humanoid.Executor interface.
+// RunActions provides a generic way to execute one or more `chromedp.Action` funcs.
+// While it's part of the humanoid.Executor interface, it's not currently used by the
+// humanoid logic itself but is available for other parts of the session that might
+// need to perform direct CDP actions through the executor.
 func (e *cdpExecutor) RunActions(ctx context.Context, actions ...chromedp.Action) error {
 	// Pass the actions directly to the underlying session's RunActions function.
 	return e.runActionsFunc(ctx, actions...)
 }
 
-// DispatchMouseEvent dispatches a single mouse event via CDP.
-// ctx here is the operational context.
+// DispatchMouseEvent implements the humanoid.Executor interface, sending a mouse
+// event (e.g., move, press, release, wheel) to the browser using the CDP
+// `input.dispatchMouseEvent` command.
 func (e *cdpExecutor) DispatchMouseEvent(ctx context.Context, data schemas.MouseEventData) error {
 	// Construct the parameters using the builder pattern for clarity
 	p := input.DispatchMouseEvent(input.MouseType(data.Type), data.X, data.Y).WithButton(input.MouseButton(data.Button)).
@@ -78,8 +94,8 @@ func (e *cdpExecutor) DispatchMouseEvent(ctx context.Context, data schemas.Mouse
 	return err
 }
 
-// SendKeys dispatches keyboard events via CDP.
-// ctx here is the operational context.
+// SendKeys implements the humanoid.Executor interface, sending a sequence of raw
+// keyboard input events to the browser. It is used for simulating typing.
 func (e *cdpExecutor) SendKeys(ctx context.Context, keys string) error {
 	// --- START FIX (Removed internal timeout) ---
 	// Do not create an internal timeout. A "SendKeys" action (like pressing Enter)
@@ -102,8 +118,10 @@ func (e *cdpExecutor) SendKeys(ctx context.Context, keys string) error {
 	return err
 }
 
-// DispatchStructuredKey implements the humanoid.Executor interface.
-// It handles pressing a key combination (modifiers + key).
+// DispatchStructuredKey implements the humanoid.Executor interface. It sends a
+// structured key event, such as a keyboard shortcut (e.g., Ctrl+C), to the
+// browser. It constructs and dispatches a CDP `keyDown` event followed by a
+// `keyUp` event with the specified modifiers (Ctrl, Alt, Shift, Meta).
 func (e *cdpExecutor) DispatchStructuredKey(ctx context.Context, data schemas.KeyEventData) error {
 	// 1. Determine CDP modifiers bitmask from our internal representation.
 	var cdpModifiers input.Modifier
@@ -157,8 +175,18 @@ func (e *cdpExecutor) DispatchStructuredKey(ctx context.Context, data schemas.Ke
 	return nil
 }
 
-// GetElementGeometry retrieves the bounding box, vertices, and tag name for a selector.
-// ctx here is used to derive the timeout context for this specific operation.
+// GetElementGeometry implements the humanoid.Executor interface. It retrieves detailed
+// geometric information about a DOM element, including its vertices, dimensions,
+// and tag name.
+//
+// To achieve this efficiently and robustly, it executes a JavaScript snippet in
+// the browser that:
+// 1. Finds the element.
+// 2. Verifies that the element is visible and interactable.
+// 3. Uses the `getBoxQuads` API to get precise vertex coordinates, which is
+//    more accurate than `getBoundingClientRect` for rotated or transformed elements.
+// 4. Returns all the required information in a single JSON object, minimizing
+//    CDP roundtrips.
 func (e *cdpExecutor) GetElementGeometry(ctx context.Context, selector string) (*schemas.ElementGeometry, error) {
 	// Use JS to get geometry and attributes in one go for efficiency and atomicity.
 	// Enhanced script to handle visibility and use getBoxQuads for accuracy.
@@ -267,8 +295,11 @@ func (e *cdpExecutor) GetElementGeometry(ctx context.Context, selector string) (
 	return &geom, nil
 }
 
-// ExecuteScript executes JavaScript within the browser context.
-// ctx here is used to derive the timeout context for this specific operation.
+// ExecuteScript implements the humanoid.Executor interface, allowing for the
+// execution of arbitrary JavaScript within the context of the browser page.
+// It uses `chromedp.Evaluate` to run the script and returns the result as a
+// `json.RawMessage`. The script is configured to be asynchronous and to automatically
+// await promises.
 func (e *cdpExecutor) ExecuteScript(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
 	// Note: chromedp.Evaluate doesn't directly support passing arguments like Playwright.
 	// If args are needed, they must be embedded into the script string carefully,

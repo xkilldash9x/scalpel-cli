@@ -187,7 +187,21 @@ func parseKeyExpression(expression string) (schemas.KeyEventData, error) {
 	return data, nil
 }
 
-// Shortcut parses a key expression (e.g., "ctrl+a", "meta+c") and dispatches it.
+// Shortcut executes a keyboard shortcut, such as "ctrl+c" or "meta+a".
+// It parses the provided expression, simulates a cognitive pause before the
+// action, dispatches the structured key event to the browser, and simulates
+// a realistic hold duration for the key combination.
+//
+// The expression format is a series of modifier keys (ctrl, alt, shift, meta)
+// and a single primary key, separated by '+'. For example: "ctrl+shift+t".
+// The parser is case-insensitive for modifiers but respects the case of the
+// primary key to correctly infer the shift state (e.g., "Ctrl+A" implies Shift).
+//
+// Parameters:
+//   - ctx: The context for the shortcut operation.
+//   - keysExpression: The string representation of the keyboard shortcut.
+//
+// Returns an error if the expression is invalid or if the dispatch fails.
 func (h *Humanoid) Shortcut(ctx context.Context, keysExpression string) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -234,7 +248,26 @@ func (h *Humanoid) Shortcut(ctx context.Context, keysExpression string) error {
 	return nil
 }
 
-// Type is the public entry point for typing and acquires the lock for the entire operation.
+// Type simulates a human typing a given string of text into a specified element.
+// This is a comprehensive, high-level action that includes:
+//  1. Moving to and clicking the target element to ensure it has focus.
+//  2. Simulating a cognitive pause before starting to type.
+//  3. Typing the text character by character, with realistic, physically-modeled
+//     delays (Inter-Key Delay) between each keystroke.
+//  4. Introducing various types of common human errors (typos) based on a
+//     probabilistic model, including neighbor-key mistakes, transpositions,
+//     homoglyphs, omissions, and insertions.
+//  5. Simulating the correction of these typos, also based on a probabilistic model.
+//  6. Modeling cognitive bursts and pauses during the typing stream.
+//  7. Updating fatigue and habituation models based on the typing effort.
+//
+// Parameters:
+//   - ctx: The context for the entire typing operation.
+//   - selector: The CSS selector for the target input element.
+//   - text: The string of text to type.
+//   - opts: Optional interaction settings.
+//
+// Returns an error if the element cannot be focused or if the context is cancelled.
 func (h *Humanoid) Type(ctx context.Context, selector string, text string, opts *InteractionOptions) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()

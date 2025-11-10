@@ -9,9 +9,11 @@ import (
 	"golang.org/x/tools/go/ssa/ssautil"
 )
 
-// BuildSSAFromPackages constructs the SSA representation for the given loaded packages.
-// It assumes the packages have been loaded with at least packages.LoadAllSyntax mode
-// and that the caller has checked for critical errors in the packages.
+// BuildSSAFromPackages takes a set of loaded Go packages and constructs their
+// Static Single Assignment (SSA) form. SSA is a low-level intermediate
+// representation that is ideal for program analysis, as it makes data flow
+// explicit. This function returns the complete SSA program and the specific SSA
+// package corresponding to the primary package of interest.
 func BuildSSAFromPackages(initialPkgs []*packages.Package) (*ssa.Program, *ssa.Package, error) {
 	if len(initialPkgs) == 0 {
 		// This function should only be called with non-empty input by the fingerprinter.

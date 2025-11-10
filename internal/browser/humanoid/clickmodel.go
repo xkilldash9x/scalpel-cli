@@ -9,7 +9,26 @@ import (
 	"go.uber.org/zap"
 )
 
-// IntelligentClick performs a human-like click action on a selector.
+// IntelligentClick performs a comprehensive, human-like click action on a UI element
+// identified by a selector. This is a high-level function that orchestrates several
+// sub-systems to create a realistic and robust interaction.
+//
+// The process includes:
+//  1. Moving the mouse realistically to the target element, ensuring it's visible.
+//  2. Performing a brief "cognitive pause" before the click to simulate final verification.
+//  3. Applying physical "click noise," a small random displacement of the cursor as the mouse button is pressed.
+//  4. Dispatching the 'mousedown' event.
+//  5. Holding the mouse button down for a variable duration, modeled by an Ex-Gaussian distribution.
+//  6. Simulating subtle cursor tremor or slip while the button is held.
+//  7. Dispatching the 'mouseup' event.
+//  8. Updating internal behavioral models for fatigue and habituation.
+//
+// Parameters:
+//   - ctx: The context for the entire click operation.
+//   - selector: The CSS selector for the target element.
+//   - opts: Optional interaction settings, such as forcing visibility.
+//
+// Returns an error if any stage of the process fails (e.g., element not found, context cancelled).
 func (h *Humanoid) IntelligentClick(ctx context.Context, selector string, opts *InteractionOptions) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
