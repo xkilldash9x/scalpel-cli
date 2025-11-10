@@ -9,22 +9,24 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/jsoncompare"
 )
 
-// Severity levels for findings.
+// Severity defines the severity level of an IDOR finding.
 type Severity string
 
 const (
 	SeverityHigh   Severity = "High"
 	SeverityMedium Severity = "Medium"
-	// Other levels (Low, Info, Critical) can be added as needed.
 )
 
-// Session defines the interface for an authenticated user session.
+// Session defines a generic interface for an authenticated user session. It
+// provides a way to check if the session is authenticated and to apply the
+// session's authentication details (e.g., cookies, headers) to an HTTP request.
 type Session interface {
 	IsAuthenticated() bool
 	ApplyToRequest(req *http.Request)
 }
 
-// RequestResponsePair holds a matched HTTP request and its response, including raw bodies.
+// RequestResponsePair is a data structure that holds a single, complete HTTP
+// transaction, including the raw request and response bodies.
 type RequestResponsePair struct {
 	Request      *http.Request
 	RequestBody  []byte
@@ -32,41 +34,35 @@ type RequestResponsePair struct {
 	ResponseBody []byte
 }
 
-// Config holds the configuration for the IDOR analysis.
+// Config encapsulates all the necessary configuration for running an IDOR
+// analysis, including authenticated sessions, comparison options, and concurrency settings.
 type Config struct {
-	// Session (User A) used for baseline requests and manipulation checks.
-	Session Session
-	// SecondSession (User B) used for horizontal bypass checks.
-	SecondSession Session
-	// ComparisonOptions defines how to normalize and compare responses.
-	// This allows the IDOR analyzer to specify preferences to the jsoncompare service.
-	// Renamed from ComparisonRules/HeuristicRules.
-	ComparisonOptions jsoncompare.Options
-	// ConcurrencyLevel defines the number of concurrent workers for replaying requests.
-	ConcurrencyLevel int
-	// HttpClient is the client used to replay requests. Should be configured externally or defaults will be applied.
-	HttpClient *http.Client
+	Session          Session // The primary authenticated session (User A).
+	SecondSession    Session // The secondary authenticated session for horizontal checks (User B).
+	ComparisonOptions jsoncompare.Options // Defines how JSON responses are normalized and compared.
+	ConcurrencyLevel int                   // The number of concurrent workers for replaying requests.
+	HttpClient       *http.Client          // The HTTP client to use for replaying requests.
 }
 
-// Finding represents a potential IDOR vulnerability that has been identified.
+// Finding represents a single, potential IDOR vulnerability discovered by the
+// analyzer. It includes details about the request, the type of test performed,
+// and the evidence from the response comparison.
 type Finding struct {
-	URL        string
-	Method     string
-	Evidence   string
-	Severity   Severity
-	TestType   string // "Horizontal" or "Manipulation"
-	StatusCode int
-	// Details specific to Manipulation checks
-	Identifier  *ObservedIdentifier
-	TestedValue string
-	// Details regarding the comparison result.
-	// Renamed from ComparisonDetails/ResponseComparisonResult.
-	ComparisonDetails *jsoncompare.ComparisonResult
+	URL               string
+	Method            string
+	Evidence          string
+	Severity          Severity
+	TestType          string // "Horizontal" or "Manipulation"
+	StatusCode        int
+	Identifier        *ObservedIdentifier // Details about the identifier that was manipulated.
+	TestedValue       string              // The value used to replace the original identifier.
+	ComparisonDetails *jsoncompare.ComparisonResult // The detailed result from the JSON comparison.
 }
 
 // --- Types related to Identifier Extraction (for Manipulation strategy) ---
 
-// IdentifierType distinguishes between different kinds of identifiers.
+// IdentifierType enumerates the kinds of resource identifiers that the analyzer
+// can detect, such as numeric IDs or UUIDs.
 type IdentifierType string
 
 const (
@@ -74,7 +70,8 @@ const (
 	TypeUUID      IdentifierType = "UUID"
 )
 
-// IdentifierLocation specifies where in the request the identifier was found.
+// IdentifierLocation specifies the part of an HTTP request where an identifier
+// was discovered.
 type IdentifierLocation string
 
 const (
@@ -84,15 +81,16 @@ const (
 	LocationHeader     IdentifierLocation = "Header"
 )
 
-// ObservedIdentifier represents a potential ID that was observed in the traffic.
+// ObservedIdentifier is a detailed record of a potential resource identifier
+// found within an HTTP request. It captures the identifier's value, its type,
+// and its precise location (e.g., a specific URL path segment, query parameter,
+// or JSON body key).
 type ObservedIdentifier struct {
-	Value    string
-	Type     IdentifierType
-	Location IdentifierLocation
-	// Key is the parameter name (Query/Header) or JSON path (JSONBody, e.g., data.items[0].id).
-	Key string
-	// PathIndex is the index in the URL path (e.g., /users/123 -> index 1).
-	PathIndex int
+	Value     string
+	Type      IdentifierType
+	Location  IdentifierLocation
+	Key       string // The parameter name (Query/Header) or JSON path (e.g., "data.items[0].id").
+	PathIndex int    // The index in the URL path (e.g., for "/users/123", the index is 1).
 }
 
 func (o ObservedIdentifier) String() string {

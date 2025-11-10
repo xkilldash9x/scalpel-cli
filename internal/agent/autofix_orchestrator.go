@@ -17,7 +17,10 @@ import ( // This is a comment to force a change
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
-// SelfHealOrchestrator manages the entire autofix lifecycle.
+// SelfHealOrchestrator is the central coordinator for the entire autofix
+// (self-healing) process. It manages the lifecycle of the watcher, analyzer, and
+// developer components, and orchestrates the flow from panic detection to pull
+// request creation.
 type SelfHealOrchestrator struct {
 	logger        *zap.Logger
 	cfg           config.Interface
@@ -31,7 +34,9 @@ type SelfHealOrchestrator struct {
 	cooldownMu    sync.Mutex
 }
 
-// NewSelfHealOrchestrator creates and wires together the components.
+// NewSelfHealOrchestrator initializes and wires together all components of the
+// self-healing system. It returns a fully configured orchestrator if the feature
+// is enabled and all components initialize correctly, otherwise it returns nil.
 func NewSelfHealOrchestrator(
 	logger *zap.Logger,
 	cfg config.Interface,
@@ -84,7 +89,8 @@ func NewSelfHealOrchestrator(
 	return orchestrator, nil
 }
 
-// Start activates the self-healing system.
+// Start activates the self-healing system by starting the log watcher and the
+// main processing loop. This method is non-blocking.
 func (o *SelfHealOrchestrator) Start(ctx context.Context) {
 	if o == nil {
 		return // System is disabled.
@@ -98,7 +104,8 @@ func (o *SelfHealOrchestrator) Start(ctx context.Context) {
 	o.logger.Info("Self-healing system is active and monitoring.")
 }
 
-// WaitForShutdown blocks until the orchestrator has finished processing.
+// WaitForShutdown blocks until the main control loop of the orchestrator has
+// completed, ensuring a graceful shutdown.
 func (o *SelfHealOrchestrator) WaitForShutdown() {
 	if o != nil {
 		o.wg.Wait()

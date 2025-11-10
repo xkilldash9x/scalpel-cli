@@ -1,4 +1,21 @@
 // internal/browser/session/interactor.go
+// This file defines the Interactor, a component responsible for performing
+// automated, intelligent, and recursive interactions with a web page. Its goal
+// is to explore a web application's state space by discovering and interacting
+// with UI elements like a human user would.
+//
+// The core logic operates in a depth-first recursive manner:
+// 1. Discover all new, unique, and interactable elements on the current page.
+// 2. Prioritize these elements (e.g., fill in input fields before clicking submit).
+// 3. Interact with a subset of these elements (e.g., click, type, select).
+// 4. After an interaction, wait for the page to stabilize (e.g., for JS updates).
+// 5. Recurse to the next depth level to discover new elements that may have appeared.
+//
+// To avoid data races and handle dynamic content robustly, the Interactor uses
+// an atomic JavaScript-based discovery mechanism. It tags elements in the DOM,
+// takes a snapshot of their state, and then uses unique selectors for subsequent
+// interactions. This ensures that interactions target the correct elements, even
+// if the DOM is modified between discovery and action.
 package session
 
 import (
@@ -26,24 +43,28 @@ import (
 
 // -- Structs and Constructors --
 
-// StabilizationFunc is a function type that waits for the application state to stabilize.
+// StabilizationFunc defines the signature for a function that can be used to
+// wait for the page to become stable (e.g., waiting for network idle or for
+// specific animations to complete).
 type StabilizationFunc func(ctx context.Context) error
 
-// ErrStaleElement indicates that the element reference (NodeID) is no longer valid,
-// likely due to a page navigation or DOM modification.
+// ErrStaleElement is a sentinel error used to indicate that an interaction
+// failed because the target DOM element is no longer attached to the document
+// or has otherwise become invalid, typically due to a navigation or a dynamic
+// DOM update.
 var ErrStaleElement = errors.New("element is stale or detached from the document")
 
-// Interactor is responsible for intelligently interacting with web pages.
+// Interactor orchestrates the automated, intelligent exploration of a web page.
+// It discovers interactive elements, prioritizes them, and performs actions
+// (clicking, typing) in a recursive, depth-first manner to uncover new states
+// of the application.
 type Interactor struct {
 	logger      *zap.Logger
-	humanoid    *humanoid.Humanoid // This can be nil if humanoid is disabled
+	humanoid    *humanoid.Humanoid // Can be nil if human-like interaction is disabled.
 	stabilizeFn StabilizationFunc
 	rng         *rand.Rand
-	// executor is used to run browser actions.
-	//  Changed from *Session to ActionExecutor interface.
-	executor ActionExecutor
-	// sessionCtx is the master context for the session lifetime, needed for cleanup tasks.
-	sessionCtx context.Context
+	executor    ActionExecutor
+	sessionCtx  context.Context
 }
 
 // elementSnapshot holds the extracted data from the DOM element at the time of discovery.
@@ -65,9 +86,17 @@ type interactiveElement struct {
 	IsInput     bool
 }
 
-// NewInteractor creates a new interactor instance.
+// NewInteractor creates and initializes a new Interactor.
 //
-//	Updated signature to accept ActionExecutor and session context.
+// Parameters:
+//   - logger: The logger for the Interactor to use.
+//   - h: An optional `humanoid.Humanoid` instance for realistic interactions. If nil,
+//     the Interactor will fall back to direct CDP actions.
+//   - stabilizeFn: A function that will be called to wait for the page to stabilize
+//     after interactions.
+//   - executor: An `ActionExecutor` (typically the Session) used to run browser actions.
+//   - sessionCtx: The master context for the browser session, used for cleanup tasks
+//     that must outlive specific interaction operations.
 func NewInteractor(logger *zap.Logger, h *humanoid.Humanoid, stabilizeFn StabilizationFunc, executor ActionExecutor, sessionCtx context.Context) *Interactor {
 	source := rand.NewSource(time.Now().UnixNano())
 	// Fallback stabilization function if none provided.
@@ -101,7 +130,18 @@ func NewInteractor(logger *zap.Logger, h *humanoid.Humanoid, stabilizeFn Stabili
 
 // -- Orchestration Logic --
 
-// Interact is the main entry point for the interaction logic.
+// Interact is the main entry point for starting the automated interaction process.
+// It initiates a recursive, depth-first exploration of the web page, starting at
+// depth 0.
+//
+// Parameters:
+//   - ctx: The context for the entire interaction sequence. A timeout should be
+//     set on this context to prevent indefinite execution.
+//   - config: The configuration that governs the interaction, such as the maximum
+//     recursion depth and the number of actions to perform at each depth.
+//
+// Returns an error if a critical part of the interaction fails or if the context
+// is cancelled.
 func (i *Interactor) Interact(ctx context.Context, config schemas.InteractionConfig) error {
 	opCtx := ctx
 	if _, ok := opCtx.Deadline(); !ok {

@@ -16,14 +16,18 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
-// Analyzer uses an LLM to analyze the source code and generate a patch.
+// Analyzer is a component of the self-healing system responsible for Phase 2:
+// analyzing a crash report (PostMortem) and the relevant source code to
+// generate a potential fix in the form of a patch.
 type Analyzer struct {
 	logger      *zap.Logger
 	llmClient   schemas.LLMClient
 	projectRoot string
 }
 
-// NewAnalyzer initializes a new code analysis service.
+// NewAnalyzer creates a new instance of the Analyzer. It requires a logger, an
+// LLM client for code generation, and the project's root directory to resolve
+// file paths.
 func NewAnalyzer(logger *zap.Logger, llmClient schemas.LLMClient, projectRoot string) *Analyzer {
 	return &Analyzer{
 		logger:      logger.Named("autofix-analyzer"),
@@ -32,7 +36,10 @@ func NewAnalyzer(logger *zap.Logger, llmClient schemas.LLMClient, projectRoot st
 	}
 }
 
-// GeneratePatch is the main entry point for Phase 2.
+// GeneratePatch is the primary method of the Analyzer. It takes a post-mortem
+// report, reads the source code, constructs a detailed prompt for the LLM, and
+// parses the LLM's response to produce a structured `AnalysisResult` containing
+// the proposed patch and an explanation.
 func (a *Analyzer) GeneratePatch(ctx context.Context, report PostMortem) (*AnalysisResult, error) {
 	select {
 	case <-ctx.Done():

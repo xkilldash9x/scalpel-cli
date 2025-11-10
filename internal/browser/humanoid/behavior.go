@@ -30,8 +30,28 @@ func (h *Humanoid) randExGaussian(mu, sigma, tau float64) float64 {
 	return normal + exponential
 }
 
-// CognitivePause is the public entry point for pausing. It acquires the lock.
-// It uses scaling factors applied to the baseline Ex-Gaussian parameters (Mu, Sigma, Tau).
+// CognitivePause simulates a human-like pause or delay, accounting for cognitive
+// load, task switching, and fatigue. This is the primary method for introducing
+// realistic delays in user interaction sequences. The duration is determined by
+// an Ex-Gaussian distribution, which accurately models human reaction times.
+//
+// The pause duration is influenced by:
+//   - Baseline reaction time parameters from the configuration.
+//   - Scaling factors to model simple vs. complex decisions.
+//   - A "task switching" penalty if the preceding action was of a different type (e.g., moving then typing).
+//   - The current level of simulated fatigue.
+//
+// During longer pauses, this method will also simulate subtle, continuous mouse
+// drift (hesitation) to avoid unnaturally static cursor behavior.
+//
+// Parameters:
+//   - ctx: The context for the operation.
+//   - meanScale: A factor to scale the mean (mu) of the Ex-Gaussian distribution.
+//     Values > 1.0 simulate longer average pauses (e.g., for complex decisions).
+//   - stdDevScale: A factor to scale the standard deviation (sigma) and exponential
+//     component (tau), affecting the variability and likelihood of long delays.
+//
+// Returns an error if the context is cancelled during the pause.
 func (h *Humanoid) CognitivePause(ctx context.Context, meanScale, stdDevScale float64) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
@@ -99,7 +119,19 @@ func (h *Humanoid) cognitivePause(ctx context.Context, meanScale, stdDevScale fl
 	return h.executor.Sleep(ctx, duration)
 }
 
-// Hesitate simulates a user pausing and acquires a lock. (Kept for compatibility)
+// Hesitate simulates a user pausing and idling, causing the cursor to drift
+// subtly around its current position using Pink Noise. This is used to model
+// user hesitation or brief periods of inactivity, making cursor behavior more
+// natural than a simple sleep.
+//
+// This is a public, thread-safe method. For internal use where a lock is already
+// held, call the `hesitate` method directly.
+//
+// Parameters:
+//   - ctx: The context for the operation.
+//   - duration: The total duration of the hesitation period.
+//
+// Returns an error if the context is cancelled during the hesitation.
 func (h *Humanoid) Hesitate(ctx context.Context, duration time.Duration) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()

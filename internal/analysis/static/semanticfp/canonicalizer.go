@@ -12,7 +12,10 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// Canonicalizer transforms an SSA function into a canonical representation.
+// Canonicalizer is responsible for transforming an SSA function into a
+// deterministic, canonical string representation. It normalizes register names,
+// block labels, and the order of commutative operations and block traversal to
+// ensure that semantically equivalent functions produce identical string outputs.
 type Canonicalizer struct {
 	Policy      LiteralPolicy
 	StrictMode  bool
@@ -22,7 +25,8 @@ type Canonicalizer struct {
 	output      strings.Builder
 }
 
-// NewCanonicalizer creates a new Canonicalizer. StrictMode is disabled by default.
+// NewCanonicalizer creates a new instance of the Canonicalizer with a given
+// literal abstraction policy.
 func NewCanonicalizer(policy LiteralPolicy) *Canonicalizer {
 	return &Canonicalizer{
 		Policy:      policy,
@@ -69,7 +73,10 @@ func (c *Canonicalizer) deterministicTraversal(fn *ssa.Function) []*ssa.BasicBlo
 	return sortedBlocks
 }
 
-// CanonicalizeFunction processes an SSA function.
+// CanonicalizeFunction is the main entry point for the canonicalization process.
+// It takes an SSA function, performs a deterministic traversal of its control
+// flow graph, and processes each instruction to generate a stable, comparable
+// string representation.
 func (c *Canonicalizer) CanonicalizeFunction(fn *ssa.Function) string {
 	if len(fn.Blocks) == 0 {
 		// Use fn.Signature for consistency with how external functions are represented.

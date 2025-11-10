@@ -23,7 +23,10 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
-// Developer automates the TDD cycle and Git workflow in an isolated environment.
+// Developer is a component of the self-healing system responsible for Phase 3:
+// validating a proposed patch in an isolated environment using a test-driven
+// development (TDD) cycle and, if successful, automating the Git workflow to
+// create a pull request.
 type Developer struct {
 	logger            *zap.Logger
 	llmClient         schemas.LLMClient
@@ -35,7 +38,9 @@ type Developer struct {
 	gitConfig         *config.GitConfig
 }
 
-// NewDeveloper initializes a new autonomous developer service.
+// NewDeveloper creates and initializes a new instance of the Developer. It
+// authenticates with the configured GitHub token to ensure it can create pull
+// requests.
 func NewDeveloper(logger *zap.Logger, llmClient schemas.LLMClient, cfg *config.AutofixConfig, sourceProjectRoot string) (*Developer, error) {
 	if !cfg.Enabled {
 		return &Developer{logger: logger.Named("autofix-developer"), cfg: cfg}, nil
@@ -68,7 +73,10 @@ func NewDeveloper(logger *zap.Logger, llmClient schemas.LLMClient, cfg *config.A
 	}, nil
 }
 
-// ValidateAndCommit is the main entry point for the auto-fix process.
+// ValidateAndCommit orchestrates the entire auto-fix process. It prepares an
+// isolated workspace, generates a new test case to reproduce the panic, applies
+// the provided patch, and runs the test suite to validate the fix. If successful,
+// it creates a pull request.
 func (d *Developer) ValidateAndCommit(ctx context.Context, report PostMortem, analysis *AnalysisResult) error {
 	if d.githubClient == nil {
 		return fmt.Errorf("developer service not fully initialized (Autofix might be disabled)")

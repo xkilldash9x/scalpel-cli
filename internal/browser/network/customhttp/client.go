@@ -20,32 +20,41 @@ import (
 	"go.uber.org/zap"
 )
 
-// ConnectionPool defines an interface for connection management used by CustomClient for eviction.
+// ConnectionPool defines a minimal interface for a connection pool, used by the
+// CustomClient's connection evictor to manage and close idle connections.
 type ConnectionPool interface {
+	// Close immediately closes all connections in the pool.
 	Close() error
+	// IsIdle returns true if the pool has been idle for at least the specified duration.
 	IsIdle(timeout time.Duration) bool
 }
 
-// CustomClient is a low-level HTTP client capable of manual HTTP/1.1 and HTTP/2 interactions.
-// It manages state (cookies), redirects, retries, authentication, and persistent connections per host.
+// CustomClient is a sophisticated, low-level HTTP client designed for fine-grained
+// control over HTTP/1.1 and HTTP/2 connections. It is the core of the browser's
+// networking stack, managing persistent connections on a per-host basis and handling
+// the full request lifecycle, including cookies, redirects, retries, and authentication.
+//
+// It maintains separate pools of `H1Client` and `H2Client` instances, allowing it
+// to transparently handle different protocol versions. A background goroutine
+// periodically evicts idle connections to conserve resources.
 type CustomClient struct {
 	Config *ClientConfig
 	Logger *zap.Logger
 
-	// Connection management
 	mu        sync.Mutex
-	h1Clients map[string]*H1Client // Host:Port -> H1Client
-	h2Clients map[string]*H2Client // Host:Port -> H2Client
+	h1Clients map[string]*H1Client // key: "host:port"
+	h2Clients map[string]*H2Client // key: "host:port"
 
-	// Maximum number of redirects to follow
+	// MaxRedirects specifies the maximum number of redirects to follow for a single request.
 	MaxRedirects int
 
-	// Synchronization for the background connection evictor.
 	closeChan chan struct{}
 	evictorWG sync.WaitGroup
 }
 
-// NewCustomClient creates a new CustomClient.
+// NewCustomClient creates and initializes a new CustomClient with the given
+// configuration. It also starts a background goroutine to periodically close
+// idle connections from its pools.
 func NewCustomClient(config *ClientConfig, logger *zap.Logger) *CustomClient {
 	if config == nil {
 		config = NewBrowserClientConfig()
@@ -70,7 +79,22 @@ func NewCustomClient(config *ClientConfig, logger *zap.Logger) *CustomClient {
 	return client
 }
 
-// Do executes an HTTP request, handling the full lifecycle including retries and redirects.
+// Do executes a single HTTP request and returns the response. This is the main
+// entry point for the client. It orchestrates the entire request lifecycle,
+// including:
+//
+// 1. Making the request body replayable for retries and redirects.
+// 2. Adding cookies from the client's cookie jar.
+// 3. Executing the request with a configurable retry policy for transient errors.
+// 4. Storing cookies from the response.
+// 5. Handling authentication challenges (e.g., HTTP Basic Auth).
+// 6. Following HTTP redirects up to a configured limit.
+//
+// Parameters:
+//   - ctx: The context for the entire request operation, including all retries and redirects.
+//   - req: The HTTP request to send.
+//
+// Returns the final HTTP response or an error if the request could not be completed.
 func (c *CustomClient) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
 	// Ensure the request body is replayable from the start, as it might be needed for retries or redirects.
 	if err := ensureBodyReplayable(req); err != nil {
@@ -463,7 +487,9 @@ func (c *CustomClient) evictIdleConnections(timeout time.Duration) {
 	}
 }
 
-// CloseAll closes all underlying connections and stops the background evictor.
+// CloseAll shuts down the client, closing all active and idle connections and
+// stopping the background connection evictor goroutine. It waits for the evictor
+// to terminate cleanly before returning.
 func (c *CustomClient) CloseAll() {
 	// Stop the evictor first.
 	select {

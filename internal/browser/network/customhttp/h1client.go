@@ -18,8 +18,14 @@ import (
 	"go.uber.org/zap"
 )
 
-// H1Client manages a single, persistent HTTP/1.1 connection.
-// It supports sequential requests (Keep-Alive) and manual pipelining.
+// H1Client manages a single, persistent HTTP/1.1 connection to a specific host.
+// It is designed to emulate the behavior of a browser's connection handling for
+// HTTP/1.1, including support for Keep-Alive (reusing a single TCP/TLS connection
+// for multiple sequential requests) and offering primitives for manual HTTP pipelining.
+//
+// The client establishes its connection lazily (on the first request) and is
+// thread-safe, ensuring that requests over the single connection are properly
+// serialized.
 type H1Client struct {
 	Conn        net.Conn
 	Config      *ClientConfig
@@ -28,12 +34,14 @@ type H1Client struct {
 	Logger      *zap.Logger
 	parser      *network.HTTPParser
 	bufReader   *bufio.Reader
-	mu          sync.Mutex // Protects connection state (isConnected), ensures sequential writes/reads, and protects lastUsed.
+	mu          sync.Mutex // Protects connection state and serializes access.
 	isConnected bool
-	lastUsed    time.Time // Tracks the last time the connection completed an operation.
+	lastUsed    time.Time // Tracks the last time the connection was used for eviction.
 }
 
-// NewH1Client creates a new H1Client. Connection is established lazily.
+// NewH1Client creates a new, un-connected H1Client for a given target URL and
+// configuration. The actual network connection is established lazily when the
+// first request is made.
 func NewH1Client(targetURL *url.URL, config *ClientConfig, logger *zap.Logger) (*H1Client, error) {
 	if config == nil {
 		config = NewBrowserClientConfig()
@@ -57,7 +65,13 @@ func NewH1Client(targetURL *url.URL, config *ClientConfig, logger *zap.Logger) (
 	}, nil
 }
 
-// Connect establishes the TCP/TLS connection, forcing HTTP/1.1 negotiation if applicable.
+// Connect establishes the underlying TCP and TLS connection to the target host if
+// it is not already connected. It is called automatically by `Do` and other
+// methods and is idempotent.
+//
+// For HTTPS connections, it uses ALPN to explicitly negotiate HTTP/1.1, ensuring
+// that servers that support both H2 and H1.1 will select the correct protocol
+// for this client.
 func (c *H1Client) Connect(ctx context.Context) error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -103,7 +117,7 @@ func (c *H1Client) Connect(ctx context.Context) error {
 	return nil
 }
 
-// Close closes the underlying connection.
+// Close terminates the client's network connection. This method is thread-safe.
 func (c *H1Client) Close() error {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -120,8 +134,9 @@ func (c *H1Client) closeInternal() error {
 	return nil
 }
 
-// IsIdle checks if the connection is idle based on the configured timeout.
-// Used by the connection evictor (implements ConnectionPool interface).
+// IsIdle determines if the connection has been idle for a duration longer than
+// the specified timeout. This method is used by the `CustomClient`'s connection
+// evictor to manage the connection pool and implements the `ConnectionPool` interface.
 func (c *H1Client) IsIdle(timeout time.Duration) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -135,8 +150,13 @@ func (c *H1Client) IsIdle(timeout time.Duration) bool {
 	return time.Since(c.lastUsed) > timeout
 }
 
-// Do sends a single HTTP/1.1 request and reads the response.
-// It ensures sequential access to the connection (HTTP Keep-Alive behavior).
+// Do sends a single HTTP request over the persistent connection and waits for the
+// response. It serializes access to the underlying connection, ensuring that
+// multiple goroutines calling `Do` will have their requests sent sequentially,
+// respecting HTTP/1.1 Keep-Alive semantics.
+//
+// This method handles the entire request-response cycle, including serializing
+// the request, writing it to the wire, and parsing the response.
 func (c *H1Client) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
 	if err := c.Connect(ctx); err != nil {
 		return nil, err
@@ -205,8 +225,13 @@ func (c *H1Client) Do(ctx context.Context, req *http.Request) (*http.Response, e
 	return resp, nil
 }
 
-// SendRaw sends raw bytes over the connection. Useful for manual pipelining or specific testing strategies.
-// The caller must ensure appropriate synchronization if sending multiple chunks sequentially.
+// SendRaw provides a low-level mechanism to send arbitrary raw bytes over the
+// connection. This is primarily intended for implementing manual HTTP/1.1
+// pipelining, where multiple serialized requests are sent without waiting for
+// individual responses.
+//
+// The caller is responsible for ensuring the data is a valid sequence of HTTP
+// requests. Access to the connection is serialized.
 func (c *H1Client) SendRaw(ctx context.Context, data []byte) error {
 	if err := c.Connect(ctx); err != nil {
 		return err
@@ -237,8 +262,16 @@ func (c *H1Client) SendRaw(ctx context.Context, data []byte) error {
 	return nil
 }
 
-// ReadPipelinedResponses reads a specified number of responses from the connection.
-// This should be called after manually sending pipelined requests using SendRaw.
+// ReadPipelinedResponses reads a specified number of HTTP responses from the
+// connection's buffered reader. This method is the counterpart to `SendRaw` and
+// is used to retrieve the results of a pipelined request sequence.
+//
+// Parameters:
+//   - ctx: The context for the read operation.
+//   - expectedCount: The number of responses to parse from the stream.
+//
+// Returns a slice of the parsed `http.Response` objects or an error if parsing
+// fails or the connection is closed prematurely.
 func (c *H1Client) ReadPipelinedResponses(ctx context.Context, expectedCount int) ([]*http.Response, error) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -277,7 +310,12 @@ func (c *H1Client) ReadPipelinedResponses(ctx context.Context, expectedCount int
 	return responses, nil
 }
 
-// SerializeRequest converts an *http.Request into its raw HTTP/1.1 wire format.
+// SerializeRequest converts an `http.Request` object into its raw HTTP/1.1 wire
+// format as a byte slice. It correctly handles the request line, headers, and body,
+// ensuring the `Content-Length` is set and the `Connection: keep-alive` header
+// is present for persistent connections.
+//
+// This utility is essential for manual request sending, such as in HTTP pipelining.
 func SerializeRequest(req *http.Request) ([]byte, error) {
 	if req == nil {
 		return nil, fmt.Errorf("request is nil")
