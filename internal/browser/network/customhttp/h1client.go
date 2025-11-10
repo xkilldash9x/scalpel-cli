@@ -1,4 +1,3 @@
-// internal/browser/network/customhttp/h1client.go
 package customhttp
 
 import (
@@ -15,6 +14,7 @@ import (
 	"time"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability" // Added import
 	"go.uber.org/zap"
 )
 
@@ -46,8 +46,9 @@ func NewH1Client(targetURL *url.URL, config *ClientConfig, logger *zap.Logger) (
 	if config == nil {
 		config = NewBrowserClientConfig()
 	}
+	// If no logger is provided, fetch the global logger.
 	if logger == nil {
-		logger = zap.NewNop()
+		logger = observability.GetLogger()
 	}
 
 	address, err := determineAddress(targetURL)
@@ -225,7 +226,7 @@ func (c *H1Client) Do(ctx context.Context, req *http.Request) (*http.Response, e
 	return resp, nil
 }
 
-// SendRaw provides a low-level mechanism to send arbitrary raw bytes over the
+// SendRaw provides a low level mechanism to send arbitrary raw bytes over the
 // connection. This is primarily intended for implementing manual HTTP/1.1
 // pipelining, where multiple serialized requests are sent without waiting for
 // individual responses.
@@ -348,6 +349,7 @@ func SerializeRequest(req *http.Request) ([]byte, error) {
 
 		var err error
 		// Read the body to determine length and prepare for serialization by http.Request.Write.
+		// Replaced deprecated ioutil.ReadAll with io.ReadAll
 		bodyBytes, err = io.ReadAll(reqClone.Body)
 		if err != nil {
 			return nil, fmt.Errorf("failed to read request body: %w", err)

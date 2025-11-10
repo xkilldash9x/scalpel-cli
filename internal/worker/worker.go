@@ -16,6 +16,15 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/worker/adapters"
 )
 
+// HumanoidInterface defines the methods that a humanoid instance must implement.
+type HumanoidInterface interface {
+	MoveTo(ctx context.Context, selector string, opts *humanoid.InteractionOptions) error
+	IntelligentClick(ctx context.Context, selector string, opts *humanoid.InteractionOptions) error
+	Type(ctx context.Context, selector, text string, opts *humanoid.InteractionOptions) error
+	DragAndDrop(ctx context.Context, startSelector, endSelector string, opts *humanoid.InteractionOptions) error
+	CognitivePause(ctx context.Context, meanScale, stdDevScale float64) error
+}
+
 // MonolithicWorker processes tasks in-process.
 // It serves as a central dispatcher, routing analysis tasks to the appropriate,
 // specialized adapters based on the task type.
@@ -205,7 +214,7 @@ func (w *MonolithicWorker) processHumanoidTask(ctx context.Context, analysisCtx 
 }
 
 // executeHumanoidSteps iterates through the steps and dispatches them to the controller.
-func (w *MonolithicWorker) executeHumanoidSteps(ctx context.Context, h *humanoid.Humanoid, steps []schemas.HumanoidStep) error {
+func (w *MonolithicWorker) executeHumanoidSteps(ctx context.Context, h HumanoidInterface, steps []schemas.HumanoidStep) error {
 	for i, step := range steps {
 		opts, err := convertHumanoidOptions(step.Options)
 		if err != nil {

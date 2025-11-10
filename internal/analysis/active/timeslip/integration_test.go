@@ -1,3 +1,4 @@
+// File: internal/analysis/active/timeslip/integration_test.go
 package timeslip
 
 import (
@@ -15,11 +16,13 @@ import (
 	"testing"
 	"time"
 
-	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+
+	// -- ADDED --
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 )
 
 // Helper struct to track requests received by the mock server in a thread-safe manner.
@@ -62,6 +65,9 @@ func (rt *requestTracker) Count() int {
 func TestExecuteH1Concurrent_BasicExecutionAndMutation(t *testing.T) {
 	t.Parallel()
 
+	// -- CORRECTED --
+	log := observability.GetLogger().Named(t.Name())
+
 	const concurrency = 10
 	tracker := &requestTracker{}
 
@@ -89,7 +95,8 @@ func TestExecuteH1Concurrent_BasicExecutionAndMutation(t *testing.T) {
 
 	// Execute Strategy
 	ctx := context.Background()
-	result, err := ExecuteH1Concurrent(ctx, candidate, config, oracle, zap.NewNop())
+	// -- CORRECTED --
+	result, err := ExecuteH1Concurrent(ctx, candidate, config, oracle, log)
 
 	// Assertions
 	require.NoError(t, err)
@@ -112,6 +119,9 @@ func TestExecuteH1Concurrent_BasicExecutionAndMutation(t *testing.T) {
 func TestExecuteH1Concurrent_Timeout(t *testing.T) {
 	t.Parallel()
 
+	// -- CORRECTED --
+	log := observability.GetLogger().Named(t.Name())
+
 	// Server that delays significantly
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		time.Sleep(200 * time.Millisecond)
@@ -127,7 +137,8 @@ func TestExecuteH1Concurrent_Timeout(t *testing.T) {
 	candidate := &RaceCandidate{URL: server.URL, Method: "GET"}
 
 	// Execute
-	_, err := ExecuteH1Concurrent(context.Background(), candidate, config, oracle, zap.NewNop())
+	// -- CORRECTED --
+	_, err := ExecuteH1Concurrent(context.Background(), candidate, config, oracle, log)
 
 	// Assertions
 	require.Error(t, err)
@@ -137,6 +148,9 @@ func TestExecuteH1Concurrent_Timeout(t *testing.T) {
 
 func TestExecuteH1Concurrent_ResourceLimits(t *testing.T) {
 	t.Parallel()
+
+	// -- CORRECTED --
+	log := observability.GetLogger().Named(t.Name())
 
 	// Create a large response body (e.g., 3MB, exceeding the 2MB maxResponseBodyBytes limit in types.go)
 	largeBody := make([]byte, 3*1024*1024)
@@ -154,7 +168,8 @@ func TestExecuteH1Concurrent_ResourceLimits(t *testing.T) {
 	candidate := &RaceCandidate{URL: server.URL, Method: "GET"}
 
 	// Execute
-	result, err := ExecuteH1Concurrent(context.Background(), candidate, config, oracle, zap.NewNop())
+	// -- CORRECTED --
+	result, err := ExecuteH1Concurrent(context.Background(), candidate, config, oracle, log)
 
 	// Assertions: The error might be returned directly or within the result object.
 	if err != nil {
@@ -173,6 +188,9 @@ func TestExecuteH1Concurrent_ResourceLimits(t *testing.T) {
 
 func TestExecuteH1SingleByteSend_BasicPipelining(t *testing.T) {
 	t.Parallel()
+
+	// -- CORRECTED --
+	log := observability.GetLogger().Named(t.Name())
 
 	const concurrency = 5
 	tracker := &requestTracker{}
@@ -213,7 +231,8 @@ func TestExecuteH1SingleByteSend_BasicPipelining(t *testing.T) {
 	}
 
 	// Execute Strategy
-	result, err := ExecuteH1SingleByteSend(context.Background(), candidate, config, oracle, zap.NewNop())
+	// -- CORRECTED --
+	result, err := ExecuteH1SingleByteSend(context.Background(), candidate, config, oracle, log)
 
 	// Assertions
 	// Check error first. If error occurred, we might have partial results, but we expect success here.
@@ -244,6 +263,9 @@ func TestExecuteH1SingleByteSend_BasicPipelining(t *testing.T) {
 
 func TestExecuteH2Multiplexing_Basic(t *testing.T) {
 	t.Parallel()
+
+	// -- CORRECTED --
+	log := observability.GetLogger().Named(t.Name())
 
 	const concurrency = 15
 	tracker := &requestTracker{}
@@ -278,7 +300,8 @@ func TestExecuteH2Multiplexing_Basic(t *testing.T) {
 	}
 
 	// Execute Strategy
-	result, err := ExecuteH2Multiplexing(context.Background(), candidate, config, oracle, zap.NewNop())
+	// -- CORRECTED --
+	result, err := ExecuteH2Multiplexing(context.Background(), candidate, config, oracle, log)
 
 	// Assertions
 	require.NoError(t, err)
@@ -294,6 +317,9 @@ func TestExecuteH2Multiplexing_Basic(t *testing.T) {
 
 func TestExecuteH2Multiplexing_Downgrade(t *testing.T) {
 	t.Parallel()
+
+	// -- CORRECTED --
+	log := observability.GetLogger().Named(t.Name())
 
 	// Setup Mock Server configured to *only* support HTTP/1.1
 	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -311,7 +337,8 @@ func TestExecuteH2Multiplexing_Downgrade(t *testing.T) {
 	candidate := &RaceCandidate{URL: server.URL, Method: "GET"}
 
 	// Execute
-	_, err := ExecuteH2Multiplexing(context.Background(), candidate, config, oracle, zap.NewNop())
+	// -- CORRECTED --
+	_, err := ExecuteH2Multiplexing(context.Background(), candidate, config, oracle, log)
 
 	// Assertions
 	require.Error(t, err)
@@ -323,6 +350,9 @@ func TestExecuteH2Multiplexing_Downgrade(t *testing.T) {
 
 func TestExecuteH2Dependency_BasicExecution(t *testing.T) {
 	t.Parallel()
+
+	// -- CORRECTED --
+	log := observability.GetLogger().Named(t.Name())
 
 	const concurrency = 5
 	tracker := &requestTracker{}
@@ -361,7 +391,8 @@ func TestExecuteH2Dependency_BasicExecution(t *testing.T) {
 
 	// Execute Strategy
 	// NOTE: The failure previously occurred here due to PROTOCOL_ERROR (non-monotonic stream IDs).
-	result, err := ExecuteH2Dependency(context.Background(), candidate, config, oracle, zap.NewNop())
+	// -- CORRECTED --
+	result, err := ExecuteH2Dependency(context.Background(), candidate, config, oracle, log)
 
 	// Assertions
 	require.NoError(t, err)
@@ -393,6 +424,10 @@ func TestExecuteH2Dependency_BasicExecution(t *testing.T) {
 
 func TestExecuteGraphQLAsync_BasicBatching(t *testing.T) {
 	t.Parallel()
+
+	// -- CORRECTED --
+	log := observability.GetLogger().Named(t.Name())
+
 	const concurrency = 3
 	tracker := &requestTracker{}
 
@@ -423,7 +458,8 @@ func TestExecuteGraphQLAsync_BasicBatching(t *testing.T) {
 	}
 
 	// Execute Strategy
-	result, err := ExecuteGraphQLAsync(context.Background(), candidate, config, oracle, zap.NewNop())
+	// -- CORRECTED --
+	result, err := ExecuteGraphQLAsync(context.Background(), candidate, config, oracle, log)
 
 	// Assertions
 	require.NoError(t, err)

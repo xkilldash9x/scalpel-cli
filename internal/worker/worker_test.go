@@ -24,7 +24,7 @@ import (
 )
 
 // setupTestEnvironment prepares the basic components needed for worker tests.
-func setupTestEnvironment(t *testing.T) (*config.Config, *zap.Logger, *core.GlobalContext) {
+func setupTestEnvironment(t testing.TB) (*config.Config, *zap.Logger, *core.GlobalContext) {
 	t.Helper()
 
 	// Initialize config with default values.
