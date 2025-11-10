@@ -216,6 +216,24 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 		mockAnalyzer.AssertExpectations(t)
 	})
 
+	t.Run("ValidRaceConditionAction", func(t *testing.T) {
+		mockAnalyzer := mocks.NewMockAnalyzer()
+		mockGlobalCtx.Adapters[schemas.TaskTestRaceCondition] = mockAnalyzer
+
+		analysisAction := Action{Type: ActionTestRaceCondition}
+		mockSession.On("CollectArtifacts", mock.Anything).Return((*schemas.Artifacts)(nil), nil).Once()
+		mockAnalyzer.On("Name").Return("MockTimeslipAnalyzer")
+		mockAnalyzer.On("Type").Return(core.TypeActive).Maybe()
+		mockAnalyzer.On("Analyze", mock.Anything, mock.Anything).Return(nil).Once()
+
+		result, err := registry.Execute(context.Background(), analysisAction)
+
+		require.NoError(t, err)
+		require.NotNil(t, result)
+		assert.Equal(t, "success", result.Status)
+		assert.Equal(t, ObservedAnalysisResult, result.ObservationType)
+		mockAnalyzer.AssertExpectations(t)
+	})
 	t.Run("ValidHumanoidAction_Integration", func(t *testing.T) {
 		// This is a full integration test for the HumanoidExecutor via the registry.
 		// 1. We use a real Humanoid instance.

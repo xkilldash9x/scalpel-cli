@@ -105,6 +105,7 @@ func (w *MonolithicWorker) registerAdapters() error {
 	w.adapterRegistry[schemas.TaskAnalyzeWebPageProtoPP] = adapters.NewProtoAdapter()
 	w.adapterRegistry[schemas.TaskAnalyzeHeaders] = adapters.NewHeadersAdapter()
 	w.adapterRegistry[schemas.TaskAnalyzeJWT] = adapters.NewJWTAdapter()
+	w.adapterRegistry[schemas.TaskTestRaceCondition] = adapters.NewTimeslipAdapter()
 	w.adapterRegistry[schemas.TaskAgentMission] = adapters.NewAgentAdapter()
 
 	w.logger.Info("Default analyzer adapters registered", zap.Int("count", len(w.adapterRegistry)))

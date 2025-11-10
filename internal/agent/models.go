@@ -41,20 +41,21 @@ type ActionType string
 
 const (
 	// -- Environmental Interaction (Basic) --
-	ActionNavigate   ActionType = "NAVIGATE"     // Navigates to a URL.
-	ActionClick      ActionType = "CLICK"        // Clicks on a UI element.
-	ActionInputText  ActionType = "INPUT_TEXT"   // Types text into an input field.
-	ActionSubmitForm ActionType = "SUBMIT_FORM" // Submits a form.
-	ActionScroll     ActionType = "SCROLL"      // Scrolls the page.
+	ActionNavigate     ActionType = "NAVIGATE"       // Navigates to a URL.
+	ActionClick        ActionType = "CLICK"          // Clicks on a UI element.
+	ActionInputText    ActionType = "INPUT_TEXT"     // Types text into an input field.
+	ActionSubmitForm   ActionType = "SUBMIT_FORM"    // Submits a form.
+	ActionScroll       ActionType = "SCROLL"         // Scrolls the page.
 	ActionWaitForAsync ActionType = "WAIT_FOR_ASYNC" // Pauses for a specified duration.
 
 	// -- High-Level Humanoid Actions --
 	ActionHumanoidDragAndDrop ActionType = "HUMANOID_DRAG_AND_DROP" // Performs a human-like drag-and-drop.
 
 	// -- Specific Analysis Actions --
-	ActionAnalyzeTaint          ActionType = "ANALYZE_TAINT"            // Initiates a taint analysis scan on the current page.
+	ActionAnalyzeTaint          ActionType = "ANALYZE_TAINT"           // Initiates a taint analysis scan on the current page.
 	ActionAnalyzeProtoPollution ActionType = "ANALYZE_PROTO_POLLUTION" // Scans for prototype pollution.
-	ActionAnalyzeHeaders        ActionType = "ANALYZE_HEADERS"          // Analyzes HTTP security headers.
+	ActionAnalyzeHeaders        ActionType = "ANALYZE_HEADERS"         // Analyzes HTTP security headers.
+	ActionTestRaceCondition     ActionType = "TEST_RACE_CONDITION"
 
 	// -- Codebase Interaction --
 	ActionGatherCodebaseContext ActionType = "GATHER_CODEBASE_CONTEXT" // Gathers static analysis context from the agent's own codebase.
@@ -73,21 +74,21 @@ const (
 // It includes the type of action, all necessary parameters, and the agent's
 // reasoning (thought process and rationale) behind the decision.
 type Action struct {
-	ID        string `json:"id"`        // A unique identifier for this action instance.
-	MissionID string `json:"mission_id"`// The ID of the mission this action is a part of.
-	ScanID    string `json:"scan_id"`   // The parent scan ID for correlation.
+	ID        string `json:"id"`         // A unique identifier for this action instance.
+	MissionID string `json:"mission_id"` // The ID of the mission this action is a part of.
+	ScanID    string `json:"scan_id"`    // The parent scan ID for correlation.
 
 	// Thought provides a step-by-step "chain of thought" from the LLM, showing
 	// the reasoning process that led to this specific action. This is invaluable
 	// for debugging and understanding the agent's behavior.
 	Thought string `json:"thought,omitempty"`
 
-	Type      ActionType             `json:"type"`                 // The specific type of action to perform.
-	Selector  string                 `json:"selector,omitempty"`   // The primary CSS selector for UI-based actions.
-	Value     string                 `json:"value,omitempty"`      // The value to be used (e.g., text to type, URL to navigate to).
-	Metadata  map[string]interface{} `json:"metadata,omitempty"`   // A flexible map for additional, action-specific parameters.
-	Rationale string                 `json:"rationale"`            // A concise justification for why this action was chosen.
-	Timestamp time.Time              `json:"timestamp"`            // The time the action was decided.
+	Type      ActionType             `json:"type"`               // The specific type of action to perform.
+	Selector  string                 `json:"selector,omitempty"` // The primary CSS selector for UI-based actions.
+	Value     string                 `json:"value,omitempty"`    // The value to be used (e.g., text to type, URL to navigate to).
+	Metadata  map[string]interface{} `json:"metadata,omitempty"` // A flexible map for additional, action-specific parameters.
+	Rationale string                 `json:"rationale"`          // A concise justification for why this action was chosen.
+	Timestamp time.Time              `json:"timestamp"`          // The time the action was decided.
 }
 
 // ObservationType categorizes the different kinds of information the agent can
@@ -139,10 +140,10 @@ type ExecutionResult struct {
 type CognitiveMessageType string
 
 const (
-	MessageTypeAction      CognitiveMessageType = "ACTION"      // A message containing a new action to be executed.
-	MessageTypeObservation CognitiveMessageType = "OBSERVATION" // A message containing a new observation for the mind to process.
+	MessageTypeAction      CognitiveMessageType = "ACTION"       // A message containing a new action to be executed.
+	MessageTypeObservation CognitiveMessageType = "OBSERVATION"  // A message containing a new observation for the mind to process.
 	MessageTypeStateChange CognitiveMessageType = "STATE_CHANGE" // A message indicating a change in the agent's state.
-	MessageTypeInterrupt   CognitiveMessageType = "INTERRUPT"   // A message to interrupt the agent's current process.
+	MessageTypeInterrupt   CognitiveMessageType = "INTERRUPT"    // A message to interrupt the agent's current process.
 )
 
 // MissionResult encapsulates the final output of a completed mission, including

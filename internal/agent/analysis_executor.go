@@ -152,6 +152,8 @@ func (e *AnalysisExecutor) mapActionToTaskType(actionType ActionType) (schemas.T
 		return schemas.TaskAnalyzeWebPageProtoPP, nil
 	case ActionAnalyzeHeaders:
 		return schemas.TaskAnalyzeHeaders, nil
+	case ActionTestRaceCondition:
+		return schemas.TaskTestRaceCondition, nil
 	default:
 		return "", fmt.Errorf("unsupported analysis action type: %s", actionType)
 	}

@@ -4,8 +4,13 @@ package worker_test
 import (
 	"context"
 	"errors"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -50,6 +55,7 @@ func TestNewMonolithicWorker_Registration(t *testing.T) {
 		schemas.TaskAnalyzeHeaders,
 		schemas.TaskAnalyzeJWT,
 		schemas.TaskAgentMission,
+		schemas.TaskTestRaceCondition,
 	}
 
 	for _, taskType := range expectedTasks {
@@ -132,4 +138,44 @@ func TestMonolithicWorker_ProcessTask_AdapterFailurePropagation(t *testing.T) {
 
 	// Verify that all the mock's expectations were met.
 	mockAnalyzer.AssertExpectations(t)
+}
+
+// TestMonolithicWorker_TimeslipAdapter_Success tests a successful run of the timeslip adapter.
+func TestMonolithicWorker_TimeslipAdapter_Success(t *testing.T) {
+	// 1. Setup Environment
+	cfg, logger, globalCtx := setupTestEnvironment(t)
+	w, err := worker.NewMonolithicWorker(cfg, logger, globalCtx)
+	require.NoError(t, err)
+
+	// 2. Setup a mock HTTP server
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		fmt.Fprintln(w, "Hello, client")
+	}))
+	defer server.Close()
+
+	// 3. Create the task
+	task := schemas.Task{
+		Type:      schemas.TaskTestRaceCondition,
+		TargetURL: server.URL,
+		ScanID:    uuid.New().String(),
+		Parameters: schemas.RaceConditionParams{
+			Method: "POST",
+		},
+	}
+	parsedURL, err := url.Parse(server.URL)
+	require.NoError(t, err)
+
+	analysisCtx := &core.AnalysisContext{
+		Task:      task,
+		Logger:    logger,
+		Global:    globalCtx,
+		TargetURL: parsedURL,
+	}
+
+	// 4. Process the task
+	err = w.ProcessTask(context.Background(), analysisCtx)
+
+	// 5. Assert the outcome
+	require.NoError(t, err)
 }

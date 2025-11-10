@@ -59,7 +59,7 @@ func NewExecutorRegistry(logger *zap.Logger, projectRoot string, globalCtx *core
 	r.register(codebaseExec, ActionGatherCodebaseContext)
 
 	// Register analysis actions
-	r.register(analysisExec, ActionAnalyzeTaint, ActionAnalyzeProtoPollution, ActionAnalyzeHeaders)
+	r.register(analysisExec, ActionAnalyzeTaint, ActionAnalyzeProtoPollution, ActionAnalyzeHeaders, ActionTestRaceCondition)
 
 	return r
 }

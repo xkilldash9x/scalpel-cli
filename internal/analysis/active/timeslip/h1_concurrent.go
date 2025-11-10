@@ -10,7 +10,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
+	"github.com/xkilldash9x/scalpel-cli/internal/browser/network/customhttp"
 	"go.uber.org/zap"
 )
 
@@ -19,15 +19,12 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 	startTime := time.Now()
 
 	// 1. Configure the client.
-	clientConfig := network.NewBrowserClientConfig()
+	clientConfig := customhttp.NewBrowserClientConfig()
 	clientConfig.RequestTimeout = config.Timeout
 	clientConfig.InsecureSkipVerify = config.InsecureSkipVerify
-	clientConfig.IdleConnTimeout = 0 // Disable idle connection pooling.
-
-	// CRITICAL: Explicitly disable HTTP Keep-Alive to ensure every request uses a new TCP connection.
-	clientConfig.DisableKeepAlives = true
-
-	client := network.NewClient(clientConfig)
+	// CRITICAL: Set a very short idle timeout to approximate disabling keep-alives.
+	clientConfig.IdleConnTimeout = 1 * time.Millisecond
+	client := customhttp.NewCustomClient(clientConfig, logger)
 
 	// Get the exclusion map once for use in all goroutines.
 	excludeMap := config.GetExcludedHeaders()
@@ -105,7 +102,7 @@ func ExecuteH1Concurrent(ctx context.Context, candidate *RaceCandidate, config *
 			// Setting req.Close hints to the transport to close the connection after.
 			req.Close = true
 
-			resp, err := client.Do(req)
+			resp, err := client.Do(ctx, req)
 			reqDuration := time.Since(reqStart)
 
 			if err != nil {
