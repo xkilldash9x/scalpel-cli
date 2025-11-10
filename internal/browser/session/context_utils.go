@@ -6,11 +6,19 @@ import (
 	"time"
 )
 
-// CombineContext creates a new context derived from ctx1 (primary/master context)
-// that is canceled when *either* ctx1 or ctx2 (secondary/operational context) is canceled.
-// It inherits values from ctx1. This is crucial for chromedp operations where
-// ctx1 carries the CDP connection info (the session context), and ctx2 carries the operational deadline.
-// This pattern aligns with Chromedp Best Practices (Section 1.1) by preserving CDP values.
+// CombineContext creates a new context that is a child of a primary context (`ctx1`)
+// but is also cancelled when a secondary context (`ctx2`) is cancelled. This is a
+// critical utility for working with `chromedp`, where `ctx1` is typically the
+// long-lived session or allocator context carrying essential connection values,
+// and `ctx2` is a shorter-lived operational context with a specific deadline
+// (e.g., for a single navigation or action).
+//
+// By deriving the new context from `ctx1`, it inherits all necessary values. By
+// monitoring `ctx2` in a separate goroutine, it ensures that the combined context
+// respects the operational timeout of `ctx2`.
+//
+// Returns the combined context and its cancel function. The caller is responsible
+// for calling the cancel function to release the monitoring goroutine.
 func CombineContext(ctx1, ctx2 context.Context) (context.Context, context.CancelFunc) {
 	// Derive from ctx1 to inherit values and ctx1's cancellation/deadline.
 	combinedCtx, cancel := context.WithCancel(ctx1)
@@ -30,26 +38,33 @@ func CombineContext(ctx1, ctx2 context.Context) (context.Context, context.Cancel
 	return combinedCtx, cancel
 }
 
-// valueOnlyContext wraps a parent context to create a "detached" context.
-// It inherits all values (like CDP target information) from its parent,
-// but it explicitly ignores the parent's deadline and cancellation signal.
-// (Moved from internal/browser/shared_types.go)
+// valueOnlyContext is a custom context type that wraps a parent context but
+// explicitly ignores the parent's deadline and cancellation. It inherits all
+// values from the parent, which is essential for preserving `chromedp`'s
+// connection and target information.
 type valueOnlyContext struct {
 	context.Context
 }
 
-// Deadline always returns false, removing any deadline from the parent.
+// Deadline is overridden to always return `false`, effectively removing any
+// deadline inherited from the parent context.
 func (valueOnlyContext) Deadline() (deadline time.Time, ok bool) { return }
 
-// Done always returns nil, making the context un-cancellable from its parent.
+// Done is overridden to always return `nil`, making the context immune to
+// cancellation signals from its parent.
 func (valueOnlyContext) Done() <-chan struct{} { return nil }
 
-// Err always returns nil.
+// Err is overridden to always return `nil`.
 func (valueOnlyContext) Err() error { return nil }
 
-// Detach returns a context that inherits values from ctx but is not canceled when ctx is.
-// This is useful for background tasks or cleanup operations that must outlive the parent context,
-// particularly in chromedp where the context carries connection information (Context Best Practices, Section 3.3).
+// Detach creates and returns a new context that is "detached" from its parent's
+// lifecycle. The new context inherits all the values of the parent `ctx` but will
+// not be cancelled when `ctx` is cancelled, nor will it expire when `ctx`'s
+// deadline is reached.
+//
+// This is particularly useful for launching background tasks or performing cleanup
+// operations that need to continue running even after the originating operation's
+// context has been cancelled.
 func Detach(ctx context.Context) context.Context {
 	return valueOnlyContext{ctx}
 }

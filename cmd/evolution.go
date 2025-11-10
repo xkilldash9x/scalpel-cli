@@ -15,24 +15,31 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/service"
 )
 
-// AnalystRunner defines the interface for the component that can execute
-// the evolution logic. This abstraction is key for testing.
+// AnalystRunner defines the interface for a component capable of executing the main
+// evolution logic. Using an interface allows for decoupling and easier testing
+// by enabling mock implementations.
 type AnalystRunner interface {
+	// Run starts the evolution process with a given high-level objective and an
+	// optional set of initial files for context.
 	Run(ctx context.Context, objective string, files []string) error
 }
 
-// analystInitializer is a function type that handles the creation of an
-// AnalystRunner. This allows the initialization logic to be injected.
+// analystInitializer is a function signature for creating an AnalystRunner.
+// This allows for dependency injection of the analyst's initialization logic,
+// primarily for testing purposes.
 type analystInitializer func(logger *zap.Logger, cfg config.Interface, llmClient schemas.LLMClient, kgClient schemas.KnowledgeGraphClient) (AnalystRunner, error)
 
-// initializeAnalyst provides the default, concrete implementation for creating
-// a new ImprovementAnalyst instance.
+// initializeAnalyst is the default implementation of analystInitializer. It creates
+// a new instance of the concrete ImprovementAnalyst from the 'analyst' package.
 func initializeAnalyst(logger *zap.Logger, cfg config.Interface, llmClient schemas.LLMClient, kgClient schemas.KnowledgeGraphClient) (AnalystRunner, error) {
 	return analyst.NewImprovementAnalyst(logger, cfg, llmClient, kgClient)
 }
 
-// newEvolveCmd creates the 'evolve' command.
-// It sets up the CLI and delegates execution to the testable runEvolve function.
+// newEvolveCmd creates the 'evolve' command for the CLI. This command
+// initiates the autonomous self-improvement process (Reflective OODA Loop)
+// for the codebase. It is responsible for parsing command-line flags and
+// setting up the necessary dependencies before delegating the core logic to
+// runEvolve.
 func newEvolveCmd() *cobra.Command {
 	var objective string
 	var files []string

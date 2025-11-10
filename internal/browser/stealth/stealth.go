@@ -1,3 +1,15 @@
+// package stealth provides functionality to apply various browser fingerprinting
+// evasions. It works by injecting a sophisticated JavaScript payload (`evasions.js`)
+// into every new document created in a browser session. This script runs before
+// any page scripts, allowing it to override and patch browser APIs that are commonly
+// used for fingerprinting (e.g., `navigator.plugins`, `WebGLRenderingContext`).
+//
+// In addition to the JavaScript evasions, this package also uses the Chrome
+// DevTools Protocol (CDP) to apply "defense-in-depth" overrides for fundamental
+// browser properties like the User-Agent, platform, viewport dimensions, and
+// timezone. These configurations are derived from a `schemas.Persona` object,
+// ensuring that the browser's fingerprint is consistent across both the CDP and
+// JavaScript layers.
 package stealth
 
 import (
@@ -29,8 +41,20 @@ const (
 
 var DefaultLanguages = []string{"en-US", "en"}
 
-// Apply returns a chromedp.Tasks action that applies the stealth configurations.
-// Note: The returned tasks must be executed using chromedp.Run(ctx, tasks) rather than tasks.Do(ctx).
+// Apply constructs a `chromedp.Tasks` list that, when executed, will apply all
+// the necessary stealth and persona emulation configurations to a browser session.
+// It combines JavaScript injection with direct CDP command overrides.
+//
+// The process includes:
+// 1. Marshalling the `Persona` into a JSON object.
+// 2. Creating a JavaScript payload that injects the persona and the main evasion script.
+// 3. Adding a CDP action to inject this script on all new documents.
+// 4. Adding CDP actions to override the User-Agent, platform, languages, timezone,
+//    locale, and device metrics.
+//
+// Note: This function returns a `chromedp.Tasks` object, which is a slice of
+// `chromedp.Action`. It must be executed using `chromedp.Run`, as it contains
+// low-level CDP commands that are not compatible with `chromedp.Tasks{...}.Do()`.
 func Apply(persona schemas.Persona, logger *zap.Logger) chromedp.Tasks {
 	if logger == nil {
 		// Use a Nop logger if none is provided to avoid nil pointer dereferences.
@@ -158,7 +182,10 @@ func createDeviceMetricsAction(persona schemas.Persona, logger *zap.Logger) chro
 	return metrics
 }
 
-// ApplyStealthEvasions is a convenience function that runs the Apply tasks using chromedp.Run.
+// ApplyStealthEvasions is a high-level convenience function that constructs the
+// stealth configuration tasks via `Apply` and immediately executes them on the
+// provided context using `chromedp.Run`. This provides a simple, one-shot way
+// to apply all evasions to an active browser context.
 func ApplyStealthEvasions(ctx context.Context, persona schemas.Persona, logger *zap.Logger) error {
 	tasks := Apply(persona, logger)
 	// Must use chromedp.Run as Apply generates low-level CDP actions.

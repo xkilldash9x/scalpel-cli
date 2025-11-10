@@ -8,28 +8,30 @@ import (
 	"time"
 )
 
-// LoginAttempt represents a single username/password combination.
+// LoginAttempt represents a single attempt to authenticate with a username,
+// password, and an optional CSRF token.
 type LoginAttempt struct {
 	Username  string
 	Password  string
 	CSRFToken string
 }
 
-// LoginResponse summarizes the result of a login attempt.
+// LoginResponse encapsulates the outcome of a single login attempt, providing a
+// structured analysis of the HTTP response.
 type LoginResponse struct {
 	Attempt           LoginAttempt
 	StatusCode        int
 	ResponseBody      string
 	ResponseTimeMs    int64
-	Success           bool
-	IsLockout         bool
-	IsUserEnumeration bool
+	Success           bool // Indicates if the login was successful.
+	IsLockout         bool // Indicates if the attempt triggered an account lockout.
+	IsUserEnumeration bool // Indicates if the response leaks information about the user's validity.
 	EnumerationDetail string
-	// The 'Evidence' field has been removed. Evidence is now generated
-	// when creating the final schemas.Finding in the analyzer.
 }
 
-// AnalyzeResponse interprets the HTTP response to determine the outcome of the login attempt.
+// AnalyzeResponse applies a set of heuristics to an HTTP response to determine
+// the semantic outcome of a login attempt. It checks for success, lockout, and
+// user enumeration by analyzing status codes and keywords in the response body.
 func AnalyzeResponse(attempt LoginAttempt, statusCode int, responseBody string, responseTimeMs int64) LoginResponse {
 	resp := LoginResponse{
 		Attempt:        attempt,
@@ -84,7 +86,10 @@ func AnalyzeResponse(attempt LoginAttempt, statusCode int, responseBody string, 
 	return resp
 }
 
-// GenerateSprayingPayloads creates a list of login attempts for password spraying.
+// GenerateSprayingPayloads creates a strategic list of login attempts designed
+// for password spraying. It pairs a list of known usernames with a curated list
+// of common and seasonal weak passwords. The list is structured to iterate
+// through passwords first to help evade user-specific lockout policies.
 func GenerateSprayingPayloads(knownUsers []string) []LoginAttempt {
 	// Common weak passwords for spraying.
 	year := time.Now().Year()

@@ -19,27 +19,27 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
-// LLMMind implements the Mind interface using a Large Language Model for decision making.
-// It operates on an OODA (Observe, Orient, Decide, Act) loop, interacting with other
-// agent components via the CognitiveBus and using a Knowledge Graph for memory.
+// LLMMind is the cognitive core of the agent, implementing the `Mind` interface
+// using a Large Language Model (LLM) for decision-making. It orchestrates the
+// agent's behavior by running a continuous OODA (Observe, Orient, Decide, Act)
+// loop. It receives observations from the cognitive bus, reasons about the state
+// of the mission using a knowledge graph, decides on the next action, and posts
+// that action back to the bus for execution.
 type LLMMind struct {
-	cfg            config.AgentConfig
-	logger         *zap.Logger
-	kg             GraphStore
-	bus            *CognitiveBus
-	llmClient      schemas.LLMClient
-	ltm            LTM
-	currentMission Mission
-	currentState   AgentState
-	mu             sync.RWMutex
-	wg             sync.WaitGroup
-	stopChan       chan struct{}
-	// stopOnce ensures the Stop method is idempotent and safe for concurrent calls.
-	stopOnce       sync.Once
-	stateReadyChan chan struct{}
-	// observerReadyChan signals when the runObserverLoop has successfully started and subscribed to the bus.
-	observerReadyChan chan struct{}
-
+	cfg                  config.AgentConfig
+	logger               *zap.Logger
+	kg                   GraphStore
+	bus                  *CognitiveBus
+	llmClient            schemas.LLMClient
+	ltm                  LTM
+	currentMission       Mission
+	currentState         AgentState
+	mu                   sync.RWMutex
+	wg                   sync.WaitGroup
+	stopChan             chan struct{}
+	stopOnce             sync.Once
+	stateReadyChan       chan struct{}
+	observerReadyChan    chan struct{} // signals when the observer loop is ready.
 	contextLookbackSteps int
 }
 
@@ -49,7 +49,9 @@ var uuidNewString = uuid.NewString
 // Statically assert that LLMMind implements the Mind interface.
 var _ Mind = (*LLMMind)(nil)
 
-// Creates a new LLMMind instance.
+// NewLLMMind creates and initializes a new instance of the LLMMind. It sets up
+// all the necessary components for the mind's operation, including the LLM client,
+// knowledge graph, cognitive bus, and long-term memory.
 func NewLLMMind(
 	logger *zap.Logger,
 	client schemas.LLMClient,
@@ -79,7 +81,10 @@ func NewLLMMind(
 	return m
 }
 
-// Begins the cognitive processing loop (OODA).
+// Start initiates the mind's main cognitive process, which consists of two
+// primary loops: an observer loop that listens for new information and a decision
+// loop that implements the OODA cycle. This method blocks until the context is
+// cancelled or the mind is stopped.
 func (m *LLMMind) Start(ctx context.Context) error {
 	m.logger.Info("Starting LLMMind cognitive loops.")
 
@@ -911,7 +916,8 @@ func (m *LLMMind) updateState(newState AgentState) {
 	m.currentState = newState
 }
 
-// Assigns a new mission to the Mind and creates the initial mission node in the KG.
+// SetMission provides the mind with its primary objective. It records the mission
+// in the knowledge graph and triggers the first decision cycle.
 func (m *LLMMind) SetMission(mission Mission) {
 	m.mu.Lock()
 	m.currentMission = mission
@@ -952,7 +958,8 @@ func (m *LLMMind) SetMission(mission Mission) {
 	m.signalStateReady()
 }
 
-// Gracefully shuts down the Mind's cognitive loops.
+// Stop gracefully terminates the mind's cognitive loops and background processes.
+// It is safe to call multiple times.
 func (m *LLMMind) Stop() {
 	m.stopOnce.Do(func() {
 		close(m.stopChan)

@@ -13,12 +13,13 @@ import (
 	"go.uber.org/zap"
 )
 
-// HTTPParser handles the parsing of raw HTTP messages, specifically for pipelined connections.
+// HTTPParser provides functionality for parsing raw HTTP messages from a stream,
+// with a specific focus on handling sequences of responses from HTTP pipelining.
 type HTTPParser struct {
 	logger *zap.Logger
 }
 
-// NewHTTPParser creates a new HTTPParser instance.
+// NewHTTPParser creates and returns a new HTTPParser.
 func NewHTTPParser(logger *zap.Logger) *HTTPParser {
 	if logger == nil {
 		logger = zap.NewNop()
@@ -28,8 +29,27 @@ func NewHTTPParser(logger *zap.Logger) *HTTPParser {
 	}
 }
 
-// ParsePipelinedResponses reads from a connection reader and attempts to parse a specified
-// number of HTTP responses. It ensures bodies are consumed and decompressed efficiently.
+// ParsePipelinedResponses reads a sequence of HTTP responses from a single
+// `io.Reader` (e.g., a TCP connection) and parses them. This is essential for
+// handling HTTP/1.1 pipelining, where multiple requests are sent without waiting
+// for each response.
+//
+// The function iteratively reads and parses each response from the buffered reader.
+// For each response, it:
+// 1. Initializes the appropriate decompression stream based on `Content-Encoding`.
+// 2. Reads the entire response body to advance the reader to the start of the next response.
+// 3. Replaces the consumed body with a new, readable `io.NopCloser` containing the
+//    fully read and decompressed body content.
+//
+// This ensures that the caller receives a slice of complete, decompressed `http.Response`
+// objects, ready for immediate use.
+//
+// Parameters:
+//   - conn: The `io.Reader` from which to read the response stream.
+//   - expectedTotal: The number of responses to attempt to parse.
+//
+// Returns a slice of parsed `http.Response` objects or an error if a non-EOF
+// parsing or decompression error occurs.
 func (p *HTTPParser) ParsePipelinedResponses(conn io.Reader, expectedTotal int) ([]*http.Response, error) {
 	if expectedTotal <= 0 {
 		return nil, nil

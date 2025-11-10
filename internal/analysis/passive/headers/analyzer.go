@@ -25,12 +25,16 @@ const MinHstsMaxAge = 15552000
 // Pre-compiles the regex for extracting max-age from the HSTS header.
 var regexMaxAge = regexp.MustCompile(`(?i)max-age=(\d+)`)
 
-// HeadersAnalyzer performs passive analysis of HTTP response headers.
+// HeadersAnalyzer is a passive analysis module that inspects HTTP response
+// headers for security misconfigurations, missing protective headers, and
+// information disclosure. It embeds `core.BaseAnalyzer` to satisfy the standard
+// analyzer interface.
 type HeadersAnalyzer struct {
 	core.BaseAnalyzer
 }
 
-// NewHeadersAnalyzer creates a new HeadersAnalyzer.
+// NewHeadersAnalyzer creates a new instance of the HeadersAnalyzer. It sets up
+// the base analyzer with its name, description, and type.
 func NewHeadersAnalyzer() *HeadersAnalyzer {
 	// The logger will be properly initialized when the adapter sets it up via the context.
 	// A Nop logger is used as a placeholder during initial construction.
@@ -40,7 +44,10 @@ func NewHeadersAnalyzer() *HeadersAnalyzer {
 	}
 }
 
-// Analyze runs the header analysis on the provided context.
+// Analyze is the main entry point for the header analysis. It extracts the HTTP
+// response headers from the HAR artifact in the `AnalysisContext`, and then runs
+// a series of checks for missing headers, weak configurations (like HSTS and
+// CSP), and information disclosure.
 func (a *HeadersAnalyzer) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
 	// Update the analyzer's logger to use the one from the context for rich, contextual logging.
 	a.Logger = analysisCtx.Logger

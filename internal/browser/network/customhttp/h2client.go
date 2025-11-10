@@ -39,7 +39,14 @@ const (
 	TargetH2StreamWindowSize = 4 * 1024 * 1024 // 4 MB
 )
 
-// H2Client manages a single HTTP/2 connection, supporting concurrent requests (multiplexing) with full flow control.
+// H2Client manages a single, persistent HTTP/2 connection to a specific host.
+// It is a low-level client that provides full control over the HTTP/2 framing layer,
+// including concurrent request multiplexing, stream management, and manual flow control.
+//
+// A background goroutine reads and processes incoming frames, dispatching them
+// to the appropriate streams. Another optional goroutine handles keep-alive PINGs
+// to maintain connection liveness. The client is thread-safe and designed for
+// high-concurrency scenarios.
 type H2Client struct {
 	Conn      net.Conn
 	Config    *ClientConfig
@@ -52,33 +59,31 @@ type H2Client struct {
 	HPDecoder *hpack.Decoder
 	hpackBuf  *bytes.Buffer
 
-	// mu protects connection state, stream management, Framer writes, HPEncoder usage, flow control windows, and PING state.
 	mu           sync.Mutex
 	isConnected  bool
 	nextStreamID uint32
 	streams      map[uint32]*h2StreamState
-	lastUsed     time.Time // Tracks the last time the connection was active (stream initialized or finalized).
+	lastUsed     time.Time
 
-	// Flow Control (Sending) - Capacity we have to send data to the server.
-	connSendWindow int64
-	maxFrameSize   uint32
-	// Initial send window size for new streams, updated by server SETTINGS.
+	// Flow control for sending data to the server.
+	connSendWindow          int64
+	maxFrameSize            uint32
 	initialStreamSendWindow int32
 
-	// Flow Control (Receiving) - Capacity the server has to send data to us.
+	// Flow control for receiving data from the server.
 	connRecvWindow    int64
 	connRecvWindowMax int64
 
-	// PING mechanism
 	pingAcks map[uint64]chan struct{}
 
-	// Synchronization for background loops.
 	doneChan   chan struct{}
 	loopWG     sync.WaitGroup
-	fatalError error // Stores the first fatal error that caused the connection to close.
+	fatalError error
 }
 
-// h2StreamState tracks the state of an active stream.
+// h2StreamState represents the state of a single HTTP/2 stream within a connection.
+// It holds the request, tracks the construction of the response, manages flow
+// control windows, and signals completion.
 type h2StreamState struct {
 	ID         uint32
 	Request    *http.Request
@@ -86,20 +91,23 @@ type h2StreamState struct {
 	BodyBuffer *bytes.Buffer
 	Headers    http.Header
 	StatusCode int
-	// DoneChan signals when the stream is complete (response finalized or error occurred).
+	// DoneChan is closed or receives an error when the stream is complete.
 	DoneChan chan error
 
-	// Flow Control (Sending)
+	// Stream-level send window.
 	sendWindow int64
-	// Condition variable to signal when the stream send window increases (uses H2Client.mu).
+	// sendCond is used to block and wake up the request-sending goroutine when
+	// the send window is updated.
 	sendCond *sync.Cond
 
-	// Flow Control (Receiving)
+	// Stream-level receive window.
 	recvWindow    int32
 	recvWindowMax int32
 }
 
-// NewH2Client creates a new H2Client. Connection is established lazily.
+// NewH2Client creates a new, un-connected H2Client for a given target URL and
+// configuration. The actual network connection and H2 preface exchange happen
+// lazily on the first request.
 func NewH2Client(targetURL *url.URL, config *ClientConfig, logger *zap.Logger) (*H2Client, error) {
 	if config == nil {
 		config = NewBrowserClientConfig()
@@ -149,8 +157,10 @@ func NewH2Client(targetURL *url.URL, config *ClientConfig, logger *zap.Logger) (
 	return client, nil
 }
 
-// IsIdle checks if the connection is idle based on the configured timeout.
-// Used by the connection evictor (implements ConnectionPool interface).
+// IsIdle determines if the connection has been idle for a duration longer than
+// the specified timeout. A connection is considered idle only if it is active and
+// has no streams in progress. This method is used by the `CustomClient`'s connection
+// evictor and implements the `ConnectionPool` interface.
 func (c *H2Client) IsIdle(timeout time.Duration) bool {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -165,8 +175,15 @@ func (c *H2Client) IsIdle(timeout time.Duration) bool {
 	return time.Since(c.lastUsed) > timeout
 }
 
-// Connect establishes the TCP/TLS connection, negotiates H2, sends the preface and initial settings,
-// and starts the background loops (readLoop and pingLoop).
+// Connect establishes the full H2 connection if it is not already active. This
+// is the primary setup method and is called lazily by `Do`. It is idempotent.
+//
+// The connection process involves:
+// 1. Establishing a TCP connection and performing a TLS handshake with ALPN to negotiate "h2".
+// 2. Sending the client preface string.
+// 3. Sending initial SETTINGS and WINDOW_UPDATE frames to configure the connection.
+// 4. Starting background goroutines to read incoming frames (`readLoop`) and
+//    handle keep-alive PINGs (`pingLoop`).
 func (c *H2Client) Connect(ctx context.Context) error {
 
 	c.mu.Lock()
@@ -276,7 +293,10 @@ func (c *H2Client) dialH2Connection(ctx context.Context) (net.Conn, error) {
 	return conn, nil
 }
 
-// Close shuts down the H2 connection gracefully (sends GOAWAY).
+// Close gracefully shuts down the H2 connection. It sends a GOAWAY frame with
+// no error code, signals the background loops to terminate, closes the underlying
+// network connection, and waits for the loops to exit. It implements the
+// `ConnectionPool` interface.
 func (c *H2Client) Close() error {
 	return c.closeWithError(http2.ErrCodeNo, nil)
 }
@@ -346,7 +366,19 @@ func (c *H2Client) closeWithError(code http2.ErrCode, err error) error {
 	return closeErr
 }
 
-// Do sends a single HTTP request over the H2 connection concurrently and waits for the response.
+// Do executes a single HTTP request over the multiplexed H2 connection. It is the
+// primary method for interacting with the client and is safe for concurrent use.
+//
+// The process involves:
+// 1. Lazily establishing the H2 connection if needed.
+// 2. Initializing a new stream for the request.
+// 3. Starting a new goroutine to serialize and send the request headers and body,
+//    respecting H2 flow control.
+// 4. Waiting for the response to be received by the background `readLoop`, or
+//    for the request context to be cancelled.
+//
+// This concurrent design allows multiple `Do` calls to be in flight simultaneously
+// over the single TCP connection.
 func (c *H2Client) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
 	if err := c.Connect(ctx); err != nil {
 		return nil, err

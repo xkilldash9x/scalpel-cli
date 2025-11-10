@@ -24,18 +24,26 @@ var locationRegex = regexp.MustCompile(`^\s*(.*?\.go):(\d+)`)
 var jsonMessageRegex = regexp.MustCompile(`"msg":"(.*?)"`)
 
 // Watcher monitors application logs for crashes and generates a post-mortem report.
+// It tails the application log file, detects panic events, and collects
+// relevant information like the stack trace, file path, and line number of the crash.
 type Watcher struct {
+	// logger is the application's logger instance.
 	logger *zap.Logger
-	// Corrected to use the configuration interface
-	cfg         config.Interface
-	appLogPath  string
+	// cfg is the application's configuration.
+	cfg config.Interface
+	// appLogPath is the path to the application log file to monitor.
+	appLogPath string
+	// dastLogPath is the path to the DAST (Dynamic Application Security Testing) log file.
 	dastLogPath string
+	// projectRoot is the root directory of the project.
 	projectRoot string
-	reportChan  chan<- PostMortem
+	// reportChan is a channel to send post-mortem reports to.
+	reportChan chan<- PostMortem
 }
 
-// NewWatcher initializes the Watcher service.
-// Corrected to accept the configuration interface
+// NewWatcher initializes and returns a new Watcher service.
+// It takes a logger, configuration, a channel for sending reports, and the project root directory.
+// It returns an error if the application log file is not configured.
 func NewWatcher(logger *zap.Logger, cfg config.Interface, reportChan chan<- PostMortem, projectRoot string) (*Watcher, error) {
 	// Corrected to use the interface's getter methods
 	appLogPath := cfg.Logger().LogFile
@@ -59,7 +67,8 @@ func NewWatcher(logger *zap.Logger, cfg config.Interface, reportChan chan<- Post
 	}, nil
 }
 
-// Start begins the log monitoring process.
+// Start begins the log monitoring process. It starts tailing the application
+// log file in a separate goroutine and returns an error if the file cannot be tailed.
 func (w *Watcher) Start(ctx context.Context) error {
 	w.logger.Info("Starting crash detection watcher...", zap.String("app_log", w.appLogPath))
 

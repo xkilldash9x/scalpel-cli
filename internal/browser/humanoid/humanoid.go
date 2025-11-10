@@ -13,7 +13,12 @@ import (
 	"go.uber.org/zap"
 )
 
-// Humanoid defines the state and capabilities for simulating human like interactions.
+// Humanoid encapsulates the state and logic for simulating human-like interaction
+// with a web page. It manages the virtual user's cursor position, behavioral state
+// (fatigue, habituation), and motor skills, using a combination of physics-based models,
+// statistical distributions, and noise generation to produce realistic user actions.
+//
+// All public methods of Humanoid are thread-safe.
 type Humanoid struct {
 	// mu protects all fields within the Humanoid struct from concurrent access.
 	mu sync.Mutex
@@ -42,7 +47,19 @@ type Humanoid struct {
 	noiseY *PinkNoiseGenerator
 }
 
-// New creates and initializes a new Humanoid instance.
+// New creates and initializes a new Humanoid instance for a browser session.
+// It takes a base humanoid configuration, a logger, and an executor for dispatching
+// browser events.
+//
+// The initialization process involves:
+//  1. Seeding random number generators for unique behavior.
+//  2. Calculating a "skill factor" to model user proficiency.
+//  3. Applying the skill factor and random jitter to the base configuration to
+//     create a unique "session persona." This ensures that each simulated user
+//     behaves slightly differently.
+//  4. Initializing state variables and noise generators.
+//
+// Returns a fully configured Humanoid ready for use.
 func New(humanoidCfg config.HumanoidConfig, logger *zap.Logger, executor Executor) *Humanoid {
 
 	// FIX: Refactor New() initialization. The previous implementation used an unnecessary lock
@@ -86,7 +103,19 @@ func New(humanoidCfg config.HumanoidConfig, logger *zap.Logger, executor Executo
 	return h
 }
 
-// NewTestHumanoid creates a Humanoid instance with deterministic dependencies for testing.
+// NewTestHumanoid creates a Humanoid instance with a fixed, deterministic configuration
+// suitable for testing. It uses a provided seed for its random number generator
+// to ensure that its behavior (e.g., movement paths, typo generation) is repeatable
+// across test runs.
+//
+// Unlike New, this function does *not* randomize the persona configuration, providing
+// a stable baseline for asserting specific outcomes in tests.
+//
+// Parameters:
+//   - executor: A mock or real Executor for the Humanoid to interact with.
+//   - seed: The seed for the random number generator.
+//
+// Returns a deterministic Humanoid instance.
 func NewTestHumanoid(executor Executor, seed int64) *Humanoid {
 	// Create a default configuration and then override specific values for testing.
 	defaultCfg := config.NewDefaultConfig()

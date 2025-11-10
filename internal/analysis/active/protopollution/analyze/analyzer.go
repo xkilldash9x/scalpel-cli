@@ -27,29 +27,29 @@ const (
 //go:embed shim.js
 var protoPollutionShim string
 
-// Analyzer manages the configuration and browser interaction for prototype pollution detection.
-// This is a long-lived, stateless component that can be shared across many analysis tasks.
+// Analyzer is a long-lived, stateless component responsible for detecting
+// client-side prototype pollution. It is configured once and can be used to
+// analyze multiple targets concurrently.
 type Analyzer struct {
 	logger  *zap.Logger
 	browser schemas.BrowserManager
 	config  config.ProtoPollutionConfig
 }
 
-// PollutionProofEvent is the data structure received from the JS shim when a potential vulnerability is found.
-// It's enhanced with Vector and StackTrace for more precise and actionable evidence.
+// PollutionProofEvent is the structure of the JSON payload sent from the
+// injected JavaScript shim when a potential prototype pollution or DOM clobbering
+// vulnerability is detected. It contains the evidence needed to confirm the finding.
 type PollutionProofEvent struct {
-	Source     string `json:"source"`
-	Canary     string `json:"canary"`
-	Vector     string `json:"vector"`
-	StackTrace string `json:"stackTrace"`
+	Source     string `json:"source"`     // The source of the pollution (e.g., "URL_SEARCH_PARAMS", "DOM_Clobbering").
+	Canary     string `json:"canary"`     // A unique token to verify the authenticity of the event.
+	Vector     string `json:"vector"`     // The specific payload or property path that caused the pollution.
+	StackTrace string `json:"stackTrace"` // The JavaScript stack trace at the time of detection.
 }
 
-// analysisContext holds the state for a single, concurrent analysis task.
-// It is created for the duration of one Analyze call and then discarded.
-// REFACTOR: This context no longer manages a finding channel or waitgroup.
-// It now holds a reference to the session context to report findings directly.
+// analysisContext holds all the state required for a single, concurrent analysis
+// of a target URL. It is created for the duration of one `Analyze` call and then discarded.
 type analysisContext struct {
-	ctx       context.Context // The parent context for the analysis.
+	ctx       context.Context
 	session   schemas.SessionContext
 	taskID    string
 	targetURL string
@@ -57,7 +57,9 @@ type analysisContext struct {
 	logger    *zap.Logger
 }
 
-// NewAnalyzer creates a new, reusable analyzer instance using the centralized application configuration.
+// NewAnalyzer creates a new, reusable instance of the prototype pollution analyzer.
+// It takes the application's configuration and a browser manager for creating
+// analysis sessions.
 func NewAnalyzer(logger *zap.Logger, browserManager schemas.BrowserManager, cfg config.ProtoPollutionConfig) *Analyzer {
 	// If the configuration provides an invalid duration, fall back to a sane default.
 	if cfg.WaitDuration <= 0 {
@@ -71,9 +73,11 @@ func NewAnalyzer(logger *zap.Logger, browserManager schemas.BrowserManager, cfg 
 	}
 }
 
-// Analyze executes the prototype pollution check against a given URL.
-// REFACTOR: This function's signature has changed. It no longer returns a slice of findings.
-// Instead, it reports findings via the session context and returns only an error.
+// Analyze performs the active analysis for prototype pollution against a single
+// target URL. It creates a new browser session, injects a JavaScript shim to
+// monitor the Object prototype, navigates to the target, and waits for a
+// configurable duration to capture any asynchronous pollution events. Findings
+// are reported directly via the session context.
 func (a *Analyzer) Analyze(ctx context.Context, taskID, targetURL string) error {
 	// 1. Acquire a browser session. We pass `nil` for the findings channel as it's no longer used by this analyzer.
 	session, err := a.browser.NewAnalysisContext(ctx, nil, schemas.Persona{}, "", "", nil)

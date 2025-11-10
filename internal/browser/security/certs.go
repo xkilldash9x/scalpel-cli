@@ -9,17 +9,26 @@ import (
 	"time"
 )
 
-// CA holds the certificate, private key, and certificate pool for a
-// dynamically generated Certificate Authority. This is used for TLS MITM operations.
+// CA encapsulates the components of a dynamically generated Certificate Authority,
+// including its root certificate, private key, and a certificate pool containing
+// the root. This is primarily used for TLS interception (MITM) in a proxy,
+// where the CA is used to sign certificates for hosts on the fly.
 type CA struct {
-	Cert       *x509.Certificate
+	// Cert is the parsed x509 root certificate of the Certificate Authority.
+	Cert *x509.Certificate
+	// PrivateKey is the RSA private key corresponding to the root certificate.
 	PrivateKey *rsa.PrivateKey
-	CertPool   *x509.CertPool
+	// CertPool is a pool containing only the CA's root certificate, which can
+	// be used by a client to validate certificates signed by this CA.
+	CertPool *x509.CertPool
 }
 
-// NewCA creates and initializes a new self-signed Certificate Authority.
-// It generates an RSA private key and a corresponding root certificate
-// that can be used to sign other certificates.
+// NewCA generates a new, self-signed Certificate Authority. It creates a 2048-bit
+// RSA private key and a corresponding root certificate configured with the
+// necessary properties to act as a CA. This CA can then be used to sign
+// certificates for other domains, which is a key requirement for TLS interception.
+//
+// Returns an initialized CA struct or an error if key or certificate generation fails.
 func NewCA() (*CA, error) {
 	// First, generate a new private key. 2048 bits is a standard, secure choice.
 	privateKey, err := rsa.GenerateKey(rand.Reader, 2048)

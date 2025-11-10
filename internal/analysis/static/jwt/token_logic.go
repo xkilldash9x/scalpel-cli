@@ -9,16 +9,19 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
+// FindingType enumerates the specific types of JWT vulnerabilities that can be detected.
 type FindingType int
 
 const (
-	UnknownFinding FindingType = iota
-	AlgNoneVulnerability
-	WeakSecretVulnerability
-	SensitiveInfoExposure
-	MissingExpiration
+	UnknownFinding        FindingType = iota // An unknown or uncategorized finding.
+	AlgNoneVulnerability                     // The token uses the insecure "none" algorithm.
+	WeakSecretVulnerability                  // The token is signed with a weak, brute-forceable secret.
+	SensitiveInfoExposure                    // The token's claims contain potentially sensitive information.
+	MissingExpiration                        // The token lacks an expiration ('exp') claim.
 )
 
+// TokenAnalysisResult encapsulates the complete result of analyzing a single JWT,
+// including its parsed components and a list of any findings.
 type TokenAnalysisResult struct {
 	TokenString string
 	Header      map[string]interface{}
@@ -26,6 +29,7 @@ type TokenAnalysisResult struct {
 	Findings    []Finding
 }
 
+// Finding represents a single vulnerability or misconfiguration identified within a JWT.
 type Finding struct {
 	Type        FindingType
 	Description string
@@ -33,6 +37,7 @@ type Finding struct {
 	Detail      map[string]interface{}
 }
 
+// weakSecrets is a curated list of common, weak secrets used for signing JWTs.
 var weakSecrets = []string{
 	"secret", "password", "123456", "12345678", "admin", "test", "root", "qwerty", "changeme",
 	"secretkey", "jwtsecret", "mysecret", "default", "key", "privatekey", "development",
@@ -40,13 +45,19 @@ var weakSecrets = []string{
 }
 
 var (
-	// This parser is used to decode tokens without checking signatures first.
+	// parserUnverified is a JWT parser configured to decode tokens without
+	// validating their signature. This is used for initial inspection of the
+	// token's header and claims.
 	parserUnverified = jwt.NewParser(
 		jwt.WithoutClaimsValidation(),
 		jwt.WithValidMethods([]string{"none", "HS256", "HS384", "HS512"}),
 	)
 )
 
+// AnalyzeToken performs a series of security checks on a given JWT string.
+// It checks for the "none" algorithm, sensitive data in claims, missing
+// expiration, and, if enabled, attempts to brute-force the signature using a
+// list of weak secrets.
 func AnalyzeToken(tokenString string, bruteForceEnabled bool) (TokenAnalysisResult, error) {
 	result := TokenAnalysisResult{
 		TokenString: tokenString,

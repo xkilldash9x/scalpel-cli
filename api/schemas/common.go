@@ -6,36 +6,44 @@ import (
 
 // -- Common Schemas --
 
-// Credential holds a username and password pair.
+// Credential represents a set of login credentials, typically a username and
+// password combination, used for authentication.
 type Credential struct {
 	Username string `json:"username"`
 	Password string `json:"password"`
 }
 
-// KeyEventData represents a structured key event, including the main key and active modifiers.
+// KeyEventData encapsulates the information for a single keyboard event,
+// including the primary key that was pressed and any active modifier keys like
+// Shift, Ctrl, or Alt.
 type KeyEventData struct {
-	// Key is the primary key pressed (e.g., "a", "c", "Enter", "Tab").
-	// This should match the string expected by the underlying executor (e.g., chromedp/kb).
+	// Key represents the main key being pressed (e.g., "a", "Enter", "Tab").
+	// The value should be compatible with the strings expected by the Chrome
+	// DevTools Protocol's `input.dispatchKeyEvent` command.
 	Key string
-	// Modifiers is a bitmask of active modifiers.
+	// Modifiers is a bitmask representing the combination of active modifier keys.
 	Modifiers KeyModifier
 }
 
-// KeyModifier represents keyboard modifiers (Ctrl, Alt, Shift, Meta).
-// These values correspond directly to the CDP input.DispatchKeyEvent modifiers bitfield.
+// KeyModifier defines a bitmask for keyboard modifiers (Ctrl, Alt, Shift, Meta)
+// to be used in keyboard events. The values are aligned with the Chrome
+// DevTools Protocol's `input.DispatchKeyEvent` modifiers.
 type KeyModifier int
 
+// Constants for keyboard modifiers, designed to be combined using bitwise OR.
 const (
-	ModNone  KeyModifier = 0
-	ModAlt   KeyModifier = 1 // Corresponds to CDP modifier 1
-	ModCtrl  KeyModifier = 2 // Corresponds to CDP modifier 2
-	ModMeta  KeyModifier = 4 // Corresponds to CDP modifier 4
-	ModShift KeyModifier = 8 // Corresponds to CDP modifier 8
+	ModNone  KeyModifier = 0 // No modifiers are active.
+	ModAlt   KeyModifier = 1 // The Alt key is active.
+	ModCtrl  KeyModifier = 2 // The Ctrl key is active.
+	ModMeta  KeyModifier = 4 // The Meta key (e.g., Command on Mac) is active.
+	ModShift KeyModifier = 8 // The Shift key is active.
 )
 
 // -- Result Schemas --
 
-// ResultEnvelope is the top level wrapper for all results from a single task.
+// ResultEnvelope serves as the top-level container for the output of a single
+// analysis task. It includes metadata like scan and task IDs, a timestamp, a
+// list of all findings, and any updates to be made to the knowledge graph.
 type ResultEnvelope struct {
 	ScanID    string                `json:"scan_id"`
 	TaskID    string                `json:"task_id"`

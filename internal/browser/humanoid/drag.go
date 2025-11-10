@@ -9,7 +9,30 @@ import (
 	"go.uber.org/zap"
 )
 
-// DragAndDrop is a public method that acquires a lock for the entire action.
+// DragAndDrop performs a human-like drag-and-drop operation from a starting element
+// to a destination element. It simulates the entire complex sequence of actions,
+// including initial movement, pressing and holding the mouse button, moving the
+// cursor to the target, and releasing the button.
+//
+// This high-level method orchestrates the following steps:
+//  1. Moves the cursor to the starting element.
+//  2. Pauses to simulate aiming before grabbing the element.
+//  3. Presses and holds the left mouse button.
+//  4. Pauses again to simulate adjusting grip.
+//  5. Ensures the destination element is visible, scrolling if necessary.
+//  6. Moves the cursor along a realistic trajectory to the destination.
+//  7. Pauses to simulate aiming before dropping.
+//  8. Releases the mouse button to complete the drop.
+//  9. Updates behavioral models (fatigue, etc.).
+//
+// Parameters:
+//   - ctx: The context for the entire drag-and-drop operation.
+//   - startSelector: The CSS selector for the element to drag.
+//   - endSelector: The CSS selector for the element to drop onto.
+//   - opts: Optional interaction settings.
+//
+// Returns an error if any part of the operation fails. It includes cleanup logic
+// to attempt to release the mouse button even if an error occurs mid-drag.
 func (h *Humanoid) DragAndDrop(ctx context.Context, startSelector, endSelector string, opts *InteractionOptions) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()

@@ -21,10 +21,14 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/service"
 )
 
-// ComponentFactory defines the interface required by the scan command, matching service.ComponentFactory.
-// We redefine the interface here to allow injection of mocks during testing without creating import cycles,
-// although we import 'service' to use the concrete Components struct in runScan.
+// ComponentFactory defines an interface for creating the full suite of services
+// required for a scan. This abstraction allows for dependency injection, making
+// the `scan` command testable by allowing mocks to be provided instead of live
+// components.
 type ComponentFactory interface {
+	// Create initializes and returns all necessary components for a scan, such as
+	// the orchestrator, knowledge graph, and various clients. It returns an
+	// interface{} that is expected to be of type *service.Components.
 	Create(ctx context.Context, cfg config.Interface, targets []string, logger *zap.Logger) (interface{}, error)
 }
 

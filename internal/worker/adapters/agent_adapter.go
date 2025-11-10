@@ -57,7 +57,7 @@ func (a *AgentAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 	// We create one here and pass it to the agent's constructor.
 	session, err := analysisCtx.Global.BrowserManager.NewAnalysisContext(
 		ctx,
-		analysisCtx.Task,
+		analysisCtx.Global.Config,
 		schemas.DefaultPersona,
 		"", // initialURL
 		"", // initialData

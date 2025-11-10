@@ -1,4 +1,15 @@
 // internal/browser/session/session.go
+// This file defines the `Session` struct, which represents a single, isolated
+// browser tab. It serves as the primary orchestrator for all browser-related
+// activities, integrating various components like the `Harvester` for data
+// collection, the `Humanoid` for realistic user interaction, and the `Interactor`
+// for automated page exploration.
+//
+// The Session manages the lifecycle of the browser tab, from initialization to
+// closure. It provides a high-level API for actions (e.g., Navigate, Click, Type)
+// and artifact collection, while also implementing the lower-level `ActionExecutor`
+// interface required by its sub-components. This centralizes context management
+// and error handling, providing a robust foundation for browser automation tasks.
 package session
 
 import (
@@ -29,7 +40,16 @@ import (
 
 // NOTE: ActionExecutor interface is defined in interfaces.go
 
-// Session represents an active browser session (a tab) and implements schemas.SessionContext.
+// Session represents a single, isolated browser tab and serves as the primary
+// orchestrator for all browser-related activities. It implements the
+// `schemas.SessionContext` interface, providing a high-level API for browser
+// interactions, and the `ActionExecutor` interface, allowing its sub-components
+// to perform browser actions safely.
+//
+// The Session integrates and manages the lifecycle of various components, including:
+//   - Harvester: For collecting network traffic and console logs.
+//   - Humanoid: For simulating realistic user interactions.
+//   - Interactor: For automated, intelligent exploration of the page.
 type Session struct {
 	id     string
 	ctx    context.Context // Master context for the session lifetime
@@ -62,15 +82,25 @@ var _ schemas.SessionContext = (*Session)(nil)
 // Ensure Session implements ActionExecutor.
 var _ ActionExecutor = (*Session)(nil)
 
-// NewSession creates a new Session instance wrapper.
+// NewSession creates a new, uninitialized Session.
+//
+// Parameters:
+//   - ctx: The master context that governs the entire lifetime of the session.
+//     This should be a context derived from `chromedp.NewContext`.
+//   - cancel: The cancel function for the master context.
+//   - cfg: The application configuration.
+//   - persona: The user persona to be emulated in this session.
+//   - logger: The logger for the session to use.
+//   - onClose: An optional callback function to be executed when the session is closed.
+//   - findingsChan: A channel for reporting security findings discovered during the session.
 func NewSession(
-	ctx context.Context, // This should be the context created by chromedp.NewContext(allocCtx)
+	ctx context.Context,
 	cancel context.CancelFunc,
-	cfg config.Interface, // Use the config interface
+	cfg config.Interface,
 	persona schemas.Persona,
 	logger *zap.Logger,
 	onClose func(),
-	findingsChan chan<- schemas.Finding, // Accept the findings channel
+	findingsChan chan<- schemas.Finding,
 ) (*Session, error) {
 
 	sessionID := uuid.New().String()
@@ -90,15 +120,34 @@ func NewSession(
 	return s, nil
 }
 
-// SetOnClose allows setting the onClose callback after initialization (e.g., by the Manager).
+// SetOnClose allows a callback function to be set after the Session has been
+// created. This is typically used by the `BrowserManager` to register a function
+// that cleans up its internal session map when a session is closed.
 func (s *Session) SetOnClose(fn func()) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.onClose = fn
 }
 
-// Initialize applies configurations and starts necessary components.
-// ctx here is an operational context (e.g., initCtx) used to enforce initialization timeouts.
+// Initialize performs the setup for the session, preparing it for interaction.
+// This is a critical step that must be called before any other actions are taken.
+//
+// The process includes:
+// 1. Establishing the initial CDP connection to the browser tab.
+// 2. Starting the `Harvester` to begin collecting network and console data.
+// 3. Applying browser stealth evasions and emulating the specified `Persona`.
+// 4. Initializing the `Humanoid` and `Interactor` components.
+// 5. Injecting the IAST (Interactive Application Security Testing) taint analysis
+//    shim script, if configured.
+// 6. Setting any custom HTTP headers.
+// 7. Positioning the mouse cursor at the center of the viewport.
+//
+// Parameters:
+//   - ctx: An operational context with a timeout for the initialization process.
+//   - taintTemplate: The JavaScript template for the taint tracking shim.
+//   - taintConfig: The JSON configuration for the taint tracking shim.
+//
+// Returns an error if any part of the initialization fails.
 func (s *Session) Initialize(ctx context.Context, taintTemplate, taintConfig string) error {
 	s.logger.Debug("Initializing session.")
 
@@ -250,10 +299,15 @@ func (s *Session) Initialize(ctx context.Context, taintTemplate, taintConfig str
 	return nil
 }
 
-// RunActions executes chromedp actions by combining the operational context (ctx)
-// with the session's master context (s.ctx). It implements the ActionExecutor interface.
-// This is the standard way to execute actions that should be tied to both the session lifetime
-// and the specific operation's deadline. (Context Best Practices 1.1)
+// RunActions executes a series of `chromedp.Action` funcs for the session. It
+// implements the `ActionExecutor` interface and is the primary method for
+// running CDP commands.
+//
+// It robustly handles context management by combining the long-lived session
+// context (which holds the CDP connection values) with a shorter-lived operational
+// context (which provides a deadline for the specific action). It also includes
+// logic to correctly prioritize context cancellation errors and to ignore spurious
+// "context canceled" errors that can occur when an action triggers a page navigation.
 func (s *Session) RunActions(ctx context.Context, actions ...chromedp.Action) error {
 	// 1. Combine Contexts
 	// s.ctx is the primary context (carries CDP connection info).
@@ -296,11 +350,17 @@ func (s *Session) RunActions(ctx context.Context, actions ...chromedp.Action) er
 	return nil
 }
 
-//	Implemented RunBackgroundActions to support Harvester body fetching during session shutdown.
+// RunBackgroundActions executes a series of `chromedp.Action` funcs in a way
+// that is detached from the main session's lifecycle. It implements the
+// `ActionExecutor` interface.
 //
-// RunBackgroundActions implements the ActionExecutor interface.
-// It ensures actions run even if the main session context (s.ctx) is cancelled,
-// by using a detached context that preserves CDP values. (Context Best Practices 3.3)
+// This is critical for operations that must complete even if the session or the
+// originating operational context is cancelled. For example, the `Harvester` uses
+// this to fetch response bodies in the background, ensuring that the fetches can
+// complete even if the user navigates away from the page or closes the session.
+//
+// It works by creating a `valueOnlyContext` that inherits the necessary CDP
+// connection info but ignores cancellation signals from the main session context.
 func (s *Session) RunBackgroundActions(ctx context.Context, actions ...chromedp.Action) error {
 	// 1. Create Detached Context
 	// Detach from the session context (s.ctx) to ignore its cancellation signal, while keeping its values (CDP info).

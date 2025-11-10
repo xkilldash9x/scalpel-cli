@@ -61,12 +61,18 @@ func newSelfHealCmd() *cobra.Command {
 	return cmd
 }
 
-// MetalystRunner defines the interface for the component that runs the healing logic.
+// MetalystRunner defines an interface for the component responsible for executing
+// the core self-healing logic. This abstraction allows the command to be tested
+// with a mock runner, decoupling it from the concrete implementation.
 type MetalystRunner interface {
+	// Run initiates the self-healing process. It takes the path to the panic log
+	// and the original command-line arguments that caused the crash as input.
 	Run(ctx context.Context, panicLogPath string, originalArgs []string) error
 }
 
-// MetalystInitializer is a function type for creating a MetalystRunner.
+// MetalystInitializer defines a function signature for creating a MetalystRunner.
+// This supports dependency injection, enabling the replacement of the real
+// Metalyst service with a mock during testing.
 type MetalystInitializer func(config.Interface, schemas.LLMClient) (MetalystRunner, error)
 
 // runSelfHeal contains the testable business logic for the command.

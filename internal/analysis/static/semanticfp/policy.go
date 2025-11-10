@@ -8,18 +8,23 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// LiteralPolicy defines the strategy for abstracting literals during canonicalization.
+// LiteralPolicy defines a configurable strategy for determining which literal
+// values (e.g., numbers, strings) should be abstracted into placeholders during
+// the canonicalization of SSA form. This allows fingerprinting to focus on
+// program structure and logic rather than specific data values.
 type LiteralPolicy struct {
-	AbstractControlFlowComparisons bool
-	KeepSmallIntegerIndices        bool
-	KeepReturnStatusValues         bool
-	SmallIntMin                    int64
-	SmallIntMax                    int64
-	// AbstractOtherTypes controls whether non-integer literals (strings, floats, etc.) are abstracted.
-	AbstractOtherTypes bool
+	AbstractControlFlowComparisons bool   // If true, abstracts literals used in `if` conditions.
+	KeepSmallIntegerIndices        bool   // If true, preserves small integers used as array/slice indices.
+	KeepReturnStatusValues         bool   // If true, preserves small integers used in `return` statements.
+	SmallIntMin                    int64  // The minimum value for an integer to be considered "small".
+	SmallIntMax                    int64  // The maximum value for an integer to be considered "small".
+	AbstractOtherTypes             bool   // If true, abstracts non-integer literals like strings and floats.
 }
 
-// DefaultLiteralPolicy provides a configuration based on the requirements.
+// DefaultLiteralPolicy is the standard policy for fingerprinting. It abstracts
+// most literals, including strings and large numbers, but preserves small
+// integers used in common contexts like array indexing and return codes, making
+// the fingerprint resilient to minor refactoring while retaining key semantics.
 var DefaultLiteralPolicy = LiteralPolicy{
 	AbstractControlFlowComparisons: true,
 	KeepSmallIntegerIndices:        true,
@@ -29,7 +34,10 @@ var DefaultLiteralPolicy = LiteralPolicy{
 	AbstractOtherTypes:             true, // Abstract strings, floats by default
 }
 
-// KeepAllLiteralsPolicy keeps most literals (useful for robust testing).
+// KeepAllLiteralsPolicy is a policy designed for testing or exact matching. It
+// disables most abstractions, causing the canonical form to retain almost all
+// literal values. This results in a fingerprint that is highly sensitive to any
+// change in constants.
 var KeepAllLiteralsPolicy = LiteralPolicy{
 	AbstractControlFlowComparisons: false,
 	KeepSmallIntegerIndices:        true,
@@ -39,7 +47,8 @@ var KeepAllLiteralsPolicy = LiteralPolicy{
 	AbstractOtherTypes:             false, // Keep strings, floats
 }
 
-// isConst checks if an ssa.Value is a constant and if its value matches the target constant.Value.
+// isConst is a helper function that checks if an `ssa.Value` is a constant
+// equal to a given `constant.Value`.
 func isConst(v ssa.Value, target constant.Value) bool {
 	if c, ok := v.(*ssa.Const); ok {
 		if c.Value == nil || target == nil {
@@ -50,7 +59,9 @@ func isConst(v ssa.Value, target constant.Value) bool {
 	return false
 }
 
-// ShouldAbstract determines whether a constant should be abstracted based on its context.
+// ShouldAbstract is the core logic of the policy. It decides whether a given
+// constant (`ssa.Const`) should be abstracted into a placeholder based on its
+// type, value, and the instruction in which it is used (`usageContext`).
 func (p *LiteralPolicy) ShouldAbstract(c *ssa.Const, usageContext ssa.Instruction) bool {
 	if c.Value == nil {
 		return false // Keep nil

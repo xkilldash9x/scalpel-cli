@@ -18,6 +18,9 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
+// JWTAnalyzer is a passive analyzer that scans HTTP traffic for JSON Web Tokens
+// (JWTs) and checks them for common vulnerabilities, such as the use of weak
+// secrets or the "none" algorithm.
 type JWTAnalyzer struct {
 	logger            *zap.Logger
 	bruteForceEnabled bool
@@ -27,6 +30,7 @@ type JWTAnalyzer struct {
 // and length checks, which were causing issues with certain token formats.
 var jwtRegex = regexp.MustCompile(`([A-Za-z0-9\-_]+)\.([A-Za-z0-9\-_]+)\.([A-Za-z0-9\-_]*)`)
 
+// NewJWTAnalyzer creates a new instance of the JWTAnalyzer.
 func NewJWTAnalyzer(logger *zap.Logger, bruteForceEnabled bool) *JWTAnalyzer {
 	return &JWTAnalyzer{
 		logger:            logger.Named("jwt_analyzer"),
@@ -34,18 +38,23 @@ func NewJWTAnalyzer(logger *zap.Logger, bruteForceEnabled bool) *JWTAnalyzer {
 	}
 }
 
+// Name returns the unique name of the analyzer.
 func (a *JWTAnalyzer) Name() string {
 	return "JWT Static Analyzer"
 }
 
+// Description provides a brief explanation of what the analyzer does.
 func (a *JWTAnalyzer) Description() string {
 	return "Scans HTTP traffic for common JWT vulnerabilities."
 }
 
+// Type returns the type of the analyzer, which is `core.TypePassive` for JWT analysis.
 func (a *JWTAnalyzer) Type() core.AnalyzerType {
 	return core.TypePassive
 }
 
+// Analyze is the main entry point for the JWT analysis. It extracts JWTs from
+// the HAR artifact and analyzes each unique token for potential vulnerabilities.
 func (a *JWTAnalyzer) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
 	if analysisCtx.Artifacts == nil || analysisCtx.Artifacts.HAR == nil {
 		return nil

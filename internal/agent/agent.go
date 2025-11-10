@@ -24,31 +24,32 @@ import ( // This is a comment to force a change
 	"github.com/xkilldash9x/scalpel-cli/internal/llmclient"
 )
 
-// Agent orchestrates the components of an autonomous security mission.
+// Agent is the core orchestrator for an autonomous security mission. It integrates
+// various components like the cognitive bus, mind (LLM), action executors, and
+// memory systems to achieve a high-level objective.
 type Agent struct {
-	mission    Mission
-	logger     *zap.Logger
-	globalCtx  *core.GlobalContext
-	mind       Mind
-	bus        *CognitiveBus
-	executors  ActionExecutor
-	wg         sync.WaitGroup
-	resultChan chan MissionResult
-	isFinished bool
-	mu         sync.Mutex
-	humanoid   humanoid.Controller
-	kg         GraphStore
-	llmClient  schemas.LLMClient
-	ltm        LTM
+	mission    Mission             // The specific mission the agent is tasked with.
+	logger     *zap.Logger         // Agent-specific logger.
+	globalCtx  *core.GlobalContext // Global context providing access to shared resources.
+	mind       Mind                // The decision-making component of the agent.
+	bus        *CognitiveBus       // The central message bus for internal communication.
+	executors  ActionExecutor      // The registry for executing actions.
+	wg         sync.WaitGroup      // WaitGroup for managing graceful shutdown.
+	resultChan chan MissionResult  // Channel to send the final mission result.
+	isFinished bool                // Flag to prevent duplicate shutdown operations.
+	mu         sync.Mutex          // Mutex to protect the isFinished flag.
+	humanoid   humanoid.Controller // Controller for human-like browser interactions.
+	kg         GraphStore          // The knowledge graph client for this agent.
+	llmClient  schemas.LLMClient   // The LLM client for this agent.
+	ltm        LTM                 // The long-term memory system.
 
-	// Manages the self-healing subsystem.
-	selfHeal *SelfHealOrchestrator
-	// Manages the proactive self-improvement subsystem.
-	evolution EvolutionEngine
+	selfHeal  *SelfHealOrchestrator // Manages the self-healing (autofix) subsystem.
+	evolution EvolutionEngine       // Manages the proactive self-improvement (evolution) subsystem.
 }
 
-// NewGraphStoreFromConfig acts as a factory to create the appropriate GraphStore.
-// It is a variable to allow for mocking in tests.
+// NewGraphStoreFromConfig is a factory function that creates a GraphStore
+// based on the provided configuration. It is implemented as a variable to allow
+// for easy mocking in tests.
 var NewGraphStoreFromConfig = func(
 	ctx context.Context,
 	cfg config.KnowledgeGraphConfig,
@@ -68,12 +69,13 @@ var NewGraphStoreFromConfig = func(
 	}
 }
 
-// NewLLMClient is a variable to allow for mocking in tests.
-// It should be defined in the llmclient package, but we declare it here
-// to satisfy the compiler for the current scope.
+// NewLLMClient is a variable that points to the LLM client factory function.
+// This allows for mocking the LLM client during testing.
 var NewLLMClient = llmclient.NewClient
 
-// Creates and initializes a fully featured agent instance.
+// New creates and initializes a new Agent instance with all its required
+// components, including the mind, cognitive bus, executors, and memory systems.
+// It wires together all dependencies and prepares the agent for a mission.
 func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, session schemas.SessionContext) (*Agent, error) {
 	agentID := uuid.New().String()[:8]
 	logger := globalCtx.Logger.With(zap.String("agent_id", agentID), zap.String("mission_id", mission.ID))
@@ -149,7 +151,10 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 	return agent, nil
 }
 
-// Executes the agent's main loop.
+// RunMission starts the agent's main operational loop. It initiates the mind's
+// cognitive processes, starts the action execution loop, and manages the overall
+// mission lifecycle. It blocks until the mission is completed, cancelled, or
+// encounters a critical error.
 func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 	a.logger.Info("Agent is commencing mission.", zap.String("objective", a.mission.Objective))
 	missionCtx, cancelMission := context.WithCancel(ctx)

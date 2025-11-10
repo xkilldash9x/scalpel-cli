@@ -24,17 +24,23 @@ const (
 )
 
 // Manager handles the browser process lifecycle and session creation.
+// It is responsible for creating, managing, and shutting down browser sessions.
 type Manager struct {
+	// allocCtx is the context for the browser allocator.
 	allocCtx context.Context
-	// allocCancel context.CancelFunc // REFACTOR: Removed. Lifecycle is managed externally.
-	logger   *zap.Logger
-	cfg      config.Interface // Use the interface
+	// logger is the application's logger instance.
+	logger *zap.Logger
+	// cfg is the application's configuration.
+	cfg config.Interface // Use the interface
+	// sessions is a map of active browser sessions.
 	sessions map[string]*session.Session
-	mu       sync.RWMutex
+	// mu is a mutex for thread-safe access to the sessions map.
+	mu sync.RWMutex
 }
 
-// NewManager creates a new browser manager using the provided allocator context.
-// REFACTOR: Updated signature to accept allocCtx instead of creating it.
+// NewManager creates and returns a new browser manager.
+// It takes a browser allocator context, configuration, and a logger.
+// It returns an error if the allocator context is invalid.
 func NewManager(allocCtx context.Context, cfg config.Interface, logger *zap.Logger) (*Manager, error) {
 	// REFACTOR: Removed ExecAllocator creation logic (lines 26-44 in original).
 
@@ -59,8 +65,19 @@ func NewManager(allocCtx context.Context, cfg config.Interface, logger *zap.Logg
 	return m, nil
 }
 
-// NewAnalysisContext creates a new browser tab (session) for analysis.
-// FIX: Added findingsChan chan<- schemas.Finding to match schemas.BrowserManager interface.
+// NewAnalysisContext creates a new browser tab (session) for a detailed security analysis.
+// It configures the session with a specific persona, taint tracking rules, and a channel for reporting findings.
+// This method is central to launching targeted analysis tasks.
+//
+// Parameters:
+//   - sessionCtx: The context governing the lifetime of the session.
+//   - cfg: The application configuration, expected to be a config.Interface.
+//   - persona: The user persona to simulate during the analysis.
+//   - taintTemplate: The template for taint tracking analysis.
+//   - taintConfig: The configuration for taint tracking.
+//   - findingsChan: The channel to which discovered findings will be sent.
+//
+// Returns a schemas.SessionContext for interacting with the browser session, or an error if setup fails.
 func (m *Manager) NewAnalysisContext(
 	sessionCtx context.Context,
 	cfg interface{},
@@ -161,9 +178,16 @@ func (m *Manager) NewAnalysisContext(
 	return s, nil
 }
 
-// NavigateAndExtract is a convenience method that creates a temporary session
-// to navigate to a URL and extract all link hrefs from the page.
-// This function is synchronous and blocking.
+// NavigateAndExtract is a high-level convenience method that creates a temporary,
+// synchronous session to perform a simple task: navigate to a URL and extract all
+// hyperlink `href` attributes from the page. It handles session creation, navigation,
+// script execution, and teardown internally.
+//
+// Parameters:
+//   - ctx: The context for the entire operation, including navigation and script execution.
+//   - url: The URL of the page to navigate to.
+//
+// Returns a slice of strings containing the hrefs of all links found, or an error.
 func (m *Manager) NavigateAndExtract(ctx context.Context, url string) ([]string, error) {
 	// REFACTOR: Decouple the session lifetime from the input operation context 'ctx'.
 	// We pass context.Background() so the session remains alive until explicitly closed.
@@ -213,7 +237,15 @@ func (m *Manager) NavigateAndExtract(ctx context.Context, url string) ([]string,
 	return hrefs, nil
 }
 
-// Shutdown gracefully closes all sessions. It does NOT close the browser process if the allocator is shared.
+// Shutdown gracefully closes all active browser sessions managed by the manager.
+// It performs a concurrent shutdown of sessions to improve speed.
+// Note: This method does *not* close the underlying browser process itself,
+// as the allocator context that controls the browser lifecycle is managed externally.
+//
+// Parameters:
+//   - ctx: A context to control the shutdown process, allowing for timeouts.
+//
+// Returns nil on successful shutdown. Errors during individual session closes are logged but do not halt the process.
 func (m *Manager) Shutdown(ctx context.Context) error {
 	m.logger.Info("Shutting down browser manager.")
 
