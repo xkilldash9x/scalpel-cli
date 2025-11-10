@@ -21,33 +21,30 @@ const (
 	FlagVulnerability = "IS_VULNERABILITY"
 )
 
-// ltm (Long-Term Memory) manages context summarization, heuristic flagging,
-// and redundancy detection for the agent's mind.
+// ltm (Long-Term Memory) provides the agent with a memory system that can
+// detect redundant or novel observations. It uses a caching mechanism with a
+// background cleanup process to manage its memory footprint.
 type ltm struct {
-	logger *zap.Logger
-	cfg    config.LTMConfig
-	mu     sync.RWMutex
-
-	// Main cache mapping observation ID to its data.
-	cache map[string]cachedObservation
-	// A set of payload hashes for near-instant redundancy checks (O(1)).
-	payloadHashes map[[32]byte]string
-
-	stopOnce sync.Once
-	// Channel to signal the background janitor goroutine to stop.
-	stopChan chan struct{}
-	wg       sync.WaitGroup
+	logger        *zap.Logger
+	cfg           config.LTMConfig
+	mu            sync.RWMutex
+	cache         map[string]cachedObservation
+	payloadHashes map[[32]byte]string // A set of hashes for fast redundancy checks.
+	stopOnce      sync.Once
+	stopChan      chan struct{} // Signals the background janitor to stop.
+	wg            sync.WaitGroup
 }
 
-// cachedObservation stores the original payload along with its hash and timestamp for eviction.
+// cachedObservation stores an observation's payload, its hash, and a timestamp
+// for time-to-live (TTL) based eviction.
 type cachedObservation struct {
 	Payload     []byte
 	PayloadHash [32]byte
 	Timestamp   time.Time
 }
 
-// NewLTM creates a new Long-Term Memory module. Its background processes must be
-// started by calling the Start() method.
+// NewLTM creates a new Long-Term Memory module. The background cache cleanup
+// process must be started by calling the Start() method.
 func NewLTM(cfg config.LTMConfig, logger *zap.Logger) LTM {
 	return &ltm{
 		logger:        logger.Named("ltm"),
@@ -58,14 +55,16 @@ func NewLTM(cfg config.LTMConfig, logger *zap.Logger) LTM {
 	}
 }
 
-// Start launches the background cache cleanup process for the LTM.
+// Start launches the background goroutine that periodically cleans up expired
+// entries from the LTM cache.
 func (l *ltm) Start() {
 	l.wg.Add(1)
 	go l.runJanitor()
 }
 
-// ProcessAndFlagObservation analyzes an observation to apply heuristic flags
-// and detect semantic redundancy. This is the primary entry point for the LLMMind.
+// ProcessAndFlagObservation is the primary entry point for the LTM. It analyzes
+// a new observation to apply heuristic flags (e.g., for errors or vulnerabilities)
+// and checks if the observation's payload is a duplicate of one seen recently.
 func (l *ltm) ProcessAndFlagObservation(ctx context.Context, obs Observation) map[string]bool {
 	flags := make(map[string]bool)
 
@@ -101,7 +100,8 @@ func (l *ltm) ProcessAndFlagObservation(ctx context.Context, obs Observation) ma
 	return flags
 }
 
-// isRedundant checks if a payload hash already exists in our cache.
+// isRedundant performs a thread-safe check to see if a payload hash already
+// exists in the LTM cache.
 func (l *ltm) isRedundant(payloadHash [32]byte) bool {
 	l.mu.RLock()
 	defer l.mu.RUnlock()
@@ -109,12 +109,12 @@ func (l *ltm) isRedundant(payloadHash [32]byte) bool {
 	return exists
 }
 
-// addObservationToCache adds a new observation's data to the internal caches.
+// addObservationToCache adds a new observation's data and hash to the internal
+// caches in a thread-safe manner.
 func (l *ltm) addObservationToCache(obsID string, payload []byte, payloadHash [32]byte) {
 	l.mu.Lock()
 	defer l.mu.Unlock()
 
-	// A simple check to prevent adding the same observation ID twice.
 	if _, exists := l.cache[obsID]; exists {
 		return
 	}
@@ -127,10 +127,10 @@ func (l *ltm) addObservationToCache(obsID string, payload []byte, payloadHash [3
 	l.payloadHashes[payloadHash] = obsID
 }
 
-// runJanitor is a background goroutine that periodically purges expired items from the cache.
+// runJanitor is the background process that periodically calls
+// purgeExpiredCache to maintain the LTM cache.
 func (l *ltm) runJanitor() {
 	defer l.wg.Done()
-	// Use a ticker to trigger cleanup at a configurable interval.
 	interval := time.Duration(l.cfg.CacheJanitorIntervalSeconds) * time.Second
 	if interval <= 0 {
 		interval = 60 * time.Second // Default to 1 minute if not configured.
@@ -151,7 +151,8 @@ func (l *ltm) runJanitor() {
 	}
 }
 
-// purgeExpiredCache iterates over the cache and removes items that have exceeded their TTL.
+// purgeExpiredCache iterates through the cache and removes any entries that are
+// older than the configured time-to-live (TTL).
 func (l *ltm) purgeExpiredCache() {
 	l.mu.Lock()
 	defer l.mu.Unlock()
@@ -165,7 +166,6 @@ func (l *ltm) purgeExpiredCache() {
 
 	for obsID, entry := range l.cache {
 		if now.Sub(entry.Timestamp) > ttl {
-			// The entry is expired, remove it from both the main cache and the hash set.
 			delete(l.cache, obsID)
 			delete(l.payloadHashes, entry.PayloadHash)
 			purgedCount++
@@ -177,13 +177,11 @@ func (l *ltm) purgeExpiredCache() {
 	}
 }
 
-// Stop gracefully shuts down the LTM's background processes.
+// Stop gracefully shuts down the LTM's background janitor process. It is safe
+// to call multiple times.
 func (l *ltm) Stop() {
-	// Use sync.Once to ensure Stop is idempotent and won't panic on closing a closed channel.
 	l.stopOnce.Do(func() {
-		// Closing the stopChan signals the janitor to exit its loop.
 		close(l.stopChan)
-		// Wait for the janitor goroutine to finish completely.
 		l.wg.Wait()
 	})
 }

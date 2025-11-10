@@ -6,18 +6,31 @@ import (
 	"math/rand"
 )
 
-// PinkNoiseGenerator implements the Voss-McCartney algorithm (stochastic version) for generating 1/f noise.
-// This type of noise exhibits long-term correlations found in human physiological processes.
+// PinkNoiseGenerator produces a sequence of 1/f noise, also known as pink noise.
+// This type of noise is characterized by its long-term correlations and is frequently
+// observed in natural and physiological systems, making it ideal for simulating
+// realistic, low-frequency drift in human motor control (e.g., cursor hesitation).
+//
+// This implementation uses the Voss-McCartney algorithm, which works by summing
+// several sources of white noise that are updated at different frequencies.
 type PinkNoiseGenerator struct {
 	rng    *rand.Rand
-	values []float64 // Current value of each white noise source (oscillator)
-	p      []float64 // Probability of change for each source
-	pink   float64   // Current pink noise value (sum of sources)
-	n      int       // Number of sources
-	scale  float64   // Normalization scale factor
+	values []float64 // The current value of each underlying white noise source.
+	p      []float64 // The probability of updating each source at a given step.
+	pink   float64   // The current accumulated pink noise value.
+	n      int       // The number of white noise sources (oscillators).
+	scale  float64   // A normalization factor to keep the output range consistent.
 }
 
-// NewPinkNoiseGenerator creates a new PinkNoiseGenerator with N sources (N=12 is typical).
+// NewPinkNoiseGenerator creates and initializes a new PinkNoiseGenerator.
+//
+// Parameters:
+//   - rng: A random number generator source.
+//   - n: The number of underlying white noise sources to use. A higher number
+//     provides a better approximation of true 1/f noise but is computationally
+//     more expensive. A value of 12 is a common and effective choice.
+//
+// Returns a fully initialized PinkNoiseGenerator ready to produce noise.
 func NewPinkNoiseGenerator(rng *rand.Rand, n int) *PinkNoiseGenerator {
 	if n <= 0 {
 		n = 12
@@ -56,7 +69,12 @@ func (p *PinkNoiseGenerator) nextWhite() float64 {
 	return p.rng.Float64()*2.0 - 1.0
 }
 
-// Next generates the next normalized pink noise sample.
+// Next calculates and returns the next sample in the pink noise sequence.
+// Each call to Next updates the internal state of one of the underlying white
+// noise sources (selected probabilistically) and returns the new sum, producing
+// a stateful, correlated noise value.
+//
+// Returns a normalized pink noise value, typically in the range of [-1.0, 1.0].
 func (p *PinkNoiseGenerator) Next() float64 {
 	// Select a source to update based on probabilities (Stochastic Voss algorithm).
 	r := p.rng.Float64()

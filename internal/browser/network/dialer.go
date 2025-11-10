@@ -14,21 +14,31 @@ import (
 	"time"
 )
 
-// DialerConfig holds configuration for the low-level dialer.
+// DialerConfig holds the complete configuration for establishing network connections,
+// including timeouts, keep-alive settings, TLS parameters, TCP options, custom DNS
+// resolvers, and proxy settings.
 type DialerConfig struct {
-	Timeout   time.Duration
+	// Timeout is the maximum amount of time a dial will wait for a connect to complete.
+	Timeout time.Duration
+	// KeepAlive specifies the interval between keep-alive probes for active connections.
 	KeepAlive time.Duration
+	// TLSConfig specifies the TLS configuration to use for secure connections.
+	// If nil, TLS will not be enabled for the connection.
 	TLSConfig *tls.Config
-	// NoDelay controls TCP_NODELAY. Crucial for browser responsiveness.
+	// NoDelay controls whether the TCP_NODELAY option is set on the connection,
+	// which is crucial for low-latency browser interactions.
 	NoDelay bool
-	// Resolver allows specifying custom DNS resolution logic.
+	// Resolver allows specifying a custom DNS resolver. If nil, the system's
+	// default resolver is used.
 	Resolver *net.Resolver
-	// ProxyURL specifies the proxy server to use (e.g., "http://user:pass@proxy.example.com:8080").
-	// Only HTTP/HTTPS proxies using the CONNECT method are supported.
+	// ProxyURL specifies the URL of an HTTP/HTTPS proxy server. If set, connections
+	// will be established through the proxy using the CONNECT method.
 	ProxyURL *url.URL
 }
 
-// Clone returns a deep copy of the DialerConfig.
+// Clone creates a deep copy of the DialerConfig, ensuring that mutable fields
+// like TLSConfig and ProxyURL are duplicated, preventing side effects when
+// configurations are modified.
 func (c *DialerConfig) Clone() *DialerConfig {
 	if c == nil {
 		// Return a safe default if the original is nil
@@ -47,7 +57,10 @@ func (c *DialerConfig) Clone() *DialerConfig {
 	return &clone
 }
 
-// NewDialerConfig creates a default, secure configuration optimized for a browser.
+// NewDialerConfig creates a new DialerConfig with secure and performant defaults
+// suitable for a modern web browser. This includes a robust TLS 1.2+ configuration
+// with a preference for modern cipher suites, a reasonable connection timeout,
+// TCP KeepAlive enabled, and TCP_NODELAY enabled for responsiveness.
 func NewDialerConfig() *DialerConfig {
 	// Enforcing strong security defaults (PFS mandatory, modern curves, TLS 1.2+).
 	tlsConfig := &tls.Config{
@@ -83,8 +96,21 @@ func NewDialerConfig() *DialerConfig {
 	}
 }
 
-// DialTCPContext establishes a raw TCP connection, potentially through a proxy. Suitable for http.Transport.DialContext.
-// It returns the established tunnel (if proxied) or the raw TCP connection (if direct).
+// DialTCPContext establishes a raw TCP connection to a given address, correctly
+// handling proxy configuration. It is designed to be used as the `DialContext`
+// function in an `http.Transport`.
+//
+// If a proxy is specified in the DialerConfig, this function will first connect
+// to the proxy and establish a TCP tunnel using the HTTP CONNECT method.
+// Otherwise, it will establish a direct TCP connection to the target address.
+//
+// Parameters:
+//   - ctx: The context to control the dialing process.
+//   - network: The network type, typically "tcp".
+//   - address: The target address in "host:port" format.
+//   - config: The dialer configuration.
+//
+// Returns the established net.Conn or an error if the connection fails.
 func DialTCPContext(ctx context.Context, network, address string, config *DialerConfig) (net.Conn, error) {
 	if config == nil {
 		config = NewDialerConfig()
@@ -245,7 +271,25 @@ func (c *prefixedConn) Read(p []byte) (int, error) {
 	return c.Conn.Read(p)
 }
 
-// DialContext creates connections manually (e.g., for WebSockets or Pipelining), including TLS upgrade.
+// DialContext provides a complete, high-level dialing function that establishes a
+// connection and performs a TLS handshake if a TLSConfig is provided. It handles
+// both direct and proxied connections transparently.
+//
+// This function orchestrates the entire connection process:
+// 1. Establishes a raw TCP connection (or a proxy tunnel) via DialTCPContext.
+// 2. If `config.TLSConfig` is not nil, it performs a TLS handshake over the
+//    established connection to upgrade it to a secure `tls.Conn`.
+//
+// It is suitable for creating connections for protocols that handle their own
+// application layer logic, such as WebSockets.
+//
+// Parameters:
+//   - ctx: The context to control the dialing and TLS handshake process.
+//   - network: The network type, typically "tcp".
+//   - address: The target address in "host:port" format.
+//   - config: The dialer configuration.
+//
+// Returns the final, possibly TLS-wrapped, net.Conn or an error.
 func DialContext(ctx context.Context, network, address string, config *DialerConfig) (net.Conn, error) {
 	if config == nil {
 		config = NewDialerConfig()

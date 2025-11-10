@@ -8,6 +8,21 @@ Scalpel CLI is an AI-powered security auditing tool designed to analyze codebase
 
 Scalpel is not just another static analysis tool. It acts as an AI agent that deeply understands your code. It combines static analysis, dynamic analysis orchestration, and a knowledge graph to build a comprehensive model of your application. This allows it to uncover complex vulnerabilities and, in many cases, automatically generate the code patches to fix them.
 
+## Architecture
+
+The Scalpel CLI is a Go application built with a modular architecture to support extensibility and maintainability. The key components are:
+
+*   **`cmd`**: Contains the main entry point for the CLI, using the [Cobra](https://github.com/spf13/cobra) library to manage commands and flags (`scan`, `report`, etc.).
+*   **`internal/config`**: Manages application configuration, loading settings from `config.yaml` and environment variables using [Viper](https://github.com/spf13/viper).
+*   **`internal/agent`**: The core AI agent logic resides here. It orchestrates the analysis process, interacts with the knowledge graph, and uses an LLM-powered "evolution" loop to reason about security vulnerabilities.
+*   **`internal/analysis`**: Contains the individual security scanners, categorized into:
+    *   `passive`: Analyzers that inspect network traffic without sending new requests (e.g., header analysis).
+    *   `static`: Analyzers that inspect code and configuration files (e.g., JWT secret scanning).
+    *   `active`: Analyzers that actively probe the application for vulnerabilities (e.g., taint analysis, prototype pollution).
+*   **`internal/browser`**: A sophisticated browser automation layer built on top of [chromedp](https://github.com/chromedp/chromedp). It includes a `humanoid` sub-package to simulate realistic user interactions, evading bot detection.
+*   **`internal/network`**: A custom, low-level HTTP client stack that provides fine-grained control over HTTP/1.1 and HTTP/2 connections, request pipelining, and transparent decompression.
+*   **`api/schemas`**: Defines the data structures used throughout the application, including HAR files, findings, and analysis tasks.
+
 ## Key Features
 
 *   **AI-Driven Analysis:** Utilizes LLMs (like Google's Gemini) to identify a wide range of security vulnerabilities with high accuracy.
@@ -25,7 +40,7 @@ Follow these instructions to get Scalpel CLI set up and ready to run your first 
 
 *   [Go](https://go.dev/doc/install) (version 1.21 or later)
 *   [Docker](https://docs.docker.com/get-docker/)
-*   A configured LLM API key (e.g., Google AI Studio API Key)
+*   An API key for your chosen LLM provider (e.g., Google AI Studio, OpenAI).
 
 ### 1. Set Up the PostgreSQL Database
 
@@ -33,7 +48,7 @@ Scalpel uses a PostgreSQL database to store its knowledge graph and analysis res
 
 **a. Launch PostgreSQL using Docker:**
 
-Run the following command to start a PostgreSQL container. This will create a database named `scalpel_db` with a user `scalpel`.
+Run the following command to start a PostgreSQL container. This will create a database named `scalpel_db` with a user `scalpel` and password `secret`.
 
 ```bash
 docker run --name scalpel-db -e POSTGRES_USER=scalpel -e POSTGRES_PASSWORD=secret -e POSTGRES_DB=scalpel_db -p 5432:5432 -d postgres:15
@@ -57,26 +72,31 @@ This command executes the `001_initial_schema.sql` script inside your running co
 go mod tidy
 ```
 
-**b. Configure `config.yaml`:**
+**b. Create and Configure `config.yaml`:**
 
-Copy the `config.yaml.example` to `config.yaml` if it exists, or ensure your `config.yaml` is updated with your database and LLM provider credentials.
+Create a `config.yaml` file in the root of the project. You can use `config.yaml.example` as a starting point. At a minimum, you need to configure the database connection and your LLM provider.
 
 ```yaml
 # Example config.yaml
 database:
-  host: "localhost"
-  port: 5432
-  user: "scalpel"
-  password: "secret" # Use environment variables or a secret management tool in production
-  dbname: "scalpel_db"
-  sslmode: "disable"
+  url: "postgres://scalpel:secret@localhost:5432/scalpel_db?sslmode=disable"
 
-llm:
-  # Your LLM provider configuration
-  # e.g., for Gemini
-  gemini:
-    apiKey: "YOUR_GEMINI_API_KEY" # Use environment variables
+agent:
+  llm:
+    default_fast_model: "gemini-1.5-flash"
+    default_powerful_model: "gemini-1.5-pro"
+    models:
+      # Configure your chosen LLM provider
+      gemini-1.5-flash:
+        provider: "gemini"
+        model: "gemini-1.5-flash-latest"
+        # API key should be set via environment variable: SCALPEL_GEMINI_API_KEY
+      gemini-1.5-pro:
+        provider: "gemini"
+        model: "gemini-1.5-pro-latest"
 ```
+**Important:** It is strongly recommended to manage API keys and other secrets using environment variables. For example, set your Gemini API key with:
+`export SCALPEL_GEMINI_API_KEY="YOUR_API_KEY"`
 
 ### 3. Build the CLI
 
@@ -88,7 +108,11 @@ go build -o scalpel ./cmd/scalpel
 
 ## Usage
 
-Once configured, you can run a scan on a target codebase.
+Once built, you can run scans using the `scalpel` executable.
+
+### Basic Scan
+
+To run a scan on a target codebase or URL:
 
 ```bash
 ./scalpel scan --target /path/to/your/project
@@ -100,34 +124,57 @@ To see all available commands and flags:
 ./scalpel --help
 ```
 
-## Running Specific Analyzers
+### Commands
 
-By default, Scalpel runs a broad set of analyzers. You can control which analyzers to run by editing the `analyzers` section in your `config.yaml` file.
+*   `scalpel scan`: The primary command to initiate a security scan on a target.
+    *   `--target`: (Required) The file path or URL of the target to scan.
+    *   `--output`: The file path to write the output report. Defaults to `results.sarif`.
+    *   `--format`: The output format. Currently supports `sarif`.
+    *   `--concurrency`: The number of concurrent analysis workers.
+    *   `--depth`: The maximum depth for web crawling and interaction.
 
-To run only specific analyzers, you can disable the categories (e.g., `static`, `passive`) and enable individual analyzers by name.
+*   `scalpel report`: Generates a report from a completed scan. (Further details to be added).
 
-**Example `config.yaml` for running only `jwt` and `idor`:**
+*   `scalpel self-heal`: (Experimental) Attempts to automatically patch vulnerabilities found in a previous scan.
 
-```yaml
-# Example config.yaml with specific analyzers enabled
-database:
-  # ... (database config)
-llm:
-  # ... (llm config)
+*   `scalpel evolution`: (Experimental) Runs the AI agent's self-improvement loop.
 
-analyzers:
-  # Disable broad categories
-  static: false
-  passive: false
-  active: false
-  auth: false
+## Configuration
 
-  # Enable specific analyzers by name
-  jwt: true
-  idor: true
+Scalpel is configured via a `config.yaml` file. The application looks for this file in the current directory by default. A detailed example with all available options can be found in `config.yaml.example`.
+
+### Key Configuration Sections:
+
+*   **`logger`**: Configures the logging level, format (console or JSON), and file output.
+*   **`database`**: Specifies the connection details for the PostgreSQL knowledge graph.
+*   **`agent`**: Contains settings for the AI agent, including the LLM router, knowledge graph, and long-term memory.
+    *   **`llm`**: Configure different LLM providers (Gemini, OpenAI, etc.), API keys, and model names for "fast" and "powerful" tasks.
+*   **`browser`**: Controls the behavior of the headless browser, including whether it runs in headless mode, viewport size, and `humanoid` settings for emulating human-like interaction.
+*   **`network`**: Configures the underlying network client, including timeouts, custom headers, and proxy settings.
+*   **`scanners`**: Provides fine-grained control to enable or disable specific security analyzers (e.g., `jwt`, `idor`, `taint`).
+
+## Development
+
+This section provides guidance for developers who want to contribute to the Scalpel CLI.
+
+### Running Tests
+
+The project has a comprehensive suite of unit and integration tests. To run all tests, use the standard Go command:
+
+```bash
+go test ./...
 ```
 
-This configuration will ensure that only the "JWT" and "IDOR" analyzers are executed during the scan.
+Some tests, particularly in the `internal/browser` package, require a running browser instance and may be slower. To run tests for a specific package:
+
+```bash
+# Example: Run tests only for the agent package
+go test ./internal/agent/...
+```
+
+### Code Style and Conventions
+
+Please follow the standard Go coding conventions (`gofmt`). We also encourage the use of `golangci-lint` to ensure code quality and consistency.
 
 ## Contributing
 

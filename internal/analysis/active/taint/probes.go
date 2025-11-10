@@ -2,13 +2,18 @@ package taint
 
 import "github.com/xkilldash9x/scalpel-cli/api/schemas"
 
-// TaintFlowPath defines a specific source-to-sink path for taint analysis.
+// TaintFlowPath represents a logical path from a probe (representing a taint
+// source) to a sink. This is used to define a ruleset for valid and invalid
+// flows to reduce false positives.
 type TaintFlowPath struct {
 	ProbeType schemas.ProbeType
 	SinkType  schemas.TaintSink
 }
 
-// ValidTaintFlows defines the set of acceptable source-to-sink paths to reduce false positives.
+// ValidTaintFlows is a map that acts as a rules engine, defining the set of
+// logical and high-risk taint flows. For example, it validates that an XSS
+// probe reaching an `innerHTML` sink is a valid path to report, while a generic
+// probe reaching the same sink might be ignored.
 var ValidTaintFlows = map[TaintFlowPath]bool{
 	{schemas.ProbeTypeXSS, schemas.SinkEval}:                true,
 	{schemas.ProbeTypeXSS, schemas.SinkInnerHTML}:           true,
@@ -55,8 +60,10 @@ var ValidTaintFlows = map[TaintFlowPath]bool{
 	{schemas.ProbeTypeOAST, schemas.SinkWorkerSrc}:         true,
 }
 
-// DefaultProbes returns a comprehensive list of attack payloads for various vulnerability classes.
-// MODULARITY: This function now provides defaults, the Analyzer consumes the configuration object.
+// DefaultProbes provides a default, comprehensive list of attack payloads
+// (probes) for various vulnerability classes, including XSS, SSTI, Prototype
+// Pollution, and OAST-based checks. This list serves as the default configuration
+// for the taint analyzer.
 func DefaultProbes() []ProbeDefinition {
 	// Define the execution proof function call.
 	executionProofCall := `window.` + JSCallbackExecutionProof + `('{{.Canary}}')`
@@ -254,7 +261,10 @@ func DefaultProbes() []ProbeDefinition {
 	}
 }
 
-// DefaultSinks defines the JavaScript functions and properties to be instrumented.
+// DefaultSinks provides a default list of JavaScript functions, properties, and
+// methods to be instrumented by the taint analysis shim. This list covers a wide
+// range of common sinks for vulnerabilities like XSS, open redirect, and data
+// exfiltration.
 func DefaultSinks() []SinkDefinition {
 	return []SinkDefinition{
 		// -- Execution Sinks (High Risk) --

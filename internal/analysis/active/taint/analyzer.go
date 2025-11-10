@@ -37,39 +37,30 @@ type HumanoidProvider interface {
 
 // REFACTOR: Removed BrowserContextProvider interface as GetContext() is deprecated and anti-pattern.
 
-// Analyzer is the central nervous system of the IAST operation. It orchestrates probe
-// injection, event collection, and vulnerability correlation.
+// Analyzer orchestrates the entire interactive application security testing (IAST)
+// process. It manages probe injection, event collection from various sources (JS
+// hooks, OAST), and the correlation of these events to identify and report
+// vulnerabilities. It is a stateful component, created for a single analysis task.
 type Analyzer struct {
-	config       Config
-	reporter     ResultsReporter
-	oastProvider OASTProvider
-	logger       *zap.Logger
-	shimTemplate string // <-- Changed from *template.Template to string
-
-	// -- State Management --
-	activeProbes map[string]ActiveProbe
-	probesMutex  sync.RWMutex // Protects activeProbes. Optimized for many concurrent reads from correlation workers.
-
-	// -- Concurrency Control --
-	// The primary communication channel from producers (JS callbacks, OAST poller) to consumers (correlation workers).
-	eventsChan chan Event
-
-	// FIX: Add a mutex to protect concurrent access to the taint flow rules.
+	config          Config
+	reporter        ResultsReporter
+	oastProvider    OASTProvider
+	logger          *zap.Logger
+	shimTemplate    string
+	activeProbes    map[string]ActiveProbe
+	probesMutex     sync.RWMutex
+	eventsChan      chan Event
 	rulesMutex      sync.RWMutex
 	validTaintFlows map[TaintFlowPath]bool
-
-	// wg tracks the lifecycle of the correlation worker pool.
-	wg sync.WaitGroup
-	// producersWG tracks the background producer goroutines (probe cleanup, OAST polling).
-	producersWG sync.WaitGroup
-
-	// backgroundCtx and backgroundCancel are used to signal a graceful shutdown to the producer goroutines.
-	backgroundCtx    context.Context
+	wg              sync.WaitGroup
+	producersWG     sync.WaitGroup
+	backgroundCtx   context.Context
 	backgroundCancel context.CancelFunc
 }
 
-// NewAnalyzer initializes the analyzer, applies configuration defaults,
-// and prepares the instrumentation shim template.
+// NewAnalyzer creates and initializes a new taint Analyzer instance. It reads
+// the JavaScript shim, applies default configuration values, and sets up the
+// internal state for a new analysis run.
 func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvider, logger *zap.Logger) (*Analyzer, error) {
 	taskLogger := logger.Named("taint_analyzer").With(zap.String("task_id", config.TaskID))
 
@@ -103,15 +94,19 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 	}, nil
 }
 
-// UpdateTaintFlowRuleForTesting provides a thread-safe way to modify a rule for a specific test.
+// UpdateTaintFlowRuleForTesting provides a thread-safe mechanism to modify the
+// taint flow validation rules during tests. This is essential for isolating and
+// testing specific correlation logic.
 func (a *Analyzer) UpdateTaintFlowRuleForTesting(flow TaintFlowPath, isValid bool) {
 	a.rulesMutex.Lock()
 	defer a.rulesMutex.Unlock()
 	a.validTaintFlows[flow] = isValid
 }
 
-// BuildTaintShim constructs the final JavaScript shim from a template string and config.
-// This function is exported to be used by the session manager during initialization.
+// BuildTaintShim is an exported utility function that constructs the final
+// JavaScript instrumentation shim from a template string and a JSON configuration
+// for sinks. This allows the session manager to prepare the shim before the
+// analyzer is fully instantiated.
 func BuildTaintShim(templateContent string, configJSON string) (string, error) {
 	// 1. Parse the template content passed as an argument.
 	tmpl, err := template.New("shim").Parse(templateContent)
@@ -141,7 +136,8 @@ func BuildTaintShim(templateContent string, configJSON string) (string, error) {
 	return buf.String(), nil
 }
 
-// applyConfigDefaults ensures that critical configuration parameters have sane default values.
+// applyConfigDefaults ensures that critical configuration parameters for the
+// analyzer have sane, non-zero default values, promoting stability.
 func applyConfigDefaults(cfg Config) Config {
 	if cfg.EventChannelBuffer == 0 {
 		// A larger buffer is a good default for a worker pool model to absorb bursts.
@@ -166,8 +162,9 @@ func applyConfigDefaults(cfg Config) Config {
 	return cfg
 }
 
-// Analyze executes the IAST analysis for a target URL using a provided browser session.
-// It orchestrates instrumentation, probing, and the graceful shutdown of background workers.
+// Analyze is the main entry point for the IAST analysis. It takes control of a
+// browser session, orchestrates the instrumentation, probing, event collection,
+// and graceful shutdown of all background workers.
 func (a *Analyzer) Analyze(ctx context.Context, session SessionContext) error {
 	a.logger.Info("Starting IAST analysis",
 		zap.String("target", a.config.Target.String()),

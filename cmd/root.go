@@ -26,9 +26,10 @@ type configKeyType struct{}
 
 var configKey = configKeyType{}
 
-// NewRootCommand creates and returns a new, fully configured root cobra command.
-// This factory function is used to ensure a stateless command instance for each execution,
-// which is crucial for both single-shot commands and the interactive shell.
+// NewRootCommand creates the main entry point for the command-line interface.
+// It initializes the root command, sets up persistent flags for configuration,
+// configures logging, and attaches all subcommands (like scan, report, etc.).
+// This function ensures a clean, state-free command structure for each execution.
 func NewRootCommand() *cobra.Command {
 	var cfgFile string
 	var validateFix bool
@@ -96,8 +97,10 @@ func NewRootCommand() *cobra.Command {
 	return rootCmd
 }
 
-// Execute creates a new root command and executes it.
-// This is the main entry point for the CLI application.
+// Execute is the primary entry point for the Scalpel CLI application. It creates a
+// new root command, executes it with the provided context, and handles top-level
+// error logging. If the context is canceled (e.g., by Ctrl+C), it suppresses
+// redundant error messages for a cleaner user experience.
 func Execute(ctx context.Context) error {
 	cmd := NewRootCommand()
 

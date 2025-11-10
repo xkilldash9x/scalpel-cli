@@ -1,4 +1,22 @@
 // File: internal/browser/humanoid/trajectory.go
+// This file contains the core logic for simulating realistic mouse movement trajectories.
+// The simulation is based on a critically-damped mass-spring-damper model, which
+// produces the characteristic smooth, curved paths of human motion.
+//
+// To ensure stable and consistent performance across different movement speeds and
+// distances, the system uses a control theory concept called Gain Scheduling. This
+// technique dynamically adjusts the parameters (gains) of a PID (Proportional-Integral-Derivative)
+// controller that corrects the cursor's path, making the movement robust and preventing
+// oscillations or sluggishness.
+//
+// The trajectory is further enhanced by several layers of noise modeling:
+// - Pink Noise (1/f noise): Simulates low-frequency, long-term drift, like a user slowly wavering.
+// - Gaussian Noise: Simulates high-frequency, random tremor.
+// - Signal-Dependent Noise: Models the phenomenon where motor control becomes less precise
+//   at higher speeds, introducing noise proportional to the cursor's velocity.
+//
+// The combination of these physics-based models and realistic noise sources allows the
+// humanoid to generate trajectories that are difficult to distinguish from those of a real user.
 package humanoid
 
 import (

@@ -12,14 +12,49 @@ import (
 	"go.uber.org/zap"
 )
 
-// MoveTo is the public, locking method for moving the cursor to a specific element.
+// MoveTo simulates a human moving the mouse cursor to a UI element specified by a selector.
+// This high-level action orchestrates a complex sequence to produce a realistic trajectory:
+//
+//  1. A "cognitive pause" to simulate the user locating the target and planning the movement.
+//  2. An "anticipatory movement," which is a small, slow initial drift towards the target.
+//  3. A primary "ballistic movement" phase, simulated using a critically-damped spring
+//     model to create a smooth, curved path with realistic acceleration and deceleration.
+//     This path is influenced by various noise models (Pink, Gaussian, Signal-Dependent).
+//  4. A "terminal pause" or verification delay upon reaching the target, modeled by
+//     Fitts's Law, which simulates the final moments of aiming. During this pause,
+//     the cursor exhibits subtle idle drift.
+//
+// The target point within the element is not simply the center but is calculated
+// based on element type, velocity biases (overshoot), and random noise to ensure
+// variability.
+//
+// Parameters:
+//   - ctx: The context for the movement operation.
+//   - selector: The CSS selector of the target element.
+//   - opts: Optional settings, such as disabling `ensureVisible` or providing a
+//     `PotentialField` to influence the path.
+//
+// Returns an error if the element cannot be found or the context is cancelled.
 func (h *Humanoid) MoveTo(ctx context.Context, selector string, opts *InteractionOptions) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	return h.moveToSelector(ctx, selector, opts)
 }
 
-// MoveToVector is the public, locking method for moving to a specific coordinate.
+// MoveToVector is the public entry point for moving the mouse cursor to a specific
+// coordinate (Vector2D). It is a thread-safe wrapper around the internal `moveToVector`
+// logic, acquiring a lock for the duration of the operation.
+//
+// This function is useful for scenarios where the target is a specific point rather
+// than a UI element. The movement simulation follows the same realistic model as `MoveTo`,
+// including anticipatory movement, ballistic trajectory, and terminal pause.
+//
+// Parameters:
+//   - ctx: The context for the movement operation.
+//   - target: The destination coordinate (Vector2D).
+//   - opts: Optional settings, such as providing a `PotentialField` to influence the path.
+//
+// Returns an error if the context is cancelled during the movement.
 func (h *Humanoid) MoveToVector(ctx context.Context, target Vector2D, opts *InteractionOptions) error {
 	h.mu.Lock()
 	defer h.mu.Unlock()
