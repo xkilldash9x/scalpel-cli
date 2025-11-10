@@ -16,7 +16,8 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/active/timeslip"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"go.uber.org/zap"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 )
 
 // MockReporter for E2E tests (Thread-safe).
@@ -51,7 +52,7 @@ type VulnerableServer struct {
 }
 
 func (vs *VulnerableServer) handler(w http.ResponseWriter, r *http.Request) {
-	// Optional locking for the "patched" test case.
+	w.Header().Set("Connection", "keep-alive")
 	if vs.useLocking {
 		vs.mu.Lock()
 		defer vs.mu.Unlock()
@@ -80,24 +81,32 @@ func (vs *VulnerableServer) handler(w http.ResponseWriter, r *http.Request) {
 			// Double-check pattern (often omitted in vulnerable code, but included here to accurately simulate the outcome)
 			if !vs.voucherUsed {
 				vs.voucherUsed = true
+				body := `{"status":"success", "message":"Voucher redeemed!"}`
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 				w.WriteHeader(http.StatusOK)
-				fmt.Fprintln(w, `{"status":"success", "message":"Voucher redeemed!"}`)
+				fmt.Fprintln(w, body)
 			} else {
 				// Another thread beat us between the initial check and this lock acquisition.
+				body := `{"status":"error", "message":"Voucher used during processing."}`
+				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 				w.WriteHeader(http.StatusConflict)
-				fmt.Fprintln(w, `{"status":"error", "message":"Voucher used during processing."}`)
+				fmt.Fprintln(w, body)
 			}
 			vs.mu.Unlock()
 		} else {
 			// Locked scenario (patched)
 			vs.voucherUsed = true
+			body := `{"status":"success", "message":"Voucher redeemed!"}`
+			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprintln(w, `{"status":"success", "message":"Voucher redeemed!"}`)
+			fmt.Fprintln(w, body)
 		}
 
 	} else {
+		body := `{"status":"error", "message":"Voucher already used."}`
+		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 		w.WriteHeader(http.StatusConflict)
-		fmt.Fprintln(w, `{"status":"error", "message":"Voucher already used."}`)
+		fmt.Fprintln(w, body)
 	}
 }
 
@@ -114,14 +123,20 @@ func setupE2EAnalyzer(reporter core.Reporter, insecure bool) (*timeslip.Analyzer
 		Success: timeslip.SuccessCondition{
 			BodyRegex: `"status":"success"`,
 		},
-	}
-	logger := zap.NewNop()
-	return timeslip.NewAnalyzer(uuid.New(), config, logger, reporter)
+	} // FIX: Removed logger from NewAnalyzer call as it's now embedded in the Analyzer struct.
+	return timeslip.NewAnalyzer(uuid.New(), config, reporter)
 }
 
 // --- IV. End-to-End System Tests ---
 
 func TestE2E_TOCTOU_Vulnerable(t *testing.T) {
+	observability.ResetForTest()
+	observability.InitializeLogger(config.LoggerConfig{
+		Level:       "debug",
+		Format:      "console",
+		AddSource:   true,
+		ServiceName: "test",
+	})
 	// Setup a vulnerable server with a significant race window (50ms) and no locking
 	vs := &VulnerableServer{
 		processDelay: 50 * time.Millisecond,
@@ -189,6 +204,7 @@ func TestE2E_TOCTOU_Vulnerable(t *testing.T) {
 }
 
 func TestE2E_Patched_WithLocking(t *testing.T) {
+	observability.InitializeLogger(config.LoggerConfig{})
 	// Setup a patched server using locking
 	vs := &VulnerableServer{
 		processDelay: 50 * time.Millisecond,

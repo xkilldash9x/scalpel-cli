@@ -1,3 +1,4 @@
+// File: internal/analysis/active/timeslip/concurrency_test.go
 package timeslip
 
 import (
@@ -13,8 +14,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/goleak"
-	"go.uber.org/zap"
 	"golang.org/x/net/http2"
+
+	// -- ADDED --
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 )
 
 // --- III. Concurrency & Reliability Tests ---
@@ -23,6 +26,9 @@ import (
 func TestGoroutineLeaks_H1Concurrent(t *testing.T) {
 	// goleak.VerifyNone(t) will fail if any unexpected goroutines are still running when the test finishes.
 	defer goleak.VerifyNone(t)
+
+	// -- CORRECTED --
+	log := observability.GetLogger().Named(t.Name())
 
 	// 1. Setup Mock Server
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -38,7 +44,8 @@ func TestGoroutineLeaks_H1Concurrent(t *testing.T) {
 	candidate := &RaceCandidate{Method: "GET", URL: server.URL}
 
 	// 3. Execution
-	_, err := ExecuteH1Concurrent(context.Background(), candidate, config, oracle, zap.NewNop())
+	// -- CORRECTED --
+	_, err := ExecuteH1Concurrent(context.Background(), candidate, config, oracle, log)
 	assert.NoError(t, err)
 
 	// 4. Verification (handled by the defer goleak.VerifyNone(t))
@@ -48,6 +55,9 @@ func TestGoroutineLeaks_H1Concurrent(t *testing.T) {
 func TestGoroutineLeaks_Cancellation(t *testing.T) {
 	// Set a slightly longer timeout for leak detection to account for cleanup time.
 	defer goleak.VerifyNone(t)
+
+	// -- CORRECTED --
+	log := observability.GetLogger().Named(t.Name())
 
 	// 1. Setup Mock Server with significant delay
 	// FIX: Use NewTLSServer as H2Multiplexing requires HTTPS.
@@ -69,7 +79,8 @@ func TestGoroutineLeaks_Cancellation(t *testing.T) {
 	done := make(chan error)
 	go func() {
 		// We use H2Multiplexing as an example strategy
-		_, err := ExecuteH2Multiplexing(ctx, candidate, config, oracle, zap.NewNop())
+		// -- CORRECTED --
+		_, err := ExecuteH2Multiplexing(ctx, candidate, config, oracle, log)
 		done <- err
 	}()
 
@@ -92,7 +103,6 @@ func TestGoroutineLeaks_Cancellation(t *testing.T) {
 // This is primarily to ensure stability and detect data races when run with `go test -race`.
 func TestStress_AnalyzerConcurrency(t *testing.T) {
 	// Setup shared components
-	logger := zap.NewNop()
 	reporter := &MockReporter{} // Thread-safe mock
 
 	// Setup Mock Server
@@ -129,7 +139,7 @@ func TestStress_AnalyzerConcurrency(t *testing.T) {
 
 			// Each goroutine gets its own analyzer instance
 			// The data race previously occurred here due to shared Config modification.
-			analyzer, err := NewAnalyzer(uuid.New(), config, logger, reporter)
+			analyzer, err := NewAnalyzer(uuid.New(), config, reporter)
 			if !assert.NoError(t, err) {
 				return
 			}

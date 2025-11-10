@@ -31,7 +31,7 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 	// The customhttp client is already optimized for connection reuse, so no special config is needed.
 
 	client := customhttp.NewCustomClient(clientConfig, logger)
-
+	defer client.CloseAll()
 	// 2. Prepare for concurrent execution.
 	resultsChan := make(chan *RaceResponse, config.Concurrency)
 	var wg sync.WaitGroup
@@ -94,7 +94,13 @@ func ExecuteH2Multiplexing(ctx context.Context, candidate *RaceCandidate, config
 			reqDuration := time.Since(reqStart)
 
 			if err != nil {
-				resultsChan <- &RaceResponse{Error: fmt.Errorf("request failed: %w", err)}
+				// FIX: Check for ALPN/negotiation errors to correctly detect H2 unsupported
+				if strings.Contains(err.Error(), "no application protocol") ||
+					strings.Contains(err.Error(), "did not negotiate HTTP/2") {
+					resultsChan <- &RaceResponse{Error: ErrH2Unsupported}
+				} else {
+					resultsChan <- &RaceResponse{Error: fmt.Errorf("request failed: %w", err)}
+				}
 				return
 			}
 			defer resp.Body.Close()

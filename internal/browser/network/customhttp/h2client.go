@@ -1,4 +1,3 @@
-// internal/browser/network/customhttp/h2client.go
 package customhttp
 
 import (
@@ -20,6 +19,7 @@ import (
 	"time"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability" // Added import
 	"go.uber.org/zap"
 	"golang.org/x/net/http2"
 	"golang.org/x/net/http2/hpack"
@@ -40,13 +40,13 @@ const (
 )
 
 // H2Client manages a single, persistent HTTP/2 connection to a specific host.
-// It is a low-level client that provides full control over the HTTP/2 framing layer,
+// It is a low level client that provides full control over the HTTP/2 framing layer,
 // including concurrent request multiplexing, stream management, and manual flow control.
 //
 // A background goroutine reads and processes incoming frames, dispatching them
 // to the appropriate streams. Another optional goroutine handles keep-alive PINGs
 // to maintain connection liveness. The client is thread-safe and designed for
-// high-concurrency scenarios.
+// high concurrency scenarios.
 type H2Client struct {
 	Conn      net.Conn
 	Config    *ClientConfig
@@ -112,8 +112,9 @@ func NewH2Client(targetURL *url.URL, config *ClientConfig, logger *zap.Logger) (
 	if config == nil {
 		config = NewBrowserClientConfig()
 	}
+	// If no logger is provided, fetch the global logger.
 	if logger == nil {
-		logger = zap.NewNop()
+		logger = observability.GetLogger()
 	}
 
 	// H2 over TLS (h2) is the primary focus. H2C (cleartext) is not implemented here.
@@ -179,11 +180,11 @@ func (c *H2Client) IsIdle(timeout time.Duration) bool {
 // is the primary setup method and is called lazily by `Do`. It is idempotent.
 //
 // The connection process involves:
-// 1. Establishing a TCP connection and performing a TLS handshake with ALPN to negotiate "h2".
-// 2. Sending the client preface string.
-// 3. Sending initial SETTINGS and WINDOW_UPDATE frames to configure the connection.
-// 4. Starting background goroutines to read incoming frames (`readLoop`) and
-//    handle keep-alive PINGs (`pingLoop`).
+//  1. Establishing a TCP connection and performing a TLS handshake with ALPN to negotiate "h2".
+//  2. Sending the client preface string.
+//  3. Sending initial SETTINGS and WINDOW_UPDATE frames to configure the connection.
+//  4. Starting background goroutines to read incoming frames (`readLoop`) and
+//     handle keep-alive PINGs (`pingLoop`).
 func (c *H2Client) Connect(ctx context.Context) error {
 
 	c.mu.Lock()
@@ -263,7 +264,8 @@ func (c *H2Client) dialH2Connection(ctx context.Context) (net.Conn, error) {
 
 	// Ensure H2 is prioritized in ALPN.
 	// We include "http/1.1" as a fallback indicator, but we strictly check for "h2" success below.
-	dialerConfig.TLSConfig.NextProtos = []string{"h2", "http/1.live"}
+	// FIX: Changed "http/1.live" (which caused the failures) to the standard "http/1.1".
+	dialerConfig.TLSConfig.NextProtos = []string{"h2", "http/1.1"}
 
 	dialerConfig.TLSConfig.InsecureSkipVerify = c.Config.InsecureSkipVerify
 	if dialerConfig.TLSConfig.ServerName == "" {
@@ -370,12 +372,12 @@ func (c *H2Client) closeWithError(code http2.ErrCode, err error) error {
 // primary method for interacting with the client and is safe for concurrent use.
 //
 // The process involves:
-// 1. Lazily establishing the H2 connection if needed.
-// 2. Initializing a new stream for the request.
-// 3. Starting a new goroutine to serialize and send the request headers and body,
-//    respecting H2 flow control.
-// 4. Waiting for the response to be received by the background `readLoop`, or
-//    for the request context to be cancelled.
+//  1. Lazily establishing the H2 connection if needed.
+//  2. Initializing a new stream for the request.
+//  3. Starting a new goroutine to serialize and send the request headers and body,
+//     respecting H2 flow control.
+//  4. Waiting for the response to be received by the background `readLoop`, or
+//     for the request context to be cancelled.
 //
 // This concurrent design allows multiple `Do` calls to be in flight simultaneously
 // over the single TCP connection.
@@ -523,7 +525,7 @@ func (c *H2Client) sendRequest(stream *h2StreamState) error {
 		}
 	}
 
-	// --- Send HEADERS ---
+	// -- Send HEADERS --
 	c.mu.Lock()
 
 	if !c.isConnected {
@@ -558,7 +560,7 @@ func (c *H2Client) sendRequest(stream *h2StreamState) error {
 		return nil
 	}
 
-	// --- Send DATA (with Flow Control) ---
+	// -- Send DATA (with Flow Control) --
 	return c.sendData(stream, bodyBytes)
 }
 
@@ -686,7 +688,7 @@ func (c *H2Client) encodeHeaders(req *http.Request, body []byte) ([]byte, error)
 	return result, nil
 }
 
-// --- Background Loops ---
+// -- Background Loops --
 
 // pingLoop periodically sends PING frames to keep the connection alive and detect failures (NAT timeouts, half-open connections).
 func (c *H2Client) pingLoop() {
@@ -765,7 +767,15 @@ func (c *H2Client) readLoop() {
 	defer c.loopWG.Done()
 	// Ensure connection is closed if the loop exits unexpectedly.
 	defer func() {
-		if c.isConnected {
+		// Check if the connection is still considered active.
+		c.mu.Lock()
+		isConn := c.isConnected
+		c.mu.Unlock()
+
+		if isConn {
+			// If the loop exits but the connection wasn't
+			// cleanly shut down (e.g., by c.Close()),
+			// we must trigger the close to clean up resources.
 			c.Close()
 		}
 	}()
@@ -816,11 +826,11 @@ func (c *H2Client) readLoop() {
 				errCode = se.Code
 			} else if errors.As(err, &ce) {
 				errCode = http2.ErrCode(ce)
-			} // <--- *** THIS WAS THE MISSING BRACE ***
+			}
 
 			c.closeWithError(errCode, fmt.Errorf("frame read error: %w", err))
 			return
-		} // <--- *** THIS WAS THE MISPLACED BRACE *** (It's now correctly closing `if err != nil`)
+		}
 
 		// Process the frame.
 		if err := c.processFrame(frame); err != nil {
@@ -856,7 +866,6 @@ func (c *H2Client) processFrame(frame http2.Frame) error {
 	if !exists {
 		// PUSH_PROMISE is not allowed from server if we disabled it.
 		if frame.Header().Type == http2.FramePushPromise {
-			// --- MODIFIED ---
 			return http2.ConnectionError(http2.ErrCodeProtocol)
 		}
 		// If DATA is received for a closed stream, we must return the flow control credit.
@@ -893,25 +902,21 @@ func (c *H2Client) processFrame(frame http2.Frame) error {
 	}
 
 	if streamErr != nil {
-		// --- MODIFIED BLOCK START ---
 		// Check if it's a fatal connection error first. If so, return it to readLoop.
 		var ce http2.ConnectionError
 		if errors.As(streamErr, &ce) {
 			return ce // Pass connection error up
 		}
-		// --- MODIFIED BLOCK END ---
 
 		// Handle stream-level errors.
 		c.Logger.Error("Stream error", zap.Uint32("streamID", streamID), zap.Error(streamErr))
 
 		// Determine the appropriate error code for RST_STREAM.
-		// --- MODIFIED BLOCK START ---
 		errCode := http2.ErrCodeInternal
 		var se http2.StreamError
 		if errors.As(streamErr, &se) {
 			errCode = se.Code
 		}
-		// --- MODIFIED BLOCK END ---
 
 		// Send RST_STREAM if the error is recoverable at the connection level and the stream hasn't ended yet.
 		if !streamEnded {
@@ -945,7 +950,6 @@ func (c *H2Client) processControlFrame(frame http2.Frame) error {
 		// Validate frame types allowed on stream 0.
 		switch f.Header().Type {
 		case http2.FrameData, http2.FrameHeaders, http2.FramePriority, http2.FrameRSTStream, http2.FramePushPromise, http2.FrameContinuation:
-			// --- MODIFIED ---
 			return http2.ConnectionError(http2.ErrCodeProtocol)
 		}
 		// Ignore unknown control frames.
@@ -970,7 +974,6 @@ func (c *H2Client) processSettingsFrame(f *http2.SettingsFrame) error {
 			newWindowSize := int32(setting.Val)
 			// Check for invalid window size (http2 library handles > MaxInt32 during parsing).
 			if newWindowSize < 0 {
-				// --- MODIFIED ---
 				return http2.ConnectionError(http2.ErrCodeFlowControl)
 			}
 			// Update existing streams' send windows (RFC 7540 Section 6.9.2).
@@ -984,7 +987,6 @@ func (c *H2Client) processSettingsFrame(f *http2.SettingsFrame) error {
 			}
 		case http2.SettingMaxFrameSize:
 			if setting.Val < DefaultH2MaxFrameSize || setting.Val > (1<<24-1) {
-				// --- MODIFIED ---
 				return http2.ConnectionError(http2.ErrCodeProtocol)
 			}
 			c.maxFrameSize = setting.Val
@@ -1040,11 +1042,9 @@ func (c *H2Client) processWindowUpdateFrame(stream *h2StreamState, f *http2.Wind
 	if increment == 0 {
 		// WINDOW_UPDATE with 0 increment is an error (RFC 7540 Section 6.9).
 		if stream == nil {
-			// --- MODIFIED ---
 			return http2.ConnectionError(http2.ErrCodeProtocol)
 		}
 		// Stream error.
-		// --- MODIFIED ---
 		return http2.StreamError{StreamID: stream.ID, Code: http2.ErrCodeProtocol}
 	}
 
@@ -1055,7 +1055,6 @@ func (c *H2Client) processWindowUpdateFrame(stream *h2StreamState, f *http2.Wind
 		// Connection window update.
 		// Check for overflow.
 		if c.connSendWindow > math.MaxInt64-int64(increment) {
-			// --- MODIFIED ---
 			return http2.ConnectionError(http2.ErrCodeFlowControl)
 		}
 		c.connSendWindow += int64(increment)
@@ -1074,7 +1073,6 @@ func (c *H2Client) processWindowUpdateFrame(stream *h2StreamState, f *http2.Wind
 
 		if stream.sendWindow > math.MaxInt64-int64(increment) {
 			// This is a stream error.
-			// --- MODIFIED ---
 			return http2.StreamError{StreamID: stream.ID, Code: http2.ErrCodeFlowControl}
 		}
 		stream.sendWindow += int64(increment)
@@ -1100,13 +1098,11 @@ func (c *H2Client) processHeadersFrame(stream *h2StreamState, f *http2.MetaHeade
 			// Pseudo-headers.
 			if isTrailer {
 				// Trailers must not include pseudo-headers.
-				// --- MODIFIED ---
 				return false, http2.StreamError{StreamID: stream.ID, Code: http2.ErrCodeProtocol}
 			}
 			if hf.Name == ":status" {
 				status, err := strconv.Atoi(hf.Value)
 				if err != nil {
-					// --- MODIFIED ---
 					return false, http2.StreamError{StreamID: stream.ID, Code: http2.ErrCodeProtocol}
 				}
 				stream.StatusCode = status
@@ -1120,7 +1116,6 @@ func (c *H2Client) processHeadersFrame(stream *h2StreamState, f *http2.MetaHeade
 
 	if !isTrailer && stream.StatusCode == 0 {
 		// Final response headers must include :status.
-		// --- MODIFIED ---
 		return false, http2.StreamError{StreamID: stream.ID, Code: http2.ErrCodeProtocol}
 	}
 
@@ -1130,7 +1125,6 @@ func (c *H2Client) processHeadersFrame(stream *h2StreamState, f *http2.MetaHeade
 // processDataFrame handles DATA frames, respecting receive flow control.
 func (c *H2Client) processDataFrame(stream *h2StreamState, f *http2.DataFrame) (bool, error) {
 	if stream.StatusCode == 0 {
-		// --- MODIFIED ---
 		return false, http2.StreamError{StreamID: stream.ID, Code: http2.ErrCodeProtocol}
 	}
 
@@ -1147,13 +1141,11 @@ func (c *H2Client) processDataFrame(stream *h2StreamState, f *http2.DataFrame) (
 	if c.connRecvWindow < int64(dataLen) {
 		c.mu.Unlock()
 		// Connection flow control violation is a connection error.
-		// --- MODIFIED ---
 		return false, http2.ConnectionError(http2.ErrCodeFlowControl)
 	}
 	if stream.recvWindow < int32(dataLen) {
 		c.mu.Unlock()
 		// Stream flow control violation is a stream error.
-		// --- MODIFIED ---
 		return false, http2.StreamError{StreamID: stream.ID, Code: http2.ErrCodeFlowControl}
 	}
 

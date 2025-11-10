@@ -26,11 +26,11 @@ const timingAnomalyStdDevThreshold = 3.0
 // we can replace them in our tests to mock their behavior without actually
 // executing them. This is key to fixing the "cannot assign to" error.
 var (
-	executeH1Concurrent     = ExecuteH1Concurrent     // Takes logger
-	executeH1SingleByteSend = ExecuteH1SingleByteSend // Takes logger
-	executeH2Multiplexing   = ExecuteH2Multiplexing   // Takes logger
-	executeH2Dependency     = ExecuteH2Dependency     // Takes logger
-	executeGraphQLAsync     = ExecuteGraphQLAsync     // Takes logger
+	executeH1Concurrent     = ExecuteH1Concurrent
+	executeH1SingleByteSend = ExecuteH1SingleByteSend
+	executeH2Multiplexing   = ExecuteH2Multiplexing
+	executeH2Dependency     = ExecuteH2Dependency
+	executeGraphQLAsync     = ExecuteGraphQLAsync
 )
 
 // Analyzer orchestrates the TimeSlip module, managing strategy execution and result analysis.
@@ -46,13 +46,8 @@ type Analyzer struct {
 
 // NewAnalyzer initializes the TimeSlip Analyzer.
 // The signature is updated to return an error if the configuration, like its regex patterns, is invalid.
-func NewAnalyzer(scanID uuid.UUID, config *Config, logger *zap.Logger, reporter core.Reporter) (*Analyzer, error) {
-	if logger == nil {
-		// This is a safety net. If no logger is provided, we use a no-op one
-		// so we don't have to deal with nil pointer panics down the line.
-		logger = observability.GetLogger().Named("timeslip_analyzer_nop")
-	}
-	log := logger.Named("timeslip_analyzer")
+func NewAnalyzer(scanID uuid.UUID, config *Config, reporter core.Reporter) (*Analyzer, error) {
+	log := observability.GetLogger().Named("timeslip_analyzer")
 
 	if config == nil {
 		// Provide a safe default configuration if none is supplied.

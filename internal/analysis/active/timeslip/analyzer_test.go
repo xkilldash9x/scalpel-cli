@@ -15,7 +15,6 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest"
 )
 
 // MockReporter implements
@@ -36,13 +35,10 @@ func (mr *MockReporter) Write(envelope *schemas.ResultEnvelope) error {
 
 // Helper to set up a default Analyzer instance for testing.
 func setupAnalyzer(t *testing.T, config *Config) (*Analyzer, *MockReporter) {
-	// Use zaptest logger which integrates with testing.T
-	// Use NewNop() for cleaner logs unless debugging specific log output.
-	logger := zap.NewNop()
 	reporter := &MockReporter{}
 	scanID := uuid.New()
 
-	analyzer, err := NewAnalyzer(scanID, config, logger, reporter)
+	analyzer, err := NewAnalyzer(scanID, config, reporter)
 
 	// We only assert NoError if we expect success.
 	// Tests for invalid config handle the error themselves.
@@ -61,18 +57,17 @@ func setupAnalyzer(t *testing.T, config *Config) (*Analyzer, *MockReporter) {
 
 func TestNewAnalyzer_Configuration(t *testing.T) {
 	scanID := uuid.New()
-	logger := zap.NewNop()
 	reporter := &MockReporter{}
 
 	t.Run("Valid Config", func(t *testing.T) {
 		config := &Config{Concurrency: 10, Timeout: 5 * time.Second}
-		analyzer, err := NewAnalyzer(scanID, config, logger, reporter)
+		analyzer, err := NewAnalyzer(scanID, config, reporter)
 		require.NoError(t, err)
 		assert.Equal(t, 10, analyzer.config.Concurrency)
 	})
 
 	t.Run("Nil Config - Defaults Applied", func(t *testing.T) {
-		analyzer, err := NewAnalyzer(scanID, nil, logger, reporter)
+		analyzer, err := NewAnalyzer(scanID, nil, reporter)
 		require.NoError(t, err)
 		// Assert defaults (as defined in analyzer.go)
 		assert.Equal(t, 20, analyzer.config.Concurrency)
@@ -81,7 +76,7 @@ func TestNewAnalyzer_Configuration(t *testing.T) {
 
 	t.Run("Low Concurrency - Adjusted to Minimum", func(t *testing.T) {
 		config := &Config{Concurrency: 1} // Too low
-		analyzer, err := NewAnalyzer(scanID, config, logger, reporter)
+		analyzer, err := NewAnalyzer(scanID, config, reporter)
 		require.NoError(t, err)
 		// Assert adjustment to minimum
 		assert.Equal(t, 2, analyzer.config.Concurrency)
@@ -94,16 +89,14 @@ func TestNewAnalyzer_Configuration(t *testing.T) {
 			},
 		}
 		// Initialization should fail because the Oracle initialization validates regexes
-		_, err := NewAnalyzer(scanID, config, logger, reporter)
+		_, err := NewAnalyzer(scanID, config, reporter)
 		require.Error(t, err)
 		// The error message comes from the regexp package via NewSuccessOracle.
 		assert.Contains(t, err.Error(), "invalid BodyRegex")
 	})
 
 	t.Run("Nil Logger - No-op Logger Used", func(t *testing.T) {
-		// Use zaptest logger here specifically to capture the warning log during initialization when nil is passed.
-		zaptest.NewLogger(t)
-		analyzer, err := NewAnalyzer(scanID, nil, nil, reporter)
+		analyzer, err := NewAnalyzer(scanID, nil, reporter)
 		require.NoError(t, err)
 		assert.NotNil(t, analyzer.logger)
 	})
@@ -548,8 +541,7 @@ func TestReportFinding_SeverityMapping(t *testing.T) {
 
 // Test case for nil reporter (should not panic).
 func TestReportFinding_NilReporter(t *testing.T) {
-	logger := zap.NewNop()
-	analyzer, err := NewAnalyzer(uuid.New(), nil, logger, nil) // Nil reporter
+	analyzer, err := NewAnalyzer(uuid.New(), nil, nil) // Nil reporter
 	require.NoError(t, err)
 
 	analysis := &AnalysisResult{Confidence: 1.0, Vulnerable: true}
