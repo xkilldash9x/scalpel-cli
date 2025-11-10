@@ -24,14 +24,20 @@ const (
 	definitionHeaderFmt       = "-- Definition for: %s (from %s) --"
 )
 
-// Definition holds the location and source offsets for a symbol's declaration.
+// Definition stores the precise location of a symbol's declaration, including
+// the file path and the start and end offsets within that file. This allows for
+// exact extraction of the source code for a given definition.
 type Definition struct {
-	FilePath    string
-	StartOffset int
-	EndOffset   int
+	FilePath    string // The absolute path to the file containing the definition.
+	StartOffset int    // The byte offset of the start of the definition.
+	EndOffset   int    // The byte offset of the end of the definition.
 }
 
-// Execute handles the GATHER_CODEBASE_CONTEXT action by performing deep static analysis.
+// Execute handles the GATHER_CODEBASE_CONTEXT action. It performs a deep static
+// analysis of the Go codebase based on a package pattern (e.g., "./..."),
+// gathers the source code of local packages, and identifies the definitions of
+// all external dependencies they use. The result is a comprehensive text blob
+// providing context to the agent's mind.
 func (e *CodebaseExecutor) Execute(ctx context.Context, action Action) (*ExecutionResult, error) {
 	if action.Type != ActionGatherCodebaseContext {
 		return nil, fmt.Errorf("codebase executor cannot handle action type: %s", action.Type)
@@ -147,9 +153,9 @@ func (e *CodebaseExecutor) analyzeCodebase(ctx context.Context, pattern string) 
 	return output, nil
 }
 
-// flattenPackages takes the initial list of packages from packages.Load and
-// recursively walks the Imports map to return a flat, unique list of all packages
-// in the dependency graph.
+// flattenPackages performs a breadth-first traversal of the package dependency
+// graph, starting from an initial set of packages. It returns a flattened,
+// unique slice containing all packages in the transitive dependency tree.
 func flattenPackages(initialPkgs []*packages.Package) []*packages.Package {
 	allPkgsMap := make(map[string]*packages.Package)
 	var queue []*packages.Package

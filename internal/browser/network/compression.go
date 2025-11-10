@@ -88,12 +88,23 @@ func putBrotliReader(br *brotli.Reader) {
 	brotliReaderPool.Put(br)
 }
 
-// CompressionMiddleware wraps an http.RoundTripper to handle response decompression transparently.
+// CompressionMiddleware is an http.RoundTripper that transparently handles
+// HTTP response decompression. It automatically adds an `Accept-Encoding` header
+// to outgoing requests to negotiate compression with the server and then decompresses
+// the response body based on the `Content-Encoding` header received.
+//
+// This middleware supports gzip, deflate (both zlib and raw), and brotli encoding,
+// utilizing sync.Pool for readers to optimize performance and reduce garbage collection.
 type CompressionMiddleware struct {
+	// Transport is the underlying http.RoundTripper to which requests will be
+	// sent after the Accept-Encoding header is added. If nil, http.DefaultTransport
+	// is used.
 	Transport http.RoundTripper
 }
 
-// NewCompressionMiddleware creates the middleware wrapper.
+// NewCompressionMiddleware creates a new CompressionMiddleware that wraps the
+// provided http.RoundTripper. If the provided transport is nil, it defaults to
+// http.DefaultTransport.
 func NewCompressionMiddleware(transport http.RoundTripper) *CompressionMiddleware {
 	if transport == nil {
 		transport = http.DefaultTransport
@@ -103,7 +114,9 @@ func NewCompressionMiddleware(transport http.RoundTripper) *CompressionMiddlewar
 	}
 }
 
-// RoundTrip executes a single HTTP transaction, handling compression negotiation.
+// RoundTrip implements the http.RoundTripper interface. It modifies the request
+// to advertise support for compression, sends the request to the underlying
+// transport, and then decompresses the response body if necessary.
 func (cm *CompressionMiddleware) RoundTrip(req *http.Request) (*http.Response, error) {
 	// Advertise support for modern compression algorithms if the caller hasn't already.
 	if req.Header.Get("Accept-Encoding") == "" {
@@ -154,10 +167,22 @@ func (w *closeWrapper) Close() error {
 	return errors.Join(err1, err2)
 }
 
-// DecompressResponse checks the Content-Encoding header and wraps the response body.
-// It handles multi-layer encoding, uses pooling, and supports robust deflate detection.
-// NOTE: If this function returns an error, the state of resp.Body is undefined (may be partially consumed).
-// The caller must close resp.Body and discard the response.
+// DecompressResponse inspects the `Content-Encoding` header of an http.Response
+// and wraps its Body with the appropriate decompression reader(s). It is the core
+// decompression logic used by the CompressionMiddleware.
+//
+// This function handles multiple, layered encodings (e.g., gzip applied over deflate)
+// by applying decoders in the reverse order. It supports gzip, brotli, and both
+// zlib-wrapped and raw deflate streams. For performance, it uses pooled readers
+// for gzip and brotli.
+//
+// After successfully wrapping the body, it removes the `Content-Encoding` and
+// `Content-Length` headers from the response and sets `resp.Uncompressed` to true.
+//
+// NOTE: If this function returns an error (e.g., due to an invalid header or
+// unsupported encoding), the `resp.Body` may have been partially read and should be
+// considered corrupted. The caller is responsible for closing the body and
+// discarding the response in such cases.
 func DecompressResponse(resp *http.Response) error {
 	if resp == nil || resp.Body == nil {
 		return nil

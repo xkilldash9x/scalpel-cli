@@ -1,4 +1,17 @@
 // internal/browser/session/interaction.go
+// This file implements the high-level user interaction methods for a Session,
+// such as navigating to a URL, clicking elements, typing text, and scrolling.
+// These methods serve as the primary API for controlling the browser page.
+//
+// When a `humanoid` is attached to the session, these actions are delegated to it
+// to simulate realistic, human-like behavior. If no humanoid is present, the
+// methods fall back to using standard, direct `chromedp` actions. This design
+// allows for a flexible execution model, supporting both simple automation and
+// sophisticated, human-like interaction simulation through the same API.
+//
+// Each method is responsible for managing its own operational context and timeouts,
+// ensuring that long-running actions (like navigation) can be cancelled without
+// terminating the entire session.
 package session
 
 import (
@@ -13,8 +26,19 @@ import (
 	"go.uber.org/zap"
 )
 
-// Navigate loads the specified URL and waits for the page to stabilize.
-// FIX: Added context.Context parameter
+// Navigate instructs the browser to load the specified URL. This is a comprehensive
+// action that includes not only the navigation itself but also a subsequent
+// "stabilization" period, where it waits for network activity to cease.
+//
+// If a `humanoid` is attached to the session, it will also perform a realistic
+// cognitive pause after the page has stabilized.
+//
+// Parameters:
+//   - ctx: The context for the navigation operation. A timeout specific to
+//     navigation will be derived from this context.
+//   - url: The URL to navigate to.
+//
+// Returns an error if the navigation fails, times out, or is cancelled.
 func (s *Session) Navigate(ctx context.Context, url string) error {
 	s.logger.Info("Navigating session.", zap.String("url", url)) // Changed log level for clarity
 
@@ -94,8 +118,18 @@ func (s *Session) Navigate(ctx context.Context, url string) error {
 	return nil
 }
 
-// Click interacts with the element matching the selector.
-// FIX: Added context.Context parameter
+// Click performs a click action on the DOM element matching the specified selector.
+// If a `humanoid` is attached, it will perform a realistic `IntelligentClick`,
+// which includes human-like mouse movements, pauses, and physical inaccuracies.
+// Otherwise, it falls back to a direct `chromedp.Click` action after ensuring
+// the element is visible.
+//
+// Parameters:
+//   - ctx: The context for the click operation.
+//   - selector: The CSS selector of the element to click.
+//
+// Returns an error if the element is not found, the click fails, or the operation
+// is cancelled.
 func (s *Session) Click(ctx context.Context, selector string) error {
 	s.logger.Debug("Attempting to click element", zap.String("selector", selector))
 
@@ -133,8 +167,21 @@ func (s *Session) Click(ctx context.Context, selector string) error {
 	return nil
 }
 
-// Type inputs text into the element matching the selector.
-// FIX: Added context.Context parameter
+// Type simulates typing text into the DOM element matching the specified selector.
+// Before typing, it ensures the element is visible and robustly clears any
+// existing content using JavaScript.
+//
+// If a `humanoid` is attached, it simulates human-like typing, complete with
+// realistic inter-key delays, probabilistic typos, and typo corrections. Otherwise,
+// it falls back to a direct `chromedp.SendKeys` action.
+//
+// Parameters:
+//   - ctx: The context for the entire typing operation.
+//   - selector: The CSS selector of the input element.
+//   - text: The text to type.
+//
+// Returns an error if the element cannot be found or interacted with, or if the
+// operation is cancelled.
 func (s *Session) Type(ctx context.Context, selector string, text string) error {
 	s.logger.Debug("Attempting to type into element", zap.String("selector", selector), zap.Int("text_length", len(text)))
 
@@ -246,8 +293,9 @@ func (s *Session) Type(ctx context.Context, selector string, text string) error 
 	return nil
 }
 
-// Submit attempts to submit the form associated with the selector.
-// FIX: Added context.Context parameter
+// Submit attempts to submit a form associated with the given selector. This is
+// typically equivalent to pressing Enter in an input field or clicking a submit
+// button. It uses the `chromedp.Submit` action.
 func (s *Session) Submit(ctx context.Context, selector string) error {
 	s.logger.Debug("Attempting to submit form", zap.String("selector", selector))
 
@@ -287,8 +335,10 @@ func (s *Session) Submit(ctx context.Context, selector string) error {
 	return nil
 }
 
-// ScrollPage simulates scrolling the page using JavaScript execution.
-// FIX: Added context.Context parameter
+// ScrollPage simulates scrolling the page in a given direction ("up", "down",
+// "top", "bottom"). It executes a JavaScript `window.scrollBy` or `window.scrollTo`
+// command to perform the scroll. If a `humanoid` is attached, it performs a
+// brief, realistic pause after the scroll action.
 func (s *Session) ScrollPage(ctx context.Context, direction string) error {
 	s.logger.Debug("Scrolling page", zap.String("direction", direction))
 
@@ -352,7 +402,13 @@ func (s *Session) ScrollPage(ctx context.Context, direction string) error {
 	return nil
 }
 
-// WaitForAsync pauses execution for a specified duration, respecting context cancellation.
+// WaitForAsync pauses the execution for a specified number of milliseconds. This
+// can be used to wait for asynchronous operations on the page to complete (e.g.,
+// an animation or a delayed API call).
+//
+// If a `humanoid` is attached, it will use `Hesitate` to simulate a more
+// realistic pause with subtle mouse drift. Otherwise, it falls back to a simple
+// `Sleep`. The wait can be cancelled by the provided context.
 func (s *Session) WaitForAsync(ctx context.Context, milliseconds int) error {
 	duration := time.Duration(milliseconds) * time.Millisecond
 	if duration <= 0 {
@@ -384,8 +440,17 @@ func (s *Session) WaitForAsync(ctx context.Context, milliseconds int) error {
 	return s.Sleep(ctx, duration)
 }
 
-// Interact triggers the automated recursive interaction logic via the Interactor component.
-// FIX: Added context.Context parameter
+// Interact initiates an automated, exploratory interaction with the current page.
+// It delegates the complex logic of discovering and interacting with elements
+// to the `Interactor` component. This method is the entry point for running a
+// full, automated crawl-and-interact sequence on a page.
+//
+// Parameters:
+//   - ctx: The context for the entire automated interaction sequence.
+//   - config: The configuration specifying the parameters for the interaction,
+//     such as maximum depth and element filtering.
+//
+// Returns an error if the interaction fails or is cancelled.
 func (s *Session) Interact(ctx context.Context, config schemas.InteractionConfig) error {
 	if s.interactor == nil {
 		return fmt.Errorf("interactor not initialized")

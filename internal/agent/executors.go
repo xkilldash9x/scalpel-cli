@@ -16,19 +16,20 @@ import (
 
 // -- Executor Registry --
 
-// ExecutorRegistry manages and dispatches actions to specialized, non-interactive executors.
-// Its role is focused on handling background tasks like codebase analysis or simple browser
-// commands, while complex user-like interactions are handled by the Agent's humanoid controller.
+// ExecutorRegistry acts as a dispatcher for various types of agent actions. It
+// holds a map of action types to their corresponding `ActionExecutor`
+// implementations, ensuring that actions are routed to the correct handler.
+// It also manages dynamic providers for browser sessions and humanoid controllers.
 type ExecutorRegistry struct {
-	logger    *zap.Logger
-	executors map[ActionType]ActionExecutor
-
+	logger           *zap.Logger
+	executors        map[ActionType]ActionExecutor
 	sessionProvider  SessionProvider
 	humanoidProvider HumanoidProvider
 	providerMu       sync.RWMutex
 }
 
-// NewExecutorRegistry creates and initializes the registry with its set of specialized executors.
+// NewExecutorRegistry creates and initializes a new registry, populating it with
+// all the specialized executors (Browser, Codebase, Analysis, Humanoid).
 func NewExecutorRegistry(logger *zap.Logger, projectRoot string, globalCtx *core.GlobalContext) *ExecutorRegistry {
 	r := &ExecutorRegistry{
 		logger:          logger.Named("executor_registry"),
@@ -63,24 +64,24 @@ func NewExecutorRegistry(logger *zap.Logger, projectRoot string, globalCtx *core
 	return r
 }
 
-// UpdateSessionProvider allows the Agent to dynamically set the session provider function
-// once a browser session has been established. This method is thread-safe.
+// UpdateSessionProvider is a thread-safe method for the Agent to dynamically
+// set the function that provides access to the active browser session.
 func (r *ExecutorRegistry) UpdateSessionProvider(provider SessionProvider) {
 	r.providerMu.Lock()
 	defer r.providerMu.Unlock()
 	r.sessionProvider = provider
 }
 
-// UpdateHumanoidProvider allows the Agent to dynamically set the humanoid provider function
-// once the Humanoid controller has been initialized. This method is thread-safe.
+// UpdateHumanoidProvider is a thread-safe method for the Agent to dynamically
+// set the function that provides access to the active humanoid controller.
 func (r *ExecutorRegistry) UpdateHumanoidProvider(provider HumanoidProvider) {
 	r.providerMu.Lock()
 	defer r.providerMu.Unlock()
 	r.humanoidProvider = provider
 }
 
-// GetSessionProvider returns a function that safely retrieves the current session provider,
-// preventing race conditions.
+// GetSessionProvider returns a thread-safe function that retrieves the current
+// browser session. This allows executors to access the session without race conditions.
 func (r *ExecutorRegistry) GetSessionProvider() SessionProvider {
 	return func() schemas.SessionContext {
 		r.providerMu.RLock()
@@ -92,8 +93,8 @@ func (r *ExecutorRegistry) GetSessionProvider() SessionProvider {
 	}
 }
 
-// GetHumanoidProvider returns a function that safely retrieves the current humanoid provider,
-// preventing race conditions.
+// GetHumanoidProvider returns a thread-safe function that retrieves the current
+// humanoid controller.
 func (r *ExecutorRegistry) GetHumanoidProvider() HumanoidProvider {
 	return func() *humanoid.Humanoid {
 		r.providerMu.RLock()
@@ -105,16 +106,17 @@ func (r *ExecutorRegistry) GetHumanoidProvider() HumanoidProvider {
 	}
 }
 
-// register associates an executor with one or more action types.
+// register is an internal helper to associate an executor with one or more action types.
 func (r *ExecutorRegistry) register(exec ActionExecutor, types ...ActionType) {
 	for _, t := range types {
 		r.executors[t] = exec
 	}
 }
 
-// Execute finds the appropriate executor for the given action and runs it.
-// It provides a detailed error if an action is dispatched here that should have been
-// handled by the Agent's primary action loop (e.g., humanoid or cognitive actions).
+// Execute finds the appropriate executor for a given action and delegates
+// execution to it. It returns an error if no executor is registered for the
+// action type or if the action is a cognitive one that should be handled by the
+// agent's main loop.
 func (r *ExecutorRegistry) Execute(ctx context.Context, action Action) (*ExecutionResult, error) {
 	executor, ok := r.executors[action.Type]
 	if !ok {
@@ -130,10 +132,12 @@ func (r *ExecutorRegistry) Execute(ctx context.Context, action Action) (*Executi
 
 // -- Browser Executor --
 
-// ActionHandler defines the function signature for a specific browser action handler.
+// ActionHandler is a function signature for a method that handles a specific
+// type of browser action.
 type ActionHandler func(ctx context.Context, session schemas.SessionContext, action Action) error
 
-// BrowserExecutor implements the ActionExecutor interface for simple, non-interactive browser tasks.
+// BrowserExecutor is a specialized executor for handling simple, non-interactive
+// browser actions like navigating, submitting forms, and scrolling.
 type BrowserExecutor struct {
 	logger          *zap.Logger
 	sessionProvider SessionProvider
@@ -142,7 +146,8 @@ type BrowserExecutor struct {
 
 var _ ActionExecutor = (*BrowserExecutor)(nil) // Verify interface compliance.
 
-// NewBrowserExecutor creates a new BrowserExecutor.
+// NewBrowserExecutor creates and initializes a new BrowserExecutor, registering
+// all of its action handlers.
 func NewBrowserExecutor(logger *zap.Logger, provider SessionProvider) *BrowserExecutor {
 	e := &BrowserExecutor{
 		logger:          logger.Named("browser_executor"),
@@ -153,11 +158,12 @@ func NewBrowserExecutor(logger *zap.Logger, provider SessionProvider) *BrowserEx
 	return e
 }
 
-// Execute looks up and runs the appropriate handler for a given browser action.
+// Execute finds the correct handler for the given browser action and executes it.
+// It retrieves the current browser session and returns a structured result,
+// parsing any errors into a format the agent's mind can understand.
 func (e *BrowserExecutor) Execute(ctx context.Context, action Action) (*ExecutionResult, error) {
 	session := e.sessionProvider()
 	if session == nil {
-		// Return a structured result instead of a raw error for consistency.
 		return &ExecutionResult{
 			Status:          "failed",
 			ObservationType: ObservedSystemState,
@@ -168,7 +174,6 @@ func (e *BrowserExecutor) Execute(ctx context.Context, action Action) (*Executio
 
 	handler, ok := e.handlers[action.Type]
 	if !ok {
-		// This should ideally be caught by the registry, but acts as a safeguard.
 		return &ExecutionResult{
 			Status:          "failed",
 			ObservationType: ObservedSystemState,
@@ -185,7 +190,6 @@ func (e *BrowserExecutor) Execute(ctx context.Context, action Action) (*Executio
 	}
 
 	if err != nil {
-		// If the handler fails, create a structured error response for the Mind.
 		result.Status = "failed"
 		errorCode, errorDetails := ParseBrowserError(err, action)
 		result.ErrorCode = errorCode
@@ -199,7 +203,7 @@ func (e *BrowserExecutor) Execute(ctx context.Context, action Action) (*Executio
 	return result, nil
 }
 
-// registerHandlers populates the internal map of action types to their handler functions.
+// registerHandlers maps action types to their corresponding handler functions.
 func (e *BrowserExecutor) registerHandlers() {
 	e.handlers[ActionNavigate] = e.handleNavigate
 	e.handlers[ActionSubmitForm] = e.handleSubmitForm
@@ -207,6 +211,7 @@ func (e *BrowserExecutor) registerHandlers() {
 	e.handlers[ActionWaitForAsync] = e.handleWaitForAsync
 }
 
+// handleNavigate executes the navigation action.
 func (e *BrowserExecutor) handleNavigate(ctx context.Context, session schemas.SessionContext, action Action) error {
 	if action.Value == "" {
 		return fmt.Errorf("ActionNavigate requires a 'value' (URL)")
@@ -214,6 +219,7 @@ func (e *BrowserExecutor) handleNavigate(ctx context.Context, session schemas.Se
 	return session.Navigate(ctx, action.Value)
 }
 
+// handleSubmitForm executes the form submission action.
 func (e *BrowserExecutor) handleSubmitForm(ctx context.Context, session schemas.SessionContext, action Action) error {
 	if action.Selector == "" {
 		return fmt.Errorf("ActionSubmitForm requires a 'selector'")
@@ -221,6 +227,7 @@ func (e *BrowserExecutor) handleSubmitForm(ctx context.Context, session schemas.
 	return session.Submit(ctx, action.Selector)
 }
 
+// handleScroll executes the page scroll action.
 func (e *BrowserExecutor) handleScroll(ctx context.Context, session schemas.SessionContext, action Action) error {
 	direction := "down"
 	if strings.EqualFold(action.Value, "up") {
@@ -229,6 +236,7 @@ func (e *BrowserExecutor) handleScroll(ctx context.Context, session schemas.Sess
 	return session.ScrollPage(ctx, direction)
 }
 
+// handleWaitForAsync executes a wait/sleep action.
 func (e *BrowserExecutor) handleWaitForAsync(ctx context.Context, session schemas.SessionContext, action Action) error {
 	durationMs := 1000 // Default wait time.
 	val, exists := action.Metadata["duration_ms"]
@@ -236,7 +244,6 @@ func (e *BrowserExecutor) handleWaitForAsync(ctx context.Context, session schema
 		switch v := val.(type) {
 		case float64:
 			durationMs = int(v)
-		// Handle integer types individually to avoid panic on type assertion in multi-type case.
 		case int:
 			durationMs = v
 		case int64:
@@ -252,7 +259,8 @@ func (e *BrowserExecutor) handleWaitForAsync(ctx context.Context, session schema
 
 // -- Codebase Executor --
 
-// CodebaseExecutor implements the ActionExecutor interface for tasks related to analyzing the local file system.
+// CodebaseExecutor is a specialized executor for actions that involve analyzing
+// the local Go codebase, such as gathering context for the agent's mind.
 type CodebaseExecutor struct {
 	logger      *zap.Logger
 	projectRoot string
@@ -270,9 +278,11 @@ func NewCodebaseExecutor(logger *zap.Logger, projectRoot string) *CodebaseExecut
 
 // -- Shared Error Parsing --
 
-// ParseBrowserError analyzes an error from a browser operation and classifies it,
-// returning a structured ErrorCode and details map for the Agent's Mind.
-// It is exported to be used by other parts of the agent, such as the Humanoid controller.
+// ParseBrowserError is a utility function that inspects an error returned from
+// a browser operation and classifies it into a structured `ErrorCode`. This
+// provides the agent's mind with more granular information about the nature of
+// the failure (e.g., distinguishing a timeout from an element not being found),
+// enabling more intelligent error handling and decision-making.
 func ParseBrowserError(err error, action Action) (ErrorCode, map[string]interface{}) {
 	errStr := err.Error()
 	details := map[string]interface{}{

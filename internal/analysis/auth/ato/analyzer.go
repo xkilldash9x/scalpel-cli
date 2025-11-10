@@ -80,13 +80,17 @@ var csrfFieldHeuristics = []string{
 	`input[type=hidden][name*=nonce]`,
 }
 
-// HumanoidProvider defines an interface for duck-typing the SessionContext
-// to check if it provides access to the Humanoid controller.
+// HumanoidProvider defines a simple interface used to check if a SessionContext
+// can provide access to a `humanoid.Humanoid` controller. This allows for
+// optional, graceful integration with the humanoid module for more realistic pauses.
 type HumanoidProvider interface {
 	GetHumanoid() *humanoid.Humanoid
 }
 
-// ATOAnalyzer actively and concurrently tests login mechanisms for vulnerabilities.
+// ATOAnalyzer is a specialized active analyzer that tests login endpoints for
+// account takeover vulnerabilities, such as credential stuffing and username
+// enumeration. It operates by discovering login forms in captured HTTP traffic
+// and replaying them with a list of common credentials.
 type ATOAnalyzer struct {
 	*core.BaseAnalyzer
 	cfg           *config.ATOConfig
@@ -94,7 +98,8 @@ type ATOAnalyzer struct {
 	credentialSet []schemas.Credential
 }
 
-// NewATOAnalyzer creates a new, production-ready instance of the ATO analyzer.
+// NewATOAnalyzer creates a new instance of the ATOAnalyzer, loading its
+// configuration and the credential set it will use for testing.
 func NewATOAnalyzer(cfg config.Interface, logger *zap.Logger) (*ATOAnalyzer, error) {
 	// Use the public Scanners() getter method instead of direct field access.
 	atoCfg := cfg.Scanners().Active.Auth.ATO
@@ -116,7 +121,9 @@ func NewATOAnalyzer(cfg config.Interface, logger *zap.Logger) (*ATOAnalyzer, err
 	}, nil
 }
 
-// loads credentials from an external file or falls back to a default list.
+// loadCredentialSet loads the list of username/password pairs to be tested from
+// a specified file or falls back to a small, internal default list if no file
+// is provided.
 func loadCredentialSet(filePath string, logger *zap.Logger) ([]schemas.Credential, error) {
 	if filePath == "" {
 		logger.Warn("No credential file specified in config, using internal default list for ATO analysis.")
@@ -133,7 +140,10 @@ func loadCredentialSet(filePath string, logger *zap.Logger) ([]schemas.Credentia
 	return nil, fmt.Errorf("credential file loading not yet implemented for path: %s", filePath)
 }
 
-// Analyze is the main entry point for the ATO analysis, using a concurrent worker pool.
+// Analyze is the main entry point for the ATO analysis. It discovers potential
+// login endpoints from the provided HAR artifacts and then uses a pool of
+// concurrent workers to test each endpoint for credential stuffing and username
+// enumeration vulnerabilities.
 func (a *ATOAnalyzer) Analyze(ctx context.Context, analysisCtx schemas.SessionContext) error {
 	if !a.cfg.Enabled {
 		a.Logger.Info("ATO analysis is disabled by configuration.")

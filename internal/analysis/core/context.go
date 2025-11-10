@@ -10,11 +10,14 @@ import (
 	"go.uber.org/zap"
 )
 
-// NEW: AdapterRegistry defines the map of task types to their corresponding analyzers.
-// It is populated by the worker and made available in the GlobalContext.
+// AdapterRegistry is a type alias for a map that associates a specific task type
+// with its corresponding `Analyzer` implementation. This registry is used by
+// workers to dispatch tasks to the correct analysis module.
 type AdapterRegistry map[schemas.TaskType]Analyzer
 
-// GlobalContext holds application-wide services and configurations shared across all tasks.
+// GlobalContext provides a centralized container for application-wide services,
+// configurations, and resources that are shared across all analysis tasks. This
+// includes database connections, loggers, and the browser manager.
 type GlobalContext struct {
 	Config         config.Interface
 	Logger         *zap.Logger
@@ -23,12 +26,14 @@ type GlobalContext struct {
 	KGClient       schemas.KnowledgeGraphClient
 	OASTProvider   schemas.OASTProvider
 	FindingsChan   chan<- schemas.Finding
-	// NEW: Provides access to analysis adapters for dynamic invocation (e.g., by the Agent).
+	// Adapters provides access to the registry of all available analysis adapters,
+	// allowing for dynamic invocation by components like the agent.
 	Adapters AdapterRegistry
 }
 
-// AnalysisContext provides the specific context for a single analysis task.
-// It includes the task details, the target, and access to the global context.
+// AnalysisContext encapsulates all the information and resources required for a
+// single, specific analysis task. It contains the task details, the target URL,
+// a task-specific logger, and access to the shared `GlobalContext`.
 type AnalysisContext struct {
 	Global    *GlobalContext
 	Task      schemas.Task
@@ -37,11 +42,14 @@ type AnalysisContext struct {
 	Artifacts *schemas.Artifacts
 	Findings  []schemas.Finding
 	KGUpdates *schemas.KnowledgeGraphUpdate
-	// NEW: Optional existing browser session.
+	// Session allows an analyzer to operate on a pre-existing browser session,
+	// which is crucial for agent-driven, multi-step analysis scenarios.
 	Session schemas.SessionContext
 }
 
-// AddFinding is a helper method to append a finding to the context.
+// AddFinding is a convenience method for analyzers to report a new vulnerability
+// finding. It automatically populates the finding with the scan ID from the
+// current task context before appending it to the list of findings.
 func (ac *AnalysisContext) AddFinding(finding schemas.Finding) {
 	if finding.ScanID == "" && ac.Task.ScanID != "" {
 		finding.ScanID = ac.Task.ScanID

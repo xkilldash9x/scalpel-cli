@@ -13,18 +13,21 @@ import (
 	"golang.org/x/tools/go/ssa"
 )
 
-// FingerprintResult holds the semantic fingerprint and the canonical IR.
+// FingerprintResult encapsulates the output of the semantic fingerprinting
+// process for a single function. It includes the function's name, its semantic
+// fingerprint (a hash), the canonical intermediate representation (IR) from
+// which the hash was derived, and the function's position in the source code.
 type FingerprintResult struct {
 	FunctionName string
 	Fingerprint  string
 	CanonicalIR  string
-	// Pos is the position of the function declaration ('func' keyword).
-	// Used for robust matching in the AST by the consumer of the fingerprint.
-	Pos token.Pos
+	Pos          token.Pos // The position of the 'func' keyword, for precise AST matching.
 }
 
-// normalizeControlFlow normalizes If statements to ensure consistent successor ordering (True=0, False=1).
-// [... implementation remains unchanged ...]
+// normalizeControlFlow modifies a function's SSA form to create a canonical
+// control flow structure. It normalizes conditional branches (e.g., rewriting
+// `a >= b` to `a < b` and swapping the successor blocks) to ensure that
+// semantically identical logic produces a consistent graph structure.
 func normalizeControlFlow(fn *ssa.Function) {
 	for _, block := range fn.Blocks {
 		if len(block.Instrs) == 0 {
@@ -51,7 +54,10 @@ func normalizeControlFlow(fn *ssa.Function) {
 	// Note: We do not need to recompute the dominator tree as we rely on DFS traversal.
 }
 
-// GenerateFingerprint calculates the semantic fingerprint for a given SSA function.
+// GenerateFingerprint is the core function that computes the semantic
+// fingerprint for a single SSA function. It first normalizes the function's
+// control flow, then generates a canonical string representation of its IR, and
+// finally hashes this string to produce the fingerprint.
 func GenerateFingerprint(fn *ssa.Function, policy LiteralPolicy, strictMode bool) FingerprintResult {
 	// 1.5. Control Flow Normalization
 	normalizeControlFlow(fn)
@@ -128,14 +134,17 @@ func loadPackagesFromSource(filename string, src string) ([]*packages.Package, e
 	return initialPkgs, nil
 }
 
-// FingerprintSource generates semantic fingerprints for all non-synthetic functions in a Go source file.
-// This is primarily intended for analyzing snippets (like diff hunks). For analyzing project files,
-// it is more efficient to use FingerprintPackages.
+// FingerprintSource is a high-level entry point for fingerprinting a single Go
+// source file provided as a string. It handles the parsing, type-checking, and
+// SSA construction before generating fingerprints for all functions within the
+// source. It is best suited for analyzing isolated snippets, such as diff hunks.
 func FingerprintSource(filename string, src string, policy LiteralPolicy) ([]FingerprintResult, error) {
 	return FingerprintSourceAdvanced(filename, src, policy, false)
 }
 
-// FingerprintSourceAdvanced provides more control over the fingerprinting process for source snippets.
+// FingerprintSourceAdvanced is an extended version of `FingerprintSource` that
+// provides additional control over the fingerprinting process, such as enabling
+// a strict mode that will panic on unhandled SSA instructions.
 func FingerprintSourceAdvanced(filename string, src string, policy LiteralPolicy, strictMode bool) ([]FingerprintResult, error) {
 	// Load packages from the source string.
 	initialPkgs, err := loadPackagesFromSource(filename, src)
@@ -147,8 +156,10 @@ func FingerprintSourceAdvanced(filename string, src string, policy LiteralPolicy
 	return FingerprintPackages(initialPkgs, policy, strictMode)
 }
 
-// FingerprintPackages generates semantic fingerprints for the provided loaded packages.
-// This is the preferred entry point when the application already manages package loading.
+// FingerprintPackages is the most efficient entry point for fingerprinting when
+// the Go packages have already been loaded by the calling application. It takes
+// the loaded packages, builds their SSA representation, and generates
+// fingerprints for all non-synthetic functions.
 func FingerprintPackages(initialPkgs []*packages.Package, policy LiteralPolicy, strictMode bool) ([]FingerprintResult, error) {
 	if len(initialPkgs) == 0 {
 		return nil, fmt.Errorf("input packages list is empty")

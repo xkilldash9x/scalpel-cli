@@ -1,4 +1,10 @@
 // internal/browser/humanoid/scrolling.go
+// This file implements the logic for intelligent, human-like scrolling within the humanoid package.
+// It uses an embedded JavaScript payload (scrolling.js) to perform fine-grained scroll
+// operations and gather metrics from the browser, such as element visibility and content density.
+// The Go code orchestrates the scrolling process, simulating behaviors like cognitive pauses
+// between scrolls (simulating reading), overshooting the target, and regressing (scrolling back
+// up slightly to re-read), making the interaction appear more natural and less robotic.
 package humanoid
 
 import (
@@ -112,7 +118,7 @@ func (h *Humanoid) intelligentScroll(ctx context.Context, selector string) error
 		if err != nil {
 			// Handle context cancellation gracefully.
 			if ctx.Err() != nil {
-				return ctx.Err()
+				return err
 			}
 			h.logger.Warn("Humanoid: Scroll iteration JS execution failed", zap.Error(err), zap.Int("iteration", iteration))
 			// If JS fails, maybe the DOM is unstable. Wait briefly and try again.
@@ -260,7 +266,11 @@ func (h *Humanoid) executeScrollJS(ctx context.Context, selector string, deltaY,
 	return &combinedResult.scrollResult, nil
 }
 
-// CalculateScrollPause is an internal helper. It assumes the caller holds the lock.
+// CalculateScrollPause calculates the duration of a pause during scrolling, simulating
+// the time a user would spend reading or scanning content. The duration is
+// influenced by the detected "content density" of the visible area and the
+// humanoid's current fatigue level.
+// This method assumes the caller holds the lock.
 func (h *Humanoid) CalculateScrollPause(contentDensity float64) time.Duration {
 	// Base pause + pause based on content density. Random variation is handled by cognitivePause.
 	pauseMs := 100 + (contentDensity * 1000 * h.dynamicConfig.ScrollReadDensityFactor)

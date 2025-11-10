@@ -15,7 +15,9 @@ import (
 	"golang.org/x/sync/errgroup"
 )
 
-// ErrUnauthenticated is returned when required sessions are missing or unauthenticated.
+// ErrUnauthenticated is a custom error type used to indicate that the IDOR
+// analysis cannot proceed because one or more required user sessions are not
+// authenticated.
 type ErrUnauthenticated struct {
 	Message string
 }
@@ -27,12 +29,13 @@ func (e *ErrUnauthenticated) Error() string {
 	return "IDOR analysis requires authenticated sessions"
 }
 
-// analysisTask represents a unit of work for the worker pool.
+// analysisTask represents a single unit of work for a concurrent worker. It
+// contains the original request/response pair and all the necessary context to
+// perform either a horizontal or resource manipulation IDOR check.
 type analysisTask struct {
-	Pair     RequestResponsePair
-	Config   Config
-	TestType string // "Horizontal" or "Manipulation"
-	// Fields specific to the Manipulation strategy
+	Pair       RequestResponsePair
+	Config     Config
+	TestType   string // "Horizontal" or "Manipulation"
 	Identifier *ObservedIdentifier
 	TestValue  string
 }
@@ -42,8 +45,10 @@ const (
 	TestTypeManipulation = "Manipulation"
 )
 
-// Detect performs the IDOR analysis concurrently.
-// It now accepts the comparer interface.
+// Detect is the core logic engine for the IDOR analysis. It takes a collection
+// of HTTP traffic, a configuration, and a JSON comparison service, then uses a
+// concurrent worker pool to generate and execute test cases for both horizontal
+// and resource manipulation IDOR vulnerabilities.
 func Detect(ctx context.Context, traffic []RequestResponsePair, config Config, logger *log.Logger, comparer jsoncompare.JSONComparison) ([]Finding, error) {
 	g, groupCtx := errgroup.WithContext(ctx)
 	g.SetLimit(config.ConcurrencyLevel)

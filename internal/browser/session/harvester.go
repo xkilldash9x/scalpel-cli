@@ -1,4 +1,14 @@
 // internal/browser/session/harvester.go
+// This file implements the Harvester, a component responsible for collecting
+// network traffic and console log data from a browser session. It listens to
+// events from the Chrome DevTools Protocol (CDP), such as network requests,
+// responses, and console API calls.
+//
+// The collected data is then aggregated and transformed into standard formats,
+// specifically a HAR (HTTP Archive) file for network traffic and a structured
+// log format for console messages. The Harvester also provides functionality
+// to wait for network idle periods, which is crucial for synchronizing
+// automation scripts with page loading activity.
 package session
 
 import (
@@ -45,14 +55,16 @@ type requestState struct {
 	monotonicTime       cdp.MonotonicTime
 }
 
-// Harvester listens to browser network events and console logs to build a HAR file.
+// Harvester is responsible for collecting network traffic (as a HAR file) and
+// console log messages from a browser session. It attaches listeners to the
+// Chrome DevTools Protocol (CDP) and processes events related to network requests,
+// page lifecycle, and console output.
 type Harvester struct {
 	ctx           context.Context
 	cancel        context.CancelFunc
 	logger        *zap.Logger
 	captureBodies bool
 
-	//  Add ActionExecutor to synchronize CDP calls (e.g., fetching bodies) and prevent deadlocks.
 	executor ActionExecutor
 
 	mu            sync.RWMutex
@@ -63,14 +75,15 @@ type Harvester struct {
 	startTime     time.Time
 	onLoadTime    float64
 	onContentLoad float64
-	activeReqs    int64 // Counter for active requests for idle calculation
+	activeReqs    int64
 
-	wg sync.WaitGroup // To wait for all body fetching goroutines
+	wg sync.WaitGroup
 }
 
-// NewHarvester creates a new network harvester instance.
-//
-//	Updated signature to accept ActionExecutor.
+// NewHarvester creates and initializes a new Harvester. It requires a parent
+// context for its own lifecycle, a logger, a flag to enable body capture, and
+// an ActionExecutor to safely perform CDP actions in the background (e.g.,
+// fetching response bodies).
 func NewHarvester(ctx context.Context, logger *zap.Logger, captureBodies bool, executor ActionExecutor) *Harvester {
 	hCtx, hCancel := context.WithCancel(ctx)
 	if executor == nil {
@@ -88,14 +101,19 @@ func NewHarvester(ctx context.Context, logger *zap.Logger, captureBodies bool, e
 	}
 }
 
-// Start begins listening to network and console events from the browser context.
+// Start attaches the Harvester's listeners to the CDP event stream of the provided
+// context (typically the session context). From this point on, it will capture
+// all relevant network and console events.
 func (h *Harvester) Start(ctx context.Context) error {
 	// This context is the session context, which is what we need to listen on
 	h.listen(ctx)
 	return nil
 }
 
-// Stop halts the event listeners and returns the collected artifacts (HAR and console logs).
+// Stop gracefully shuts down the Harvester. It cancels its internal context,
+// waits for any in-flight background operations (like fetching response bodies)
+// to complete, and then generates the final HAR file and console log slice from
+// the collected data.
 func (h *Harvester) Stop(ctx context.Context) (*schemas.HAR, []schemas.ConsoleLog) {
 	h.cancel() // Signal the listener goroutine and body fetching goroutines to stop
 
@@ -153,11 +171,15 @@ func (h *Harvester) listen(ctx context.Context) {
 	})
 }
 
-// WaitNetworkIdle blocks until the network has been quiet for a specified duration.
+// WaitNetworkIdle blocks until there have been no active network requests for a
+// specified `quietPeriod`. This is a crucial synchronization primitive for browser
+// automation, allowing scripts to wait until a page has fully loaded all its
+// dynamic resources before proceeding.
 //
-//	Rewritten logic to correctly implement network idle detection.
-//
-// The previous implementation incorrectly reset the timer every tick when idle, causing timeouts.
+// It works by monitoring the number of in-flight requests. When the count drops
+// to zero, a timer is started. If the count remains at zero until the timer
+// fires, the network is considered idle. If a new request starts, the timer is
+// stopped and reset.
 func (h *Harvester) WaitNetworkIdle(ctx context.Context, quietPeriod time.Duration) error {
 	h.logger.Debug("Waiting for network to become idle.")
 

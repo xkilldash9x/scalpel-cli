@@ -1,4 +1,17 @@
 // File: internal/config/config.go
+// This file defines the core configuration structures for the application,
+// using a combination of struct tags for file-based configuration loading (via Viper)
+// and an interface-based approach for dependency injection and mocking.
+//
+// The `Config` struct aggregates all configuration sub-modules (e.g., Logger,
+// Database, Browser), while the `Interface` defines a contract for accessing these
+// configurations. This separation allows other parts of the application to depend
+// on the `Interface` rather than the concrete `Config` struct, promoting loose
+// coupling.
+//
+// The file also includes functions for setting default values (`SetDefaults`),
+// creating a default configuration (`NewDefaultConfig`), loading from a Viper
+// instance (`NewConfigFromViper`), and validating the loaded configuration.
 package config
 
 import (
@@ -9,8 +22,11 @@ import (
 	"github.com/spf13/viper"
 )
 
-// Interface defines the contract for accessing application configuration.
-// This allows for dependency injection and mocking in tests.
+// Interface defines a contract for accessing application configuration settings.
+// It uses a getter/setter pattern to provide a stable, decoupled interface that
+// hides the underlying implementation of the configuration struct. This allows
+// different parts of the application to depend on this interface, making them
+// easier to test and more resilient to changes in the configuration structure.
 type Interface interface {
 	Logger() LoggerConfig
 	Database() DatabaseConfig
@@ -63,7 +79,9 @@ type Interface interface {
 	SetATOConfig(atoCfg ATOConfig)
 }
 
-// Config holds the entire application configuration.
+// Config is the top-level struct that aggregates all configuration modules for
+// the application. It uses `mapstructure` tags to facilitate loading from
+// configuration files (e.g., YAML, JSON) via the Viper library.
 type Config struct {
 	LoggerCfg    LoggerConfig    `mapstructure:"logger" yaml:"logger"`
 	DatabaseCfg  DatabaseConfig  `mapstructure:"database" yaml:"database"`
@@ -75,7 +93,8 @@ type Config struct {
 	AgentCfg     AgentConfig     `mapstructure:"agent" yaml:"agent"`
 	DiscoveryCfg DiscoveryConfig `mapstructure:"discovery" yaml:"discovery"`
 	AutofixCfg   AutofixConfig   `mapstructure:"autofix" yaml:"autofix"`
-	// ScanCfg gets its marching orders from CLI flags, not the config file.
+	// ScanCfg holds settings for a specific scan job, typically populated from
+	// CLI flags rather than a configuration file, hence the ignored tags.
 	ScanCfg ScanConfig `mapstructure:"-" yaml:"-"`
 }
 
@@ -150,7 +169,8 @@ func (c *Config) SetATOConfig(atoCfg ATOConfig) {
 	c.ScannersCfg.Active.Auth.ATO = atoCfg
 }
 
-// AutofixConfig holds settings for the self-healing (autofix) subsystem.
+// AutofixConfig contains settings for the experimental self-healing and
+// auto-patching features of the agent.
 type AutofixConfig struct {
 	Enabled                bool         `mapstructure:"enabled" yaml:"enabled"`
 	ProjectRoot            string       `mapstructure:"project_root" yaml:"project_root"`
@@ -162,21 +182,23 @@ type AutofixConfig struct {
 	GitHub                 GitHubConfig `mapstructure:"github" yaml:"github"`
 }
 
-// GitConfig defines the committer identity.
+// GitConfig defines the author identity for commits made by the autofix agent.
 type GitConfig struct {
 	AuthorName  string `mapstructure:"author_name" yaml:"author_name"`
 	AuthorEmail string `mapstructure:"author_email" yaml:"author_email"`
 }
 
-// GitHubConfig defines the configuration for GitHub integration.
+// GitHubConfig holds the necessary information for the autofix agent to create
+// pull requests on GitHub.
 type GitHubConfig struct {
-	Token      string `mapstructure:"token" yaml:"-"`
+	Token      string `mapstructure:"token" yaml:"-"` // Loaded from env, not config file.
 	RepoOwner  string `mapstructure:"repo_owner" yaml:"repo_owner"`
 	RepoName   string `mapstructure:"repo_name" yaml:"repo_name"`
 	BaseBranch string `mapstructure:"base_branch" yaml:"base_branch"`
 }
 
-// LoggerConfig holds all the configuration for the logger.
+// LoggerConfig defines all settings related to logging, including level, format,
+// file rotation, and colorization.
 type LoggerConfig struct {
 	Level       string      `mapstructure:"level" yaml:"level"`
 	Format      string      `mapstructure:"format" yaml:"format"`
@@ -190,7 +212,7 @@ type LoggerConfig struct {
 	Colors      ColorConfig `mapstructure:"colors" yaml:"colors"`
 }
 
-// ColorConfig defines the color codes for different log levels.
+// ColorConfig specifies the terminal color codes for different log levels.
 type ColorConfig struct {
 	Debug  string `mapstructure:"debug" yaml:"debug"`
 	Info   string `mapstructure:"info" yaml:"info"`
@@ -201,12 +223,13 @@ type ColorConfig struct {
 	Fatal  string `mapstructure:"fatal" yaml:"fatal"`
 }
 
-// DatabaseConfig holds the database connection details.
+// DatabaseConfig holds the connection string for the application's database.
 type DatabaseConfig struct {
 	URL string `mapstructure:"url" yaml:"url"`
 }
 
-// EngineConfig configures the core task processing engine.
+// EngineConfig provides settings for the core task processing engine, controlling
+// concurrency, queue sizes, and timeouts.
 type EngineConfig struct {
 	QueueSize             int           `mapstructure:"queue_size" yaml:"queue_size"`
 	WorkerConcurrency     int           `mapstructure:"worker_concurrency" yaml:"worker_concurrency"`
@@ -215,7 +238,8 @@ type EngineConfig struct {
 	FindingsFlushInterval time.Duration `mapstructure:"findings_flush_interval" yaml:"findings_flush_interval"`
 }
 
-// BrowserConfig holds settings for the headless browser instances.
+// BrowserConfig contains all settings for controlling headless browser instances,
+// including viewport size, concurrency, and behavioral flags.
 type BrowserConfig struct {
 	Headless        bool           `mapstructure:"headless" yaml:"headless"`
 	DisableCache    bool           `mapstructure:"disable_cache" yaml:"disable_cache"`
@@ -228,7 +252,8 @@ type BrowserConfig struct {
 	Humanoid        HumanoidConfig `mapstructure:"humanoid" yaml:"humanoid"`
 }
 
-// ProxyConfig defines the configuration for an outbound proxy.
+// ProxyConfig defines the settings for an outbound proxy to be used by the
+// application's network clients.
 type ProxyConfig struct {
 	Enabled bool   `mapstructure:"enabled" yaml:"enabled"`
 	Address string `mapstructure:"address" yaml:"address"`
@@ -236,7 +261,8 @@ type ProxyConfig struct {
 	CAKey   string `mapstructure:"ca_key" yaml:"ca_key"`
 }
 
-// NetworkConfig tunes the network behavior of the application.
+// NetworkConfig tunes the global network behavior for HTTP clients, such as
+// timeouts, default headers, and proxy settings.
 type NetworkConfig struct {
 	Timeout               time.Duration     `mapstructure:"timeout" yaml:"timeout"`
 	NavigationTimeout     time.Duration     `mapstructure:"navigation_timeout" yaml:"navigation_timeout"`
@@ -247,34 +273,40 @@ type NetworkConfig struct {
 	IgnoreTLSErrors       bool              `mapstructure:"ignore_tls_errors" yaml:"ignore_tls_errors"`
 }
 
-// IASTConfig holds configuration for the Interactive Application Security Testing module.
+// IASTConfig holds settings for the Interactive Application Security Testing (IAST)
+// module, which injects a JavaScript shim to perform taint tracking.
 type IASTConfig struct {
 	Enabled    bool   `mapstructure:"enabled" yaml:"enabled"`
 	ShimPath   string `mapstructure:"shim_path" yaml:"shim_path"`
 	ConfigPath string `mapstructure:"config_path" yaml:"config_path"`
 }
 
-// ScannersConfig is a container for all scanner related configurations.
+// ScannersConfig is a container that aggregates the configurations for all
+// passive, static, and active security scanners.
 type ScannersConfig struct {
 	Passive PassiveScannersConfig `mapstructure:"passive" yaml:"passive"`
 	Static  StaticScannersConfig  `mapstructure:"static" yaml:"static"`
 	Active  ActiveScannersConfig  `mapstructure:"active" yaml:"active"`
 }
 
-// PassiveScannersConfig holds settings for passive scanners.
+// PassiveScannersConfig holds settings for scanners that only analyze
+// traffic without sending new requests.
 type PassiveScannersConfig struct {
 	Headers HeadersConfig `mapstructure:"headers" yaml:"headers"`
 }
+// HeadersConfig enables or disables the passive HTTP header scanner.
 type HeadersConfig struct {
 	Enabled bool `mapstructure:"enabled" yaml:"enabled"`
 }
 
-// StaticScannersConfig holds settings for static analysis scanners.
+// StaticScannersConfig holds settings for scanners that perform static analysis
+// on response content.
 type StaticScannersConfig struct {
 	JWT JWTConfig `mapstructure:"jwt" yaml:"jwt"`
 }
 
-// JWTConfig defines settings for the JSON Web Token scanner.
+// JWTConfig defines settings for the JSON Web Token (JWT) static scanner, including
+// known secrets and options for brute-force attacks.
 type JWTConfig struct {
 	Enabled           bool     `mapstructure:"enabled" yaml:"enabled"`
 	KnownSecrets      []string `mapstructure:"known_secrets" yaml:"known_secrets"`
@@ -282,7 +314,8 @@ type JWTConfig struct {
 	DictionaryFile    string   `mapstructure:"dictionary_file" yaml:"dictionary_file"`
 }
 
-// ActiveScannersConfig holds settings for active scanners that send payloads.
+// ActiveScannersConfig holds settings for scanners that actively send malicious
+// or malformed requests to probe for vulnerabilities.
 type ActiveScannersConfig struct {
 	Taint          TaintConfig          `mapstructure:"taint" yaml:"taint"`
 	ProtoPollution ProtoPollutionConfig `mapstructure:"protopollution" yaml:"protopollution"`
@@ -290,20 +323,22 @@ type ActiveScannersConfig struct {
 	Auth           AuthConfig           `mapstructure:"auth" yaml:"auth"`
 }
 
-// TaintConfig configures the taint analysis scanner.
+// TaintConfig configures the active taint analysis scanner.
 type TaintConfig struct {
 	Enabled     bool `mapstructure:"enabled" yaml:"enabled"`
 	Depth       int  `mapstructure:"depth" yaml:"depth"`
 	Concurrency int  `mapstructure:"concurrency" yaml:"concurrency"`
 }
 
-// ProtoPollutionConfig defines the configuration for the Prototype Pollution analyzer.
+// ProtoPollutionConfig defines settings for the client-side Prototype Pollution
+// active scanner.
 type ProtoPollutionConfig struct {
 	Enabled      bool          `mapstructure:"enabled" yaml:"enabled"`
 	WaitDuration time.Duration `mapstructure:"wait_duration" yaml:"wait_duration"`
 }
 
-// TimeSlipConfig configures the time based vulnerability scanner.
+// TimeSlipConfig configures the time-based vulnerability scanner, which looks
+// for timing side-channel vulnerabilities.
 type TimeSlipConfig struct {
 	Enabled        bool `mapstructure:"enabled" yaml:"enabled"`
 	RequestCount   int  `mapstructure:"request_count" yaml:"request_count"`
@@ -311,13 +346,14 @@ type TimeSlipConfig struct {
 	ThresholdMs    int  `mapstructure:"threshold_ms" yaml:"threshold_ms"`
 }
 
-// AuthConfig holds configurations for authentication related scanners.
+// AuthConfig aggregates configurations for all authentication-related scanners.
 type AuthConfig struct {
 	ATO  ATOConfig  `mapstructure:"ato" yaml:"ato"`
 	IDOR IDORConfig `mapstructure:"idor" yaml:"idor"`
 }
 
-// ATOConfig configures the Account Takeover scanner.
+// ATOConfig configures the Account Takeover (ATO) scanner, which performs
+// credential stuffing and password spraying attacks.
 type ATOConfig struct {
 	Enabled                bool     `mapstructure:"enabled" yaml:"enabled"`
 	CredentialFile         string   `mapstructure:"credential_file" yaml:"credential_file"`
@@ -331,14 +367,15 @@ type ATOConfig struct {
 	LockoutKeywords        []string `mapstructure:"lockout_keywords" yaml:"lockout_keywords"`
 }
 
-// IDORConfig defines the settings for the Insecure Direct Object Reference scanner.
+// IDORConfig defines settings for the Insecure Direct Object Reference (IDOR) scanner.
 type IDORConfig struct {
 	Enabled        bool                `mapstructure:"enabled" yaml:"enabled"`
 	IgnoreList     []string            `mapstructure:"ignore_list" yaml:"ignore_list"`
 	TestStrategies map[string][]string `mapstructure:"test_strategies" yaml:"test_strategies"`
 }
 
-// ScanConfig holds settings populated from CLI flags for a specific scan job.
+// ScanConfig holds settings for a specific scan job, typically populated from
+// command-line flags.
 type ScanConfig struct {
 	Targets     []string
 	Output      string
@@ -348,7 +385,8 @@ type ScanConfig struct {
 	Scope       string
 }
 
-// DiscoveryConfig configures the asset discovery process.
+// DiscoveryConfig contains settings for the initial asset discovery and
+// enumeration phase of a scan.
 type DiscoveryConfig struct {
 	MaxDepth           int           `mapstructure:"max_depth" yaml:"max_depth"`
 	Concurrency        int           `mapstructure:"concurrency" yaml:"concurrency"`
@@ -370,13 +408,14 @@ type PostgresConfig struct {
 	SSLMode  string `mapstructure:"sslmode" yaml:"sslmode"`
 }
 
-// KnowledgeGraphConfig specifies the backend for the knowledge graph.
+// KnowledgeGraphConfig specifies the backend database for the agent's knowledge graph.
 type KnowledgeGraphConfig struct {
 	Type     string         `mapstructure:"type" yaml:"type"`
 	Postgres PostgresConfig `mapstructure:"postgres" yaml:"postgres"`
 }
 
-// AgentConfig holds settings related to the AI agent and its components.
+// AgentConfig aggregates settings for the AI agent, including its LLM router,
+// knowledge graph, long-term memory, and self-improvement (evolution) features.
 type AgentConfig struct {
 	LLM            LLMRouterConfig      `mapstructure:"llm" yaml:"llm"`
 	Evolution      EvolutionConfig      `mapstructure:"evolution" yaml:"evolution"`
@@ -384,22 +423,25 @@ type AgentConfig struct {
 	LTM            LTMConfig            `mapstructure:"ltm" yaml:"ltm"`
 }
 
-// LTMConfig holds the configuration for the Long-Term Memory module.
+// LTMConfig holds settings for the agent's Long-Term Memory (LTM) module,
+// which is used for caching and knowledge retention.
 type LTMConfig struct {
 	CacheTTLSeconds             int `mapstructure:"cache_ttl_seconds" yaml:"cache_ttl_seconds"`
 	CacheJanitorIntervalSeconds int `mapstructure:"cache_janitor_interval_seconds" yaml:"cache_janitor_interval_seconds"`
 }
 
-// EvolutionConfig holds settings for the proactive self-improvement (evolution) subsystem.
+// EvolutionConfig contains settings for the agent's self-improvement and
+// code evolution capabilities.
 type EvolutionConfig struct {
 	Enabled    bool          `mapstructure:"enabled" yaml:"enabled"`
 	MaxCycles  int           `mapstructure:"max_cycles" yaml:"max_cycles"`
 	SettleTime time.Duration `mapstructure:"settle_time" yaml:"settle_time"`
 }
 
-// LLMProvider defines the supported LLM providers.
+// LLMProvider is an enumeration of the supported Large Language Model providers.
 type LLMProvider string
 
+// Supported LLM providers.
 const (
 	ProviderGemini    LLMProvider = "gemini"
 	ProviderOpenAI    LLMProvider = "openai"
@@ -407,14 +449,16 @@ const (
 	ProviderOllama    LLMProvider = "ollama"
 )
 
-// LLMRouterConfig configures the model routing logic.
+// LLMRouterConfig defines the settings for routing requests to different LLMs
+// based on whether a "fast" or "powerful" model is required.
 type LLMRouterConfig struct {
 	DefaultFastModel     string                    `mapstructure:"default_fast_model" yaml:"default_fast_model"`
 	DefaultPowerfulModel string                    `mapstructure:"default_powerful_model" yaml:"default_powerful_model"`
 	Models               map[string]LLMModelConfig `mapstructure:"models" yaml:"models"`
 }
 
-// LLMModelConfig defines the configuration for a single LLM.
+// LLMModelConfig specifies the connection and generation parameters for a single
+// Large Language Model.
 type LLMModelConfig struct {
 	Provider      LLMProvider       `mapstructure:"provider" yaml:"provider"`
 	Model         string            `mapstructure:"model" yaml:"model"`
@@ -428,7 +472,9 @@ type LLMModelConfig struct {
 	SafetyFilters map[string]string `mapstructure:"safety_filters" yaml:"safety_filters"`
 }
 
-// NewDefaultConfig creates a new configuration struct populated with default values.
+// NewDefaultConfig creates a new Config struct and populates it with default
+// values by calling SetDefaults. This ensures that the application has a
+// sensible baseline configuration even if a config file is missing.
 func NewDefaultConfig() *Config {
 	v := viper.New()
 	SetDefaults(v)
@@ -441,7 +487,10 @@ func NewDefaultConfig() *Config {
 	return &cfg
 }
 
-// SetDefaults initializes default values for various configuration parameters.
+// SetDefaults applies a comprehensive set of default values to a `viper.Viper`
+// instance. This ensures that all configuration parameters have a sensible
+// fallback value, preventing nil pointer errors and establishing a baseline
+// behavior for the application out-of-the-box.
 func SetDefaults(v *viper.Viper) {
 	// -- Logger --
 	v.SetDefault("logger.level", "info")
@@ -639,7 +688,11 @@ func setHumanoidDefaults(v *viper.Viper) {
 	v.SetDefault(prefix+"persona_jitter_skill", 0.20)
 }
 
-// NewConfigFromViper creates a new configuration instance from a viper object.
+// NewConfigFromViper unmarshals a `viper.Viper` instance into a `Config` struct.
+// It is the primary mechanism for loading configuration from files and environment
+// variables. It also binds specific environment variables for sensitive data
+// (like API keys and database URLs) and performs validation on the resulting
+// configuration.
 func NewConfigFromViper(v *viper.Viper) (*Config, error) {
 	var cfg Config
 
@@ -667,7 +720,9 @@ func NewConfigFromViper(v *viper.Viper) (*Config, error) {
 	return &cfg, nil
 }
 
-// Validate checks the configuration for required fields and sane values.
+// Validate performs a top-level validation of the main `Config` struct, ensuring
+// that essential parameters are set and have sane values. It delegates more
+// specific validation to the `Validate` methods of its sub-configuration structs.
 func (c *Config) Validate() error {
 	if c.EngineCfg.WorkerConcurrency <= 0 {
 		return fmt.Errorf("engine.worker_concurrency must be a positive integer")
@@ -684,7 +739,9 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// Validate checks the Autofix configuration.
+// Validate checks the AutofixConfig for correctness, ensuring that if the feature
+// is enabled, all required fields (like GitHub repository details and token)
+// are present.
 func (a *AutofixConfig) Validate() error {
 	if !a.Enabled {
 		return nil
@@ -701,7 +758,8 @@ func (a *AutofixConfig) Validate() error {
 	return nil
 }
 
-// Validate checks the EvolutionConfig settings.
+// Validate checks the EvolutionConfig, ensuring that if the feature is enabled,
+// its parameters (like `MaxCycles`) are valid.
 func (e *EvolutionConfig) Validate() error {
 	if !e.Enabled {
 		return nil
@@ -715,7 +773,8 @@ func (e *EvolutionConfig) Validate() error {
 	return nil
 }
 
-// Validate checks the AgentConfig settings, delegating to its sub-components.
+// Validate checks the AgentConfig, delegating validation to its sub-modules
+// like Evolution and LTM.
 func (a *AgentConfig) Validate() error {
 	if err := a.Evolution.Validate(); err != nil {
 		return err
@@ -726,7 +785,8 @@ func (a *AgentConfig) Validate() error {
 	return nil
 }
 
-// Validate checks the LTMConfig settings.
+// Validate checks the LTMConfig, ensuring that cache TTL and janitor intervals
+// are positive values.
 func (l *LTMConfig) Validate() error {
 	if l.CacheTTLSeconds <= 0 {
 		return fmt.Errorf("agent.ltm.cache_ttl_seconds must be a positive integer")
