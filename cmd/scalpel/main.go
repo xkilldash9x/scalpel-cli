@@ -22,18 +22,16 @@ import (
 
 const panicLogFile = "panic.log"
 
-// ASCII Art for scalpel-cli (Metasploit Style)
 const asciiArt = `
-              _______
-      ,           ,
-     /             \        "Precision is the difference between
-    ((__-^^-,-^^-__))        a butcher and a surgeon."
-    \` + `-_---' ` + `---_-'` + `
-     <__|o\` + ` 'o|__>           [ scalpel-cli v0.1.0-alpha ]
-        \  ` + `  /             +-----------------------------+
-         ): : (              | 7 Analysis Modules        |
-         :o_o:              | 0 Payloads                  |
-         _..-` + "`" + `              +-----------------------------+
+    /\
+   /  \		   "Precision is the difference 
+  / /\ \       between a butcher and surgeon."
+ / /  \ \
+ \ \__/ / 	    [ scalpel-cli v0.1.0  ]
+  \____/	 	+---------------------+
+   |  |		 	| 07 Analysis Modules |
+   |  |		 	| 39 Payload Exploits |
+				+---------------------+
 `
 
 // Define function variables for dependency injection/mocking in tests.

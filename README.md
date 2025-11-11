@@ -1,6 +1,6 @@
 # Scalpel CLI
 
-[![Go Test](https://github.com/your-org/scalpel-cli/actions/workflows/go-test.yaml/badge.svg)](https://github.com/your-org/scalpel-cli/actions/workflows/go-test.yaml)
+[![Go Test](https://github.com/xkilldash9x/scalpel-cli/actions/workflows/go-test.yaml/badge.svg)](https://github.com/xkilldash9x/scalpel-cli/actions/workflows/go-test.yaml)
 
 Scalpel CLI is an AI-powered security auditing tool designed to analyze codebases, identify vulnerabilities, and provide automated fixes. It leverages Large Language Models (LLMs) to bring a new level of intelligence to application security testing, moving beyond simple pattern matching to understand the context and logic of your code.
 
