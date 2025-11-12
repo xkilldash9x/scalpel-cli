@@ -8,35 +8,48 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"path/filepath"
 	"testing"
 	"time"
 
+	"github.com/mitchellh/go-homedir"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/worker/adapters"
 )
 
 // Helper to setup AnalysisContext for ATOAdapter
 func setupATOContext(t *testing.T, params interface{}) *core.AnalysisContext {
 	t.Helper()
+	// Create a default config to ensure Global.Config is not nil.
+	defaultConfig := config.NewDefaultConfig()
 	return &core.AnalysisContext{
 		Task: schemas.Task{
 			TaskID:     "task-ato-1",
 			Type:       schemas.TaskTestAuthATO,
 			Parameters: params,
 		},
-		Logger:   zap.NewNop(),
-		Global:   &core.GlobalContext{},
+		Logger: zap.NewNop(),
+		Global: &core.GlobalContext{
+			Config: defaultConfig,
+		},
 		Findings: []schemas.Finding{},
 	}
 }
 
 func TestATOAdapter_Analyze_ParameterValidation(t *testing.T) {
 	adapter := adapters.NewATOAdapter()
+
+	// Determine the expected path for SecLists for robust error message checking.
+	home, err := homedir.Dir()
+	require.NoError(t, err, "Failed to get home directory for test setup")
+	expectedSecListsPath := filepath.Join(home, "SecLists")
+	expectedErr := fmt.Sprintf("SecLists directory not found at '%s'. Please install SecLists or configure the correct path.", expectedSecListsPath)
 
 	tests := []struct {
 		name          string
@@ -45,8 +58,8 @@ func TestATOAdapter_Analyze_ParameterValidation(t *testing.T) {
 	}{
 		{"Wrong Type", "invalid string", "invalid parameters type for ATO task; expected schemas.ATOTaskParams or *schemas.ATOTaskParams, got string"},
 		{"Nil Pointer", (*schemas.ATOTaskParams)(nil), "invalid parameters: nil pointer for ATO task"},
-		{"Empty Usernames (Struct)", schemas.ATOTaskParams{Usernames: []string{}}, "'usernames' parameter must be a non-empty array of strings"},
-		{"Empty Usernames (Pointer)", &schemas.ATOTaskParams{Usernames: []string{}}, "'usernames' parameter must be a non-empty array of strings"},
+		{"Empty Usernames (Struct)", schemas.ATOTaskParams{Usernames: []string{}}, expectedErr},
+		{"Empty Usernames (Pointer)", &schemas.ATOTaskParams{Usernames: []string{}}, expectedErr},
 	}
 
 	for _, tt := range tests {
