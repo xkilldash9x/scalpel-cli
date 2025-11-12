@@ -181,12 +181,12 @@ func (e *cdpExecutor) DispatchStructuredKey(ctx context.Context, data schemas.Ke
 //
 // To achieve this efficiently and robustly, it executes a JavaScript snippet in
 // the browser that:
-// 1. Finds the element.
-// 2. Verifies that the element is visible and interactable.
-// 3. Uses the `getBoxQuads` API to get precise vertex coordinates, which is
-//    more accurate than `getBoundingClientRect` for rotated or transformed elements.
-// 4. Returns all the required information in a single JSON object, minimizing
-//    CDP roundtrips.
+//  1. Finds the element.
+//  2. Verifies that the element is visible and interactable.
+//  3. Uses the `getBoxQuads` API to get precise vertex coordinates, which is
+//     more accurate than `getBoundingClientRect` for rotated or transformed elements.
+//  4. Returns all the required information in a single JSON object, minimizing
+//     CDP roundtrips.
 func (e *cdpExecutor) GetElementGeometry(ctx context.Context, selector string) (*schemas.ElementGeometry, error) {
 	// Use JS to get geometry and attributes in one go for efficiency and atomicity.
 	// Enhanced script to handle visibility and use getBoxQuads for accuracy.
@@ -246,12 +246,12 @@ func (e *cdpExecutor) GetElementGeometry(ctx context.Context, selector string) (
 
 	// Apply timeout for geometry retrieval to the operational context.
 	// This is correct, as geometry lookups should be fast.
-	timeout := 10 * time.Second
-	opCtx, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
+	//timeout := 10 * time.Second
+	//opCtx, cancel := context.WithTimeout(ctx, timeout)
+	//defer cancel()
 
 	// Use the session's runActionsFunc (RunActions).
-	err := e.runActionsFunc(opCtx,
+	err := e.runActionsFunc(ctx,
 		// Evaluate the script and expect a result back
 		chromedp.Evaluate(script, &res, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
 			// Ensure promises resolve, return actual value, handle exceptions silently in JS
@@ -261,8 +261,8 @@ func (e *cdpExecutor) GetElementGeometry(ctx context.Context, selector string) (
 
 	if err != nil {
 		// Check if it was specifically a timeout error
-		if opCtx.Err() == context.DeadlineExceeded {
-			return nil, fmt.Errorf("timeout getting geometry for '%s': %w", selector, opCtx.Err())
+		if ctx.Err() == context.DeadlineExceeded {
+			return nil, fmt.Errorf("timeout getting geometry for '%s': %w", selector, ctx.Err())
 		}
 		// Check if the error is a context cancellation (from ctx or e.ctx)
 		if ctx.Err() != nil || e.ctx.Err() != nil {

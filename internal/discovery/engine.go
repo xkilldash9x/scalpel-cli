@@ -106,6 +106,8 @@ func (e *Engine) Start(ctx context.Context, initialTargets []string) (<-chan sch
 			go e.worker(sessionCtx, workerWG, taskChan)
 		}
 
+		passiveWG := &sync.WaitGroup{}
+
 		// Process all initial targets.
 		for _, targetURL := range initialTargets {
 			parsedInitialURL, err := e.normalizeAndValidate(targetURL, "")
@@ -129,7 +131,9 @@ func (e *Engine) Start(ctx context.Context, initialTargets []string) (<-chan sch
 			// Start passive discovery in parallel.
 			if e.config.Discovery().PassiveEnabled != nil && *e.config.Discovery().PassiveEnabled && e.passiveRunner != nil {
 				log.Info("Launching passive discovery for target...", zap.String("target", targetURL))
+				passiveWG.Add(1)
 				go func(initialURL *url.URL) {
+					defer passiveWG.Done()
 					passiveResults := e.passiveRunner.Run(sessionCtx, initialURL)
 					count := 0
 					for resultURL := range passiveResults {
@@ -146,8 +150,12 @@ func (e *Engine) Start(ctx context.Context, initialTargets []string) (<-chan sch
 			e.processAsset(sessionCtx, parsedInitialURL, 0, "Seed", taskChan)
 		}
 
-		e.taskWG.Wait()
-		close(e.queue)
+		go func() {
+			passiveWG.Wait()
+			e.taskWG.Wait()
+			close(e.queue)
+		}()
+
 		workerWG.Wait()
 		log.Info("Discovery session finished")
 	}()

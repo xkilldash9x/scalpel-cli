@@ -62,7 +62,7 @@ var DefaultPersona = Persona{
 	AvailWidth:  1920,
 	AvailHeight: 1040,
 	ColorDepth:  24,
-	PixelDepth:  24,
+	PixelDepth:  1,
 	Mobile:      false,
 	Timezone:    "America/Los_Angeles",
 	Locale:      "en-US",
@@ -99,12 +99,12 @@ type InteractionStep struct {
 // automated browser interactions, including crawl depth, delays, and custom
 // interaction sequences.
 type InteractionConfig struct {
-	MaxDepth                int               `json:"max_depth"`                  // Maximum depth for crawling links.
-	MaxInteractionsPerDepth int               `json:"max_interactions_per_depth"` // Max actions on a single page.
-	InteractionDelayMs      int               `json:"interaction_delay_ms"`       // Delay between actions.
-	PostInteractionWaitMs   int               `json:"post_interaction_wait_ms"`   // Wait time after an action for page load.
-	CustomInputData         map[string]string `json:"custom_input_data,omitempty"`  // Pre-filled data for forms.
-	Steps                   []InteractionStep `json:"steps,omitempty"`            // A specific sequence of actions to perform.
+	MaxDepth                int               `json:"max_depth"`                   // Maximum depth for crawling links.
+	MaxInteractionsPerDepth int               `json:"max_interactions_per_depth"`  // Max actions on a single page.
+	InteractionDelayMs      int               `json:"interaction_delay_ms"`        // Delay between actions.
+	PostInteractionWaitMs   int               `json:"post_interaction_wait_ms"`    // Wait time after an action for page load.
+	CustomInputData         map[string]string `json:"custom_input_data,omitempty"` // Pre-filled data for forms.
+	Steps                   []InteractionStep `json:"steps,omitempty"`             // A specific sequence of actions to perform.
 }
 
 // -- Browser Artifact Schemas --
@@ -116,8 +116,8 @@ type ConsoleLog struct {
 	Timestamp time.Time `json:"timestamp"` // The time the message was logged.
 	Text      string    `json:"text"`      // The content of the console message.
 	Source    string    `json:"source,omitempty"`
-	URL       string    `json:"url,omitempty"` // The URL of the script that generated the message.
-	Line      int64     `json:"line,omitempty"`  // The line number in the script.
+	URL       string    `json:"url,omitempty"`  // The URL of the script that generated the message.
+	Line      int64     `json:"line,omitempty"` // The line number in the script.
 }
 
 // CookieSameSite specifies the SameSite attribute for an HTTP cookie, controlling
@@ -218,7 +218,7 @@ const (
 	MouseMove    MouseEventType = "mouseMoved"    // The mouse was moved.
 	MousePress   MouseEventType = "mousePressed"  // A mouse button was pressed.
 	MouseRelease MouseEventType = "mouseReleased" // A mouse button was released.
-	MouseWheel   MouseEventType = "mouseWheel"   // The mouse wheel was scrolled.
+	MouseWheel   MouseEventType = "mouseWheel"    // The mouse wheel was scrolled.
 )
 
 // MouseButton identifies a specific mouse button.
