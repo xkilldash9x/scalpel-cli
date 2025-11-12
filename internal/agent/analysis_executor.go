@@ -1,8 +1,9 @@
 // internal/agent/analysis_executor.go
 package agent
 
-import ( // This is a comment to force a change
+import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"net/url"
 	"time"
@@ -53,7 +54,7 @@ func (e *AnalysisExecutor) Execute(ctx context.Context, action Action) (*Executi
 
 	analyzer, ok := e.globalCtx.Adapters[taskType]
 	if !ok {
-		return e.fail(ErrCodeNotImplemented, fmt.Sprintf("Adapter not found for task type: %s (Action: %s)", taskType, action.Type), nil), nil
+		return e.fail(ErrCodeNotImplemented, fmt.Sprintf("Adapter not found or enabled for task type: %s (Action: %s)", taskType, action.Type), nil), nil
 	}
 
 	// 2. Preparation: Session requirements and Artifact collection.
@@ -89,13 +90,30 @@ func (e *AnalysisExecutor) Execute(ctx context.Context, action Action) (*Executi
 		TaskID:     action.ID, // Use Action ID as the Task ID for this execution
 		ScanID:     action.ScanID,
 		Type:       taskType,
-		TargetURL:  action.Value, // Use Action.Value if the adapter needs a specific URL
+		TargetURL:  action.Value,
 		Parameters: action.Metadata,
 	}
 
 	var parsedURL *url.URL
-	if action.Value != "" {
-		parsedURL, _ = url.Parse(action.Value)
+	// Use the current session URL as a fallback if Action.Value is empty.
+	targetURLStr := action.Value
+	if targetURLStr == "" && session != nil {
+		urlJSON, err := session.ExecuteScript(ctx, "return window.location.href", nil)
+		if err == nil && len(urlJSON) > 0 {
+			var currentURL string
+			// The result from ExecuteScript is a JSON-encoded string.
+			if json.Unmarshal(urlJSON, &currentURL) == nil {
+				targetURLStr = currentURL
+			} else {
+				e.logger.Warn("Failed to unmarshal current URL from ExecuteScript", zap.ByteString("json", urlJSON))
+			}
+		} else if err != nil {
+			e.logger.Warn("Failed to get current URL via ExecuteScript", zap.Error(err))
+		}
+	}
+
+	if targetURLStr != "" {
+		parsedURL, _ = url.Parse(targetURLStr) // Best effort parsing.
 	}
 
 	analysisCtx := &core.AnalysisContext{
@@ -115,13 +133,24 @@ func (e *AnalysisExecutor) Execute(ctx context.Context, action Action) (*Executi
 	// 4. Run the analyzer
 	e.logger.Info("Starting analysis adapter", zap.String("analyzer", analyzer.Name()))
 	startTime := time.Now()
-	err = analyzer.Analyze(ctx, analysisCtx)
+
+	// Use a distinct context for the analysis execution itself, allowing for specific timeouts.
+	// TODO: Make analysis timeout configurable.
+	analysisExecCtx, analysisCancel := context.WithTimeout(ctx, 10*time.Minute)
+	defer analysisCancel()
+
+	err = analyzer.Analyze(analysisExecCtx, analysisCtx)
 	duration := time.Since(startTime)
 	e.logger.Info("Analysis adapter finished", zap.String("analyzer", analyzer.Name()), zap.Duration("duration", duration), zap.Int("findings_count", len(analysisCtx.Findings)))
 
 	// 5. Process the results
 	if err != nil {
-		return e.fail(ErrCodeExecutionFailure, fmt.Sprintf("Analysis failed: %v", err), nil), nil
+		// Classify the analysis failure (Timeout vs General Failure).
+		errorCode := ErrCodeAnalysisFailure
+		if analysisExecCtx.Err() != nil && analysisExecCtx.Err() == context.DeadlineExceeded {
+			errorCode = ErrCodeTimeoutError
+		}
+		return e.fail(errorCode, fmt.Sprintf("Analysis failed: %v", err), nil), nil
 	}
 
 	// Summary data for the Mind's observation node.
@@ -154,19 +183,30 @@ func (e *AnalysisExecutor) mapActionToTaskType(actionType ActionType) (schemas.T
 		return schemas.TaskAnalyzeHeaders, nil
 	case ActionTestRaceCondition:
 		return schemas.TaskTestRaceCondition, nil
+	case ActionAnalyzeJWT:
+		// Note: Requires corresponding definition in the schemas package.
+		return schemas.TaskAnalyzeJWT, nil
+	case ActionTestATO:
+		// Note: Requires corresponding definition in the schemas package.
+		return schemas.TaskTestAuthATO, nil
+	case ActionTestIDOR:
+		// Note: Requires corresponding definition in the schemas package.
+		return schemas.TaskTestAuthIDOR, nil
 	default:
 		return "", fmt.Errorf("unsupported analysis action type: %s", actionType)
 	}
 }
 
+// fail is a helper function to generate a standardized failed ExecutionResult.
 func (e *AnalysisExecutor) fail(code ErrorCode, message string, data map[string]interface{}) *ExecutionResult {
 	if data == nil {
 		data = make(map[string]interface{})
 	}
 	data["message"] = message
 	return &ExecutionResult{
-		Status:          "failed",
-		ObservationType: ObservedSystemState,
+		Status: "failed",
+		// Use ObservedAnalysisResult even on failure so the Mind knows the analysis attempt finished.
+		ObservationType: ObservedAnalysisResult,
 		ErrorCode:       code,
 		ErrorDetails:    data,
 	}

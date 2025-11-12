@@ -16,6 +16,20 @@ import (
 	"golang.org/x/tools/go/packages"
 )
 
+// CodebaseExecutor is a specialized executor for handling static analysis of the Go codebase.
+type CodebaseExecutor struct {
+	logger      *zap.Logger
+	projectRoot string
+}
+
+// NewCodebaseExecutor creates a new instance of the CodebaseExecutor.
+func NewCodebaseExecutor(logger *zap.Logger, projectRoot string) *CodebaseExecutor {
+	return &CodebaseExecutor{
+		logger:      logger.Named("codebase_executor"),
+		projectRoot: projectRoot,
+	}
+}
+
 const (
 	// -- Headers used for separating sections in the final output --
 	moduleSourceCodeHeaderFmt = "## Source Code for Module: %s ##"

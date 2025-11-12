@@ -285,7 +285,13 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 
 	// NEW: Test actions that should be handled by the Agent loop
 	t.Run("AgentLoopActions", func(t *testing.T) {
-		actions := []ActionType{ActionConclude, ActionPerformComplexTask, ActionEvolveCodebase}
+		actions := []ActionType{
+			ActionConclude,
+			ActionEvolveCodebase,
+			ActionExecuteLoginSequence,
+			ActionExploreApplication,
+			ActionFuzzEndpoint,
+		}
 		for _, actionType := range actions {
 			t.Run(string(actionType), func(t *testing.T) {
 				action := Action{Type: actionType}

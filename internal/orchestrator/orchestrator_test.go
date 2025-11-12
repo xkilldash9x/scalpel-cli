@@ -50,23 +50,24 @@ func (m *mockDiscoveryEngine) Stop() {
 
 // mockTaskEngine is a mock for the TaskEngine interface.
 type mockTaskEngine struct {
-	mu          sync.Mutex
-	startCalled bool
-	stopCalled  bool
-	task        schemas.Task // -- captures the last task received --
-	wg          sync.WaitGroup
+	mu            sync.Mutex
+	startCalled   bool
+	stopCalled    bool
+	receivedTasks []schemas.Task // -- captures all tasks received --
+	wg            sync.WaitGroup
 }
 
 func (m *mockTaskEngine) Start(ctx context.Context, taskChan <-chan schemas.Task) {
 	m.mu.Lock()
 	m.startCalled = true
+	m.receivedTasks = []schemas.Task{}
 	m.mu.Unlock()
 
 	// -- a little goroutine to simulate task consumption --
 	go func() {
 		for task := range taskChan {
 			m.mu.Lock()
-			m.task = task
+			m.receivedTasks = append(m.receivedTasks, task)
 			m.mu.Unlock()
 			m.wg.Done() // Signal that a task was received
 		}
@@ -140,6 +141,10 @@ func TestOrchestrator_StartScan(t *testing.T) {
 		ctx, cancel := context.WithCancel(context.Background())
 		defer cancel()
 
+		// -- Set expectations for the number of tasks BEFORE starting --
+		expectedTaskCount := 4 // 1 discovery + 3 orchestrator
+		fixture.TaskEngine.wg.Add(expectedTaskCount)
+
 		targets := []string{"https://example.com"}
 		scanID := "test-scan-123"
 
@@ -163,12 +168,21 @@ func TestOrchestrator_StartScan(t *testing.T) {
 		fixture.TaskEngine.mu.Unlock()
 
 		// -- simulate a discovered task --
-		fixture.TaskEngine.wg.Add(1) // Expect one task
-		fixture.DiscoveryEngine.taskChan <- schemas.Task{TaskID: "task-abc"}
-		fixture.TaskEngine.wg.Wait() // Wait for the task engine to process it
+		fixture.DiscoveryEngine.taskChan <- schemas.Task{TaskID: "task-discovery"}
+		fixture.TaskEngine.wg.Wait() // Wait for all tasks to be processed
 
+		// -- verify received tasks --
 		fixture.TaskEngine.mu.Lock()
-		assert.Equal(t, "task-abc", fixture.TaskEngine.task.TaskID, "TaskEngine did not receive the correct task")
+		assert.Len(t, fixture.TaskEngine.receivedTasks, expectedTaskCount, "Should have received all tasks")
+		// -- check for a specific discovery task --
+		foundDiscoveryTask := false
+		for _, task := range fixture.TaskEngine.receivedTasks {
+			if task.TaskID == "task-discovery" {
+				foundDiscoveryTask = true
+				break
+			}
+		}
+		assert.True(t, foundDiscoveryTask, "Did not receive the discovery task")
 		fixture.TaskEngine.mu.Unlock()
 
 		// -- signal shutdown and wait for it to complete --
