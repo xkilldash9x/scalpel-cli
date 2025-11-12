@@ -84,7 +84,7 @@ func (a *ProtoAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCo
 	analyzer := proto.NewAnalyzer(
 		logger.With(zap.String("module", proto.ModuleName)),
 		globalCtx.BrowserManager,
-		protoConfig,
+		globalCtx.Config,
 	)
 
 	// 5. Execute Analysis
