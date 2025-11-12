@@ -1,4 +1,4 @@
-// File: internal/agent/executors.go
+// internal/agent/executors.go
 package agent
 
 import (
@@ -28,6 +28,9 @@ type ExecutorRegistry struct {
 	providerMu       sync.RWMutex
 }
 
+// Verify interface compliance.
+var _ ActionExecutor = (*ExecutorRegistry)(nil)
+
 // NewExecutorRegistry creates and initializes a new registry, populating it with
 // all the specialized executors (Browser, Codebase, Analysis, Humanoid).
 func NewExecutorRegistry(logger *zap.Logger, projectRoot string, globalCtx *core.GlobalContext) *ExecutorRegistry {
@@ -47,19 +50,25 @@ func NewExecutorRegistry(logger *zap.Logger, projectRoot string, globalCtx *core
 	analysisExec := NewAnalysisExecutor(logger, globalCtx, safeProviderGetter)
 	humanoidExec := NewHumanoidExecutor(logger, safeHumanoidGetter)
 
-	// Register browser actions. Note that CLICK and INPUT_TEXT are absent,
-	// as they are now orchestrated by the Agent via the Humanoid module.
+	// Register browser actions.
 	r.register(browserExec, ActionNavigate, ActionSubmitForm, ActionScroll, ActionWaitForAsync)
 
-	// Register complex, interactive browser actions.
-	// These are handled by the HumanoidExecutor, which orchestrates human-like interactions.
+	// Register complex, interactive browser actions (Humanoid).
 	r.register(humanoidExec, ActionClick, ActionInputText, ActionHumanoidDragAndDrop)
 
-	// Register codebase actions, which are non-interactive by nature.
+	// Register codebase actions.
 	r.register(codebaseExec, ActionGatherCodebaseContext)
 
-	// Register analysis actions
-	r.register(analysisExec, ActionAnalyzeTaint, ActionAnalyzeProtoPollution, ActionAnalyzeHeaders, ActionTestRaceCondition)
+	// Register analysis actions (Updated to include all defined actions).
+	r.register(analysisExec,
+		ActionAnalyzeTaint,
+		ActionAnalyzeProtoPollution,
+		ActionAnalyzeHeaders,
+		ActionAnalyzeJWT,
+		ActionTestRaceCondition,
+		ActionTestATO,
+		ActionTestIDOR,
+	)
 
 	return r
 }
@@ -109,6 +118,9 @@ func (r *ExecutorRegistry) GetHumanoidProvider() HumanoidProvider {
 // register is an internal helper to associate an executor with one or more action types.
 func (r *ExecutorRegistry) register(exec ActionExecutor, types ...ActionType) {
 	for _, t := range types {
+		if _, exists := r.executors[t]; exists {
+			r.logger.Warn("Overwriting existing executor registration for action type.", zap.String("type", string(t)))
+		}
 		r.executors[t] = exec
 	}
 }
@@ -121,10 +133,17 @@ func (r *ExecutorRegistry) Execute(ctx context.Context, action Action) (*Executi
 	executor, ok := r.executors[action.Type]
 	if !ok {
 		switch action.Type {
-		case ActionConclude, ActionPerformComplexTask, ActionEvolveCodebase:
-			return nil, fmt.Errorf("%s should be handled by the Agent's cognitive loop, not dispatched to ExecutorRegistry", action.Type)
+		// These are cognitive control actions handled by the main Agent loop.
+		case ActionConclude, ActionEvolveCodebase:
+			return nil, fmt.Errorf("CRITICAL: %s is a cognitive control action and should be handled by the Agent loop, not dispatched to ExecutorRegistry", action.Type)
 		default:
-			return nil, fmt.Errorf("no executor registered for action type: %s", action.Type)
+			// The action type is genuinely unknown by the executors.
+			return &ExecutionResult{
+				Status:          "failed",
+				ObservationType: ObservedSystemState,
+				ErrorCode:       ErrCodeUnknownAction,
+				ErrorDetails:    map[string]interface{}{"message": fmt.Sprintf("No executor registered for action type: %s", action.Type)},
+			}, nil
 		}
 	}
 	return executor.Execute(ctx, action)
@@ -174,6 +193,7 @@ func (e *BrowserExecutor) Execute(ctx context.Context, action Action) (*Executio
 
 	handler, ok := e.handlers[action.Type]
 	if !ok {
+		// Defense-in-depth check.
 		return &ExecutionResult{
 			Status:          "failed",
 			ObservationType: ObservedSystemState,
@@ -238,9 +258,12 @@ func (e *BrowserExecutor) handleScroll(ctx context.Context, session schemas.Sess
 
 // handleWaitForAsync executes a wait/sleep action.
 func (e *BrowserExecutor) handleWaitForAsync(ctx context.Context, session schemas.SessionContext, action Action) error {
-	durationMs := 1000 // Default wait time.
+	defaultDurationMs := 1000
+	durationMs := defaultDurationMs
+
 	val, exists := action.Metadata["duration_ms"]
 	if exists {
+		// Handle various numeric types resulting from JSON unmarshaling.
 		switch v := val.(type) {
 		case float64:
 			durationMs = int(v)
@@ -248,51 +271,34 @@ func (e *BrowserExecutor) handleWaitForAsync(ctx context.Context, session schema
 			durationMs = v
 		case int64:
 			durationMs = int(v)
-		case float32:
-			durationMs = int(v)
 		default:
-			e.logger.Warn("Invalid type for duration_ms, using default.", zap.Any("type", v))
+			e.logger.Warn("Invalid type for 'duration_ms' metadata. Using default.", zap.Any("value", val))
+			durationMs = defaultDurationMs
 		}
 	}
-	return session.WaitForAsync(ctx, durationMs)
-}
 
-// -- Codebase Executor --
-
-// CodebaseExecutor is a specialized executor for actions that involve analyzing
-// the local Go codebase, such as gathering context for the agent's mind.
-type CodebaseExecutor struct {
-	logger      *zap.Logger
-	projectRoot string
-}
-
-var _ ActionExecutor = (*CodebaseExecutor)(nil) // Verify interface compliance.
-
-// NewCodebaseExecutor creates a new CodebaseExecutor.
-func NewCodebaseExecutor(logger *zap.Logger, projectRoot string) *CodebaseExecutor {
-	return &CodebaseExecutor{
-		logger:      logger.Named("codebase_executor"),
-		projectRoot: projectRoot,
+	if durationMs <= 0 {
+		durationMs = defaultDurationMs
 	}
+
+	return session.WaitForAsync(ctx, durationMs)
 }
 
 // -- Shared Error Parsing --
 
 // ParseBrowserError is a utility function that inspects an error returned from
-// a browser operation and classifies it into a structured `ErrorCode`. This
-// provides the agent's mind with more granular information about the nature of
-// the failure (e.g., distinguishing a timeout from an element not being found),
-// enabling more intelligent error handling and decision-making.
+// a browser operation (BrowserExecutor or HumanoidExecutor) and classifies it
+// into a structured `ErrorCode`. This provides the agent's mind with granular
+// information about the nature of the failure, enabling intelligent error handling.
 func ParseBrowserError(err error, action Action) (ErrorCode, map[string]interface{}) {
 	errStr := err.Error()
 	details := map[string]interface{}{
-		"message": errStr,
-		"action":  action.Type,
+		"message":     errStr,
+		"action_type": action.Type,
 	}
 
 	// 1. Check for parameter validation errors explicitly.
-	// This prevents validation errors (which often contain the word "selector")
-	// from being misclassified by subsequent checks.
+	// This prevents validation errors from being misclassified by subsequent checks.
 	if strings.Contains(errStr, "requires a 'selector'") ||
 		strings.Contains(errStr, "requires a 'value'") ||
 		strings.Contains(errStr, "requires 'metadata.target_selector'") ||
@@ -304,15 +310,25 @@ func ParseBrowserError(err error, action Action) (ErrorCode, map[string]interfac
 	if strings.Contains(errStr, "timeout") || strings.Contains(errStr, "context deadline exceeded") {
 		return ErrCodeTimeoutError, details
 	}
-	if strings.Contains(errStr, "net::ERR") {
+
+	// 3. Check for navigation errors.
+	if strings.Contains(errStr, "net::ERR") || strings.Contains(errStr, "navigation failed") {
 		return ErrCodeNavigationError, details
 	}
 
-	// 3. Check for element lookup failures.
-	// Removed the overly broad `strings.Contains(errStr, "selector")`.
-	if strings.Contains(errStr, "no element found") || strings.Contains(errStr, "geometry retrieval failed") {
+	// 4. Check for element lookup failures.
+	if strings.Contains(errStr, "no element found") {
 		details["selector"] = action.Selector
 		return ErrCodeElementNotFound, details
+	}
+
+	// 5. Check for visibility/obstruction issues (Crucial for Humanoid actions).
+	if strings.Contains(errStr, "not visible") ||
+		strings.Contains(errStr, "obscured") ||
+		strings.Contains(errStr, "is being covered") ||
+		strings.Contains(errStr, "outside the viewport") {
+		details["selector"] = action.Selector
+		return ErrCodeHumanoidTargetNotVisible, details
 	}
 
 	return ErrCodeExecutionFailure, details

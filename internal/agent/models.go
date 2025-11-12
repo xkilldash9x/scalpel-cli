@@ -46,16 +46,25 @@ const (
 	ActionInputText    ActionType = "INPUT_TEXT"     // Types text into an input field.
 	ActionSubmitForm   ActionType = "SUBMIT_FORM"    // Submits a form.
 	ActionScroll       ActionType = "SCROLL"         // Scrolls the page.
-	ActionWaitForAsync ActionType = "WAIT_FOR_ASYNC" // Pauses for a specified duration.
+	ActionWaitForAsync ActionType = "WAIT_FOR_ASYNC" // Pauses for asynchronous activity to settle.
 
 	// -- High-Level Humanoid Actions --
 	ActionHumanoidDragAndDrop ActionType = "HUMANOID_DRAG_AND_DROP" // Performs a human-like drag-and-drop.
 
-	// -- Specific Analysis Actions --
-	ActionAnalyzeTaint          ActionType = "ANALYZE_TAINT"           // Initiates a taint analysis scan on the current page.
-	ActionAnalyzeProtoPollution ActionType = "ANALYZE_PROTO_POLLUTION" // Scans for prototype pollution.
-	ActionAnalyzeHeaders        ActionType = "ANALYZE_HEADERS"         // Analyzes HTTP security headers.
-	ActionTestRaceCondition     ActionType = "TEST_RACE_CONDITION"
+	// -- Security Analysis Actions (Active & IAST) --
+	// These actions involve injecting payloads, manipulating the environment, or analyzing the live state.
+	ActionAnalyzeTaint          ActionType = "ANALYZE_TAINT"           // (IAST/Taint) Taint analysis (XSS, Injection) on the current page state.
+	ActionAnalyzeProtoPollution ActionType = "ANALYZE_PROTO_POLLUTION" // (Active/Proto) Scans for client-side prototype pollution and DOM clobbering.
+	ActionTestRaceCondition     ActionType = "TEST_RACE_CONDITION"     // (Active/TimeSlip) Tests an endpoint for race conditions (TOCTOU).
+
+	// -- Authentication & Authorization Testing --
+	ActionTestATO  ActionType = "TEST_ATO"  // (Active/ATO) Account Takeover: Tests login endpoints for credential stuffing/enumeration.
+	ActionTestIDOR ActionType = "TEST_IDOR" // (Active/IDOR) Insecure Direct Object Reference: Compares resource access between sessions.
+
+	// -- Security Analysis Actions (Passive & Static) --
+	// These actions analyze artifacts (HAR, DOM, Headers) already collected.
+	ActionAnalyzeHeaders ActionType = "ANALYZE_HEADERS" // (Passive/Headers) Analyzes HTTP security headers from collected traffic.
+	ActionAnalyzeJWT     ActionType = "ANALYZE_JWT"     // (Passive/JWT) Analyzes captured JWTs for vulnerabilities.
 
 	// -- Codebase Interaction --
 	ActionGatherCodebaseContext ActionType = "GATHER_CODEBASE_CONTEXT" // Gathers static analysis context from the agent's own codebase.
@@ -64,7 +73,10 @@ const (
 	ActionEvolveCodebase ActionType = "EVOLVE_CODEBASE" // Initiates the self-improvement (evolution) process.
 
 	// -- High-Level, Complex Actions --
-	ActionPerformComplexTask ActionType = "PERFORM_COMPLEX_TASK" // A placeholder for future complex, multi-step tasks.
+	// Complex tasks that might be decomposed into simpler actions by the executor or the Mind itself.
+	ActionExecuteLoginSequence ActionType = "EXECUTE_LOGIN_SEQUENCE" // Executes a predefined or discovered login sequence.
+	ActionExploreApplication   ActionType = "EXPLORE_APPLICATION"    // Initiates a comprehensive crawl/exploration of the application scope.
+	ActionFuzzEndpoint         ActionType = "FUZZ_ENDPOINT"          // Performs fuzzing against a specific API endpoint or form inputs.
 
 	// -- Mission Control --
 	ActionConclude ActionType = "CONCLUDE" // Concludes the current mission.
@@ -99,12 +111,13 @@ const (
 	ObservedNetworkActivity ObservationType = "NETWORK_ACTIVITY" // An observation of network traffic (e.g., from a HAR file).
 	ObservedDOMChange       ObservationType = "DOM_CHANGE"       // An observation of a change in the Document Object Model.
 	ObservedConsoleMessage  ObservationType = "CONSOLE_MESSAGE"  // An observation of a browser console message.
-	ObservedTaintFlow       ObservationType = "TAINT_FLOW"       // An observation of a data flow from a source to a sink.
+	ObservedTaintFlow       ObservationType = "TAINT_FLOW"       // An observation of a data flow from a source to a sink (IAST).
 	ObservedCodebaseContext ObservationType = "CODEBASE_CONTEXT" // An observation containing source code and dependency information.
 	ObservedEvolutionResult ObservationType = "EVOLUTION_RESULT" // The outcome of a self-improvement attempt.
 	ObservedVulnerability   ObservationType = "VULNERABILITY"    // A specific security vulnerability has been identified.
 	ObservedSystemState     ObservationType = "SYSTEM_STATE"     // An observation about the agent's own internal state or a system error.
-	ObservedAnalysisResult  ObservationType = "ANALYSIS_RESULT"  // A generic wrapper for the output of a security analysis adapter.
+	ObservedAnalysisResult  ObservationType = "ANALYSIS_RESULT"  // A generic wrapper for analysis output (e.g., Headers, JWT, Race Condition results).
+	ObservedAuthResult      ObservationType = "AUTH_RESULT"      // The result of an authentication or authorization test (ATO, IDOR, Login).
 )
 
 // Observation represents a piece of information that the agent's mind has
@@ -120,6 +133,51 @@ type Observation struct {
 	Result         ExecutionResult `json:"result"`           // The status and metadata of the action's execution.
 	Timestamp      time.Time       `json:"timestamp"`        // The time the observation was made.
 }
+
+// ErrorCode provides a structured, enumerable way to represent specific error
+// conditions that can occur during an agent's action execution. This allows the
+// agent's mind (LLM) to reason about failures and implement intelligent recovery strategies.
+type ErrorCode string
+
+// Constants defining the set of specific, structured error codes that can be
+// returned by action executors. (Consolidated from errors.go)
+const (
+	// -- General Execution Errors --
+	ErrCodeExecutionFailure  ErrorCode = "EXECUTION_FAILURE"   // A generic failure during the execution of an action.
+	ErrCodeNotImplemented    ErrorCode = "NOT_IMPLEMENTED"     // The requested action or feature is not implemented.
+	ErrCodeInvalidParameters ErrorCode = "INVALID_PARAMETERS"  // The parameters provided for the action were invalid.
+	ErrCodeJSONMarshalFailed ErrorCode = "JSON_MARSHAL_FAILED" // Failed to marshal data to JSON.
+	ErrCodeUnknownAction     ErrorCode = "UNKNOWN_ACTION_TYPE" // The action type is not recognized by any executor.
+	ErrCodeFeatureDisabled   ErrorCode = "FEATURE_DISABLED"    // The requested feature is disabled in the configuration.
+	ErrCodeTimeoutError      ErrorCode = "TIMEOUT_ERROR"       // An operation timed out.
+
+	// -- Browser/DOM Errors --
+	ErrCodeElementNotFound ErrorCode = "ELEMENT_NOT_FOUND" // The target DOM element could not be found.
+	ErrCodeNavigationError ErrorCode = "NAVIGATION_ERROR"  // An error occurred while navigating to a URL.
+
+	// -- Humanoid-specific errors --
+
+	// ErrCodeHumanoidTargetNotVisible indicates that a target element was found in the DOM
+	// but is not currently visible in the viewport (e.g., obscured or off-screen).
+	ErrCodeHumanoidTargetNotVisible ErrorCode = "HUMANOID_TARGET_NOT_VISIBLE"
+
+	// ErrCodeHumanoidGeometryInvalid indicates that the geometry of the target element is
+	// invalid for interaction (e.g., it has zero width or height).
+	ErrCodeHumanoidGeometryInvalid ErrorCode = "HUMANOID_GEOMETRY_INVALID"
+
+	// ErrCodeHumanoidInteractionFailed is a general failure during a complex humanoid
+	// interaction like a click or drag.
+	ErrCodeHumanoidInteractionFailed ErrorCode = "HUMANOID_INTERACTION_FAILED"
+
+	// -- Analysis & Security Testing Errors --
+	ErrCodeAnalysisFailure ErrorCode = "ANALYSIS_FAILURE" // Failure within an analysis module.
+
+	// -- Evolution-specific errors --
+	ErrCodeEvolutionFailure ErrorCode = "EVOLUTION_FAILURE" // An error occurred during the self-improvement/evolution process.
+
+	// -- Internal System Errors --
+	ErrCodeExecutorPanic ErrorCode = "EXECUTOR_PANIC" // An executor experienced an unrecoverable panic.
+)
 
 // ExecutionResult is a standardized structure for reporting the outcome of an
 // action. It provides detailed feedback to the mind, including success/failure

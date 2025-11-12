@@ -62,7 +62,7 @@ func (e *HumanoidExecutor) Execute(ctx context.Context, action Action) (*Executi
 
 	handler, ok := e.handlers[action.Type]
 	if !ok {
-		// Return a structured ExecutionResult instead of a raw error.
+		// Defense-in-depth check.
 		return &ExecutionResult{
 			Status:          "failed",
 			ObservationType: ObservedSystemState,
@@ -79,12 +79,13 @@ func (e *HumanoidExecutor) Execute(ctx context.Context, action Action) (*Executi
 	}
 
 	if err != nil {
-		// If the handler fails, use the shared browser error parser to create a structured response.
+		// If the handler fails, use the specialized error parser to create a structured response.
 		result.Status = "failed"
-		result.ErrorCode, result.ErrorDetails = e.parseHumanoidError(err, action) // Assign error code and details
+		result.ErrorCode, result.ErrorDetails = e.parseHumanoidError(err, action)
 		e.logger.Warn("Humanoid action execution failed",
 			zap.String("action", string(action.Type)),
-			zap.String("error_code", string(result.ErrorCode)), // Use the assigned error code for logging
+			zap.String("selector", action.Selector),
+			zap.String("error_code", string(result.ErrorCode)),
 			zap.Error(err))
 	}
 
@@ -92,24 +93,32 @@ func (e *HumanoidExecutor) Execute(ctx context.Context, action Action) (*Executi
 }
 
 // parseHumanoidError classifies an error from a humanoid operation.
-// It first uses the generic browser error parser and then adds humanoid-specific classifications.
+// It refines the generic browser error classification with humanoid-specific patterns.
 func (e *HumanoidExecutor) parseHumanoidError(err error, action Action) (ErrorCode, map[string]interface{}) {
-	// Start with the generic browser error parser.
+	// Start with the generic browser error parser (which now includes visibility checks).
 	errorCode, details := ParseBrowserError(err, action)
 
-	// If it's a generic failure, check for more specific humanoid error patterns.
+	// Refine classification based on humanoid-specific error patterns if the generic parser didn't identify a specific issue.
+	errStr := err.Error()
+
+	// 1. Check for invalid geometry or interactability state not caught by visibility checks.
+	if strings.Contains(errStr, "not interactable") ||
+		strings.Contains(errStr, "zero size") ||
+		strings.Contains(errStr, "detached from the DOM") {
+		details["selector"] = action.Selector
+		return ErrCodeHumanoidGeometryInvalid, details
+	}
+
+	// 2. General interaction failures (catch-all for specific operations).
 	if errorCode == ErrCodeExecutionFailure {
-		errStr := err.Error()
-		if strings.Contains(errStr, "not interactable") || strings.Contains(errStr, "zero size") {
-			details["selector"] = action.Selector
-			return ErrCodeHumanoidGeometryInvalid, details
-		}
-		// This is a good catch-all for when a click/type action fails for a non-specific reason.
-		if strings.Contains(errStr, "failed to click") || strings.Contains(errStr, "failed to type") {
+		if strings.Contains(errStr, "failed to click") ||
+			strings.Contains(errStr, "failed to type") ||
+			strings.Contains(errStr, "drag and drop failed") {
 			return ErrCodeHumanoidInteractionFailed, details
 		}
 	}
 
+	// Fallback to the initial classification if no specific humanoid error is matched.
 	return errorCode, details
 }
 
@@ -123,14 +132,14 @@ type potentialFieldSource struct {
 
 // parseInteractionOptions extracts humanoid interaction options from the action's metadata.
 func (e *HumanoidExecutor) parseInteractionOptions(metadata map[string]interface{}) *humanoid.InteractionOptions {
-	if metadata == nil {
+	if metadata == nil || len(metadata) == 0 {
 		return nil // No metadata, so no options.
 	}
 
 	opts := &humanoid.InteractionOptions{}
 	hasOptions := false
 
-	// Check for 'ensure_visible'
+	// 1. Parse 'ensure_visible'.
 	if val, ok := metadata["ensure_visible"]; ok {
 		if ensureVisible, isBool := val.(bool); isBool {
 			opts.EnsureVisible = &ensureVisible
@@ -140,40 +149,21 @@ func (e *HumanoidExecutor) parseInteractionOptions(metadata map[string]interface
 		}
 	}
 
-	// Check for 'potential_field'
+	// 2. Parse 'potential_field'.
 	if val, ok := metadata["potential_field"]; ok {
 		fieldData, isMap := val.(map[string]interface{})
 		if !isMap {
-			e.logger.Warn("Invalid type for 'potential_field' in metadata, expected a map.", zap.Any("value", val))
+			e.logger.Warn("Invalid type for 'potential_field' in metadata, expected an object.", zap.Any("value", val))
 		} else {
-			sourcesData, hasSources := fieldData["sources"].([]interface{})
-			if !hasSources {
-				e.logger.Warn("Invalid 'potential_field' structure, missing 'sources' array.", zap.Any("value", fieldData))
-			} else {
-				field := &humanoid.PotentialField{}
-				var successfulSources int // <-- FIX: Track successful parses
-				for _, s := range sourcesData {
-					sourceMap, isMap := s.(map[string]interface{})
-					if !isMap {
-						continue
+			if sourcesRaw, hasSources := fieldData["sources"]; hasSources {
+				if sourcesData, isArray := sourcesRaw.([]interface{}); isArray {
+					field := e.parsePotentialFieldSources(sourcesData)
+					if field != nil {
+						opts.Field = field
+						hasOptions = true
 					}
-					// A quick way to convert map[string]interface{} to a struct
-					jsonBytes, err := json.Marshal(sourceMap)
-					if err != nil {
-						continue // This catches the func() {} marshal error
-					}
-					var parsedSource potentialFieldSource
-					if err := json.Unmarshal(jsonBytes, &parsedSource); err == nil {
-						// Use the public AddSource method to append to the unexported slice.
-						field.AddSource(humanoid.Vector2D{X: parsedSource.X, Y: parsedSource.Y}, parsedSource.Strength, parsedSource.StdDev)
-						successfulSources++ // <-- FIX: Increment on success
-					}
-				}
-
-				// FIX: Only assign the field and set hasOptions if we actually parsed sources
-				if successfulSources > 0 {
-					opts.Field = field
-					hasOptions = true
+				} else {
+					e.logger.Warn("Invalid type for 'potential_field.sources', expected an array.", zap.Any("value", sourcesRaw))
 				}
 			}
 		}
@@ -183,6 +173,38 @@ func (e *HumanoidExecutor) parseInteractionOptions(metadata map[string]interface
 		return nil // No valid options were parsed.
 	}
 	return opts // Return the populated options struct.
+}
+
+// parsePotentialFieldSources processes the array of source definitions.
+func (e *HumanoidExecutor) parsePotentialFieldSources(sourcesData []interface{}) *humanoid.PotentialField {
+	field := &humanoid.PotentialField{}
+	var successfulSources int
+
+	for _, s := range sourcesData {
+		sourceMap, isMap := s.(map[string]interface{})
+		if !isMap {
+			continue
+		}
+
+		// Use JSON marshal/unmarshal for robust conversion from map[string]interface{} to the struct.
+		jsonBytes, err := json.Marshal(sourceMap)
+		if err != nil {
+			// This handles cases where the map contains unserializable data (e.g., functions).
+			continue
+		}
+
+		var parsedSource potentialFieldSource
+		if err := json.Unmarshal(jsonBytes, &parsedSource); err == nil {
+			// Use the public AddSource method to append to the unexported slice.
+			field.AddSource(humanoid.Vector2D{X: parsedSource.X, Y: parsedSource.Y}, parsedSource.Strength, parsedSource.StdDev)
+			successfulSources++
+		}
+	}
+
+	if successfulSources > 0 {
+		return field
+	}
+	return nil
 }
 
 // registerHandlers populates the internal map of action types to their handler functions.
@@ -205,7 +227,7 @@ func (e *HumanoidExecutor) handleInputText(ctx context.Context, h *humanoid.Huma
 		return fmt.Errorf("ActionInputText requires a 'selector'")
 	}
 	if action.Value == "" {
-		e.logger.Debug("ActionInputText called with empty 'value'.")
+		e.logger.Debug("ActionInputText called with empty 'value'.", zap.String("selector", action.Selector))
 	}
 	opts := e.parseInteractionOptions(action.Metadata)
 	return h.Type(ctx, action.Selector, action.Value, opts)

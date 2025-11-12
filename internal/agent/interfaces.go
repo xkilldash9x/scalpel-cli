@@ -1,7 +1,7 @@
-// File: internal/agent/interfaces.go
+// internal/agent/interfaces.go
 package agent
 
-import ( // This is a comment to force a change
+import (
 	"context"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
@@ -11,17 +11,6 @@ import ( // This is a comment to force a change
 // currently active browser session. This allows components to be initialized
 // before a session is available and to always access the most current session.
 type SessionProvider func() schemas.SessionContext
-
-// ActionRegistry defines the interface for a component, like the ExecutorRegistry,
-// that is responsible for dispatching actions to the appropriate executor. This
-// abstraction decouples the Agent from the concrete implementation, making it
-// more modular and easier to test.
-type ActionRegistry interface {
-	// Execute dispatches and executes a given action.
-	Execute(ctx context.Context, action Action) (*ExecutionResult, error)
-	// UpdateSessionProvider allows for the dynamic injection of the session provider.
-	UpdateSessionProvider(provider SessionProvider)
-}
 
 // EvolutionEngine defines the interface for the agent's proactive
 // self-improvement subsystem.
@@ -68,7 +57,7 @@ type Mind interface {
 // ActionExecutor defines a standard interface for any component that can execute
 // a specific type of action. This allows for a modular system where different
 // executors handle different capabilities (e.g., browser interaction vs.
-// codebase analysis).
+// codebase analysis). This interface is also implemented by the ExecutorRegistry.
 type ActionExecutor interface {
 	// Execute performs the action and returns the result of the execution.
 	Execute(ctx context.Context, action Action) (*ExecutionResult, error)

@@ -1,4 +1,4 @@
-// File: internal/agent/llm_mind.go
+// internal/agent/llm_mind.go
 package agent
 
 import (
@@ -77,7 +77,13 @@ func NewLLMMind(
 		contextLookbackSteps: contextLookbackSteps,
 	}
 
-	m.logger.Info("LLMMind initialized", zap.String("default_model", cfg.LLM.DefaultPowerfulModel), zap.Int("context_lookback", m.contextLookbackSteps), zap.Bool("evolution_enabled", cfg.Evolution.Enabled))
+	// Defensive check for LLM configuration.
+	defaultModel := "unknown"
+	if cfg.LLM.DefaultPowerfulModel != "" {
+		defaultModel = cfg.LLM.DefaultPowerfulModel
+	}
+
+	m.logger.Info("LLMMind initialized", zap.String("default_model", defaultModel), zap.Int("context_lookback", m.contextLookbackSteps), zap.Bool("evolution_enabled", cfg.Evolution.Enabled))
 	return m
 }
 
@@ -154,7 +160,6 @@ func (m *LLMMind) Start(ctx context.Context) error {
 // observations from the CognitiveBus and processes them.
 func (m *LLMMind) runObserverLoop(ctx context.Context) {
 	defer m.wg.Done()
-	// m.logger.Info("Observer loop started."); // Moved down slightly
 	obsChan, unsubscribe := m.bus.Subscribe(MessageTypeObservation)
 	defer unsubscribe()
 
@@ -366,7 +371,8 @@ func (m *LLMMind) decideNextAction(ctx context.Context, contextSnapshot *schemas
 		return Action{}, err
 	}
 
-	apiCtx, cancel := context.WithTimeout(ctx, 30*time.Second)
+	// Increased timeout for potentially complex decisions involving analysis modules.
+	apiCtx, cancel := context.WithTimeout(ctx, 60*time.Second)
 	defer cancel()
 
 	req := schemas.GenerationRequest{
@@ -399,41 +405,46 @@ func (m *LLMMind) generateSystemPrompt() string {
 Your goal is to achieve the Mission Objective by exploring a web application, analyzing its components, and identifying vulnerabilities.
 You operate in a continuous OODA loop. You receive the state as a JSON Knowledge Graph snapshot and must respond with a single JSON object for the next action.`
 
-	// Conditionally include the evolution prompt if enabled in the configuration.
-	evolutionPrompt := ""
-	if m.cfg.Evolution.Enabled {
-		evolutionPrompt = `
-    4. Proactive Self-Improvement (Evolution):
-    - EVOLVE_CODEBASE: Initiate an autonomous OODA loop to improve the agent's own source code.
-      **WHEN TO USE:** Only when you identify a limitation, bug, or inefficiency in the agent's capabilities that prevents achieving the mission objective, AND you have context about the relevant code (e.g., from GATHER_CODEBASE_CONTEXT).
-      **PARAMETERS:**
-        - value: The objective of the improvement (Required, String).
-        - metadata.target_files: List of relevant file paths (Optional, Array[string]).
-      Example: {"type": "EVOLVE_CODEBASE", "value": "Improve error handling for timeouts in BrowserExecutor", "metadata": {"target_files": ["internal/agent/executors.go"]}, "rationale": "Repeated timeouts require better handling."}
-`
-	}
+	// The action list prompt is generated dynamically, including evolution actions if enabled.
+	actionListPrompt := m.getActionListPrompt()
 
 	vulnerabilityProbingPrompt := `    **Advanced Vulnerability Probing Strategies**:
-    When testing for vulnerabilities like SQL Injection, do not use a single payload. Follow a multi-stage diagnostic process.
+    When testing for vulnerabilities like SQL Injection (via INPUT_TEXT), do not use a single payload. Follow a multi-stage diagnostic process.
     1.  **Character Probing**: Start by injecting single characters (` + "`" + `'` + "`" + `, ` + "`" + `"` + "`" + `) to trigger database errors. An error is a strong signal.
     2.  **Boolean-Based Blind Probing**: If no errors appear, try to force a different application response using logical conditions.
-        - Inject a TRUE condition (e.g., ` + "`" + `admin' AND '1'='1'` + "`" + `). Observe the response (e.g., "Incorrect password").
-        - Inject a FALSE condition (e.g., ` + "`" + `admin' AND '1'='2'` + "`" + `). Observe the response (e.g., "User not found").
+        - Inject a TRUE condition (e.g., ` + "`" + `admin' AND '1'='1'` + "`" + `). Observe the response.
+        - Inject a FALSE condition (e.g., ` + "`" + `admin' AND '1'='2'` + "`" + `). Observe the response.
         - If the responses differ, you have confirmed a blind SQLi.
-    3.  **Time-Based Blind Probing**: If Boolean responses are identical, attempt to introduce a time delay. This is your final confirmation method for blind injection.
-        - Inject a time-delay payload (e.g., ` + "`" + `admin' AND pg_sleep(5)--` + "`" + ` for PostgreSQL, or ` + "`" + `admin' AND SLEEP(5)--` + "`" + ` for MySQL).
+    3.  **Time-Based Blind Probing**: If Boolean responses are identical, attempt to introduce a time delay.
+        - Inject a time-delay payload (e.g., ` + "`" + `admin' AND pg_sleep(5)--` + "`" + `).
         - Observe the response time. A significant delay confirms the vulnerability.
     
-    Record your findings from each stage in the ` + "`thought`" + ` and ` + "`rationale`" + ` fields of your action. Use the observations from one step to inform the next. For example, if a single quote causes an error, all subsequent payloads should use single quotes.`
+    Record your findings from each stage in the ` + "`thought`" + ` and ` + "`rationale`" + ` fields of your action. Use the observations from one step to inform the next.`
 
 	// Generate the error handling prompt dynamically to ensure EVOLVE_CODEBASE is only mentioned if enabled.
 	errorHandlingPrompt := m.generateErrorHandlingPrompt()
 
-	return basePrompt + m.getActionListPrompt() + evolutionPrompt + errorHandlingPrompt + vulnerabilityProbingPrompt + m.getClosingPrompt()
+	// Combine all parts of the prompt.
+	return basePrompt + actionListPrompt + errorHandlingPrompt + vulnerabilityProbingPrompt + m.getClosingPrompt()
 }
 
-// getActionListPrompt returns the static list of available actions.
+// getActionListPrompt returns the list of available actions, dynamically including evolution if enabled.
 func (m *LLMMind) getActionListPrompt() string {
+
+	// Evolution prompt is conditionally added.
+	evolutionAction := ""
+	if m.cfg.Evolution.Enabled {
+		evolutionAction = `
+    7. Proactive Self-Improvement (Evolution):
+    - EVOLVE_CODEBASE: Initiate an autonomous OODA loop to improve the agent's own source code.
+      **WHEN TO USE:** When identifying a limitation or bug in the agent's capabilities preventing mission success, AND after gathering relevant code context.
+      **PARAMETERS:**
+        - value: The objective of the improvement (Required, String).
+        - metadata.target_files: List of relevant file paths (Optional, Array[string]).
+      Example: {"type": "EVOLVE_CODEBASE", "value": "Improve timeout handling in BrowserExecutor", "metadata": {"target_files": ["internal/agent/executors.go"]}, "rationale": "Repeated timeouts require better handling."}
+`
+	}
+
 	return `
 Available Action Types:
 
@@ -443,22 +454,37 @@ Available Action Types:
     - INPUT_TEXT: Type text into a field. (Params: selector, value)
     - SUBMIT_FORM: Submit a form. (Params: selector)
     - SCROLL: Scroll the page. (Params: value="up" or "down")
-    - WAIT_FOR_ASYNC: Pause execution. (Params: metadata={"duration_ms": 1500})
+    - WAIT_FOR_ASYNC: Pause execution for stabilization. (Params: metadata={"duration_ms": 1500})
 
-    2. Advanced/Complex Interaction:
-    - HUMANOID_DRAG_AND_DROP: Move an element from one location to another. Use 'selector' for the element to drag, and 'metadata.target_selector' for the drop target.
-      Example: {"type": "HUMANOID_DRAG_AND_DROP", "selector": "#item-1", "metadata": {"target_selector": "#cart"}, "rationale": "Testing cart functionality."}
-    - PERFORM_COMPLEX_TASK: Instruct the agent to perform a high level action (e.g., 'LOGIN'). Use sparingly.
+    2. Complex Workflows & Interaction:
+    - HUMANOID_DRAG_AND_DROP: Move an element. Use 'selector' for the source, 'metadata.target_selector' for the target.
+    - EXECUTE_LOGIN_SEQUENCE: Executes a predefined or discovered login sequence.
+    - EXPLORE_APPLICATION: Initiates a comprehensive crawl/exploration of the application scope.
+    - FUZZ_ENDPOINT: Performs fuzzing against a specific API endpoint or form inputs on the current page.
 
-    3. Analysis & System:
-    - ANALYZE_TAINT: (Active) Scan the current page context for data flows (Taint analysis/XSS). Use after navigation or significant UI changes. The analysis runs on the current browser state.
-      Example: {"type": "ANALYZE_TAINT", "rationale": "Analyzing the user profile page inputs for XSS vulnerabilities."}
-    - ANALYZE_PROTO_POLLUTION: (Active) Scan the current page context for client-side prototype pollution and DOM clobbering.
-      Example: {"type": "ANALYZE_PROTO_POLLUTION", "rationale": "Analyzing the dashboard JS environment for pollution vulnerabilities."}
-    - ANALYZE_HEADERS: (Passive) Analyze the HTTP headers captured in the current browser state artifacts for security misconfigurations.
-      Example: {"type": "ANALYZE_HEADERS", "rationale": "Checking security headers on the main application responses."}
+    3. Active Security Analysis & IAST:
+    - ANALYZE_TAINT: (IAST/Taint) Scan the current page context for data flows (XSS, Injection). Use after UI changes.
+      Example: {"type": "ANALYZE_TAINT", "rationale": "Analyzing the user profile page inputs for XSS."}
+    - ANALYZE_PROTO_POLLUTION: (Active/Proto) Scan the current page context for client-side prototype pollution.
+    - TEST_RACE_CONDITION: (Active/TimeSlip) Execute concurrent requests to detect race conditions (TOCTOU).
+      **PARAMETERS:** Requires 'metadata' defining the 'request_id' (from KG) or full request details ('url', 'method', 'body').
+      Example: {"type": "TEST_RACE_CONDITION", "metadata": {"request_id": "uuid-from-kg"}, "rationale": "Testing if the 'apply discount' action is vulnerable to race conditions."}
+
+    4. Authentication & Authorization Testing:
+    - TEST_ATO: (Active/ATO) Test a discovered login endpoint for credential stuffing and enumeration.
+      Example: {"type": "TEST_ATO", "rationale": "Testing the admin login for weak credentials."}
+    - TEST_IDOR: (Active/IDOR) Test endpoints using differential analysis between two sessions.
+      **NOTE:** Requires established sessions (e.g., via EXECUTE_LOGIN_SEQUENCE).
+      Example: {"type": "TEST_IDOR", "rationale": "Checking if user A can access user B's resources."}
+
+    5. Passive Analysis (Inspecting Artifacts):
+    - ANALYZE_HEADERS: (Passive/Headers) Analyze HTTP headers captured in artifacts (HAR) for misconfigurations.
+    - ANALYZE_JWT: (Passive/JWT) Inspect captured traffic (HAR) for JWTs and check for weak secrets or 'none' algorithm.
+
+    6. System & Control:
     - GATHER_CODEBASE_CONTEXT: Read source code for a module. (Params: metadata={"module_path": "..."})
-    - CONCLUDE: Finish the mission.`
+    - CONCLUDE: Finish the mission.
+` + evolutionAction
 }
 
 // generateErrorHandlingPrompt creates the instructions for error recovery strategies dynamically.
@@ -468,27 +494,28 @@ func (m *LLMMind) generateErrorHandlingPrompt() string {
 
     **Crucial Error Handling Instructions**:
     Analyze the "error_code" (in the KG node properties) if a previous action failed (status="ERROR").
-    - ` + "`ELEMENT_NOT_FOUND`" + `: The selector was incorrect or the element does not exist. Strategy: Try a different selector or navigate elsewhere.
-    - ` + "`HUMANOID_GEOMETRY_INVALID`" + `: The element exists but has zero size or invalid structure. Strategy: Try interacting with a parent element or skip this target.
-    - ` + "`HUMANOID_TARGET_NOT_VISIBLE`" + `: The element exists but is obscured or off-screen.
+    - ` + string(ErrCodeElementNotFound) + `: The selector was incorrect or the element does not exist. Strategy: Try a different selector or navigate elsewhere.
+    - ` + string(ErrCodeHumanoidGeometryInvalid) + `: The element exists but has zero size or invalid structure. Strategy: Try interacting with a parent element or skip this target.
+    - ` + string(ErrCodeHumanoidTargetNotVisible) + `: The element exists but is obscured or off-screen.
       -> Strategy: You MUST use ` + "`SCROLL`" + ` or interact with other UI elements (like closing a modal) to make it visible BEFORE retrying the interaction.
-    - ` + "`NAVIGATION_ERROR`" + `: The URL could not be reached. Strategy: Verify the URL or navigate back.
-    - ` + "`FEATURE_DISABLED`" + `: You attempted to use a feature that is disabled. Strategy: Find an alternative approach; do not retry the action.
-    - ` + "`INVALID_PARAMETERS`" + `: The parameters for the action were missing or invalid. Strategy: Correct the parameters (e.g., provide the missing selector) and retry the action.`
+    - ` + string(ErrCodeNavigationError) + `: The URL could not be reached. Strategy: Verify the URL or navigate back.
+    - ` + string(ErrCodeFeatureDisabled) + `: You attempted to use a feature that is disabled. Strategy: Find an alternative approach; do not retry the action.
+    - ` + string(ErrCodeInvalidParameters) + `: The parameters for the action were missing or invalid. Strategy: Correct the parameters (e.g., provide the missing selector) and retry the action.
+    - ` + string(ErrCodeAnalysisFailure) + `: An analysis module (e.g., TEST_ATO, ANALYZE_TAINT) failed internally. Strategy: Review error_details. Do not retry immediately.`
 
 	// Conditional instructions related to Evolution capabilities.
 	conditionalErrorHandling := ""
 	if m.cfg.Evolution.Enabled {
 		// If enabled, provide detailed strategies involving EVOLVE_CODEBASE.
 		conditionalErrorHandling = `
-    - ` + "`TIMEOUT_ERROR`" + `: The operation took too long. Strategy: Consider using ` + "`WAIT_FOR_ASYNC`" + ` before retrying. If ` + "`EVOLVE_CODEBASE`" + ` timed out, the objective was likely too complex.
-    - ` + "`EVOLUTION_FAILURE`" + `: The self-improvement cycle failed. Strategy: Analyze the failure details (` + "`error_details`" + `), and either retry with a refined objective or abandon the evolution attempt.
-    - ` + "`EXECUTION_FAILURE`" + `: If details suggest an internal bug. Strategy: Consider using ` + "`EVOLVE_CODEBASE`" + ` to fix the bug after gathering context.`
+    - ` + string(ErrCodeTimeoutError) + `: The operation took too long. Strategy: Consider using ` + "`WAIT_FOR_ASYNC`" + ` before retrying. If ` + "`EVOLVE_CODEBASE`" + ` timed out, the objective was likely too complex.
+    - ` + string(ErrCodeEvolutionFailure) + `: The self-improvement cycle failed. Strategy: Analyze the failure details (` + "`error_details`" + `), and either retry with a refined objective or abandon the evolution attempt.
+    - ` + string(ErrCodeExecutionFailure) + `: If details suggest an internal bug. Strategy: Consider using ` + "`EVOLVE_CODEBASE`" + ` to fix the bug after gathering context.`
 	} else {
 		// If disabled, provide simpler strategies without mentioning EVOLVE_CODEBASE.
 		conditionalErrorHandling = `
-    - ` + "`TIMEOUT_ERROR`" + `: The operation took too long. Strategy: Consider using ` + "`WAIT_FOR_ASYNC`" + ` before retrying.
-    - ` + "`EXECUTION_FAILURE`" + `: A generic failure occurred. Strategy: Analyze the error_details and try an alternative approach.`
+    - ` + string(ErrCodeTimeoutError) + `: The operation took too long. Strategy: Consider using ` + "`WAIT_FOR_ASYNC`" + ` before retrying.
+    - ` + string(ErrCodeExecutionFailure) + `: A generic failure occurred. Strategy: Analyze the error_details and try an alternative approach.`
 	}
 
 	return baseErrorHandling + conditionalErrorHandling
@@ -588,10 +615,8 @@ func (m *LLMMind) processObservation(ctx context.Context, obs Observation) error
 	return nil
 }
 
-// -- REFACTORING NOTE --
-// This function is now more robust. It handles cases where observation data might be nil,
-// empty, or not a string, preventing panics and improving data resilience.
 // Orients on the observation, specifically looking for codebase context to analyze.
+// Handles cases where observation data might be nil, empty, or not a string robustly.
 func (m *LLMMind) orientOnObservation(ctx context.Context, obs Observation) error {
 	if obs.Type != ObservedCodebaseContext {
 		return nil
@@ -616,9 +641,12 @@ func (m *LLMMind) orientOnObservation(ctx context.Context, obs Observation) erro
 
 	m.logger.Info("Orienting on new codebase context, extracting dependencies.", zap.String("obs_id", obs.ID))
 
+	// Assuming the codebase context data is a JSON representation of the dependency map.
 	var deps map[string][]string
 	if err := json.Unmarshal([]byte(codeContext), &deps); err != nil {
-		return fmt.Errorf("failed to unmarshal dependency map from observation data: %w", err)
+		// Log the error but don't fail the entire observation processing, as the data might be in an unexpected format.
+		m.logger.Warn("Failed to unmarshal dependency map from observation data. Skipping dependency extraction.", zap.Error(err), zap.String("obs_id", obs.ID))
+		return nil
 	}
 
 	return m.addDependenciesToKG(ctx, obs.ID, deps)
@@ -671,7 +699,9 @@ func (m *LLMMind) addDependenciesToKG(ctx context.Context, sourceObservationID s
 		}
 	}
 
-	m.logger.Info("Enriched knowledge graph with codebase dependencies.", zap.Int("files_analyzed", len(deps)))
+	if len(deps) > 0 {
+		m.logger.Info("Enriched knowledge graph with codebase dependencies.", zap.Int("files_analyzed", len(deps)))
+	}
 	return lastErr
 }
 
@@ -829,17 +859,15 @@ func (m *LLMMind) recordObservationKG(ctx context.Context, obs Observation, flag
 	return nil
 }
 
-// -- REFACTORING NOTE --
-// Metadata values are now stored directly without string conversion.
-// This preserves the original data type (e.g., numbers for duration_ms),
-// which is better for structured data integrity in the Knowledge Graph.
 // Creates a node and corresponding edges in the knowledge graph for a given action.
+// Metadata values are stored directly to preserve their original data types.
 func (m *LLMMind) recordActionKG(ctx context.Context, action Action) error {
 	now := time.Now().UTC()
 
 	propsMap := map[string]interface{}{
 		"type":      string(action.Type),
 		"rationale": action.Rationale,
+		"thought":   action.Thought, // Include the chain-of-thought.
 		"timestamp": action.Timestamp,
 		"status":    string(schemas.StatusNew),
 	}
@@ -849,7 +877,7 @@ func (m *LLMMind) recordActionKG(ctx context.Context, action Action) error {
 	if action.Value != "" {
 		const maxLen = 256
 		if utf8.RuneCountInString(action.Value) > maxLen {
-			runes := []rune(action.Value) // FIX: Correctly handle multi-byte characters when truncating.
+			runes := []rune(action.Value) // Correctly handle multi-byte characters when truncating.
 			propsMap["value"] = string(runes[:maxLen]) + "..."
 		} else {
 			propsMap["value"] = action.Value
