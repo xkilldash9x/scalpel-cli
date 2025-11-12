@@ -16,6 +16,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
 // ScopeManager is an interface that defines the boundaries of the engagement.
@@ -24,9 +25,15 @@ type ScopeManager interface {
 	GetRootDomain() string
 }
 
+// crawlTask represents a URL to be crawled, including its depth.
+type crawlTask struct {
+	URL   string
+	Depth int
+}
+
 // Engine orchestrates the discovery process (passive and active crawling).
 type Engine struct {
-	config        Config
+	config        config.Interface
 	scope         ScopeManager
 	kg            schemas.KnowledgeGraphClient
 	browser       schemas.BrowserInteractor
@@ -49,15 +56,13 @@ var ignoredExtensions = map[string]struct{}{
 
 // NewEngine creates a new Discovery Engine instance.
 func NewEngine(
-	cfg Config,
+	cfg config.Interface,
 	scope ScopeManager,
 	kg schemas.KnowledgeGraphClient,
 	browser schemas.BrowserInteractor,
 	passive *PassiveRunner,
 	logger *zap.Logger,
 ) *Engine {
-	cfg.SetDefaults()
-
 	if logger == nil {
 		logger = zap.NewNop()
 	}
@@ -79,12 +84,12 @@ func NewEngine(
 func (e *Engine) Start(ctx context.Context, initialTargets []string) (<-chan schemas.Task, error) {
 	e.sessionID = uuid.New().String()
 	log := e.logger.With(zap.String("sessionID", e.sessionID))
-	log.Info("Starting discovery session", zap.Strings("targets", initialTargets), zap.Int("maxDepth", e.config.MaxDepth))
+	log.Info("Starting discovery session", zap.Strings("targets", initialTargets), zap.Int("maxDepth", e.config.Discovery().MaxDepth))
 
 	if len(initialTargets) == 0 {
 		return nil, fmt.Errorf("at least one initial target must be provided")
 	}
-	
+
 	taskChan := make(chan schemas.Task, 100)
 
 	// This context governs the entire discovery session, including all workers.
@@ -96,7 +101,7 @@ func (e *Engine) Start(ctx context.Context, initialTargets []string) (<-chan sch
 		defer cancelSession()
 
 		workerWG := &sync.WaitGroup{}
-		for i := 0; i < e.config.Concurrency; i++ {
+		for i := 0; i < e.config.Discovery().Concurrency; i++ {
 			workerWG.Add(1)
 			go e.worker(sessionCtx, workerWG, taskChan)
 		}
@@ -113,16 +118,16 @@ func (e *Engine) Start(ctx context.Context, initialTargets []string) (<-chan sch
 			// This could be enhanced to handle multiple root domains.
 			rootDomain := e.scope.GetRootDomain()
 			if err := e.kg.AddNode(ctx, schemas.Node{
-				ID:    rootDomain,
-				Type:  schemas.NodeDomain,
-				Label: rootDomain,
+				ID:     rootDomain,
+				Type:   schemas.NodeDomain,
+				Label:  rootDomain,
 				Status: schemas.StatusNew,
 			}); err != nil {
 				log.Warn("Failed to add root domain to Knowledge Graph", zap.Error(err))
 			}
-			
+
 			// Start passive discovery in parallel.
-			if e.config.PassiveEnabled != nil && *e.config.PassiveEnabled && e.passiveRunner != nil {
+			if e.config.Discovery().PassiveEnabled != nil && *e.config.Discovery().PassiveEnabled && e.passiveRunner != nil {
 				log.Info("Launching passive discovery for target...", zap.String("target", targetURL))
 				go func(initialURL *url.URL) {
 					passiveResults := e.passiveRunner.Run(sessionCtx, initialURL)
@@ -136,7 +141,7 @@ func (e *Engine) Start(ctx context.Context, initialTargets []string) (<-chan sch
 					log.Info("Passive discovery for target finished", zap.Int("count", count), zap.String("target", initialURL.String()))
 				}(parsedInitialURL)
 			}
-			
+
 			// Seed the active crawler.
 			e.processAsset(sessionCtx, parsedInitialURL, 0, "Seed", taskChan)
 		}
@@ -154,7 +159,6 @@ func (e *Engine) Stop() {
 	// The lifecycle is now managed by the context passed to Start().
 	// A manual Stop method is less necessary but can be kept for explicit shutdown signaling if needed.
 }
-
 
 // worker is the concurrent function that processes tasks from the queue.
 func (e *Engine) worker(ctx context.Context, workerWG *sync.WaitGroup, taskChan chan<- schemas.Task) {
@@ -179,7 +183,7 @@ func (e *Engine) worker(ctx context.Context, workerWG *sync.WaitGroup, taskChan 
 				}()
 				defer e.taskWG.Done()
 				defer atomic.AddInt32(&e.activeWorkers, -1)
-				crawlCtx, cancel := context.WithTimeout(ctx, e.config.Timeout)
+				crawlCtx, cancel := context.WithTimeout(ctx, e.config.Discovery().Timeout)
 				defer cancel()
 				e.crawlPage(crawlCtx, task, taskChan)
 			}()
@@ -226,20 +230,7 @@ func (e *Engine) processAsset(ctx context.Context, u *url.URL, depth int, source
 		zap.Int("depth", depth),
 		zap.String("source", source))
 
-	// Create and send a task for this URL
-	task := schemas.Task{
-		TaskID:    uuid.NewString(),
-		ScanID:    e.sessionID,
-		Type:      schemas.TaskAnalyzeWebPageTaint, // Default task type for now
-		TargetURL: urlString,
-	}
-	
-	select {
-	case taskChan <- task:
-	case <-ctx.Done():
-		return
-	}
-
+	e.dispatchTasksForAsset(ctx, urlString, taskChan)
 
 	props, _ := json.Marshal(map[string]interface{}{
 		"depth":     depth,
@@ -259,9 +250,9 @@ func (e *Engine) processAsset(ctx context.Context, u *url.URL, depth int, source
 
 	hostname := u.Hostname()
 	if err := e.kg.AddNode(ctx, schemas.Node{
-		ID:    hostname,
-		Type:  schemas.NodeDomain,
-		Label: hostname,
+		ID:     hostname,
+		Type:   schemas.NodeDomain,
+		Label:  hostname,
 		Status: schemas.StatusNew,
 	}); err != nil {
 		e.logger.Warn("Failed to add/update Domain node in KG", zap.Error(err), zap.String("hostname", hostname))
@@ -290,7 +281,7 @@ func (e *Engine) processAsset(ctx context.Context, u *url.URL, depth int, source
 		}
 	}
 
-	if depth < e.config.MaxDepth {
+	if depth < int(e.config.Discovery().MaxDepth) {
 		e.taskWG.Add(1)
 		select {
 		case e.queue <- crawlTask{URL: urlString, Depth: depth}:
@@ -299,6 +290,42 @@ func (e *Engine) processAsset(ctx context.Context, u *url.URL, depth int, source
 			e.taskWG.Done()
 		}
 	}
+}
+
+// dispatchTasksForAsset creates and sends tasks based on the enabled scanners in config.
+func (e *Engine) dispatchTasksForAsset(ctx context.Context, urlString string, taskChan chan<- schemas.Task) {
+	scanners := e.config.Scanners()
+
+	// Helper to send a task while respecting context cancellation.
+	sendTask := func(taskType schemas.TaskType) {
+		task := schemas.Task{
+			TaskID:    uuid.NewString(),
+			ScanID:    e.sessionID,
+			Type:      taskType,
+			TargetURL: urlString,
+		}
+		select {
+		case taskChan <- task:
+			e.logger.Debug("Dispatched task for asset", zap.String("url", urlString), zap.String("type", string(taskType)))
+		case <-ctx.Done():
+			e.logger.Warn("Context cancelled, could not dispatch task", zap.String("url", urlString), zap.String("type", string(taskType)))
+		}
+	}
+
+	if scanners.Active.Taint.Enabled {
+		sendTask(schemas.TaskAnalyzeWebPageTaint)
+	}
+	if scanners.Active.ProtoPollution.Enabled {
+		sendTask(schemas.TaskAnalyzeWebPageProtoPP)
+	}
+	if scanners.Passive.Headers.Enabled {
+		sendTask(schemas.TaskAnalyzeHeaders)
+	}
+	if scanners.Static.JWT.Enabled {
+		sendTask(schemas.TaskAnalyzeJWT)
+	}
+	// Note: Timeslip, ATO and IDOR are more complex and are typically not dispatched per-URL.
+	// They would be dispatched by a higher-level orchestrator logic based on scan strategy.
 }
 
 // normalizeAndValidate cleans the URL, resolves relative paths, checks the scope, and normalizes the format.

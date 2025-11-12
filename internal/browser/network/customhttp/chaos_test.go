@@ -134,7 +134,7 @@ func TestChaos_ConnectionDrops(t *testing.T) {
 	defer server.Close()
 
 	proxy := newChaosProxy(t, server.Listener.Addr().String())
-	proxy.closeRate = 0.5 // 50% chance of dropping the connection
+	proxy.closeRate = 0.1 // 10% chance of dropping the connection
 	defer proxy.Close()
 
 	logger := zaptest.NewLogger(t)

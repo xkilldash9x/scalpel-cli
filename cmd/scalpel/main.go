@@ -27,11 +27,12 @@ const asciiArt = `
    /  \		   "Precision is the difference 
   / /\ \       between a butcher and surgeon."
  / /  \ \
- \ \__/ / 	    [ scalpel-cli v0.1.0  ]
+ \ \__/ / 	        [ scalpel-cli v0.1.0  ]
   \____/	 	+---------------------+
    |  |		 	| 07 Analysis Modules |
    |  |		 	| 39 Payload Exploits |
-				+---------------------+
+			+---------------------+
+
 `
 
 // Define function variables for dependency injection/mocking in tests.

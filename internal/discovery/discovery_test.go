@@ -17,6 +17,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 )
 
@@ -53,42 +54,6 @@ func (m *mockBrowserInteractor) NavigateAndExtract(ctx context.Context, url stri
 }
 
 // -- Test Cases --
-
-// TestConfig_SetDefaults ensures that our configuration gets sensible defaults
-// when values are not provided.
-func TestConfig_SetDefaults(t *testing.T) {
-	t.Run("Applies defaults to zero-valued Config", func(t *testing.T) {
-		cfg := &Config{}
-		cfg.SetDefaults()
-
-		assert.Equal(t, 3, cfg.MaxDepth)
-		assert.Equal(t, 5, cfg.Concurrency)
-		assert.Equal(t, 45*time.Second, cfg.Timeout)
-		assert.True(t, *cfg.PassiveEnabled)
-		assert.Equal(t, 0.5, cfg.CrtShRateLimit)
-		assert.Equal(t, ".scalpel_cache", cfg.CacheDir)
-	})
-
-	t.Run("Does not override existing values", func(t *testing.T) {
-		passiveDisabled := false
-		cfg := &Config{
-			MaxDepth:       10,
-			Concurrency:    20,
-			Timeout:        90 * time.Second,
-			PassiveEnabled: &passiveDisabled,
-			CrtShRateLimit: 1.0,
-			CacheDir:       "/tmp/custom_cache",
-		}
-		cfg.SetDefaults()
-
-		assert.Equal(t, 10, cfg.MaxDepth)
-		assert.Equal(t, 20, cfg.Concurrency)
-		assert.Equal(t, 90*time.Second, cfg.Timeout)
-		assert.False(t, *cfg.PassiveEnabled)
-		assert.Equal(t, 1.0, cfg.CrtShRateLimit)
-		assert.Equal(t, "/tmp/custom_cache", cfg.CacheDir)
-	})
-}
 
 // TestBasicScopeManager verifies that our scope logic correctly identifies
 // in scope and out of scope URLs. This is critical to prevent scope creep.
@@ -191,10 +156,14 @@ func TestPassiveRunner(t *testing.T) {
 		require.NoError(t, err)
 		defer os.RemoveAll(cacheDir)
 
-		cfg := Config{CacheDir: cacheDir}
-		cfg.SetDefaults()
+		mockConfig := &mocks.MockConfig{}
+		discoveryConfig := config.DiscoveryConfig{
+			CacheDir:       cacheDir,
+			CrtShRateLimit: 10, // Set a non-zero rate limit to prevent test hanging
+		}
+		mockConfig.On("Discovery").Return(discoveryConfig)
 
-		runner := NewPassiveRunner(cfg, client, scope, logger)
+		runner := NewPassiveRunner(mockConfig, client, scope, logger)
 		resultsChan := make(chan string, 100)
 		go func() {
 			defer close(resultsChan)
@@ -246,8 +215,9 @@ func TestPassiveRunner(t *testing.T) {
 
 		// The httpClientAdapter lets us use the test server with our interface.
 		client := &httpClientAdapter{client: server.Client()}
-		cfg := Config{}
-		cfg.SetDefaults()
+		mockConfig := &mocks.MockConfig{}
+		discoveryConfig := config.DiscoveryConfig{}
+		mockConfig.On("Discovery").Return(discoveryConfig)
 		serverURL, err := url.Parse(server.URL)
 		require.NoError(t, err)
 
@@ -255,7 +225,7 @@ func TestPassiveRunner(t *testing.T) {
 		testScope, err := NewBasicScopeManager(server.URL, true)
 		require.NoError(t, err)
 
-		runner := NewPassiveRunner(cfg, client, testScope, logger)
+		runner := NewPassiveRunner(mockConfig, client, testScope, logger)
 		resultsChan := make(chan string, 100)
 		// We call checkRobotsAndSitemaps directly to isolate the test and avoid
 		// the network call that runner.Run() would otherwise trigger.
@@ -338,15 +308,23 @@ func TestEngine_Start(t *testing.T) {
 
 		// For this test, we'll disable passive discovery to focus on the active crawler.
 		passiveDisabled := false
-		cfg := Config{
+		mockConfig := &mocks.MockConfig{}
+		discoveryConfig := config.DiscoveryConfig{
 			MaxDepth:       2, // We expect it to stop after page1_sub1
 			Concurrency:    2,
 			Timeout:        5 * time.Second,
 			PassiveEnabled: &passiveDisabled,
 		}
+		scannersConfig := config.ScannersConfig{
+			Active: config.ActiveScannersConfig{
+				Taint: config.TaintConfig{Enabled: true},
+			},
+		}
+		mockConfig.On("Discovery").Return(discoveryConfig)
+		mockConfig.On("Scanners").Return(scannersConfig)
 
 		// We don't need a real passive runner here.
-		engine := NewEngine(cfg, scope, kgClient, browser, nil, zap.NewNop())
+		engine := NewEngine(mockConfig, scope, kgClient, browser, nil, zap.NewNop())
 
 		// -- Execute --
 		ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
