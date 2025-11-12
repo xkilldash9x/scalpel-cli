@@ -86,6 +86,7 @@ func (a *ATOAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCont
 			a.performLoginAttempt(ctx, analysisCtx, attempt)
 		}
 	}
+	analysisCtx.Logger.Info("ATO analysis finished.")
 	return nil
 }
 

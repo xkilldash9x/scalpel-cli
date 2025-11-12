@@ -229,6 +229,5 @@ func TestRunScanLogic(t *testing.T) {
 	})
 }
 
-// NOTE: TestComponentsShutdown has been removed from this file, as the
 // 'Components' struct and its 'Shutdown' method are no longer part of the
 // 'cmd' package. That test should be moved to the 'internal/service' package.
