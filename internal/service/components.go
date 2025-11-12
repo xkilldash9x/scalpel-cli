@@ -35,63 +35,81 @@ type Components struct {
 	BrowserAllocatorCancel context.CancelFunc
 }
 
-// Shutdown gracefully closes all components, ensuring resources are released in the correct order.
+// Shutdown gracefully closes all components within a hard timeout. This function
+// is designed to be called via defer and handles its own timeout context to ensure
+// cleanup happens even if the main scan context is abruptly canceled.
 func (c *Components) Shutdown() {
 	logger := observability.GetLogger()
-	logger.Debug("Beginning components shutdown sequence.")
+	logger.Info("Beginning graceful shutdown sequence...")
 
-	// 1. Stop the engines first (Producers) to cease generating new work.
+	// Create a master shutdown context with a timeout for all cleanup operations.
+	shutdownCtx, cancel := context.WithTimeout(context.Background(), 45*time.Second)
+	defer cancel()
+
+	// 1. Stop Engines: Cease new work generation immediately.
 	if c.TaskEngine != nil {
 		c.TaskEngine.Stop()
 		logger.Debug("Task engine stopped.")
 	}
-
 	if c.DiscoveryEngine != nil {
 		c.DiscoveryEngine.Stop()
 		logger.Debug("Discovery engine stopped.")
 	}
 
-	// 2. Close the findings channel. This signals the consumer to drain and stop.
+	// 2. Signal Findings Consumer to Stop: Close the channel to let it drain.
 	if c.findingsChan != nil {
 		close(c.findingsChan)
 		logger.Debug("Findings channel closed.")
 	}
 
-	// 3. Wait for the consumer to finish processing the drained channel.
+	// 3. Wait for Findings Consumer Gracefully: Wait for it to finish, but with a timeout.
 	if c.consumerWG != nil {
-		// The StartFindingsConsumer ensures the WaitGroup is decremented upon completion,
-		// including after draining the final batch.
-		c.consumerWG.Wait()
-		logger.Debug("Findings consumer finished processing.")
-	}
-
-	// 4. Shut down the browser manager.
-	if c.BrowserManager != nil {
-		// Use a separate context with a timeout for shutdown to ensure it completes
-		// even if the main application context was canceled.
-		shutdownCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		defer cancel()
-
-		if err := c.BrowserManager.Shutdown(shutdownCtx); err != nil {
-			logger.Warn("Error during browser manager shutdown.", zap.Error(err))
+		if timedWait(c.consumerWG, 15*time.Second) {
+			logger.Debug("Findings consumer finished processing gracefully.")
 		} else {
-			logger.Debug("Browser manager shut down.")
+			logger.Warn("Timeout exceeded while waiting for the findings consumer to finish. Some findings may not have been saved.")
 		}
 	}
 
-	// 5. Cancel the root browser allocator context. This will terminate the browser process.
+	// 4. Shut Down Browser Manager: This manages all active browser sessions.
+	if c.BrowserManager != nil {
+		if err := c.BrowserManager.Shutdown(shutdownCtx); err != nil {
+			logger.Warn("Error during browser manager shutdown.", zap.Error(err))
+		} else {
+			logger.Debug("Browser manager shut down successfully.")
+		}
+	}
+
+	// 5. Terminate Root Browser Process: The allocator context cancellation kills the browser.
 	if c.BrowserAllocatorCancel != nil {
 		c.BrowserAllocatorCancel()
 		logger.Debug("Browser allocator context canceled.")
 	}
 
-	// 6. Close the database connection pool.
-	// This is closed here if the pool was created by the ComponentFactory (i.e., during a scan).
-	// If a component initializes the KG independently (e.g., 'evolve'), it is responsible for its cleanup.
+	// 6. Close Database Connection Pool.
 	if c.DBPool != nil {
 		c.DBPool.Close()
 		logger.Debug("Database connection pool closed.")
 	}
 
-	logger.Info("All scan components shut down successfully.")
+	logger.Info("Graceful shutdown sequence complete.")
+}
+
+// timedWait waits for the WaitGroup for a maximum of the specified duration.
+// It returns true if the wait completed, false if it timed out.
+func timedWait(wg *sync.WaitGroup, timeout time.Duration) bool {
+	// Create a channel that will be closed when the WaitGroup is done.
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		wg.Wait()
+	}()
+
+	// Select will wait for either the done channel to be closed or the timeout to be reached.
+	select {
+	case <-done:
+		return true // Wait completed.
+	case <-time.After(timeout):
+		return false // Timed out.
+	}
 }

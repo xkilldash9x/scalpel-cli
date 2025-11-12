@@ -136,17 +136,31 @@ func newColorizedLevelEncoder(colors config.ColorConfig) zapcore.LevelEncoder {
 	}
 }
 
+// getEncoder selects and configures the appropriate log encoder based on the
+// provided configuration. It supports "json" for structured logging and a custom
+// "console" format for human-readable, colorized terminal output.
 func getEncoder(cfg config.LoggerConfig) zapcore.Encoder {
+	// --- Base Configuration ---
+	// Start with production-ready encoder settings.
 	encoderConfig := zap.NewProductionEncoderConfig()
-	encoderConfig.EncodeTime = zapcore.ISO8601TimeEncoder
+	// Use a more human-readable time format.
+	encoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("2006-01-02T15:04:05.000Z07:00")
 
+	// --- Console Format ---
+	// The console format is optimized for readability in a terminal.
 	if cfg.Format == "console" {
+		// Enable colorized log levels for better visual distinction.
 		encoderConfig.EncodeLevel = newColorizedLevelEncoder(cfg.Colors)
+
+		// Customize the encoder to create a clean, single-line log message.
+		// This avoids the multi-line, key-value output of the default console encoder.
 		return zapcore.NewConsoleEncoder(encoderConfig)
 	}
 
-	// JSON format defaults.
-	encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder
+	// --- JSON Format (Default) ---
+	// The JSON format is ideal for production environments where logs are parsed
+	// by log management systems (e.g., ELK, Splunk, Datadog).
+	encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder // e.g., "INFO", "ERROR"
 	return zapcore.NewJSONEncoder(encoderConfig)
 }
 

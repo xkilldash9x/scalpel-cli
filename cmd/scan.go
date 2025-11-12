@@ -6,7 +6,10 @@ import (
 	"errors"
 	"fmt"
 	"net/url"
+	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/google/uuid"
@@ -130,8 +133,9 @@ func normalizeTargets(targets []string) ([]string, error) {
 	return normalized, nil
 }
 
-// runScan contains the core, testable logic for executing a scan.
-// It no longer knows how to create components, only how to use them.
+// runScan orchestrates the entire scan lifecycle, including component initialization,
+// execution, and graceful shutdown. It sets up a signal handler to intercept
+// interrupt signals (like Ctrl+C), allowing the application to terminate cleanly.
 func runScan(
 	ctx context.Context,
 	logger *zap.Logger,
@@ -140,27 +144,51 @@ func runScan(
 	output, format string,
 	factory ComponentFactory,
 ) error {
-	// Initialize all dependencies using the factory.
-	rawComponents, err := factory.Create(ctx, cfg, targets, logger)
-	if err != nil {
-		// If creation fails, the factory handles the shutdown of partially initialized components.
-		return fmt.Errorf("failed to initialize scan components: %w", err)
-	}
-	// Perform a type assertion to get the concrete component struct from the service package.
-	components, ok := rawComponents.(*service.Components)
-	if !ok {
-		// This indicates a programming error (the factory returned the wrong type).
-		return fmt.Errorf("component factory returned an invalid type; expected *service.Components but got %T", rawComponents)
-	}
-	defer components.Shutdown()
+	// --- Graceful Shutdown Setup ---
+	// Create a context that can be canceled manually. This will be the main context for the scan.
+	scanCtx, cancelScan := context.WithCancel(ctx)
+	defer cancelScan() // Ensure cancel is called to free resources.
 
-	scanID := uuid.New().String()
+	// Set up a channel to listen for OS signals (SIGINT, SIGTERM).
+	sigChan := make(chan os.Signal, 1)
+	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
 
-	// FIX: Replaced the buggy single-target logic with a call to our robust helper function.
+	// Launch a goroutine to handle signal notifications.
+	go func() {
+		// Block until a signal is received.
+		sig := <-sigChan
+		logger.Warn("Received shutdown signal, initiating graceful shutdown.", zap.String("signal", sig.String()))
+
+		// Trigger the cancellation of the scan context.
+		cancelScan()
+	}()
+
+	// --- Target Validation ---
 	scanTargets, err := normalizeTargets(targets)
 	if err != nil {
 		return fmt.Errorf("failed to normalize targets: %w", err)
 	}
+
+	// --- Component Initialization ---
+	// Initialize all dependencies using the factory, passing the cancelable scan context.
+	rawComponents, err := factory.Create(scanCtx, cfg, scanTargets, logger)
+	if err != nil {
+		return fmt.Errorf("failed to initialize scan components: %w", err)
+	}
+	components, ok := rawComponents.(*service.Components)
+	if !ok {
+		return fmt.Errorf("component factory returned an invalid type; expected *service.Components but got %T", rawComponents)
+	}
+	// Use a deferred function to ensure Shutdown is always called, even on panic.
+	defer func() {
+		logger.Info("Starting component shutdown...")
+		// The Shutdown method now handles its own timeout.
+		components.Shutdown()
+		logger.Info("Component shutdown complete.")
+	}()
+
+	// --- Scan Execution ---
+	scanID := uuid.New().String()
 
 	logger.Info("Starting new scan",
 		zap.String("scanID", scanID),
@@ -170,29 +198,32 @@ func runScan(
 		zap.Bool("include_subdomains", cfg.Discovery().IncludeSubdomains),
 	)
 
-	// Execute the scan via the orchestrator.
-	if err := components.Orchestrator.StartScan(ctx, scanTargets, scanID); err != nil {
+	if err := components.Orchestrator.StartScan(scanCtx, scanTargets, scanID); err != nil {
+		// If the error is due to context cancellation, it's a graceful shutdown.
 		if errors.Is(err, context.Canceled) {
-			logger.Warn("Scan aborted gracefully by user signal.", zap.String("scanID", scanID))
-			// Return nil as the shutdown was graceful and initiated by the user.
-			return nil
+			logger.Warn("Scan aborted by user signal.", zap.String("scanID", scanID))
+			return nil // Return nil for a clean exit.
 		}
+		// Otherwise, it's an unexpected error during the scan.
 		logger.Error("Scan failed during orchestration.", zap.Error(err), zap.String("scanID", scanID))
 		return err
 	}
 
-	logger.Info("Scan execution completed successfully.", zap.String("scanID", scanID))
-
-	// Generate a report if an output file was specified.
-	if output != "" {
-		if err := generateReport(ctx, components.Store, scanID, format, output, logger); err != nil {
-			return err // Error is already descriptive
+	// --- Report Generation ---
+	// Check if the scan was canceled before generating the report.
+	if scanCtx.Err() == context.Canceled {
+		logger.Info("Skipping report generation due to scan cancellation.", zap.String("scanID", scanID))
+	} else {
+		logger.Info("Scan execution completed successfully.", zap.String("scanID", scanID))
+		if output != "" {
+			if err := generateReport(ctx, components.Store, scanID, format, output, logger); err != nil {
+				return err
+			}
 		}
-	}
-
-	fmt.Printf("\nScan Complete. Scan ID: %s\n", scanID)
-	if output == "" {
-		fmt.Printf("To generate a report, run: scalpel-cli report --scan-id %s\n", scanID)
+		fmt.Printf("\nScan Complete. Scan ID: %s\n", scanID)
+		if output == "" {
+			fmt.Printf("To generate a report, run: scalpel-cli report --scan-id %s\n", scanID)
+		}
 	}
 
 	return nil

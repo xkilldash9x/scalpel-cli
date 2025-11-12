@@ -148,8 +148,8 @@ discovery:
 
 agent:
   llm:
-    default_fast_model: "gemini-2.5-flash"
-    default_powerful_model: "gemini-2.5-pro"
+    default_fast_model: "gemini-1.5-flash"
+    default_powerful_model: "gemini-1.5-pro"
     models: {}
   knowledge_graph:
     type: "postgres"
