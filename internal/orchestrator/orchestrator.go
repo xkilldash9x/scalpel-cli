@@ -8,8 +8,10 @@ import (
 	"context"
 	"fmt"
 	"log"
+	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
@@ -63,14 +65,66 @@ func (o *Orchestrator) StartScan(ctx context.Context, targets []string, scanID s
 	o.logger.Info("Orchestrator starting scan", zap.String("scanID", scanID), zap.Strings("targets", targets))
 
 	// 1. Start the discovery engine. It returns a channel that streams tasks.
-	taskChan, err := o.discoveryEngine.Start(ctx, targets)
+	discoveryTaskChan, err := o.discoveryEngine.Start(ctx, targets)
 	if err != nil {
 		return fmt.Errorf("failed to start discovery engine: %w", err)
 	}
 	o.logger.Info("Discovery engine started")
 
-	// 2. Start the task engine, passing it the channel from the discovery engine.
-	o.taskEngine.Start(ctx, taskChan)
+	// Create a new channel that merges orchestrator-dispatched tasks and discovery tasks.
+	mergedTaskChan := make(chan schemas.Task, 100) // Buffer size can be tuned
+
+	var wg sync.WaitGroup
+
+	// Goroutine to forward tasks from discovery to the merged channel
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		for task := range discoveryTaskChan {
+			select {
+			case mergedTaskChan <- task:
+			case <-ctx.Done():
+				return
+			}
+		}
+	}()
+
+	// Goroutine to dispatch high-level tasks and then close the merged channel
+	go func() {
+		// Dispatch high-level tasks here
+		scanners := o.cfg.Scanners()
+		if scanners.Active.Auth.IDOR.Enabled {
+			o.logger.Info("Dispatching IDOR task")
+			mergedTaskChan <- schemas.Task{
+				TaskID: uuid.NewString(),
+				ScanID: scanID,
+				Type:   schemas.TaskTestAuthIDOR,
+			}
+		}
+		if scanners.Active.Auth.ATO.Enabled {
+			o.logger.Info("Dispatching ATO task")
+			mergedTaskChan <- schemas.Task{
+				TaskID: uuid.NewString(),
+				ScanID: scanID,
+				Type:   schemas.TaskTestAuthATO,
+			}
+		}
+
+		// Dispatch the main agent mission task
+		o.logger.Info("Dispatching Agent Mission task")
+		mergedTaskChan <- schemas.Task{
+			TaskID: uuid.NewString(),
+			ScanID: scanID,
+			Type:   schemas.TaskAgentMission,
+		}
+
+		// Wait for discovery to finish, then close the merged channel
+		wg.Wait()
+		close(mergedTaskChan)
+	}()
+
+	// 2. Start the task engine, passing it the merged channel.
+	o.taskEngine.Start(ctx, mergedTaskChan)
 	o.logger.Info("Task engine started and consuming tasks")
 
 	// 3. Wait for the context to be cancelled.

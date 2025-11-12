@@ -561,30 +561,76 @@ func TestAgent_ActionLoop(t *testing.T) {
 		}
 	})
 
-	// NEW: Test for PerformComplexTask being dispatched to the executor
-	t.Run("PerformComplexTaskAction_DispatchedToExecutor", func(t *testing.T) {
+	// NEW: Test for complex actions being dispatched to the executor
+	t.Run("ExecuteLoginSequenceAction_DispatchedToExecutor", func(t *testing.T) {
 		agent, bus, cancelRoot, _ := setupActionLoop(t)
 		defer cancelRoot()
 		mockExecutors := agent.executors.(*MockExecutorRegistry)
 
-		action := Action{Type: ActionPerformComplexTask, Value: "some complex task"}
+		action := Action{Type: ActionExecuteLoginSequence, Rationale: "Attempting login"}
 		obsChan, unsub := bus.Subscribe(MessageTypeObservation)
 		defer unsub()
 
-		execResult := &ExecutionResult{Status: "success", ObservationType: ObservedSystemState}
+		execResult := &ExecutionResult{Status: "success", ObservationType: ObservedAuthResult}
 		mockExecutors.On("Execute", mock.Anything, action).Return(execResult, nil).Once()
 
-		// Act
-		err := bus.Post(context.Background(), CognitiveMessage{ID: "complex-task-msg", Type: MessageTypeAction, Payload: action})
+		err := bus.Post(context.Background(), CognitiveMessage{ID: "login-msg", Type: MessageTypeAction, Payload: action})
 		require.NoError(t, err)
 
-		// Assert
 		select {
 		case msg := <-obsChan:
 			bus.Acknowledge(msg)
 			mockExecutors.AssertExpectations(t)
 		case <-time.After(2 * time.Second):
-			t.Fatal("Timeout waiting for PerformComplexTask action to be dispatched to executor")
+			t.Fatal("Timeout waiting for ActionExecuteLoginSequence to be dispatched")
+		}
+	})
+
+	t.Run("ExploreApplicationAction_DispatchedToExecutor", func(t *testing.T) {
+		agent, bus, cancelRoot, _ := setupActionLoop(t)
+		defer cancelRoot()
+		mockExecutors := agent.executors.(*MockExecutorRegistry)
+
+		action := Action{Type: ActionExploreApplication, Rationale: "Exploring the app"}
+		obsChan, unsub := bus.Subscribe(MessageTypeObservation)
+		defer unsub()
+
+		execResult := &ExecutionResult{Status: "success", ObservationType: ObservedDOMChange}
+		mockExecutors.On("Execute", mock.Anything, action).Return(execResult, nil).Once()
+
+		err := bus.Post(context.Background(), CognitiveMessage{ID: "explore-msg", Type: MessageTypeAction, Payload: action})
+		require.NoError(t, err)
+
+		select {
+		case msg := <-obsChan:
+			bus.Acknowledge(msg)
+			mockExecutors.AssertExpectations(t)
+		case <-time.After(2 * time.Second):
+			t.Fatal("Timeout waiting for ActionExploreApplication to be dispatched")
+		}
+	})
+
+	t.Run("FuzzEndpointAction_DispatchedToExecutor", func(t *testing.T) {
+		agent, bus, cancelRoot, _ := setupActionLoop(t)
+		defer cancelRoot()
+		mockExecutors := agent.executors.(*MockExecutorRegistry)
+
+		action := Action{Type: ActionFuzzEndpoint, Rationale: "Fuzzing the endpoint"}
+		obsChan, unsub := bus.Subscribe(MessageTypeObservation)
+		defer unsub()
+
+		execResult := &ExecutionResult{Status: "success", ObservationType: ObservedAnalysisResult}
+		mockExecutors.On("Execute", mock.Anything, action).Return(execResult, nil).Once()
+
+		err := bus.Post(context.Background(), CognitiveMessage{ID: "fuzz-msg", Type: MessageTypeAction, Payload: action})
+		require.NoError(t, err)
+
+		select {
+		case msg := <-obsChan:
+			bus.Acknowledge(msg)
+			mockExecutors.AssertExpectations(t)
+		case <-time.After(2 * time.Second):
+			t.Fatal("Timeout waiting for ActionFuzzEndpoint to be dispatched")
 		}
 	})
 }

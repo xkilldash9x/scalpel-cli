@@ -395,7 +395,6 @@ func (a *Agent) executeEvolution(ctx context.Context, action Action) *ExecutionR
 		a.logger.Error("Evolution Analyst finished with error.", zap.Error(err))
 		result.Status = "failed"
 		errorCode := ErrCodeEvolutionFailure
-		// FIX (Group 3): Use errors.Is() for robust detection of context deadline exceeded,
 		// regardless of whether the context itself cancelled (evoCtx.Err()) or the underlying operation returned the error (err).
 		if errors.Is(err, context.DeadlineExceeded) || errors.Is(evoCtx.Err(), context.DeadlineExceeded) || strings.Contains(err.Error(), "timed out") {
 			errorCode = ErrCodeTimeoutError
