@@ -152,6 +152,7 @@ func (a *IDORAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCon
 			logger.Info("Responses are not semantically equivalent.", zap.String("diff", comparisonResult.Diff))
 		}
 	}
+	analysisCtx.Logger.Info("IDOR analysis finished.")
 	return nil
 }
 
