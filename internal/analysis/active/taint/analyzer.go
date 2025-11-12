@@ -42,19 +42,20 @@ type HumanoidProvider interface {
 // hooks, OAST), and the correlation of these events to identify and report
 // vulnerabilities. It is a stateful component, created for a single analysis task.
 type Analyzer struct {
-	config          Config
-	reporter        ResultsReporter
-	oastProvider    OASTProvider
-	logger          *zap.Logger
-	shimTemplate    string
-	activeProbes    map[string]ActiveProbe
-	probesMutex     sync.RWMutex
-	eventsChan      chan Event
-	rulesMutex      sync.RWMutex
-	validTaintFlows map[TaintFlowPath]bool
-	wg              sync.WaitGroup
-	producersWG     sync.WaitGroup
-	backgroundCtx   context.Context
+	config           Config
+	reporter         ResultsReporter
+	oastProvider     OASTProvider
+	oastConfigured   bool // Flag to indicate if OAST is available.
+	logger           *zap.Logger
+	shimTemplate     string
+	activeProbes     map[string]ActiveProbe
+	probesMutex      sync.RWMutex
+	eventsChan       chan Event
+	rulesMutex       sync.RWMutex
+	validTaintFlows  map[TaintFlowPath]bool
+	wg               sync.WaitGroup
+	producersWG      sync.WaitGroup
+	backgroundCtx    context.Context
 	backgroundCancel context.CancelFunc
 }
 
@@ -82,10 +83,17 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 		localValidTaintFlows[k] = v
 	}
 
+	// Single, upfront check for OAST provider.
+	oastConfigured := oastProvider != nil
+	if !oastConfigured {
+		taskLogger.Info("No OAST provider configured; out-of-band tests will be skipped.")
+	}
+
 	return &Analyzer{
 		config:          config,
 		reporter:        reporter,
 		oastProvider:    oastProvider,
+		oastConfigured:  oastConfigured,
 		logger:          taskLogger,
 		activeProbes:    make(map[string]ActiveProbe),
 		eventsChan:      make(chan Event, config.EventChannelBuffer),
@@ -435,13 +443,14 @@ func (a *Analyzer) generateCanary(prefix string, probeType schemas.ProbeType) st
 // preparePayload replaces placeholders in a probe definition with a canary and OAST server URL.
 func (a *Analyzer) preparePayload(probeDef ProbeDefinition, canary string) string {
 	requiresOAST := strings.Contains(probeDef.Payload, "{{.OASTServer}}")
-	if requiresOAST && a.oastProvider == nil {
-		a.logger.Warn("OAST probe defined but no OAST provider configured. Skipping probe.", zap.String("canary", canary))
+	if requiresOAST && !a.oastConfigured {
+		// No warning needed here, it's logged once during initialization.
 		return ""
 	}
 
 	replacements := []string{"{{.Canary}}", canary}
 	if requiresOAST {
+		// We can now safely access oastProvider as oastConfigured is true.
 		oastURL := a.oastProvider.GetServerURL()
 		replacements = append(replacements, "{{.OASTServer}}", oastURL)
 	}

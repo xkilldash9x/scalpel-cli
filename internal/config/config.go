@@ -294,6 +294,7 @@ type ScannersConfig struct {
 type PassiveScannersConfig struct {
 	Headers HeadersConfig `mapstructure:"headers" yaml:"headers"`
 }
+
 // HeadersConfig enables or disables the passive HTTP header scanner.
 type HeadersConfig struct {
 	Enabled bool `mapstructure:"enabled" yaml:"enabled"`
@@ -522,7 +523,7 @@ func SetDefaults(v *viper.Viper) {
 
 	// -- Network --
 	v.SetDefault("network.timeout", "30s")
-	v.SetDefault("network.navigation_timeout", "90s")
+	v.SetDefault("network.navigation_timeout", "180s")
 	v.SetDefault("network.capture_response_bodies", true)
 	v.SetDefault("network.post_load_wait", "2s")
 	v.SetDefault("network.proxy.enabled", false)
@@ -539,8 +540,8 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("scanners.active.protopollution.enabled", true)
 	v.SetDefault("scanners.active.protopollution.wait_duration", 8*time.Second)
 	v.SetDefault("scanners.active.timeslip.enabled", false)
-	v.SetDefault("scanners.active.auth.ato.enabled", false)
-	v.SetDefault("scanners.active.auth.idor.enabled", false)
+	v.SetDefault("scanners.active.auth.ato.enabled", true)
+	v.SetDefault("scanners.active.auth.idor.enabled", true)
 
 	// -- Discovery --
 	v.SetDefault("discovery.max_depth", 5)
@@ -552,9 +553,8 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("discovery.passive_concurrency", 10)
 
 	// -- Agent --
-	// FIX: Align the default model with the test expectation.
-	v.SetDefault("agent.llm.default_fast_model", "gemini-2.5-flash")
-	v.SetDefault("agent.llm.default_powerful_model", "gemini-2.5-pro")
+	v.SetDefault("agent.llm.default_fast_model", "gemini-1.5-flash")
+	v.SetDefault("agent.llm.default_powerful_model", "gemini-1.5-pro")
 	v.SetDefault("agent.knowledge_graph.type", "postgres")
 	v.SetDefault("agent.knowledge_graph.postgres.host", "localhost")
 	v.SetDefault("agent.knowledge_graph.postgres.port", 5432)
