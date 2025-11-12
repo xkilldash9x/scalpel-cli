@@ -215,8 +215,9 @@ func TestRunScanLogic(t *testing.T) {
 		// Expect all targets missing a scheme to default to https.
 		expectedTargets := []string{"https://example.com", "http://test.com", "https://another.org"}
 
-		// Factory is called with original targets for initialization logic (like scope).
-		mockFactory.On("Create", mock.Anything, cfg, targetsInput, mock.AnythingOfType("*zap.Logger")).Return(mockComponents, nil)
+		// FIX: The factory should be set up with the *expected* normalized targets,
+		// as this is what the `Create` method will receive after normalization.
+		mockFactory.On("Create", mock.Anything, cfg, expectedTargets, mock.AnythingOfType("*zap.Logger")).Return(mockComponents, nil)
 		// Assert that the normalized URLs are passed to the orchestrator.
 		mockOrchestrator.On("StartScan", mock.Anything, expectedTargets, mock.AnythingOfType("string")).Return(nil)
 

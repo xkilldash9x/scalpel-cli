@@ -41,6 +41,7 @@ Follow these instructions to get Scalpel CLI set up and ready to run your first 
 *   [Go](https://go.dev/doc/install) (version 1.21 or later)
 *   [Docker](https://docs.docker.com/get-docker/)
 *   An API key for your chosen LLM provider (e.g., Google AI Studio, OpenAI).
+*   [SecLists](https://github.com/danielmiessler/SecLists): Required for certain active scanners like the Account Takeover (ATO) module.
 
 ### 1. Set Up the PostgreSQL Database
 
@@ -81,6 +82,14 @@ Create a `config.yaml` file in the root of the project. You can use `config.yaml
 database:
   url: "postgres://scalpel:secret@localhost:5432/scalpel_db?sslmode=disable"
 
+scanners:
+  active:
+    auth:
+      ato:
+        # Path to your local SecLists repository.
+        # It's recommended to clone it to your home directory.
+        # git clone https://github.com/danielmiessler/SecLists.git ~/SecLists
+        seclists_path: "~/SecLists"
 agent:
   llm:
     default_fast_model: "gemini-1.5-flash"

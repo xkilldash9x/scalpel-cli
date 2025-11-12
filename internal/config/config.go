@@ -358,6 +358,7 @@ type AuthConfig struct {
 type ATOConfig struct {
 	Enabled                bool     `mapstructure:"enabled" yaml:"enabled"`
 	CredentialFile         string   `mapstructure:"credential_file" yaml:"credential_file"`
+	SecListsPath           string   `mapstructure:"seclists_path" yaml:"seclists_path"`
 	Concurrency            int      `mapstructure:"concurrency" yaml:"concurrency"`
 	MinRequestDelayMs      int      `mapstructure:"min_request_delay_ms" yaml:"min_request_delay_ms"`
 	RequestDelayJitterMs   int      `mapstructure:"request_delay_jitter_ms" yaml:"request_delay_jitter_ms"`
@@ -503,6 +504,13 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("logger.max_backups", 5)
 	v.SetDefault("logger.max_age", 30)
 	v.SetDefault("logger.compress", true)
+	v.SetDefault("logger.colors.debug", "cyan")
+	v.SetDefault("logger.colors.info", "green")
+	v.SetDefault("logger.colors.warn", "yellow")
+	v.SetDefault("logger.colors.error", "red")
+	v.SetDefault("logger.colors.dpanic", "magenta")
+	v.SetDefault("logger.colors.panic", "magenta")
+	v.SetDefault("logger.colors.fatal", "magenta")
 
 	// -- Engine --
 	v.SetDefault("engine.queue_size", 1000)
@@ -541,6 +549,7 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("scanners.active.protopollution.wait_duration", 8*time.Second)
 	v.SetDefault("scanners.active.timeslip.enabled", false)
 	v.SetDefault("scanners.active.auth.ato.enabled", true)
+	v.SetDefault("scanners.active.auth.ato.seclists_path", "~/SecLists")
 	v.SetDefault("scanners.active.auth.idor.enabled", true)
 
 	// -- Discovery --

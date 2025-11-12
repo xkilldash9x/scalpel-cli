@@ -43,7 +43,17 @@ func newScanCmd(factory ComponentFactory) *cobra.Command {
 		Short: "Starts a new security scan against the specified targets",
 		Args:  cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
+			// Get the original context from the command.
 			ctx := cmd.Context()
+
+			// Retrieve the value of the verbose flag.
+			verbose, _ := cmd.Flags().GetBool("verbose")
+
+			// Add the verbose flag's value to the context. This makes it accessible
+			// to downstream functions like runScan without needing to pass it as an
+			// explicit argument. This is a clean way to provide request-scoped values.
+			ctx = context.WithValue(ctx, "verbose", verbose)
+
 			logger := observability.GetLogger()
 
 			cfg, err := getConfigFromContext(ctx)
@@ -70,6 +80,7 @@ func newScanCmd(factory ComponentFactory) *cobra.Command {
 	scanCmd.Flags().IntP("depth", "d", 0, "Maximum crawl depth. (Overrides config/env)")
 	scanCmd.Flags().IntP("concurrency", "j", 0, "Number of concurrent engine workers. (Overrides config/env)")
 	scanCmd.Flags().String("scope", "strict", "Scan scope strategy ('strict' or 'subdomain'). (Overrides config/env)")
+	scanCmd.Flags().BoolP("verbose", "v", false, "Enable verbose (DEBUG) logging.")
 
 	return scanCmd
 }
@@ -162,6 +173,21 @@ func runScan(
 		// Trigger the cancellation of the scan context.
 		cancelScan()
 	}()
+
+	// --- Logger Re-initialization ---
+	// Re-initialize the logger based on the final, flag-overridden config.
+	// This ensures that all subsequent logs (including component initialization)
+	// respect the verbosity level set by the user.
+	// We get the verbose flag directly from the command context.
+	verbose, _ := ctx.Value("verbose").(bool)
+	if verbose {
+		loggerCfg := cfg.Logger()
+		loggerCfg.Level = "debug"
+		observability.ResetForTest()                                // Reset to allow re-initialization
+		observability.InitializeLogger(loggerCfg)                   // Re-initialize with new level
+		logger = observability.GetLogger()                          // Get the new logger instance
+		logger.Debug("Verbose logging enabled via --verbose flag.") // First debug message
+	}
 
 	// --- Target Validation ---
 	scanTargets, err := normalizeTargets(targets)

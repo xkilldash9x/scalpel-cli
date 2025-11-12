@@ -22,7 +22,7 @@ func TestNewDefaultConfig(t *testing.T) {
 	assert.True(t, cfg.Browser().Headless)
 	assert.Equal(t, 30*time.Second, cfg.Network().Timeout)
 	assert.Equal(t, "postgres", cfg.Agent().KnowledgeGraph.Type)
-	assert.Equal(t, "gemini-2.5-pro", cfg.Agent().LLM.DefaultPowerfulModel)
+	assert.Equal(t, "gemini-1.5-pro", cfg.Agent().LLM.DefaultPowerfulModel)
 	assert.False(t, cfg.Autofix().Enabled)
 	assert.Equal(t, 0.75, cfg.Autofix().MinConfidenceThreshold)
 	assert.Equal(t, "scalpel-autofix-bot", cfg.Autofix().Git.AuthorName)
