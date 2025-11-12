@@ -33,7 +33,7 @@ var protoPollutionShim string
 type Analyzer struct {
 	logger  *zap.Logger
 	browser schemas.BrowserManager
-	config  config.ProtoPollutionConfig
+	config  config.Interface
 }
 
 // PollutionProofEvent is the structure of the JSON payload sent from the
@@ -60,10 +60,14 @@ type analysisContext struct {
 // NewAnalyzer creates a new, reusable instance of the prototype pollution analyzer.
 // It takes the application's configuration and a browser manager for creating
 // analysis sessions.
-func NewAnalyzer(logger *zap.Logger, browserManager schemas.BrowserManager, cfg config.ProtoPollutionConfig) *Analyzer {
+func NewAnalyzer(logger *zap.Logger, browserManager schemas.BrowserManager, cfg config.Interface) *Analyzer {
 	// If the configuration provides an invalid duration, fall back to a sane default.
-	if cfg.WaitDuration <= 0 {
-		cfg.WaitDuration = 8 * time.Second
+	if cfg.Scanners().Active.ProtoPollution.WaitDuration <= 0 {
+		// This is a temporary workaround to set a default value.
+		// A better solution would be to have a dedicated setter in the config interface.
+		if c, ok := cfg.(*config.Config); ok {
+			c.ScannersCfg.Active.ProtoPollution.WaitDuration = 8 * time.Second
+		}
 	}
 
 	return &Analyzer{
@@ -80,7 +84,7 @@ func NewAnalyzer(logger *zap.Logger, browserManager schemas.BrowserManager, cfg 
 // are reported directly via the session context.
 func (a *Analyzer) Analyze(ctx context.Context, taskID, targetURL string) error {
 	// 1. Acquire a browser session. We pass `nil` for the findings channel as it's no longer used by this analyzer.
-	session, err := a.browser.NewAnalysisContext(ctx, nil, schemas.Persona{}, "", "", nil)
+	session, err := a.browser.NewAnalysisContext(ctx, a.config, schemas.Persona{}, "", "", nil)
 	if err != nil {
 		return fmt.Errorf("could not initialize browser analysis context: %w", err)
 	}
@@ -102,14 +106,15 @@ func (a *Analyzer) Analyze(ctx context.Context, taskID, targetURL string) error 
 	}
 
 	// 4. Navigate to the target.
-	aCtx.logger.Info("Navigating and monitoring.", zap.Duration("wait_duration", a.config.WaitDuration))
+	waitDuration := a.config.Scanners().Active.ProtoPollution.WaitDuration
+	aCtx.logger.Info("Navigating and monitoring.", zap.Duration("wait_duration", waitDuration))
 	if err := session.Navigate(ctx, targetURL); err != nil {
 		// Navigation errors are often not fatal; the page might have loaded enough for our purposes.
 		aCtx.logger.Debug("Navigation completed (or failed gracefully)", zap.Error(err))
 	}
 
 	// 5. Wait for asynchronous events to be captured by our shim.
-	timer := time.NewTimer(a.config.WaitDuration)
+	timer := time.NewTimer(waitDuration)
 	select {
 	case <-timer.C:
 		aCtx.logger.Info("Monitoring period finished.")
@@ -166,17 +171,17 @@ func (aCtx *analysisContext) handlePollutionProof(event PollutionProofEvent) {
 	evidence := string(evidenceBytes)
 
 	finding := schemas.Finding{
-		ID:        uuid.New().String(),
-		TaskID:    aCtx.taskID,
-		Target:    aCtx.targetURL,
-		ObservedAt: time.Now().UTC(),
-		Module:    ModuleName,
+		ID:                uuid.New().String(),
+		TaskID:            aCtx.taskID,
+		Target:            aCtx.targetURL,
+		ObservedAt:        time.Now().UTC(),
+		Module:            ModuleName,
 		VulnerabilityName: vulnerabilityName,
 		Severity:          severity,
 		Description:       desc,
 		Evidence:          json.RawMessage(evidence),
-		Recommendation: getRecommendation(vulnerabilityName),
-		CWE:            cwe,
+		Recommendation:    getRecommendation(vulnerabilityName),
+		CWE:               cwe,
 	}
 
 	// REFACTOR: Instead of writing to a channel, use the session's AddFinding method.
