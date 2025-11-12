@@ -26,29 +26,26 @@ import (
 func TestNewAnalyzer(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	mockBrowserManager := new(mocks.MockBrowserManager)
-	cfg := config.ProtoPollutionConfig{
-		Enabled: true,
-		// WaitDuration is 0 (invalid)
-	}
+	cfg := config.NewDefaultConfig()
+	// Set to 0 to test the default fallback logic.
+	cfg.ScannersCfg.Active.ProtoPollution.WaitDuration = 0
 
 	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 
 	assert.NotNil(t, analyzer)
 	assert.Equal(t, logger.Named("pp_analyzer"), analyzer.logger)
 	assert.Equal(t, mockBrowserManager, analyzer.browser)
-	// Check that the default wait duration is applied.
-	expectedCfg := cfg
-	expectedCfg.WaitDuration = 8 * time.Second
-	assert.Equal(t, expectedCfg, analyzer.config)
+	// Check that the default wait duration is applied correctly.
+	assert.Equal(t, 8*time.Second, analyzer.config.Scanners().Active.ProtoPollution.WaitDuration)
 }
 
 func TestAnalyze_FindingFound(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	mockBrowserManager := new(mocks.MockBrowserManager)
 	mockSession := mocks.NewMockSessionContext()
-	cfg := config.ProtoPollutionConfig{
-		WaitDuration: 150 * time.Millisecond,
-	}
+	cfg := config.NewDefaultConfig()
+	cfg.ScannersCfg.Active.ProtoPollution.WaitDuration = 150 * time.Millisecond
+
 	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 
 	ctx := context.Background()
@@ -59,7 +56,7 @@ func TestAnalyze_FindingFound(t *testing.T) {
 	findingReported.Add(1)
 
 	// --- Mocks ---
-	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil).Once()
+	mockBrowserManager.On("NewAnalysisContext", ctx, cfg, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil).Once()
 
 	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil).Once()
 
@@ -137,13 +134,13 @@ func TestAnalyze_NoFinding(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	mockBrowserManager := new(mocks.MockBrowserManager)
 	mockSession := mocks.NewMockSessionContext()
-	cfg := config.ProtoPollutionConfig{
-		WaitDuration: 50 * time.Millisecond,
-	}
+	cfg := config.NewDefaultConfig()
+	cfg.ScannersCfg.Active.ProtoPollution.WaitDuration = 50 * time.Millisecond
+
 	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 	ctx := context.Background()
 
-	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil)
+	mockBrowserManager.On("NewAnalysisContext", ctx, cfg, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil)
 	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil).Once()
 	mockSession.On("InjectScriptPersistently", ctx, mock.AnythingOfType("string")).Return(nil)
 	mockSession.On("Navigate", ctx, "http://clean.example.com").Return(nil)
@@ -160,12 +157,12 @@ func TestAnalyze_NoFinding(t *testing.T) {
 func TestAnalyze_BrowserError(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	mockBrowserManager := new(mocks.MockBrowserManager)
-	cfg := config.ProtoPollutionConfig{}
+	cfg := config.NewDefaultConfig()
 	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 	ctx := context.Background()
 	expectedErr := errors.New("failed to launch browser")
 
-	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(nil, expectedErr)
+	mockBrowserManager.On("NewAnalysisContext", ctx, cfg, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(nil, expectedErr)
 
 	err := analyzer.Analyze(ctx, "task-fail", "http://example.com")
 
@@ -179,12 +176,13 @@ func TestAnalyze_ContextCancellation(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	mockBrowserManager := new(mocks.MockBrowserManager)
 	mockSession := mocks.NewMockSessionContext()
-	cfg := config.ProtoPollutionConfig{WaitDuration: 5 * time.Second}
+	cfg := config.NewDefaultConfig()
+	cfg.ScannersCfg.Active.ProtoPollution.WaitDuration = 5 * time.Second
 	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 
 	ctx, cancel := context.WithCancel(context.Background())
 
-	mockBrowserManager.On("NewAnalysisContext", mock.Anything, mock.Anything, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil)
+	mockBrowserManager.On("NewAnalysisContext", mock.Anything, cfg, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil)
 	mockSession.On("ExposeFunction", mock.Anything, jsCallbackName, mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil)
 	mockSession.On("InjectScriptPersistently", mock.Anything, mock.AnythingOfType("string")).Return(nil)
 	mockSession.On("Navigate", mock.Anything, "http://slow.example.com").Return(nil).Run(func(args mock.Arguments) {
@@ -212,12 +210,12 @@ func TestAnalyze_InstrumentationError(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	mockBrowserManager := new(mocks.MockBrowserManager)
 	mockSession := mocks.NewMockSessionContext()
-	cfg := config.ProtoPollutionConfig{}
+	cfg := config.NewDefaultConfig()
 	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 	ctx := context.Background()
 	expectedErr := errors.New("browser disconnected")
 
-	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil)
+	mockBrowserManager.On("NewAnalysisContext", ctx, cfg, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil)
 	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.Anything).Return(expectedErr)
 	mockSession.On("Close", ctx).Return(nil)
 
@@ -234,11 +232,12 @@ func TestAnalyze_MismatchedCanary(t *testing.T) {
 	logger := zaptest.NewLogger(t)
 	mockBrowserManager := new(mocks.MockBrowserManager)
 	mockSession := mocks.NewMockSessionContext()
-	cfg := config.ProtoPollutionConfig{WaitDuration: 100 * time.Millisecond}
+	cfg := config.NewDefaultConfig()
+	cfg.ScannersCfg.Active.ProtoPollution.WaitDuration = 100 * time.Millisecond
 	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 	ctx := context.Background()
 
-	mockBrowserManager.On("NewAnalysisContext", ctx, mock.Anything, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil)
+	mockBrowserManager.On("NewAnalysisContext", ctx, cfg, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil)
 	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil)
 	mockSession.On("InjectScriptPersistently", ctx, mock.AnythingOfType("string")).Return(nil)
 	mockSession.On("Navigate", ctx, "http://example.com").Return(nil).Run(func(args mock.Arguments) {
