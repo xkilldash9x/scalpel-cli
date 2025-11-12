@@ -215,18 +215,8 @@ func (f *concreteFactory) Create(ctx context.Context, cfg config.Interface, targ
 	httpClient := network.NewClient(nil)
 	httpAdapter := discovery.NewHTTPClientAdapter(httpClient)
 
-	discoveryCfg := discovery.Config{
-		MaxDepth:           cfg.Discovery().MaxDepth,
-		Concurrency:        cfg.Discovery().Concurrency,
-		Timeout:            cfg.Discovery().Timeout,
-		PassiveEnabled:     cfg.Discovery().PassiveEnabled,
-		CrtShRateLimit:     cfg.Discovery().CrtShRateLimit,
-		CacheDir:           cfg.Discovery().CacheDir,
-		PassiveConcurrency: cfg.Discovery().PassiveConcurrency,
-	}
-
-	passiveRunner := discovery.NewPassiveRunner(discoveryCfg, httpAdapter, scopeManager, logger)
-	discoveryEngine := discovery.NewEngine(discoveryCfg, scopeManager, kg, browserManager, passiveRunner, logger)
+	passiveRunner := discovery.NewPassiveRunner(cfg, httpAdapter, scopeManager, logger)
+	discoveryEngine := discovery.NewEngine(cfg, scopeManager, kg, browserManager, passiveRunner, logger)
 	components.DiscoveryEngine = discoveryEngine
 	logger.Debug("Discovery engine initialized.")
 
@@ -244,4 +234,3 @@ func (f *concreteFactory) Create(ctx context.Context, cfg config.Interface, targ
 	// Return the components. The deferred function will not trigger Shutdown as initializationErr is nil.
 	return components, nil
 }
-

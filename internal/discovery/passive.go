@@ -17,6 +17,8 @@ import (
 
 	"go.uber.org/zap"
 	"golang.org/x/time/rate"
+
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
 // HTTPClient defines the interface for making HTTP GET requests.
@@ -53,39 +55,37 @@ func (a *httpClientAdapter) Get(ctx context.Context, url string) ([]byte, int, e
 // PassiveRunner handles passive discovery techniques. These are designed to be less noisy
 // and yield high value intelligence without directly engaging the target in an aggressive manner.
 type PassiveRunner struct {
-	config      Config
-	httpClient  HTTPClient
-	scope       ScopeManager
-	logger      *zap.Logger
+	config     config.Interface // Use the global config interface
+	httpClient HTTPClient
+	scope      ScopeManager
+	logger     *zap.Logger
 	// resilience: rate limiter for external services. gotta be a good net citizen.
-	crtLimiter  *rate.Limiter
+	crtLimiter *rate.Limiter
 	// A semaphore to limit concurrent outbound HTTP requests for things like sitemaps.
 	httpLimiter chan struct{}
 }
 
 // NewPassiveRunner creates a new PassiveRunner.
 // The signature is updated to use the local ScopeManager and HTTPClient interfaces.
-func NewPassiveRunner(cfg Config, client HTTPClient, scope ScopeManager, logger *zap.Logger) *PassiveRunner {
-	// Ensure defaults are applied if this runner is initialized independently.
-	cfg.SetDefaults()
-
+func NewPassiveRunner(cfg config.Interface, client HTTPClient, scope ScopeManager, logger *zap.Logger) *PassiveRunner {
 	if logger == nil {
 		logger = zap.NewNop()
 	}
+	discoveryCfg := cfg.Discovery() // Get the discovery-specific config
 
 	// Set a reasonable default for passive concurrency if not configured.
 	passiveConcurrency := 10
-	if cfg.PassiveConcurrency > 0 {
-		passiveConcurrency = cfg.PassiveConcurrency
+	if discoveryCfg.PassiveConcurrency > 0 {
+		passiveConcurrency = discoveryCfg.PassiveConcurrency
 	}
 
 	return &PassiveRunner{
-		config:      cfg,
-		httpClient:  client,
-		scope:       scope,
-		logger:      logger.Named("DiscoveryPassive"),
+		config:     cfg, // Store the main config
+		httpClient: client,
+		scope:      scope,
+		logger:     logger.Named("DiscoveryPassive"),
 		// Setting the rate limit for crt.sh based on the configuration.
-		crtLimiter:  rate.NewLimiter(rate.Limit(cfg.CrtShRateLimit), 1),
+		crtLimiter:  rate.NewLimiter(rate.Limit(discoveryCfg.CrtShRateLimit), 1),
 		httpLimiter: make(chan struct{}, passiveConcurrency),
 	}
 }
@@ -190,7 +190,7 @@ func (p *PassiveRunner) checkCrtSh(ctx context.Context, domain string, resultsCh
 // getCachePath generates a domain specific cache file path.
 func (p *PassiveRunner) getCachePath(domain string) string {
 	sanitizedDomain := strings.ReplaceAll(domain, ".", "_")
-	return filepath.Join(p.config.CacheDir, fmt.Sprintf("crt_cache_%s.json", sanitizedDomain))
+	return filepath.Join(p.config.Discovery().CacheDir, fmt.Sprintf("crt_cache_%s.json", sanitizedDomain))
 }
 
 // loadCrtCache attempts to load and validate a cache file for a given domain.
@@ -216,7 +216,7 @@ func (p *PassiveRunner) loadCrtCache(domain string) ([]string, bool) {
 
 // saveCrtCache writes a list of domains to the cache for a specific root domain.
 func (p *PassiveRunner) saveCrtCache(domain string, domains []string) {
-	if err := os.MkdirAll(p.config.CacheDir, 0755); err != nil {
+	if err := os.MkdirAll(p.config.Discovery().CacheDir, 0755); err != nil {
 		p.logger.Warn("Could not create cache directory", zap.Error(err))
 		return
 	}
