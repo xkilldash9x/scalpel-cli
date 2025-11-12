@@ -26,9 +26,12 @@ func NewHeadersAdapter() *HeadersAdapter {
 
 // Analyze is the bridge function called by the worker.
 func (a *HeadersAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
-	analysisCtx.Logger.Info("Dispatching to security headers analyzer.")
+	analysisCtx.Logger.Info("Starting security headers analysis.")
 
 	// The beautiful part about good interface design is that sometimes,
 	// the adapter just needs to pass the work along.
-	return a.headersAnalyzer.Analyze(ctx, analysisCtx)
+	err := a.headersAnalyzer.Analyze(ctx, analysisCtx)
+
+	analysisCtx.Logger.Info("Security headers analysis finished.")
+	return err
 }

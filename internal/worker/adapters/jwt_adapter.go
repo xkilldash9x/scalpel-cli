@@ -25,6 +25,8 @@ func NewJWTAdapter() *JWTAdapter {
 
 // Analyze is the main execution method for the adapter.
 func (a *JWTAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
+	analysisCtx.Logger.Info("Starting JWT analysis.")
+
 	// The adapter's primary role is to correctly configure and
 	// delegate the analysis task to the underlying analyzer.
 
@@ -34,6 +36,7 @@ func (a *JWTAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCont
 		jwtConfig := analysisCtx.Global.Config.JWT()
 		// If the entire JWT scanner is disabled, we should stop here.
 		if !jwtConfig.Enabled {
+			analysisCtx.Logger.Info("JWT analysis skipped as it is disabled in the configuration.")
 			return nil
 		}
 		bruteForceEnabled = jwtConfig.BruteForceEnabled
@@ -44,5 +47,8 @@ func (a *JWTAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCont
 
 	// delegate the analysis call. the analyzer will add any findings
 	// directly to the provided analysis context.
-	return analyzer.Analyze(ctx, analysisCtx)
+	err := analyzer.Analyze(ctx, analysisCtx)
+
+	analysisCtx.Logger.Info("JWT analysis finished.")
+	return err
 }

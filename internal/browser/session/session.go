@@ -133,14 +133,14 @@ func (s *Session) SetOnClose(fn func()) {
 // This is a critical step that must be called before any other actions are taken.
 //
 // The process includes:
-// 1. Establishing the initial CDP connection to the browser tab.
-// 2. Starting the `Harvester` to begin collecting network and console data.
-// 3. Applying browser stealth evasions and emulating the specified `Persona`.
-// 4. Initializing the `Humanoid` and `Interactor` components.
-// 5. Injecting the IAST (Interactive Application Security Testing) taint analysis
-//    shim script, if configured.
-// 6. Setting any custom HTTP headers.
-// 7. Positioning the mouse cursor at the center of the viewport.
+//  1. Establishing the initial CDP connection to the browser tab.
+//  2. Starting the `Harvester` to begin collecting network and console data.
+//  3. Applying browser stealth evasions and emulating the specified `Persona`.
+//  4. Initializing the `Humanoid` and `Interactor` components.
+//  5. Injecting the IAST (Interactive Application Security Testing) taint analysis
+//     shim script, if configured.
+//  6. Setting any custom HTTP headers.
+//  7. Positioning the mouse cursor at the center of the viewport.
 //
 // Parameters:
 //   - ctx: An operational context with a timeout for the initialization process.
@@ -673,36 +673,29 @@ func (s *Session) Close(ctx context.Context) error {
 		return nil
 	}
 	s.isClosed = true
-	// Set findingsChan to nil under lock to prevent writes during/after close
-	s.findingsChan = nil
+	s.findingsChan = nil // Prevent further writes
 	s.mu.Unlock()
 
-	s.logger.Info("Closing browser session.", zap.String("session_id", s.id))
+	s.logger.Info("Closing browser session.")
 
-	// 1. Stop the Harvester (gracefully). Use operational context with timeout.
 	if s.harvester != nil {
-		// Use a short, independent timeout context for stopping harvester
 		stopCtx, stopCancel := context.WithTimeout(context.Background(), 5*time.Second)
-		defer stopCancel()        //  Ensure context cancellation is deferred (idiomatic Go).
-		s.harvester.Stop(stopCtx) // Pass the timed context
+		defer stopCancel()
+		s.harvester.Stop(stopCtx)
 		s.logger.Debug("Harvester stopped.")
 	}
 
-	// 2. Cancel the main session context. This signals termination.
 	if s.cancel != nil {
 		s.cancel()
 		s.logger.Debug("Session master context cancelled.")
 	}
 
-	// 3. Execute the onClose callback (e.g., remove from manager map).
 	if s.onClose != nil {
 		s.onClose()
 		s.logger.Debug("onClose callback executed.")
 	}
 
-	s.logger.Info("Session close sequence complete.", zap.String("session_id", s.id))
-	// Note: Closing the underlying browser tab/context is typically handled by chromedp
-	// when the session context (s.ctx) derived from NewContext is canceled.
+	s.logger.Info("Session close sequence complete.")
 	return nil
 }
 
