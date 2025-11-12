@@ -215,4 +215,62 @@ func TestOrchestrator_StartScan(t *testing.T) {
 		assert.False(t, fixture.TaskEngine.startCalled, "TaskEngine should not be started if discovery fails")
 		assert.False(t, fixture.DiscoveryEngine.stopCalled, "DiscoveryEngine.Stop should not be called on start failure")
 	})
+
+	t.Run("should dispatch high-level tasks with correct non-nil parameters", func(t *testing.T) {
+		t.Parallel()
+		fixture := setupTest(t)
+		// Enable the scanners that dispatch high-level tasks.
+		cfg := fixture.Config.(*config.Config) // Cast to concrete type to modify
+		cfg.ScannersCfg.Active.Auth.IDOR.Enabled = true
+		cfg.ScannersCfg.Active.Auth.ATO.Enabled = true
+
+		orch, _ := New(cfg, fixture.Logger, fixture.DiscoveryEngine, fixture.TaskEngine)
+
+		ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+		defer cancel()
+
+		// Expect 3 high-level tasks (IDOR, ATO, Agent)
+		fixture.TaskEngine.wg.Add(3)
+
+		go func() {
+			_ = orch.StartScan(ctx, []string{"https://example.com"}, "test-params-scan")
+		}()
+
+		// Wait for the 3 tasks to be dispatched and received.
+		fixture.TaskEngine.wg.Wait()
+
+		// Make a copy of the received tasks for safe concurrent access.
+		fixture.TaskEngine.mu.Lock()
+		receivedTasks := make([]schemas.Task, len(fixture.TaskEngine.receivedTasks))
+		copy(receivedTasks, fixture.TaskEngine.receivedTasks)
+		fixture.TaskEngine.mu.Unlock()
+
+		// --- Assertions ---
+		require.Len(t, receivedTasks, 3, "Expected exactly 3 high-level tasks to be dispatched")
+
+		taskParamsByType := make(map[schemas.TaskType]interface{})
+		for _, task := range receivedTasks {
+			taskParamsByType[task.Type] = task.Parameters
+		}
+
+		// Check IDOR task
+		idorParams, ok := taskParamsByType[schemas.TaskTestAuthIDOR]
+		require.True(t, ok, "IDOR task was not dispatched")
+		assert.NotNil(t, idorParams, "IDOR task parameters should not be nil")
+		assert.IsType(t, schemas.IDORTaskParams{}, idorParams, "IDOR task parameters have incorrect type")
+
+		// Check ATO task
+		atoParams, ok := taskParamsByType[schemas.TaskTestAuthATO]
+		require.True(t, ok, "ATO task was not dispatched")
+		assert.NotNil(t, atoParams, "ATO task parameters should not be nil")
+		assert.IsType(t, schemas.ATOTaskParams{}, atoParams, "ATO task parameters have incorrect type")
+
+		// Check Agent Mission task
+		agentParams, ok := taskParamsByType[schemas.TaskAgentMission]
+		require.True(t, ok, "Agent Mission task was not dispatched")
+		assert.NotNil(t, agentParams, "Agent Mission task parameters should not be nil")
+		mission, ok := agentParams.(schemas.AgentMissionParams)
+		require.True(t, ok, "Agent Mission task parameters have incorrect type")
+		assert.NotEmpty(t, mission.MissionBrief, "Agent mission brief should not be empty")
+	})
 }

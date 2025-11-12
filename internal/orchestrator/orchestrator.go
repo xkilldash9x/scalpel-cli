@@ -96,9 +96,10 @@ func (o *Orchestrator) StartScan(ctx context.Context, targets []string, scanID s
 		if scanners.Active.Auth.IDOR.Enabled {
 			o.logger.Info("Dispatching IDOR task")
 			mergedTaskChan <- schemas.Task{
-				TaskID: uuid.NewString(),
-				ScanID: scanID,
-				Type:   schemas.TaskTestAuthIDOR,
+				TaskID:     uuid.NewString(),
+				ScanID:     scanID,
+				Type:       schemas.TaskTestAuthIDOR,
+				Parameters: schemas.IDORTaskParams{},
 			}
 		}
 		if scanners.Active.Auth.ATO.Enabled {
@@ -107,6 +108,9 @@ func (o *Orchestrator) StartScan(ctx context.Context, targets []string, scanID s
 				TaskID: uuid.NewString(),
 				ScanID: scanID,
 				Type:   schemas.TaskTestAuthATO,
+				Parameters: schemas.ATOTaskParams{
+					Usernames: []string{},
+				},
 			}
 		}
 
@@ -116,6 +120,9 @@ func (o *Orchestrator) StartScan(ctx context.Context, targets []string, scanID s
 			TaskID: uuid.NewString(),
 			ScanID: scanID,
 			Type:   schemas.TaskAgentMission,
+			Parameters: schemas.AgentMissionParams{
+				MissionBrief: "Perform a comprehensive security audit of the target application.",
+			},
 		}
 
 		// Wait for discovery to finish, then close the merged channel

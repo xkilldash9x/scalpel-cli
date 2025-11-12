@@ -154,7 +154,7 @@ func getEncoder(cfg config.LoggerConfig) zapcore.Encoder {
 
 		// Customize the encoder to create a clean, single-line log message.
 		// This avoids the multi-line, key-value output of the default console encoder.
-		return zapcore.NewConsoleEncoder(encoderConfig)
+		return newCustomConsoleEncoder(encoderConfig)
 	}
 
 	// --- JSON Format (Default) ---
@@ -162,6 +162,26 @@ func getEncoder(cfg config.LoggerConfig) zapcore.Encoder {
 	// by log management systems (e.g., ELK, Splunk, Datadog).
 	encoderConfig.EncodeLevel = zapcore.CapitalLevelEncoder // e.g., "INFO", "ERROR"
 	return zapcore.NewJSONEncoder(encoderConfig)
+}
+
+// newCustomConsoleEncoder creates a Zap encoder with a custom format optimized for
+// human readability in a terminal. It produces a clean, single-line output that
+// includes the timestamp, a color-coded level, the logger's name (component),
+// the main message, and any structured fields as a JSON blob.
+func newCustomConsoleEncoder(cfg zapcore.EncoderConfig) zapcore.Encoder {
+	// We create a new encoder configuration to avoid modifying the original.
+	// This ensures that if the original cfg is used elsewhere, it remains unchanged.
+	consoleCfg := cfg
+	// The `EncodeName` is customized to add a dot suffix, making the component
+	// name visually distinct in the log line (e.g., "scalpel-cli.DiscoveryEngine.").
+	consoleCfg.EncodeName = func(loggerName string, enc zapcore.PrimitiveArrayEncoder) {
+		enc.AppendString(loggerName + ".")
+	}
+
+	// The custom encoder is built on top of Zap's standard ConsoleEncoder.
+	// By creating our own implementation, we gain full control over the final
+	// log format, allowing us to structure the output exactly as desired.
+	return zapcore.NewConsoleEncoder(consoleCfg)
 }
 
 // GetLogger returns the initialized global logger instance.

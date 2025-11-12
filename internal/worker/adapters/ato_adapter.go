@@ -2,18 +2,24 @@
 package adapters
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
 	"io"
 	"net/http"
+	"os"
+	"path/filepath"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/mitchellh/go-homedir"
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/auth/ato"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"go.uber.org/zap"
 )
 
@@ -65,11 +71,21 @@ func (a *ATOAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCont
 		return fmt.Errorf("invalid parameters type for ATO task; expected schemas.ATOTaskParams or *schemas.ATOTaskParams, got %s", actualType)
 	}
 
-	if len(params.Usernames) == 0 {
-		return fmt.Errorf("'usernames' parameter must be a non-empty array of strings")
+	// Load usernames from SecLists if not provided in task parameters
+	usernames, err := a.loadUsernames(analysisCtx.Global.Config, params)
+	if err != nil {
+		// FIX: Instead of calling Fatal, which exits the program, return an error.
+		// This allows tests to assert the error condition correctly.
+		analysisCtx.Logger.Error("Failed to load usernames for ATO attack", zap.Error(err))
+		return err
 	}
 
-	payloads := ato.GenerateSprayingPayloads(params.Usernames)
+	if len(usernames) == 0 {
+		analysisCtx.Logger.Warn("No usernames loaded for ATO attack, skipping.")
+		return nil
+	}
+
+	payloads := ato.GenerateSprayingPayloads(usernames)
 	analysisCtx.Logger.Info("Generated login payloads for spraying attack", zap.Int("payload_count", len(payloads)))
 
 	// Throttle requests to avoid overwhelming the target.
@@ -178,4 +194,59 @@ func (a *ATOAdapter) createAtoFinding(analysisCtx *core.AnalysisContext, vulnNam
 		CWE:            []string{cwe},
 	}
 	analysisCtx.AddFinding(finding)
+}
+
+// loadUsernames determines the list of usernames to use for the ATO attack.
+// It prioritizes usernames provided directly in the task parameters. If none are
+// provided, it attempts to load a default list from the SecLists repository,
+// using the path specified in the application configuration.
+func (a *ATOAdapter) loadUsernames(cfg config.Interface, params schemas.ATOTaskParams) ([]string, error) {
+	// If usernames are explicitly provided in the task, use them.
+	if len(params.Usernames) > 0 {
+		return params.Usernames, nil
+	}
+
+	// Otherwise, load from the configured SecLists path.
+	atoCfg := cfg.Scanners().Active.Auth.ATO
+	if atoCfg.SecListsPath == "" {
+		return nil, fmt.Errorf("ATO scanner is enabled, but no SecLists path is configured in config.yaml")
+	}
+
+	// Expand tilde for home directory support.
+	secListsDir, err := homedir.Expand(atoCfg.SecListsPath)
+	if err != nil {
+		return nil, fmt.Errorf("could not expand SecLists path '%s': %w", atoCfg.SecListsPath, err)
+	}
+
+	// Check if the directory exists.
+	if _, err := os.Stat(secListsDir); os.IsNotExist(err) {
+		return nil, fmt.Errorf("SecLists directory not found at '%s'. Please install SecLists or configure the correct path.", secListsDir)
+	}
+
+	// Construct the path to the default username list.
+	usernameFile := filepath.Join(secListsDir, "Usernames", "top-usernames-shortlist.txt")
+	if _, err := os.Stat(usernameFile); os.IsNotExist(err) {
+		return nil, fmt.Errorf("default username list not found at '%s'. Please ensure SecLists is installed correctly.", usernameFile)
+	}
+
+	// Read the usernames from the file.
+	file, err := os.Open(usernameFile)
+	if err != nil {
+		return nil, fmt.Errorf("failed to open username file '%s': %w", usernameFile, err)
+	}
+	defer file.Close()
+
+	var usernames []string
+	scanner := bufio.NewScanner(file)
+	for scanner.Scan() {
+		if username := strings.TrimSpace(scanner.Text()); username != "" {
+			usernames = append(usernames, username)
+		}
+	}
+
+	if err := scanner.Err(); err != nil {
+		return nil, fmt.Errorf("error reading username file '%s': %w", usernameFile, err)
+	}
+
+	return usernames, nil
 }
