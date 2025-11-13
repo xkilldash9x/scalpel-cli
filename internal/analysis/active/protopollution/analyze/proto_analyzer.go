@@ -18,10 +18,9 @@ import (
 )
 
 const (
-	ModuleName          = "PrototypePollutionAnalyzer"
-	jsCallbackName      = "__scalpel_protopollution_proof"
-	placeholderCanary   = "{{SCALPEL_CANARY}}"
-	placeholderCallback = "{{SCALPEL_CALLBACK}}"
+	ModuleName            = "PrototypePollutionAnalyzer"
+	placeholderCanary     = "{{SCALPEL_CANARY}}"
+	placeholderCallbackName = "{{SCALPEL_CALLBACK_NAME}}"
 )
 
 //go:embed shim.js
@@ -49,12 +48,13 @@ type PollutionProofEvent struct {
 // analysisContext holds all the state required for a single, concurrent analysis
 // of a target URL. It is created for the duration of one `Analyze` call and then discarded.
 type analysisContext struct {
-	ctx       context.Context
-	session   schemas.SessionContext
-	taskID    string
-	targetURL string
-	canary    string
-	logger    *zap.Logger
+	ctx          context.Context
+	session      schemas.SessionContext
+	taskID       string
+	targetURL    string
+	canary       string
+	callbackName string
+	logger       *zap.Logger
 }
 
 // NewAnalyzer creates a new, reusable instance of the prototype pollution analyzer.
@@ -92,12 +92,13 @@ func (a *Analyzer) Analyze(ctx context.Context, taskID, targetURL string) error 
 
 	// 2. Initialize an isolated context for this specific task.
 	aCtx := &analysisContext{
-		ctx:       ctx,
-		session:   session,
-		taskID:    taskID,
-		targetURL: targetURL,
-		canary:    "sclp_" + uuid.New().String()[:8], // Generate a unique canary for this run.
-		logger:    a.logger.With(zap.String("taskID", taskID), zap.String("target", targetURL)),
+		ctx:          ctx,
+		session:      session,
+		taskID:       taskID,
+		targetURL:    targetURL,
+		canary:       "sclp_" + uuid.New().String()[:8], // Generate a unique canary for this run.
+		callbackName: "sclp_cb_" + uuid.New().String()[:12], // Generate a unique, randomized callback name.
+		logger:       a.logger.With(zap.String("taskID", taskID), zap.String("target", targetURL)),
 	}
 
 	// 3. Instrument the browser session with our shim and callbacks.
@@ -135,11 +136,11 @@ func (a *Analyzer) Analyze(ctx context.Context, taskID, targetURL string) error 
 func (a *Analyzer) instrumentSession(ctx context.Context, session schemas.SessionContext, aCtx *analysisContext) error {
 	// The handler is now a method on analysisContext, which closes over the necessary state.
 	// This avoids complex parameter passing for the callback.
-	if err := session.ExposeFunction(ctx, jsCallbackName, aCtx.handlePollutionProof); err != nil {
+	if err := session.ExposeFunction(ctx, aCtx.callbackName, aCtx.handlePollutionProof); err != nil {
 		return fmt.Errorf("failed to expose proof function: %w", err)
 	}
 
-	shimScript := a.generateShim(aCtx.canary)
+	shimScript := a.generateShim(aCtx)
 
 	if err := session.InjectScriptPersistently(ctx, shimScript); err != nil {
 		return fmt.Errorf("failed to inject pp shim: %w", err)
@@ -192,10 +193,10 @@ func (aCtx *analysisContext) handlePollutionProof(event PollutionProofEvent) {
 }
 
 // generateShim prepares the JavaScript payload using fast string replacement.
-func (a *Analyzer) generateShim(canary string) string {
+func (a *Analyzer) generateShim(aCtx *analysisContext) string {
 	shim := protoPollutionShim
-	shim = strings.ReplaceAll(shim, placeholderCanary, canary)
-	shim = strings.ReplaceAll(shim, placeholderCallback, jsCallbackName)
+	shim = strings.ReplaceAll(shim, placeholderCanary, aCtx.canary)
+	shim = strings.ReplaceAll(shim, placeholderCallbackName, aCtx.callbackName)
 	return shim
 }
 

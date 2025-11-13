@@ -6,7 +6,12 @@
 
     // These placeholders are replaced by the Go analyzer before injection.
     let pollutionCanary = '{{SCALPEL_CANARY}}';
-    let detectionCallbackName = '__scalpel_protopollution_proof';
+    let detectionCallbackName = '{{SCALPEL_CALLBACK_NAME}}';
+
+    // Immediately capture the callback function into a local variable. This is the defense-in-depth
+    // measure against DOM Clobbering. Even if an element overwrites the global `window[detectionCallbackName]`,
+    // our shim will still hold a reference to the original function.
+    const callback = scope[detectionCallbackName];
 
     let domObserver = null;
 
@@ -38,12 +43,13 @@
      * @param {string} vector - A more detailed description or the actual malicious payload.
      */
     function notifyBackend(source, vector) {
-        if (typeof scope[detectionCallbackName] === 'function') {
+        // Use the locally captured callback function, not the global one.
+        if (typeof callback === 'function') {
             const stack = new Error().stack;
             // Use setTimeout to avoid blocking the main thread.
             setTimeout(() => {
                 try {
-                    scope[detectionCallbackName]({
+                    callback({
                         source: source,
                         canary: pollutionCanary,
                         vector: vector || "N/A",
