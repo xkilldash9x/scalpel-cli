@@ -564,6 +564,8 @@ func SetDefaults(v *viper.Viper) {
 	// -- Agent --
 	v.SetDefault("agent.llm.default_fast_model", "gemini-1.5-flash")
 	v.SetDefault("agent.llm.default_powerful_model", "gemini-1.5-pro")
+	// NEW: Set up default model configurations in the map.
+	setLLMDefaults(v)
 	v.SetDefault("agent.knowledge_graph.type", "postgres")
 	v.SetDefault("agent.knowledge_graph.postgres.host", "localhost")
 	v.SetDefault("agent.knowledge_graph.postgres.port", 5432)
@@ -746,6 +748,51 @@ func (c *Config) Validate() error {
 		return fmt.Errorf("agent configuration invalid: %w", err)
 	}
 	return nil
+}
+
+// setLLMDefaults populates the models map with default configurations for the LLM router.
+func setLLMDefaults(v *viper.Viper) {
+	// Define the map of default models
+	defaultModels := map[string]LLMModelConfig{
+		"gemini-1.5-pro": {
+			Provider:    ProviderGemini,
+			Model:       "gemini-1.5-pro-latest",
+			APIKey:      "", // Should be loaded from env
+			APITimeout:  2 * time.Minute,
+			Temperature: 0.7,
+			TopP:        0.9,
+			TopK:        40,
+			MaxTokens:   8192,
+		},
+		"gemini-1.5-flash": {
+			Provider:    ProviderGemini,
+			Model:       "gemini-1.5-flash-latest",
+			APIKey:      "", // Should be loaded from env
+			APITimeout:  90 * time.Second,
+			Temperature: 0.8,
+			TopP:        0.95,
+			TopK:        50,
+			MaxTokens:   4096,
+		},
+	}
+
+	// Set the entire map as the default for the 'agent.llm.models' key.
+	// Viper requires the map to be of type map[string]interface{} for defaults.
+	modelDefaults := make(map[string]interface{})
+	for key, modelCfg := range defaultModels {
+		modelDefaults[key] = map[string]interface{}{
+			"provider":       string(modelCfg.Provider),
+			"model":          modelCfg.Model,
+			"api_key":        modelCfg.APIKey,
+			"api_timeout":    modelCfg.APITimeout.String(),
+			"temperature":    modelCfg.Temperature,
+			"top_p":          modelCfg.TopP,
+			"top_k":          modelCfg.TopK,
+			"max_tokens":     modelCfg.MaxTokens,
+			"safety_filters": modelCfg.SafetyFilters,
+		}
+	}
+	v.SetDefault("agent.llm.models", modelDefaults)
 }
 
 // Validate checks the AutofixConfig for correctness, ensuring that if the feature

@@ -99,15 +99,17 @@ func (o *Orchestrator) StartScan(ctx context.Context, targets []string, scanID s
 				TaskID:     uuid.NewString(),
 				ScanID:     scanID,
 				Type:       schemas.TaskTestAuthIDOR,
+				TargetURL:  targets[0],
 				Parameters: schemas.IDORTaskParams{},
 			}
 		}
 		if scanners.Active.Auth.ATO.Enabled {
 			o.logger.Info("Dispatching ATO task")
 			mergedTaskChan <- schemas.Task{
-				TaskID: uuid.NewString(),
-				ScanID: scanID,
-				Type:   schemas.TaskTestAuthATO,
+				TaskID:    uuid.NewString(),
+				ScanID:    scanID,
+				Type:      schemas.TaskTestAuthATO,
+				TargetURL: targets[0],
 				Parameters: schemas.ATOTaskParams{
 					Usernames: []string{},
 				},

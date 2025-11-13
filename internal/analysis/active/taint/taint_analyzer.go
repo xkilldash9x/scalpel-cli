@@ -821,6 +821,65 @@ func (a *Analyzer) processEvent(event Event) {
 	}
 }
 
+// FIX: isErrorPageContext implements heuristics to determine if the context (URL and Title)
+// where an event occurred corresponds to an error page (e.g., 404, 500, generic error).
+// This helps reduce false positives caused by payload reflection on custom error pages.
+func (a *Analyzer) isErrorPageContext(pageURL, pageTitle string) bool {
+	// Heuristic 1: Check for common error patterns in the page title.
+	// Titles are often the most reliable indicator available client-side.
+	titleLower := strings.ToLower(pageTitle)
+	errorTitleKeywords := []string{
+		"404", "not found", "error", "failed", "unavailable", "bad request",
+		"internal server error", "access denied", "forbidden",
+		"problem loading page", // Matches the title visible in the screenshot tabs.
+		"site can't be reached",
+	}
+
+	for _, keyword := range errorTitleKeywords {
+		if strings.Contains(titleLower, keyword) {
+			// Add nuanced checks to avoid matching legitimate content (e.g., a blog post about errors).
+			// If the title strongly indicates an error (e.g., starts with the keyword), we trust it more.
+			if strings.HasPrefix(titleLower, keyword) {
+				return true
+			}
+
+			// Specific checks for generic keywords
+			if keyword == "not found" && (strings.Contains(titleLower, "page not found") || strings.Contains(titleLower, "404")) {
+				return true
+			}
+			if keyword == "error" && (strings.Contains(titleLower, "error code") || strings.Contains(titleLower, "an error occurred") || strings.Contains(titleLower, "internal server error")) {
+				return true
+			}
+
+			// If it just contains the keyword but none of the nuanced checks pass, continue checking other keywords.
+		}
+	}
+
+	// Heuristic 2: Check for error patterns in the URL (path or query).
+	// This is less reliable as URLs can be anything, but common patterns are worth checking.
+	urlLower := strings.ToLower(pageURL)
+	errorURLKeywords := []string{
+		"/404", "/error", "/not-found",
+		"error=", "errcode=", "status=4", "status=5", // Check for query params
+	}
+	for _, keyword := range errorURLKeywords {
+		if strings.Contains(urlLower, keyword) {
+			// This is a simpler check. If "error" is in the URL, we're more suspicious.
+			// We can refine this if it's too aggressive.
+			return true
+		}
+	}
+
+	// Heuristic 3: Check for analyzer specific loading messages from the shim.
+	if strings.Contains(pageTitle, "N/A (Loading)") || strings.Contains(pageTitle, "N/A (Security Exception)") {
+		// If the page is still loading or we couldn't access the title, we are uncertain.
+		// We choose to suppress findings in uncertain states to reduce noise.
+		return true
+	}
+
+	return false
+}
+
 // handles confirmed out of band callbacks and reports a finding.
 func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
 	a.probesMutex.RLock()
@@ -831,6 +890,10 @@ func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
 		a.logger.Debug("OAST interaction received for unknown or expired canary.", zap.String("canary", interaction.Canary))
 		return
 	}
+
+	// NOTE: We do not filter OAST findings based on error pages. OAST confirms
+	// server-side processing (e.g., SSRF, Blind RCE), which is valid regardless
+	// of the HTTP response rendered by the client.
 
 	a.logger.Warn("Vulnerability Confirmed via OAST Interaction!",
 		zap.String("source", string(probe.Source)),
@@ -846,9 +909,17 @@ func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
 		detail = "Blind vulnerability (e.g., SSRF, RCE) confirmed via OAST callback."
 	}
 
+	// Determine the occurrence URL. For OAST it's complex as we don't have the client context.
+	// We default to the target URL.
+	occurrenceURL := a.config.Target.String()
+
 	finding := CorrelatedFinding{
-		TaskID:            a.config.TaskID,
-		TargetURL:         a.config.Target.String(),
+		TaskID:    a.config.TaskID,
+		TargetURL: a.config.Target.String(),
+		// FIX: Populate occurrence context (limited for OAST).
+		OccurrenceURL:   occurrenceURL,
+		OccurrenceTitle: "N/A (Out of Band)",
+
 		Sink:              schemas.SinkOASTInteraction,
 		Origin:            probe.Source,
 		Value:             probe.Value,
@@ -883,6 +954,19 @@ func (a *Analyzer) processExecutionProof(proof ExecutionProofEvent) {
 		return
 	}
 
+	// FIX: Implement filtering based on page context to reduce FPs on error pages.
+	// FIX: Pass PageURL to the context checker.
+	if a.isErrorPageContext(proof.PageURL, proof.PageTitle) {
+		a.logger.Info("Execution proof suppressed: Detected on likely error page.",
+			zap.String("url", proof.PageURL),
+			zap.String("title", proof.PageTitle),
+			zap.String("canary", proof.Canary),
+		)
+		// Although execution on an error page is technically a vulnerability, we suppress
+		// it here to meet the requirement of reducing noise from 404/error scenarios.
+		return
+	}
+
 	a.logger.Warn("Vulnerability Confirmed via Execution Proof!",
 		zap.String("source", string(probe.Source)),
 		zap.String("type", string(probe.Type)),
@@ -890,8 +974,12 @@ func (a *Analyzer) processExecutionProof(proof ExecutionProofEvent) {
 	)
 
 	finding := CorrelatedFinding{
-		TaskID:            a.config.TaskID,
-		TargetURL:         a.config.Target.String(),
+		TaskID:    a.config.TaskID,
+		TargetURL: a.config.Target.String(),
+		// FIX: Populate occurrence context.
+		OccurrenceURL:   proof.PageURL,
+		OccurrenceTitle: proof.PageTitle,
+
 		Sink:              schemas.SinkExecution,
 		Origin:            probe.Source,
 		Value:             probe.Value,
@@ -934,10 +1022,27 @@ func (a *Analyzer) processSinkEvent(event SinkEvent) {
 		)
 
 		if a.isContextValid(event, probe) {
+
+			// FIX: Implement filtering based on page context to reduce FPs on error pages.
+			// FIX: Pass PageURL to the context checker.
+			if a.isErrorPageContext(event.PageURL, event.PageTitle) {
+				a.logger.Info("Taint flow suppressed: Detected on likely error page.",
+					zap.String("url", event.PageURL),
+					zap.String("title", event.PageTitle),
+					zap.String("canary", canary),
+					zap.String("sink", string(event.Type)),
+				)
+				continue // Skip reporting this specific flow.
+			}
+
 			sanitizationLevel, detailSuffix := a.checkSanitization(event.Value, probe)
 			finding := CorrelatedFinding{
-				TaskID:            a.config.TaskID,
-				TargetURL:         a.config.Target.String(),
+				TaskID:    a.config.TaskID,
+				TargetURL: a.config.Target.String(),
+				// FIX: Populate occurrence context.
+				OccurrenceURL:   event.PageURL,
+				OccurrenceTitle: event.PageTitle,
+
 				Sink:              event.Type,
 				Origin:            probe.Source,
 				Value:             event.Value,
@@ -975,6 +1080,17 @@ func (a *Analyzer) processPrototypePollutionConfirmation(event SinkEvent) {
 		return
 	}
 
+	// FIX: Implement filtering based on page context.
+	// FIX: Pass PageURL to the context checker.
+	if a.isErrorPageContext(event.PageURL, event.PageTitle) {
+		a.logger.Info("Prototype Pollution suppressed: Detected on likely error page.",
+			zap.String("url", event.PageURL),
+			zap.String("title", event.PageTitle),
+			zap.String("canary", canary),
+		)
+		return
+	}
+
 	a.logger.Warn("Vulnerability Confirmed: JavaScript Prototype Pollution!",
 		zap.String("source", string(probe.Source)),
 		zap.String("canary", canary),
@@ -982,8 +1098,12 @@ func (a *Analyzer) processPrototypePollutionConfirmation(event SinkEvent) {
 	)
 
 	finding := CorrelatedFinding{
-		TaskID:            a.config.TaskID,
-		TargetURL:         a.config.Target.String(),
+		TaskID:    a.config.TaskID,
+		TargetURL: a.config.Target.String(),
+		// FIX: Populate occurrence context.
+		OccurrenceURL:   event.PageURL,
+		OccurrenceTitle: event.PageTitle,
+
 		Sink:              schemas.SinkPrototypePollution,
 		Origin:            probe.Source,
 		Value:             probe.Value,
