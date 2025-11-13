@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"errors"
 	"regexp"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -58,14 +59,26 @@ func TestAnalyze_FindingFound(t *testing.T) {
 	// --- Mocks ---
 	mockBrowserManager.On("NewAnalysisContext", ctx, cfg, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil).Once()
 
-	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil).Once()
+	// The callback name is now randomized, so we need to capture it.
+	var capturedCallbackName string
+	mockSession.On("ExposeFunction", ctx, mock.MatchedBy(func(name string) bool {
+		return strings.HasPrefix(name, "sclp_cb_")
+	}), mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil).Once().Run(func(args mock.Arguments) {
+		capturedCallbackName = args.String(1)
+	})
 
 	mockSession.On("InjectScriptPersistently", ctx, mock.AnythingOfType("string")).Return(nil).Once().Run(func(args mock.Arguments) {
 		script := args.String(1)
-		re := regexp.MustCompile(`let pollutionCanary = '([^']+)';`)
-		matches := re.FindStringSubmatch(script)
-		require.Len(t, matches, 2, "Could not find canary in injected script.")
-		capturedCanary = matches[1]
+		canaryRe := regexp.MustCompile(`let pollutionCanary = '([^']+)';`)
+		canaryMatches := canaryRe.FindStringSubmatch(script)
+		require.Len(t, canaryMatches, 2, "Could not find canary in injected script.")
+		capturedCanary = canaryMatches[1]
+
+		callbackRe := regexp.MustCompile(`let detectionCallbackName = '([^']+)';`)
+		callbackMatches := callbackRe.FindStringSubmatch(script)
+		require.Len(t, callbackMatches, 2, "Could not find callback name in injected script.")
+		// We assert that the callback name in the script matches the one passed to ExposeFunction.
+		assert.Equal(t, capturedCallbackName, callbackMatches[1])
 	})
 
 	mockSession.On("AddFinding", ctx, mock.AnythingOfType("schemas.Finding")).Return(nil).Once().Run(func(args mock.Arguments) {
@@ -78,9 +91,10 @@ func TestAnalyze_FindingFound(t *testing.T) {
 		go func() {
 			time.Sleep(20 * time.Millisecond)
 			require.NotEmpty(t, capturedCanary, "Canary was not captured before navigation simulation")
+			require.NotEmpty(t, capturedCallbackName, "Callback name was not captured before navigation simulation")
 
 			// Use the mock's helper to get the function and call it.
-			fn, ok := mockSession.GetExposedFunction(jsCallbackName)
+			fn, ok := mockSession.GetExposedFunction(capturedCallbackName)
 			require.True(t, ok, "Callback function was not set via ExposeFunction")
 			callback, ok := fn.(func(PollutionProofEvent))
 			require.True(t, ok, "Exposed function has the wrong signature")
@@ -141,7 +155,7 @@ func TestAnalyze_NoFinding(t *testing.T) {
 	ctx := context.Background()
 
 	mockBrowserManager.On("NewAnalysisContext", ctx, cfg, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil)
-	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil).Once()
+	mockSession.On("ExposeFunction", ctx, mock.AnythingOfType("string"), mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil).Once()
 	mockSession.On("InjectScriptPersistently", ctx, mock.AnythingOfType("string")).Return(nil)
 	mockSession.On("Navigate", ctx, "http://clean.example.com").Return(nil)
 	mockSession.On("Close", mock.Anything).Return(nil)
@@ -183,7 +197,7 @@ func TestAnalyze_ContextCancellation(t *testing.T) {
 	ctx, cancel := context.WithCancel(context.Background())
 
 	mockBrowserManager.On("NewAnalysisContext", mock.Anything, cfg, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil)
-	mockSession.On("ExposeFunction", mock.Anything, jsCallbackName, mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil)
+	mockSession.On("ExposeFunction", mock.Anything, mock.AnythingOfType("string"), mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil)
 	mockSession.On("InjectScriptPersistently", mock.Anything, mock.AnythingOfType("string")).Return(nil)
 	mockSession.On("Navigate", mock.Anything, "http://slow.example.com").Return(nil).Run(func(args mock.Arguments) {
 		go func() {
@@ -216,7 +230,7 @@ func TestAnalyze_InstrumentationError(t *testing.T) {
 	expectedErr := errors.New("browser disconnected")
 
 	mockBrowserManager.On("NewAnalysisContext", ctx, cfg, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil)
-	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.Anything).Return(expectedErr)
+	mockSession.On("ExposeFunction", ctx, mock.AnythingOfType("string"), mock.Anything).Return(expectedErr)
 	mockSession.On("Close", ctx).Return(nil)
 
 	err := analyzer.Analyze(ctx, "task-instrument-fail", "http://example.com")
@@ -237,14 +251,18 @@ func TestAnalyze_MismatchedCanary(t *testing.T) {
 	analyzer := NewAnalyzer(logger, mockBrowserManager, cfg)
 	ctx := context.Background()
 
+	var capturedCallbackName string
 	mockBrowserManager.On("NewAnalysisContext", ctx, cfg, schemas.Persona{}, "", "", (chan<- schemas.Finding)(nil)).Return(mockSession, nil)
-	mockSession.On("ExposeFunction", ctx, jsCallbackName, mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil)
+	mockSession.On("ExposeFunction", ctx, mock.AnythingOfType("string"), mock.AnythingOfType("func(proto.PollutionProofEvent)")).Return(nil).Run(func(args mock.Arguments) {
+		capturedCallbackName = args.String(1)
+	})
 	mockSession.On("InjectScriptPersistently", ctx, mock.AnythingOfType("string")).Return(nil)
 	mockSession.On("Navigate", ctx, "http://example.com").Return(nil).Run(func(args mock.Arguments) {
 		go func() {
 			time.Sleep(10 * time.Millisecond)
+			require.NotEmpty(t, capturedCallbackName)
 			// Use the mock's helper to get the function and call it.
-			fn, ok := mockSession.GetExposedFunction(jsCallbackName)
+			fn, ok := mockSession.GetExposedFunction(capturedCallbackName)
 			require.True(t, ok, "Callback function was not set via ExposeFunction")
 			callback, ok := fn.(func(PollutionProofEvent))
 			require.True(t, ok, "Exposed function has the wrong signature")
