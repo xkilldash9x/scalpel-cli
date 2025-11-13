@@ -178,6 +178,10 @@ func newCustomConsoleEncoder(cfg zapcore.EncoderConfig) zapcore.Encoder {
 		enc.AppendString(loggerName + ".")
 	}
 
+	// Use a space as a separator instead of the default tab for a cleaner,
+	// single-line output.
+	consoleCfg.ConsoleSeparator = " "
+
 	// The custom encoder is built on top of Zap's standard ConsoleEncoder.
 	// By creating our own implementation, we gain full control over the final
 	// log format, allowing us to structure the output exactly as desired.
