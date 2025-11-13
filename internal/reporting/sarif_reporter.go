@@ -13,6 +13,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	// The import "github.com/xkilldash9x/scalpel-cli/cmd" has been removed to break the import cycle.
 	"github.com/xkilldash9x/scalpel-cli/internal/reporting/sarif"
 )
@@ -42,7 +43,8 @@ type SARIFReporter struct {
 
 // NewSARIFReporter creates a new reporter that writes SARIF output.
 // The signature is updated to accept the toolVersion via dependency injection.
-func NewSARIFReporter(writer io.WriteCloser, logger *zap.Logger, toolVersion string) *SARIFReporter {
+func NewSARIFReporter(writer io.WriteCloser, toolVersion string) *SARIFReporter {
+	logger := observability.GetLogger().Named("sarif_reporter")
 	// Initialize the SARIF log structure with tool information.
 	// The tool version is now passed in as an argument.
 	log := &sarif.Log{

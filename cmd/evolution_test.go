@@ -9,7 +9,6 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
@@ -40,7 +39,7 @@ func setupTestConfig(t *testing.T) config.Interface {
 
 // NOTE: This assumes runEvolve, AnalystRunner, and the initializer function type are defined in the cmd package.
 func TestRunEvolve(t *testing.T) {
-	logger := zaptest.NewLogger(t)
+	logger := zap.NewNop()
 	ctx := context.Background()
 	cfg := setupTestConfig(t)           // Get a local config instance.
 	mockLLM := new(mocks.MockLLMClient) // Create the mock LLM

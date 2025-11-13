@@ -9,6 +9,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 )
 
 // Reporter defines the interface for writing scan results to an output.
@@ -33,11 +34,8 @@ func (nwc *nopWriteCloser) Close() error {
 
 // New creates a new reporter based on the specified format and output path.
 // The signature is updated to accept the toolVersion for dependency injection.
-func New(format, outputPath string, logger *zap.Logger, toolVersion string) (Reporter, error) {
-	if logger == nil {
-		// Robustness: Ensure a logger is always present.
-		return nil, fmt.Errorf("logger cannot be nil")
-	}
+func New(format, outputPath, toolVersion string) (Reporter, error) {
+	logger := observability.GetLogger()
 
 	var writer io.WriteCloser // Use interface type
 	isStdOut := outputPath == "" || outputPath == "stdout"
@@ -67,7 +65,7 @@ func New(format, outputPath string, logger *zap.Logger, toolVersion string) (Rep
 	switch format {
 	case "sarif":
 		// Pass the toolVersion down to the SARIF reporter's constructor.
-		return NewSARIFReporter(writer, logger.Named("sarif_reporter"), toolVersion), nil
+		return NewSARIFReporter(writer, toolVersion), nil
 	case "json":
 		cleanup() // Close the file handle
 		return nil, fmt.Errorf("json reporter not yet implemented")
