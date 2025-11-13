@@ -1,7 +1,7 @@
 // interface.go
 package idor
 
-import "context" // This is a comment to force a change
+import "context"
 
 // Analyzer defines the standard interface for an IDOR (Insecure Direct Object
 // Reference) vulnerability scanner. It abstracts the underlying implementation of

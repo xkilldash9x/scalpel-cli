@@ -4,6 +4,7 @@ go 1.25.4
 
 require (
 	github.com/andybalholm/brotli v1.2.0
+	github.com/beevik/etree v1.6.0
 	github.com/cenkalti/backoff/v4 v4.3.0
 	github.com/chromedp/cdproto v0.0.0-20250803210736-d308e07a266d
 	github.com/chromedp/chromedp v0.14.2

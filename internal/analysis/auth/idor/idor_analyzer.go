@@ -3,6 +3,7 @@ package idor
 
 import (
 	"context"
+	"fmt"
 	"log"
 	"runtime"
 
@@ -12,16 +13,13 @@ import (
 )
 
 // IDORAnalyzer is the main orchestrator for the Insecure Direct Object Reference
-// (IDOR) detection process. It implements the `Analyzer` interface and uses a
-// JSON comparison service to semantically compare HTTP responses.
+// (IDOR) detection process. It implements the `Analyzer` interface.
 type IDORAnalyzer struct {
-	logger   *log.Logger // Standard logger for compatibility.
+	logger   *log.Logger                // Standard logger for compatibility.
 	comparer jsoncompare.JSONComparison // The injected service for semantic JSON comparison.
 }
 
-// NewIDORAnalyzer creates a new instance of the IDORAnalyzer. It requires a
-// logger and an implementation of the `jsoncompare.JSONComparison` interface.
-// If the comparer is nil, it initializes a default instance with a warning.
+// NewIDORAnalyzer creates a new instance of the IDORAnalyzer.
 func NewIDORAnalyzer(logger *log.Logger, comparer jsoncompare.JSONComparison) Analyzer {
 	if logger == nil {
 		logger = log.Default()
@@ -39,9 +37,7 @@ func NewIDORAnalyzer(logger *log.Logger, comparer jsoncompare.JSONComparison) An
 	}
 }
 
-// AnalyzeTraffic is the primary entry point for the IDOR analysis. It takes a
-// slice of HTTP traffic, validates the configuration, sets production-ready
-// defaults, and then invokes the core detection logic.
+// AnalyzeTraffic is the primary entry point for the IDOR analysis.
 func (a *IDORAnalyzer) AnalyzeTraffic(ctx context.Context, traffic []RequestResponsePair, config Config) ([]Finding, error) {
 	a.logger.Println("Starting IDOR analysis...")
 
@@ -52,12 +48,18 @@ func (a *IDORAnalyzer) AnalyzeTraffic(ctx context.Context, traffic []RequestResp
 	}
 
 	// Validate configuration and set production-ready defaults.
+	// This dynamically modifies the config based on available sessions.
 	if err := a.validateAndConfigure(&config); err != nil {
 		return nil, err
 	}
 
+	// Check if any strategy remains enabled after validation
+	if config.SkipHorizontal && config.SkipManipulation && config.SkipUnauthenticated {
+		a.logger.Println("All IDOR analysis strategies are disabled or cannot run. Exiting.")
+		return nil, nil
+	}
+
 	// 2. Execute Detection Logic
-	// Pass the injected comparer service to the detection logic.
 	findings, err := Detect(ctx, traffic, config, a.logger, a.comparer)
 	if err != nil {
 		// Check if the error is due to context cancellation.
@@ -74,21 +76,48 @@ func (a *IDORAnalyzer) AnalyzeTraffic(ctx context.Context, traffic []RequestResp
 	return findings, nil
 }
 
-// validateAndConfigure checks the configuration and sets sensible production defaults.
+// validateAndConfigure checks the configuration, sets defaults, and adjusts strategies based on available sessions.
 func (a *IDORAnalyzer) validateAndConfigure(config *Config) error {
-	// Validate Sessions
-	if config.Session == nil || config.SecondSession == nil {
-		return &ErrUnauthenticated{Message: "Both Session and SecondSession must be provided."}
+	// Validate Sessions for Authenticated Strategies
+	requiresPrimarySession := !config.SkipManipulation
+	requiresSecondSession := !config.SkipHorizontal
+
+	// Check Primary Session (User A)
+	if requiresPrimarySession {
+		if config.Session == nil || !config.Session.IsAuthenticated() {
+			a.logger.Println("Warning: Primary session (User A) missing or unauthenticated. Disabling Manipulation checks.")
+			config.SkipManipulation = true
+		}
 	}
-	if !config.Session.IsAuthenticated() {
-		return &ErrUnauthenticated{Message: "Primary session is not authenticated."}
+
+	// Check Secondary Session (User B)
+	if requiresSecondSession {
+		if config.Session == nil || !config.Session.IsAuthenticated() {
+			// Cannot run Horizontal if User A is missing (need User A's traffic context)
+			a.logger.Println("Warning: Primary session (User A) missing or unauthenticated. Disabling Horizontal checks.")
+			config.SkipHorizontal = true
+		} else if config.SecondSession == nil || !config.SecondSession.IsAuthenticated() {
+			// If SecondSession is missing, we can still run Manipulation and Unauthenticated.
+			a.logger.Println("Warning: Secondary session (User B) missing or unauthenticated. Disabling Horizontal checks.")
+			config.SkipHorizontal = true
+		}
 	}
-	if !config.SecondSession.IsAuthenticated() {
-		return &ErrUnauthenticated{Message: "Secondary session is not authenticated."}
+
+	// Handle cases where no authenticated sessions are available.
+	isAuthenticatedAvailable := (config.Session != nil && config.Session.IsAuthenticated())
+	if !isAuthenticatedAvailable {
+		if !config.SkipUnauthenticated {
+			a.logger.Println("No valid authenticated sessions provided. Proceeding with Unauthenticated checks only.")
+			// Ensure authenticated strategies are marked as skipped.
+			config.SkipHorizontal = true
+			config.SkipManipulation = true
+		} else {
+			// Error if no sessions are available AND unauthenticated checks are disabled.
+			return fmt.Errorf("no valid sessions provided and Unauthenticated checks are disabled; nothing to analyze")
+		}
 	}
 
 	// Set default comparison options if not initialized.
-	// We check if the Rules struct within Options is initialized by looking at EntropyThreshold.
 	if config.ComparisonOptions.Rules.EntropyThreshold == 0 {
 		// Use the default options from the centralized service.
 		config.ComparisonOptions = jsoncompare.DefaultOptions()

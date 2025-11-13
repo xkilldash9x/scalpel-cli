@@ -95,11 +95,16 @@ func (a *IDORAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCon
 	// -- Loop through each identifier and test for IDOR by manipulating it.
 	for _, ident := range identifiers {
 		logger := analysisCtx.Logger.With(zap.String("identifier_value", ident.Value), zap.String("location", string(ident.Location)))
-		testValue, err := idor.GenerateTestValue(ident)
+		testValues, err := idor.GenerateTestValues(ident)
 		if err != nil {
-			logger.Debug("Cannot generate predictable test value for identifier.", zap.Error(err))
+			logger.Debug("Cannot generate predictable test values for identifier.", zap.Error(err))
 			continue
 		}
+		if len(testValues) == 0 {
+			logger.Debug("No test values generated for identifier.")
+			continue
+		}
+		testValue := testValues[0]
 		logger.Info("Generated test value", zap.String("test_value", testValue))
 
 		// -- Create a new request with the manipulated identifier.
