@@ -571,14 +571,29 @@ func (s *Session) initializeCursorPosition(ctx context.Context) error {
 // [Rest of the file remains unchanged from the provided input]
 // initializeTaintShim builds, exposes the callback, and injects the IAST shim script.
 func (s *Session) initializeTaintShim(ctx context.Context, template, configJSON string) error {
-	script, err := taint.BuildTaintShim(template, configJSON)
+	// VULN-FIX: Generate unique callback names for this analysis session to prevent DOM Clobbering.
+	shortID := uuid.New().String()[:8]
+	sinkCallbackName := fmt.Sprintf("%s_%s", taint.JSCallbackSinkEvent, shortID)
+	proofCallbackName := fmt.Sprintf("%s_%s", taint.JSCallbackExecutionProof, shortID)
+	errorCallbackName := fmt.Sprintf("%s_%s", taint.JSCallbackShimError, shortID)
+
+	script, err := taint.BuildTaintShim(template, configJSON, sinkCallbackName, proofCallbackName, errorCallbackName)
 	if err != nil {
 		return fmt.Errorf("failed to build shim script: %w", err)
 	}
 
-	// Expose the reporting function using the operational context.
-	if err := s.ExposeFunction(ctx, "__scalpel_sink_event", s.handleTaintEvent); err != nil {
+	// Expose the reporting functions using the operational context.
+	if err := s.ExposeFunction(ctx, sinkCallbackName, s.handleTaintEvent); err != nil {
 		return fmt.Errorf("failed to expose sink event handler: %w", err)
+	}
+	// Expose dummy handlers for proof and error events to match the new shim's expectations.
+	// A proper implementation would require these handlers to be passed in or the session
+	// to have a more direct connection to the taint analyzer.
+	if err := s.ExposeFunction(ctx, proofCallbackName, s.handleExecutionProofEvent); err != nil {
+		s.logger.Warn("Failed to expose dummy execution proof handler. This may affect some taint probes.", zap.Error(err))
+	}
+	if err := s.ExposeFunction(ctx, errorCallbackName, s.handleShimErrorEvent); err != nil {
+		s.logger.Warn("Failed to expose dummy shim error handler.", zap.Error(err))
 	}
 
 	// Inject the script persistently using the operational context.
@@ -652,6 +667,16 @@ func (s *Session) handleTaintEvent(eventData map[string]interface{}) {
 	if err := s.AddFinding(findingCtx, finding); err != nil {
 		s.logger.Error("Failed to add IAST finding.", zap.Error(err))
 	}
+}
+
+// handleExecutionProofEvent is a dummy callback for the IAST shim.
+func (s *Session) handleExecutionProofEvent(eventData map[string]interface{}) {
+	s.logger.Debug("Received execution proof event (dummy handler).", zap.Any("data", eventData))
+}
+
+// handleShimErrorEvent is a dummy callback for the IAST shim.
+func (s *Session) handleShimErrorEvent(eventData map[string]interface{}) {
+	s.logger.Warn("Received shim error event (dummy handler).", zap.Any("data", eventData))
 }
 
 // ID returns the unique identifier for the session.

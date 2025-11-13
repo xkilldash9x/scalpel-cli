@@ -48,19 +48,23 @@ func (a *IDORAnalyzer) AnalyzeTraffic(ctx context.Context, traffic []RequestResp
 	}
 
 	// Validate configuration and set production-ready defaults.
-	// This dynamically modifies the config based on available sessions.
 	if err := a.validateAndConfigure(&config); err != nil {
 		return nil, err
 	}
 
 	// Check if any strategy remains enabled after validation
-	if config.SkipHorizontal && config.SkipManipulation && config.SkipUnauthenticated {
+	if config.SkipHorizontal && config.SkipManipulation && config.SkipUnauthenticated && config.SkipHorizontalManipulation {
 		a.logger.Println("All IDOR analysis strategies are disabled or cannot run. Exiting.")
 		return nil, nil
 	}
 
-	// 2. Execute Detection Logic
-	findings, err := Detect(ctx, traffic, config, a.logger, a.comparer)
+	// (Strategic 5.2) Initialize and populate the Identifier Pool
+	identifierPool := NewIdentifierPool()
+	a.populateIdentifierPool(traffic, identifierPool)
+	a.logger.Printf("Identifier Pool populated with %d unique identifiers.", identifierPool.Count())
+
+	// 2. Execute Detection Logic (Pass the pool to Detect)
+	findings, err := Detect(ctx, traffic, config, a.logger, a.comparer, identifierPool)
 	if err != nil {
 		// Check if the error is due to context cancellation.
 		if ctx.Err() != nil {
@@ -76,11 +80,29 @@ func (a *IDORAnalyzer) AnalyzeTraffic(ctx context.Context, traffic []RequestResp
 	return findings, nil
 }
 
+// (Strategic 5.2) populateIdentifierPool extracts identifiers from all traffic (requests and responses).
+func (a *IDORAnalyzer) populateIdentifierPool(traffic []RequestResponsePair, pool *IdentifierPool) {
+	for _, pair := range traffic {
+		// Extract from request
+		reqIdentifiers := ExtractIdentifiers(pair.Request, pair.RequestBody)
+		for _, ident := range reqIdentifiers {
+			pool.Add(ident)
+		}
+
+		// Extract from response bodies (significantly improves pool quality).
+		respIdentifiers := ExtractIdentifiersFromResponse(pair.Response, pair.ResponseBody)
+		for _, ident := range respIdentifiers {
+			pool.Add(ident)
+		}
+	}
+}
+
 // validateAndConfigure checks the configuration, sets defaults, and adjusts strategies based on available sessions.
 func (a *IDORAnalyzer) validateAndConfigure(config *Config) error {
 	// Validate Sessions for Authenticated Strategies
 	requiresPrimarySession := !config.SkipManipulation
-	requiresSecondSession := !config.SkipHorizontal
+	// (Strategic 5.1) Horizontal and HorizontalManipulation require SecondSession
+	requiresSecondSession := !config.SkipHorizontal || !config.SkipHorizontalManipulation
 
 	// Check Primary Session (User A)
 	if requiresPrimarySession {
@@ -93,13 +115,15 @@ func (a *IDORAnalyzer) validateAndConfigure(config *Config) error {
 	// Check Secondary Session (User B)
 	if requiresSecondSession {
 		if config.Session == nil || !config.Session.IsAuthenticated() {
-			// Cannot run Horizontal if User A is missing (need User A's traffic context)
-			a.logger.Println("Warning: Primary session (User A) missing or unauthenticated. Disabling Horizontal checks.")
+			// Cannot run Horizontal strategies if User A is missing (need User A's traffic context)
+			a.logger.Println("Warning: Primary session (User A) missing or unauthenticated. Disabling Horizontal and HorizontalManipulation checks.")
 			config.SkipHorizontal = true
+			config.SkipHorizontalManipulation = true
 		} else if config.SecondSession == nil || !config.SecondSession.IsAuthenticated() {
-			// If SecondSession is missing, we can still run Manipulation and Unauthenticated.
-			a.logger.Println("Warning: Secondary session (User B) missing or unauthenticated. Disabling Horizontal checks.")
+			// If SecondSession is missing, we cannot run Horizontal strategies.
+			a.logger.Println("Warning: Secondary session (User B) missing or unauthenticated. Disabling Horizontal and HorizontalManipulation checks.")
 			config.SkipHorizontal = true
+			config.SkipHorizontalManipulation = true
 		}
 	}
 
@@ -111,17 +135,24 @@ func (a *IDORAnalyzer) validateAndConfigure(config *Config) error {
 			// Ensure authenticated strategies are marked as skipped.
 			config.SkipHorizontal = true
 			config.SkipManipulation = true
+			config.SkipHorizontalManipulation = true
 		} else {
 			// Error if no sessions are available AND unauthenticated checks are disabled.
 			return fmt.Errorf("no valid sessions provided and Unauthenticated checks are disabled; nothing to analyze")
 		}
 	}
 
+	// (Fix 3.2) Log safety status
+	if config.AllowUnsafeMethods {
+		a.logger.Println("WARNING: Unsafe HTTP methods (POST, PUT, DELETE, PATCH) are enabled. This may cause state changes.")
+	} else {
+		a.logger.Println("Running in safe mode. Only testing safe methods (e.g., GET).")
+	}
+
 	// Set default comparison options if not initialized.
 	if config.ComparisonOptions.Rules.EntropyThreshold == 0 {
 		// Use the default options from the centralized service.
 		config.ComparisonOptions = jsoncompare.DefaultOptions()
-		a.logger.Println("Using default comparison options from jsoncompare service.")
 	}
 
 	// Set default concurrency level
@@ -133,9 +164,9 @@ func (a *IDORAnalyzer) validateAndConfigure(config *Config) error {
 		a.logger.Printf("Setting concurrency level to %d.", config.ConcurrencyLevel)
 	}
 
-	// Set default HTTP client with networking package
+	// (Fix 4.1) Set default HTTP client with networking package (Secure Transport)
 	if config.HttpClient == nil {
-		a.logger.Println("Configuring default production HTTP client.")
+		a.logger.Println("Configuring default production HTTP client (includes SSRF protection).")
 		// Production-ready HTTP client configuration
 		clientConfig := network.NewBrowserClientConfig()
 		config.HttpClient = network.NewClient(clientConfig)

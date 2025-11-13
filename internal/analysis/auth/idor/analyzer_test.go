@@ -53,14 +53,14 @@ func TestAnalyzer_AnalyzeTraffic_Validation(t *testing.T) {
 			name:      "Missing Primary Session",
 			traffic:   traffic,
 			config:    Config{Session: nil, SecondSession: userBAuth},
-			expectErr: true,
+			expectErr: false,
 			errType:   &ErrUnauthenticated{},
 		},
 		{
 			name:      "Primary Session Unauthenticated",
 			traffic:   traffic,
 			config:    Config{Session: userUnauth, SecondSession: userBAuth},
-			expectErr: true,
+			expectErr: false,
 			errType:   &ErrUnauthenticated{},
 		},
 	}

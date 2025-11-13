@@ -9,6 +9,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"net/url"
 	"os"
 	"path/filepath"
 	"strings"
@@ -21,6 +22,13 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"go.uber.org/zap"
+)
+
+// Constants for default behavior if not specified in task parameters (assuming future schema updates).
+const (
+	defaultUserField   = "username"
+	defaultPassField   = "password"
+	defaultContentType = "application/json"
 )
 
 type ATOAdapter struct {
@@ -74,8 +82,6 @@ func (a *ATOAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCont
 	// Load usernames from SecLists if not provided in task parameters
 	usernames, err := a.loadUsernames(analysisCtx.Global.Config, params)
 	if err != nil {
-		// FIX: Instead of calling Fatal, which exits the program, return an error.
-		// This allows tests to assert the error condition correctly.
 		analysisCtx.Logger.Error("Failed to load usernames for ATO attack", zap.Error(err))
 		return err
 	}
@@ -92,6 +98,21 @@ func (a *ATOAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCont
 	throttle := time.NewTicker(200 * time.Millisecond)
 	defer throttle.Stop()
 
+	// Determine request structure (Fields and Content-Type).
+	// NOTE: We assume these fields might be added to schemas.ATOTaskParams in the future.
+	// For now, we use defaults, making the adapter less flexible.
+	userField := defaultUserField
+	passField := defaultPassField
+	contentType := defaultContentType
+
+	/*
+		// Example of how to integrate if schema is updated:
+		if params.UserField != "" {
+			userField = params.UserField
+		}
+		// ... similar for PassField and ContentType
+	*/
+
 	for _, attempt := range payloads {
 		// Check for cancellation signal before each attempt.
 		select {
@@ -99,28 +120,55 @@ func (a *ATOAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisCont
 			analysisCtx.Logger.Warn("ATO analysis cancelled by context.", zap.Error(ctx.Err()))
 			return ctx.Err()
 		case <-throttle.C: // Receive from the ticker's channel 'C'.
-			a.performLoginAttempt(ctx, analysisCtx, attempt)
+			a.performLoginAttempt(ctx, analysisCtx, attempt, userField, passField, contentType)
 		}
 	}
 	analysisCtx.Logger.Info("ATO analysis finished.")
 	return nil
 }
 
-func (a *ATOAdapter) performLoginAttempt(ctx context.Context, analysisCtx *core.AnalysisContext, attempt ato.LoginAttempt) {
+// prepareRequestBody handles JSON and Form URL Encoded content types dynamically.
+func (a *ATOAdapter) prepareRequestBody(attempt ato.LoginAttempt, userField, passField, contentType string) (io.Reader, error) {
+
+	if strings.Contains(contentType, "application/json") {
+		payload := map[string]string{
+			userField: attempt.Username,
+			passField: attempt.Password,
+		}
+		payloadBytes, err := json.Marshal(payload)
+		if err != nil {
+			return nil, fmt.Errorf("failed to marshal JSON payload: %w", err)
+		}
+		return bytes.NewReader(payloadBytes), nil
+	}
+
+	if strings.Contains(contentType, "application/x-www-form-urlencoded") {
+		values := url.Values{}
+		values.Add(userField, attempt.Username)
+		values.Add(passField, attempt.Password)
+		return strings.NewReader(values.Encode()), nil
+	}
+
+	return nil, fmt.Errorf("unsupported content type: %s", contentType)
+}
+
+func (a *ATOAdapter) performLoginAttempt(ctx context.Context, analysisCtx *core.AnalysisContext, attempt ato.LoginAttempt, userField, passField, contentType string) {
 	logger := analysisCtx.Logger.With(zap.String("username", attempt.Username))
-	payloadBytes, err := json.Marshal(map[string]string{"username": attempt.Username, "password": attempt.Password})
+
+	// ENHANCEMENT: Handle different request body formats.
+	requestBody, err := a.prepareRequestBody(attempt, userField, passField, contentType)
 	if err != nil {
-		logger.Error("Failed to marshal login payload", zap.Error(err))
+		logger.Error("Failed to prepare login payload", zap.Error(err))
 		return
 	}
 
-	req, err := http.NewRequestWithContext(ctx, "POST", analysisCtx.TargetURL.String(), bytes.NewReader(payloadBytes))
+	req, err := http.NewRequestWithContext(ctx, "POST", analysisCtx.TargetURL.String(), requestBody)
 	if err != nil {
 		logger.Error("Failed to create HTTP request", zap.Error(err))
 		return
 	}
-	req.Header.Set("Content-Type", "application/json")
-	req.Header.Set("User-Agent", "evolution-scalpel-ATO-Scanner/1.1")
+	req.Header.Set("Content-Type", contentType)
+	req.Header.Set("User-Agent", "evolution-scalpel-ATO-Scanner/1.2")
 
 	startTime := time.Now()
 	resp, err := a.httpClient.Do(req)
@@ -144,15 +192,31 @@ func (a *ATOAdapter) performLoginAttempt(ctx context.Context, analysisCtx *core.
 
 	result := ato.AnalyzeResponse(attempt, resp.StatusCode, string(bodyBytes), responseTimeMs)
 
+	// Handle Success or MFA (which implies valid primary credentials)
 	if result.Success {
-		a.createAtoFinding(analysisCtx, "Successful Login with Weak Credentials", schemas.SeverityHigh, "CWE-521",
-			fmt.Sprintf("Successfully authenticated as user '%s' using a common weak password ('%s').", result.Attempt.Username, result.Attempt.Password),
-			result)
+		vulnName := "Successful Login with Weak Credentials"
+		severity := schemas.SeverityHigh
+		cwe := "CWE-521"
+
+		// VULN FIX: CWE-312 - Redact the password from the description.
+		desc := fmt.Sprintf("Successfully authenticated primary credentials as user '%s' using a common weak password (redacted).", result.Attempt.Username)
+
+		if result.IsMFAChallenge {
+			vulnName = "Weak Credentials Accepted (MFA Present)"
+			// Severity adjusted in createAtoFinding based on MFA presence.
+			desc += " An MFA challenge was detected."
+		}
+
+		a.createAtoFinding(analysisCtx, vulnName, severity, cwe, desc, result)
 	}
+
 	if result.IsUserEnumeration {
-		a.createAtoFinding(analysisCtx, "User Enumeration on Login Form", schemas.SeverityMedium, "CWE-200",
-			fmt.Sprintf("The login endpoint response for user '%s' allows for user enumeration. Detail: %s", result.Attempt.Username, result.EnumerationDetail),
-			result)
+		// Only report enumeration if success hasn't already confirmed the user exists.
+		if !result.Success {
+			a.createAtoFinding(analysisCtx, "User Enumeration on Login Form", schemas.SeverityMedium, "CWE-203",
+				fmt.Sprintf("The login endpoint response for user '%s' allows for user enumeration. Detail: %s", result.Attempt.Username, result.EnumerationDetail),
+				result)
+		}
 	}
 }
 
@@ -163,6 +227,11 @@ func (a *ATOAdapter) createAtoFinding(analysisCtx *core.AnalysisContext, vulnNam
 		responseBodyEvidence = responseBodyEvidence[:2048] + "... [TRUNCATED]"
 	}
 
+	// Adjust severity if MFA is detected, specifically for High severity findings (downgrade to Medium).
+	if result.IsMFAChallenge && severity == schemas.SeverityHigh {
+		severity = schemas.SeverityMedium
+	}
+
 	evidenceMap := map[string]interface{}{
 		"username": result.Attempt.Username,
 		// Password intentionally omitted from evidence logs.
@@ -170,6 +239,7 @@ func (a *ATOAdapter) createAtoFinding(analysisCtx *core.AnalysisContext, vulnNam
 		"responseBody":   responseBodyEvidence,
 		"detail":         result.EnumerationDetail,
 		"responseTimeMs": result.ResponseTimeMs,
+		"mfaDetected":    result.IsMFAChallenge,
 	}
 	evidence, err := json.Marshal(evidenceMap)
 	if err != nil {
@@ -178,20 +248,17 @@ func (a *ATOAdapter) createAtoFinding(analysisCtx *core.AnalysisContext, vulnNam
 	}
 
 	finding := schemas.Finding{
-		ID:     uuid.New().String(),
-		TaskID: analysisCtx.Task.TaskID,
-		// Refactored: Renamed Timestamp to ObservedAt
-		ObservedAt: time.Now().UTC(),
-		Target:     analysisCtx.TargetURL.String(),
-		Module:     a.Name(),
-		// Refactored: Flattened Vulnerability struct to VulnerabilityName
+		ID:                uuid.New().String(),
+		TaskID:            analysisCtx.Task.TaskID,
+		ObservedAt:        time.Now().UTC(),
+		Target:            analysisCtx.TargetURL.String(),
+		Module:            a.Name(),
 		VulnerabilityName: vulnName,
 		Severity:          severity,
 		Description:       desc,
-		// Refactored: Assign []byte directly to json.RawMessage
-		Evidence:       evidence,
-		Recommendation: "Implement rate limiting, account lockouts, and CAPTCHA. Ensure login responses are generic and do not disclose whether a username or password was correct. Implement MFA.",
-		CWE:            []string{cwe},
+		Evidence:          evidence,
+		Recommendation:    "Implement rate limiting, account lockouts, and CAPTCHA. Ensure login responses are generic and do not disclose whether a username or password was correct. Implement and enforce MFA.",
+		CWE:               []string{cwe},
 	}
 	analysisCtx.AddFinding(finding)
 }
@@ -209,7 +276,8 @@ func (a *ATOAdapter) loadUsernames(cfg config.Interface, params schemas.ATOTaskP
 	// Otherwise, load from the configured SecLists path.
 	atoCfg := cfg.Scanners().Active.Auth.ATO
 	if atoCfg.SecListsPath == "" {
-		return nil, fmt.Errorf("ATO scanner is enabled, but no SecLists path is configured in config.yaml")
+		// Provide a helpful error message if SecLists is required but not configured.
+		return nil, fmt.Errorf("no usernames provided in task parameters and SecLists path is not configured in config.yaml")
 	}
 
 	// Expand tilde for home directory support.
@@ -239,7 +307,8 @@ func (a *ATOAdapter) loadUsernames(cfg config.Interface, params schemas.ATOTaskP
 	var usernames []string
 	scanner := bufio.NewScanner(file)
 	for scanner.Scan() {
-		if username := strings.TrimSpace(scanner.Text()); username != "" {
+		// Trim space and ignore empty lines or comments (often starting with #)
+		if username := strings.TrimSpace(scanner.Text()); username != "" && !strings.HasPrefix(username, "#") {
 			usernames = append(usernames, username)
 		}
 	}

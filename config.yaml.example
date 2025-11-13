@@ -23,7 +23,7 @@ database:
 engine:
   queue_size: 1000
   worker_concurrency: 8
-  default_task_timeout: "15m"
+  default_task_timeout: "30m"
 
 browser:
   headless: true
@@ -54,8 +54,8 @@ browser:
   humanoid: {}
 
 network:
-  timeout: "30s"
-  navigation_timeout: "90s"
+  timeout: "2m"
+  navigation_timeout: "5m"
   post_load_wait: "2s"
   capture_response_bodies: true
   ignore_tls_errors: false
@@ -89,7 +89,7 @@ scanners:
       concurrency: 2
     protopollution:
       enabled: true
-      wait_duration: "8s"
+      wait_duration: "20s"
     timeslip:
       enabled: true
       request_count: 25
@@ -139,7 +139,7 @@ scanners:
 discovery:
   max_depth: 5
   concurrency: 20
-  timeout: "15m"
+  timeout: "30m"
   passive_enabled: true
   include_subdomains: true
   crtsh_rate_limit: 2.0
@@ -148,9 +148,27 @@ discovery:
 
 agent:
   llm:
-    default_fast_model: "gemini-1.5-flash"
-    default_powerful_model: "gemini-1.5-pro"
-    models: {}
+    default_fast_model: "gemini-2.5-flash"
+    default_powerful_model: "gemini-2.5-pro"
+    models:
+      gemini-2.5-pro:
+        provider: "gemini"
+        model: "gemini-2.5-pro-latest"
+        api_key: "" # Should be loaded from env
+        api_timeout: "2m"
+        temperature: 0.7
+        top_p: 0.9
+        top_k: 40
+        max_tokens: 16384
+      gemini-2.5-flash:
+        provider: "gemini"
+        model: "gemini-2.5-flash-latest"
+        api_key: "" # Should be loaded from env
+        api_timeout: "90s"
+        temperature: 0.8
+        top_p: 0.95
+        top_k: 50
+        max_tokens: 4096
   knowledge_graph:
     type: "postgres"
 

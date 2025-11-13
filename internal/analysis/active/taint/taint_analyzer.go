@@ -1,3 +1,4 @@
+// Filename: taint_analyzer.go
 // File: internal/analysis/active/taint/analyzer.go
 package taint
 
@@ -95,7 +96,8 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 	}
 
 	// VULN-FIX: Generate unique callback names for this analysis session to prevent DOM Clobbering.
-	// This makes it impossible for a target page to predict and overwrite the callback functions.
+	// This makes it impossible for a target page to predict and overwrite the callback functions
+	// before or after the shim initializes.
 	shortID := uuid.New().String()[:8]
 	sinkCallbackName := fmt.Sprintf("%s_%s", JSCallbackSinkEvent, shortID)
 	proofCallbackName := fmt.Sprintf("%s_%s", JSCallbackExecutionProof, shortID)
@@ -399,6 +401,7 @@ func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h 
 	}
 
 	if err := session.Navigate(ctx, a.config.Target.String()); err != nil {
+		// We continue even if navigation fails, as the browser might be on a page (e.g., about:blank) where we can still attempt injections, or it might eventually navigate.
 		a.logger.Warn("Initial navigation failed, attempting to continue probes.", zap.Error(err))
 	}
 
@@ -468,7 +471,7 @@ func (a *Analyzer) preparePayload(probeDef ProbeDefinition, canary string) strin
 	}
 
 	// VULN-FIX: Add the dynamic, session-specific proof callback name to the replacements.
-	// This ensures that XSS probes are generated with the correct, non-clobberable callback.
+	// This ensures that XSS probes are generated with the correct, non-clobberable callback name.
 	replacements := []string{
 		"{{.Canary}}", canary,
 		"{{.ProofCallbackName}}", a.jsCallbackExecutionProofName,
@@ -510,7 +513,9 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 			} else {
 				jsPayload := string(jsonPayload)
 				lsKey := fmt.Sprintf("%s%d", storageKeyPrefix, i)
-				fmt.Fprintf(&injectionScriptBuilder, "localStorage.setItem(%q, %s);\n", lsKey, jsPayload)
+				// FIX: Wrap localStorage access in try/catch to handle SecurityError if access is denied (e.g., about:blank, sandboxed iframe, strict privacy settings).
+				// This prevents the entire injection script from failing if localStorage is inaccessible.
+				fmt.Fprintf(&injectionScriptBuilder, "try { localStorage.setItem(%q, %s); } catch(e) { console.warn('[Scalpel] Failed to set LocalStorage item %s:', e); }\n", lsKey, jsPayload, lsKey)
 				a.registerProbe(ActiveProbe{
 					Type:      probeDef.Type,
 					Key:       lsKey,
@@ -532,7 +537,8 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 			} else {
 				jsPayload := string(jsonPayload)
 				ssKey := fmt.Sprintf("%s%d_s", storageKeyPrefix, i)
-				fmt.Fprintf(&injectionScriptBuilder, "sessionStorage.setItem(%q, %s);\n", ssKey, jsPayload)
+				// FIX: Wrap sessionStorage access in try/catch.
+				fmt.Fprintf(&injectionScriptBuilder, "try { sessionStorage.setItem(%q, %s); } catch(e) { console.warn('[Scalpel] Failed to set SessionStorage item %s:', e); }\n", ssKey, jsPayload, ssKey)
 				a.registerProbe(ActiveProbe{
 					Type:      probeDef.Type,
 					Key:       ssKey,
@@ -554,7 +560,8 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 			} else {
 				jsPayload := string(jsonPayload)
 				cookieName := fmt.Sprintf("%s%d", cookieNamePrefix, i)
-				cookieCommand := fmt.Sprintf("document.cookie = `${%q}=${encodeURIComponent(%s)}; path=/; max-age=3600; samesite=Lax;%s`;\n", cookieName, jsPayload, secureFlag)
+				// FIX: Wrap document.cookie access in try/catch.
+				cookieCommand := fmt.Sprintf("try { document.cookie = `${%q}=${encodeURIComponent(%s)}; path=/; max-age=3600; samesite=Lax;%s`; } catch(e) { console.warn('[Scalpel] Failed to set Cookie %s:', e); }\n", cookieName, jsPayload, secureFlag, cookieName)
 				injectionScriptBuilder.WriteString(cookieCommand)
 				a.registerProbe(ActiveProbe{
 					Type:      probeDef.Type,
@@ -579,11 +586,13 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 	}
 
 	// FIX: The ExecuteScript function now requires a third 'options' argument. Pass nil.
+	// By wrapping the JS in try/catch blocks above, this call should no longer return an error due to JS SecurityExceptions during storage access.
 	if _, err := session.ExecuteScript(ctx, injectionScript, nil); err != nil {
-		a.logger.Warn("Failed to inject persistent probes via JavaScript", zap.Error(err))
+		// This error now likely indicates a more fundamental issue with the JS execution environment rather than storage access denial.
+		a.logger.Warn("Failed to execute persistent probe injection script", zap.Error(err))
 	}
 
-	a.logger.Debug("Persistent probes injected. Refreshing page.")
+	a.logger.Debug("Persistent probes injected (or attempted). Refreshing page.")
 
 	// REFACTOR: Pause before refreshing the page. Use operation context.
 	if err := a.executePause(ctx, h, 200, 80); err != nil {
@@ -602,15 +611,21 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 	return nil
 }
 
-//	injects probes into URL query parameters and the hash fragment.
-//
+// probeURLSources injects probes into URL query parameters and the hash fragment.
 // REFACTOR: Updated signature to remove BrowserContext. Integrated pauses using operation context.
 func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, h *humanoid.Humanoid) error {
-	baseURL := *a.config.Target
+	// Create a safe copy of the target URL to modify it.
+	baseURL, err := url.Parse(a.config.Target.String())
+	if err != nil {
+		// Should be safe as the config target URL is usually pre-validated.
+		a.logger.Error("Failed to parse base URL for probing", zap.Error(err))
+		return fmt.Errorf("failed to parse base URL for probing: %w", err)
+	}
+
 	paramPrefix := "sc_test_"
 
 	// -- Query Parameter Probing --
-	targetURL := baseURL
+	targetURL, _ := url.Parse(baseURL.String()) // Copy for query params
 	q := targetURL.Query()
 	probesInjected := 0
 	for i, probeDef := range a.config.Probes {
@@ -652,7 +667,7 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, 
 	}
 
 	// -- Hash Fragment Probing --
-	targetURL = baseURL // reset for the next probe type
+	targetURL, _ = url.Parse(baseURL.String()) // Reset/Copy for hash fragments
 	var hashFragments []string
 	probesInjected = 0
 	for i, probeDef := range a.config.Probes {
@@ -830,8 +845,7 @@ func (a *Analyzer) fetchAndEnqueueOAST() {
 	}
 }
 
-//	main dispatcher for incoming events. It routes events
-//
+// processEvent is the main dispatcher for incoming events. It routes events
 // to the appropriate handler based on their type.
 func (a *Analyzer) processEvent(event Event) {
 	switch e := event.(type) {
@@ -905,7 +919,7 @@ func (a *Analyzer) isErrorPageContext(pageURL, pageTitle string) bool {
 	return false
 }
 
-// handles confirmed out of band callbacks and reports a finding.
+// processOASTInteraction handles confirmed out of band callbacks and reports a finding.
 func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
 	a.probesMutex.RLock()
 	probe, ok := a.activeProbes[interaction.Canary]
@@ -979,18 +993,31 @@ func (a *Analyzer) processExecutionProof(proof ExecutionProofEvent) {
 		return
 	}
 
-	// FIX: Implement filtering based on page context to reduce FPs on error pages.
-	// FIX: Pass PageURL to the context checker.
-	if a.isErrorPageContext(proof.PageURL, proof.PageTitle) {
-		a.logger.Info("Execution proof suppressed: Detected on likely error page.",
-			zap.String("url", proof.PageURL),
-			zap.String("title", proof.PageTitle),
-			zap.String("canary", proof.Canary),
-		)
-		// Although execution on an error page is technically a vulnerability, we suppress
-		// it here to meet the requirement of reducing noise from 404/error scenarios.
-		return
-	}
+	// ** FIX: Logic correction **
+	// The error page filter has been removed from this function.
+	//
+	// Rationale: An `ExecutionProofEvent` is a high-confidence, confirmed
+	// vulnerability (e.g., XSS). If code execution is achieved, it is a
+	// finding that must be reported, regardless of whether it occurred on
+	// a "404 Not Found" page or the main application page.
+	//
+	// Suppressing this finding would create a critical false negative and
+	// directly cause the "diminished capability" you observed.
+	//
+	// The filter remains on the lower-confidence `processSinkEvent` to
+	// reduce noise from simple, non-executing reflections.
+	/*
+		if a.isErrorPageContext(proof.PageURL, proof.PageTitle) {
+			a.logger.Info("Execution proof suppressed: Detected on likely error page.",
+				zap.String("url", proof.PageURL),
+				zap.String("title", proof.PageTitle),
+				zap.String("canary", proof.Canary),
+			)
+			// Although execution on an error page is technically a vulnerability, we suppress
+			// it here to meet the requirement of reducing noise from 404/error scenarios.
+			return
+		}
+	*/
 
 	a.logger.Warn("Vulnerability Confirmed via Execution Proof!",
 		zap.String("source", string(probe.Source)),
@@ -1048,8 +1075,12 @@ func (a *Analyzer) processSinkEvent(event SinkEvent) {
 
 		if a.isContextValid(event, probe) {
 
-			// FIX: Implement filtering based on page context to reduce FPs on error pages.
-			// FIX: Pass PageURL to the context checker.
+			// ** FIX: Nuanced Filtering **
+			// This filter is intentionally *kept* for low-confidence SinkEvents
+			// to reduce noise from simple reflections on 404/error pages.
+			// This logic has been *removed* from the high-confidence
+			// ExecutionProof and PrototypePollution handlers to fix the
+			// "diminished capability" (false negative) problem.
 			if a.isErrorPageContext(event.PageURL, event.PageTitle) {
 				a.logger.Info("Taint flow suppressed: Detected on likely error page.",
 					zap.String("url", event.PageURL),
@@ -1095,9 +1126,15 @@ func (a *Analyzer) processPrototypePollutionConfirmation(event SinkEvent) {
 	defer a.probesMutex.RUnlock()
 
 	canary := event.Value
+	// Ensure the value reported actually looks like a canary before attempting lookup.
+	if !canaryRegex.MatchString(canary) {
+		a.logger.Debug("Prototype Pollution check reported a value that is not a canary.", zap.String("value", canary))
+		return
+	}
+
 	probe, ok := a.activeProbes[canary]
 	if !ok {
-		a.logger.Debug("Prototype Pollution confirmation for unknown canary.", zap.String("canary", canary))
+		a.logger.Debug("Prototype Pollution confirmation for unknown or expired canary.", zap.String("canary", canary))
 		return
 	}
 	if probe.Type != schemas.ProbeTypePrototypePollution {
@@ -1105,16 +1142,22 @@ func (a *Analyzer) processPrototypePollutionConfirmation(event SinkEvent) {
 		return
 	}
 
-	// FIX: Implement filtering based on page context.
-	// FIX: Pass PageURL to the context checker.
-	if a.isErrorPageContext(event.PageURL, event.PageTitle) {
-		a.logger.Info("Prototype Pollution suppressed: Detected on likely error page.",
-			zap.String("url", event.PageURL),
-			zap.String("title", event.PageTitle),
-			zap.String("canary", canary),
-		)
-		return
-	}
+	// ** FIX: Logic correction **
+	// The error page filter has been removed from this function.
+	//
+	// Rationale: This is a high-confidence, confirmed vulnerability.
+	// Like an execution proof, it should be reported regardless of the
+	// page context to avoid false negatives.
+	/*
+		if a.isErrorPageContext(event.PageURL, event.PageTitle) {
+			a.logger.Info("Prototype Pollution suppressed: Detected on likely error page.",
+				zap.String("url", event.PageURL),
+				zap.String("title", event.PageTitle),
+				zap.String("canary", canary),
+			)
+			return
+		}
+	*/
 
 	a.logger.Warn("Vulnerability Confirmed: JavaScript Prototype Pollution!",
 		zap.String("source", string(probe.Source)),

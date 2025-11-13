@@ -1,3 +1,4 @@
+// Filename: types.go
 // package taint defines the core data structures, constants, and interfaces
 // used throughout the IAST analysis system.
 package taint
@@ -9,9 +10,8 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 )
 
-// Constants defining the names of Go functions exposed to the browser's
-// JavaScript environment. These create the callback bridge from the JS shim
-// back to the Go analyzer.
+// Constants defining the base names of Go functions exposed to the browser's
+// JavaScript environment. These are used as prefixes to generate session-specific randomized names.
 const (
 	JSCallbackSinkEvent      = "__scalpel_sink_event"
 	JSCallbackExecutionProof = "__scalpel_execution_proof"

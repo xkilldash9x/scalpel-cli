@@ -28,7 +28,7 @@ var (
 	// Improved UUID regex to adhere closely to RFC 4122 (version and variant bits) for accuracy
 	uuidRegex = regexp.MustCompile(`(?i)\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b`)
 	// Numeric regex. Minimum length 3 to filter noise, max 19 for 64-bit int.
-	numericRegex = regexp.MustCompile(`\b\d{3,19}\b`)
+	numericRegex = regexp.MustCompile(`\b\d{1,19}\b`)
 	// Hash regex covering MD5 (32), SHA1 (40), and SHA256 (64) hex characters.
 	hashRegex = regexp.MustCompile(`(?i)\b[a-f0-9]{32}|[a-f0-9]{40}|[a-f0-9]{64}\b`)
 )
@@ -146,6 +146,57 @@ func ExtractIdentifiers(req *http.Request, body []byte) []ObservedIdentifier {
 
 	return deduplicateIdentifiers(identifiers)
 }
+
+// ExtractIdentifiersFromResponse scans response headers and body for identifiers.
+func ExtractIdentifiersFromResponse(resp *http.Response, body []byte) []ObservedIdentifier {
+	if resp == nil {
+		return nil
+	}
+	var identifiers []ObservedIdentifier
+	contentType := resp.Header.Get("Content-Type")
+
+	// Helper function to check and add identifiers
+	checkAndAdd := func(value string, location IdentifierLocation, key string) {
+		if matchIdentifier(value, TypeUUID, uuidRegex) {
+			identifiers = append(identifiers, ObservedIdentifier{Value: value, Type: TypeUUID, Location: location, Key: key})
+			return
+		}
+		isHash := matchIdentifier(value, TypeHash, hashRegex)
+		isNumeric := matchIdentifier(value, TypeNumericID, numericRegex)
+		if isNumeric && !isHash {
+			identifiers = append(identifiers, ObservedIdentifier{Value: value, Type: TypeNumericID, Location: location, Key: key})
+		} else if isHash {
+			identifiers = append(identifiers, ObservedIdentifier{Value: value, Type: TypeHash, Location: location, Key: key})
+		}
+	}
+
+	// 1. Check Headers
+	for key, values := range resp.Header {
+		for _, value := range values {
+			checkAndAdd(value, LocationHeader, key)
+		}
+	}
+
+	// 2. Check Body
+	if len(body) > 0 {
+		if strings.Contains(contentType, "application/json") {
+			var data interface{}
+			decoder := json.NewDecoder(bytes.NewReader(body))
+			decoder.UseNumber()
+			if err := decoder.Decode(&data); err == nil {
+				extractFromJSON(data, "", &identifiers)
+			}
+		} else if strings.Contains(contentType, "application/xml") || strings.Contains(contentType, "text/xml") {
+			doc := etree.NewDocument()
+			if err := doc.ReadFromBytes(body); err == nil {
+				extractFromXML(doc.Root(), &identifiers)
+			}
+		}
+	}
+
+	return deduplicateIdentifiers(identifiers)
+}
+
 
 // deduplicateIdentifiers removes duplicates based on Type and Value.
 func deduplicateIdentifiers(identifiers []ObservedIdentifier) []ObservedIdentifier {
@@ -284,16 +335,27 @@ func extractFromJSON(data interface{}, prefix string, identifiers *[]ObservedIde
 	}
 }
 
-// GenerateTestValues creates a list of new, predictable values based on an observed identifier.
-func GenerateTestValues(ident ObservedIdentifier) ([]string, error) {
+// GenerateTestValues creates a list of new values based on an observed identifier,
+// prioritizing known-good values from the identifier pool.
+func GenerateTestValues(ident ObservedIdentifier, pool *IdentifierPool) ([]string, error) {
+	var testValues []string
+
+	// (Strategic 5.2) Prioritize getting a different, known-valid ID from the pool.
+	if pool != nil {
+		if pooledVal, ok := pool.GetDifferent(ident.Type, ident.Value); ok {
+			testValues = append(testValues, pooledVal)
+		}
+	}
+
+	// Fallback to generative strategies.
 	switch ident.Type {
 	case TypeNumericID:
 		val, err := strconv.ParseInt(ident.Value, 10, 64)
 		if err != nil {
 			return nil, fmt.Errorf("could not parse numeric ID '%s' as int64: %w", ident.Value, err)
 		}
-		// Strategies: Increment, Decrement (if > 0), and a larger number.
-		testValues := []string{strconv.FormatInt(val+1, 10)}
+		// Strategies: Increment, Decrement (if > 0).
+		testValues = append(testValues, strconv.FormatInt(val+1, 10))
 		if val > 0 {
 			testValues = append(testValues, strconv.FormatInt(val-1, 10))
 		}
@@ -301,17 +363,23 @@ func GenerateTestValues(ident ObservedIdentifier) ([]string, error) {
 		if val < (1<<63-1000) && val+100 > val+1 {
 			testValues = append(testValues, strconv.FormatInt(val+100, 10))
 		}
-		return uniqueStrings(testValues), nil
 
 	case TypeUUID:
-		// Generate a new, random UUID. One is sufficient.
-		return []string{uuid.NewString()}, nil
+		// Generate a new, random UUID.
+		testValues = append(testValues, uuid.NewString())
+
 	case TypeHash:
 		// Generate a new hash based on the format (length) of the original hash.
-		return []string{generateHash(ident.Value, "test_idor_value")}, nil
+		testValues = append(testValues, generateHash(ident.Value, "test_idor_value"))
+
 	default:
-		return nil, fmt.Errorf("unsupported identifier type for test value generation: %s", ident.Type)
+		// If we have no specific strategy and the pool was empty, we have no values.
+		if len(testValues) == 0 {
+			return nil, fmt.Errorf("unsupported identifier type for test value generation: %s", ident.Type)
+		}
 	}
+
+	return uniqueStrings(testValues), nil
 }
 
 // uniqueStrings removes duplicates from a slice.

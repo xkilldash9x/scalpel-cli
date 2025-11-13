@@ -1,3 +1,4 @@
+//Filename: taint_shim.js
 // internal/analysis/active/taint/taint_shim.js
 (function(scope) {
     'use strict';
@@ -10,6 +11,7 @@
     const CONFIG = {
         // @ts-ignore - This is a Go template placeholder that will be replaced with a valid JSON object.
         Sinks: {{.SinksJSON}},
+        // VULN-FIX: These names are randomized per session by the Go backend.
         SinkCallbackName: "{{.SinkCallbackName}}",
         ProofCallbackName: "{{.ProofCallbackName}}",
         ErrorCallbackName: "{{.ErrorCallbackName}}",
@@ -273,7 +275,7 @@
         }
 
         // Replace the exposed Go function (which is a direct binding) with a JS wrapper.
-        // This is necessary because the XSS payload can only call the global function directly.
+        // This is necessary because the XSS payload can only call the global function directly (using the randomized name).
         // Our wrapper adds the stack trace before calling the real (captured) callback.
         scope[CONFIG.ProofCallbackName] = function(canary) {
             const stack = getStackTrace();
@@ -298,10 +300,327 @@
 
     /**
      * Resolves a nested property path (e.g., "Element.prototype.innerHTML") on a given object.
+     * Returns an object containing the resolved object, its base, the property name, and the full path.
      */
     function resolvePath(path, root = scope) {
-// ... (The remaining content of taint_shim.js remains unchanged up to the end of the file) ...
-// ...
+        const parts = path.split('.');
+        let current = root;
+        const resolvedPath = [];
+
+        for (const part of parts) {
+            if (current === null || typeof current === 'undefined') {
+                return null;
+            }
+            
+            try {
+                // Check if the property exists on the object or its prototype chain.
+                if (part in current) {
+                    current = current[part];
+                    resolvedPath.push(part);
+                } else {
+                    // ROBUSTNESS: Special handling for specific global objects if direct lookup failed.
+                    // This helps when the environment might not have them directly on the scope object initially (e.g., 'document' during early load in some environments).
+                    if (!IS_WORKER && root === scope) {
+                        if (part === 'document' && typeof document !== 'undefined') {
+                            current = document;
+                            resolvedPath.push('document');
+                            continue;
+                        }
+                        if (part === 'navigator' && typeof navigator !== 'undefined') {
+                            current = navigator;
+                            resolvedPath.push('navigator');
+                            continue;
+                        }
+                    }
+                    return null; // Property not found in the chain
+                }
+            } catch (e) {
+                // Accessing certain properties might throw (e.g., cross-origin restrictions).
+                reportShimError(e, `resolvePath access error: ${path} at ${part}`);
+                return null;
+            }
+        }
+
+        // Calculate the base object (the object containing the final property)
+        let base = root;
+        for(let i = 0; i < resolvedPath.length - 1; i++) {
+            base = base[resolvedPath[i]];
+        }
+
+        return {
+            object: current,
+            base: base,
+            propertyName: parts[parts.length - 1],
+            fullPath: resolvedPath.join('.')
+        };
+    }
+
+    /**
+     * Creates a wrapper function for instrumenting function call sinks.
+     */
+    function createFunctionWrapper(originalFunction, sinkDef) {
+        // Optimization: Check if the function is already instrumented (by checking if we wrapped it previously).
+        if (instrumentedCache.has(originalFunction)) {
+            return originalFunction;
+        }
+
+        const wrapper = function(...args) {
+            // Check pre-conditions if defined (e.g., setTimeout with string arg).
+            if (sinkDef.ConditionID) {
+                const handler = ConditionHandlers[sinkDef.ConditionID];
+                if (handler && !handler(args)) {
+                    return originalFunction.apply(this, args);
+                }
+            }
+
+            // Special handling for the `fetch` sink to inspect both URL and Body.
+            // This combines the logic for both FETCH_URL and FETCH sinks.
+            if (sinkDef.Name === 'fetch') {
+                // Arg 0 (URL or Request object)
+                if (isTainted(args[0])) {
+                    // We report FETCH_URL regardless of which specific sink definition triggered this wrapper.
+                    reportSink("FETCH_URL", args[0], "fetch(url/request)");
+                }
+
+                // Arg 1 (Options object, check body)
+                if (args.length > 1 && args[1] && typeof args[1] === 'object' && args[1].body) {
+                    if (isTainted(args[1].body)) {
+                        reportSink("FETCH", args[1].body, "fetch(options.body)");
+                    }
+                }
+            } else {
+                // Standard argument inspection.
+                const taintedArg = args[sinkDef.ArgIndex];
+                if (isTainted(taintedArg)) {
+                    const detail = `${sinkDef.Name}(arg${sinkDef.ArgIndex})`;
+                    reportSink(sinkDef.Type, taintedArg, detail);
+                }
+            }
+
+            // Call the original function.
+            return originalFunction.apply(this, args);
+        };
+
+        // ROBUSTNESS: Mimic original function properties (toString, prototype) to avoid detection or breakage.
+        try {
+            Object.setPrototypeOf(wrapper, Object.getPrototypeOf(originalFunction));
+            wrapper.toString = function() { return originalFunction.toString(); };
+            if (originalFunction.prototype) {
+                wrapper.prototype = originalFunction.prototype;
+            }
+            // Copy static properties if any
+            Object.getOwnPropertyNames(originalFunction).forEach(prop => {
+                if (!wrapper.hasOwnProperty(prop)) {
+                    try {
+                        Object.defineProperty(wrapper, prop, Object.getOwnPropertyDescriptor(originalFunction, prop));
+                    } catch (e) {
+                        // Ignore errors copying properties
+                    }
+                }
+            });
+        } catch (e) {
+            // Best effort mimicry, might fail on some built-ins.
+        }
+        
+        instrumentedCache.add(wrapper);
+        return wrapper;
+    }
+
+    /**
+     * Creates wrapper functions (getter/setter) for instrumenting property assignment sinks.
+     */
+    function createPropertyWrappers(originalDescriptor, sinkDef) {
+        const wrappers = { ...originalDescriptor };
+
+        if (originalDescriptor.set) {
+            wrappers.set = function(value) {
+                if (isTainted(value)) {
+                    const detail = `${sinkDef.Name} = value`;
+                    reportSink(sinkDef.Type, value, detail);
+                }
+                return originalDescriptor.set.call(this, value);
+            };
+            
+             // ROBUSTNESS: Mimic original setter properties.
+             try {
+                Object.setPrototypeOf(wrappers.set, Object.getPrototypeOf(originalDescriptor.set));
+                wrappers.set.toString = function() { return originalDescriptor.set.toString(); };
+            } catch (e) {
+                // Best effort mimicry.
+            }
+
+        } else if (originalDescriptor.writable) {
+            // Handle properties defined with 'value' and 'writable: true' (less common for built-in sinks).
+            logger.warn("Instrumenting writable data property without a native setter:", sinkDef.Name);
+            // This requires redefining the property as an accessor, which is complex to manage the underlying value reliably across all contexts.
+            // For core sinks like innerHTML, the 'set' path is standard and sufficient.
+        }
+       
+        return wrappers;
+    }
+
+    /**
+     * Instruments a single sink based on its definition.
+     */
+    function instrumentSink(sinkDef) {
+        // 1. Resolve the path to the object containing the property/function (the base object).
+        // E.g., for "Element.prototype.innerHTML", we need "Element.prototype".
+        const pathParts = sinkDef.Name.split('.');
+        const propertyName = pathParts.pop();
+        const basePath = pathParts.join('.');
+
+        let targetBase;
+
+        if (basePath) {
+            const resolvedBase = resolvePath(basePath);
+            if (resolvedBase && resolvedBase.object) {
+                targetBase = resolvedBase.object;
+            }
+        } else {
+            // It's a global function/property (e.g., 'eval', 'fetch').
+            targetBase = scope;
+        }
+
+
+        if (!targetBase || (typeof targetBase !== 'object' && typeof targetBase !== 'function')) {
+            // This is expected for APIs not supported by the browser (e.g., jQuery not loaded, or very old browser).
+            // We log it but do not report it as an error to the backend to reduce noise.
+            logger.log("Skipping sink: Base object not found or invalid type.", sinkDef.Name);
+            return;
+        }
+
+        // 2. Get the existing property descriptor from the base object.
+        const descriptor = Object.getOwnPropertyDescriptor(targetBase, propertyName);
+
+        if (!descriptor) {
+            // Property doesn't exist directly on the base object (it might be inherited, but instrumentation happens on the definition).
+            logger.log("Skipping sink: Property descriptor not found on base object.", sinkDef.Name);
+            return;
+        }
+
+        // Check if the property is configurable. If not, we cannot instrument it.
+        if (!descriptor.configurable) {
+            // This is common for security-sensitive properties in modern browsers.
+            logger.warn("Cannot instrument non-configurable property:", sinkDef.Name);
+            return;
+        }
+
+        // 3. Create and apply the appropriate wrapper(s).
+        try {
+            if (sinkDef.Setter) {
+                // Instrumenting a property setter (e.g., innerHTML).
+                const wrappers = createPropertyWrappers(descriptor, sinkDef);
+                Object.defineProperty(targetBase, propertyName, wrappers);
+                logger.log(`Instrumented property setter: ${sinkDef.Name}`);
+            } else {
+                // Instrumenting a function call (e.g., document.write, eval).
+                // Functions can be defined via 'value' (data descriptor) or 'get' (accessor descriptor).
+                const originalFunction = descriptor.value || (descriptor.get && descriptor.get.call(targetBase));
+                
+                if (typeof originalFunction === 'function') {
+                    const wrapper = createFunctionWrapper(originalFunction, sinkDef);
+                    
+                    // If the descriptor used 'value', update it.
+                    if ('value' in descriptor) {
+                        descriptor.value = wrapper;
+                        Object.defineProperty(targetBase, propertyName, descriptor);
+                    } else if ('get' in descriptor) {
+                        // If it used 'get', we wrap the getter to return the wrapped function.
+                        Object.defineProperty(targetBase, propertyName, {
+                            ...descriptor,
+                            get: () => wrapper
+                        });
+                    } else {
+                        logger.warn("Function found but descriptor structure unexpected (no value or get):", sinkDef.Name);
+                    }
+                    
+                    logger.log(`Instrumented function: ${sinkDef.Name}`);
+                } else {
+                    logger.warn("Target is not a function, but sink definition expects it to be:", sinkDef.Name);
+                }
+            }
+        } catch (error) {
+            // Instrumentation can fail due to various browser security restrictions or complex object states.
+            reportShimError(error, `instrumentSink failure: ${sinkDef.Name}`);
+        }
+    }
+
+    /**
+     * Implements the detection logic for Prototype Pollution vulnerabilities.
+     * Checks if Object.prototype has been polluted with the specific property.
+     */
+    function checkPrototypePollution() {
+        try {
+            // Check if the specific property exists on the Object.prototype itself.
+            if (Object.prototype.hasOwnProperty(CONFIG.PollutionCheckProperty)) {
+                const pollutedValue = Object.prototype[CONFIG.PollutionCheckProperty];
+                
+                // Validate that the value looks like one of our canaries.
+                if (typeof pollutedValue === 'string' && pollutedValue.includes(CONFIG.CanaryPrefix)) {
+                    logger.warn("Prototype Pollution Detected!", pollutedValue);
+                    
+                    // Report the confirmation back to the backend.
+                    // We use the specific SinkPrototypePollution type.
+                    // The 'value' is the canary itself, and 'detail' is the property name.
+                    reportSink("PROTOTYPE_POLLUTION", pollutedValue, CONFIG.PollutionCheckProperty);
+                    
+                    // Clean up the prototype to prevent interference with the application and subsequent probes.
+                    try {
+                        delete Object.prototype[CONFIG.PollutionCheckProperty];
+                    } catch (cleanupError) {
+                        reportShimError(cleanupError, "checkPrototypePollution cleanup failure");
+                    }
+                }
+            }
+        } catch (error) {
+            reportShimError(error, "checkPrototypePollution execution failure");
+        }
+    }
+
+
+    /**
+     * Initializes the instrumentation process.
+     */
+    function initialize() {
+        logger.log("Initializing Taint Analysis Shim...");
+
+        // 1. Initialize the execution proof callback wrapper first.
+        initializeExecutionProofCallback();
+
+        // 2. Instrument all defined sinks.
+        const groupedSinks = {};
+        CONFIG.Sinks.forEach(sink => {
+            // Group sinks by name. This ensures that functions like 'fetch' (which have multiple sink definitions for different arguments) are only instrumented once.
+            // The createFunctionWrapper handles the logic for all arguments internally.
+            if (!groupedSinks[sink.Name]) {
+                groupedSinks[sink.Name] = sink;
+            }
+        });
+
+        Object.values(groupedSinks).forEach(instrumentSink);
+
+        // 3. Set up Prototype Pollution detection.
+        // We check periodically as pollution might happen asynchronously via various libraries after page load.
+        const pollutionCheckInterval = setInterval(checkPrototypePollution, 500);
+
+        // Stop checking after a reasonable time (e.g., 30 seconds) to minimize long-term overhead.
+        setTimeout(() => {
+            clearInterval(pollutionCheckInterval);
+            logger.log("Stopped periodic Prototype Pollution checks.");
+        }, 30000);
+
+        // Also check immediately after initialization and on standard page load events.
+        checkPrototypePollution();
+        if (!IS_WORKER && scope.addEventListener) {
+            scope.addEventListener('load', checkPrototypePollution);
+            scope.addEventListener('DOMContentLoaded', checkPrototypePollution);
+        }
+        
+
+        logger.log("Taint Analysis Shim initialized.");
+    }
+
+    // Start the initialization process.
     initialize();
 
     // Expose internals for testing if in test mode

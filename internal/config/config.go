@@ -367,6 +367,7 @@ type ATOConfig struct {
 	PassFailureKeywords    []string `mapstructure:"pass_failure_keywords" yaml:"pass_failure_keywords"`
 	GenericFailureKeywords []string `mapstructure:"generic_failure_keywords" yaml:"generic_failure_keywords"`
 	LockoutKeywords        []string `mapstructure:"lockout_keywords" yaml:"lockout_keywords"`
+	MFAKeywords            []string `mapstructure:"mfa_keywords" yaml:"mfa_keywords"`
 }
 
 // IDORConfig defines settings for the Insecure Direct Object Reference (IDOR) scanner.
@@ -515,7 +516,7 @@ func SetDefaults(v *viper.Viper) {
 	// -- Engine --
 	v.SetDefault("engine.queue_size", 1000)
 	v.SetDefault("engine.worker_concurrency", 10)
-	v.SetDefault("engine.default_task_timeout", "5m")
+	v.SetDefault("engine.default_task_timeout", "30m")
 	v.SetDefault("engine.findings_batch_size", 100)
 	v.SetDefault("engine.findings_flush_interval", "2s")
 
@@ -530,8 +531,8 @@ func SetDefaults(v *viper.Viper) {
 	setHumanoidDefaults(v)
 
 	// -- Network --
-	v.SetDefault("network.timeout", "30s")
-	v.SetDefault("network.navigation_timeout", "180s")
+	v.SetDefault("network.timeout", "2m")
+	v.SetDefault("network.navigation_timeout", "5m")
 	v.SetDefault("network.capture_response_bodies", true)
 	v.SetDefault("network.post_load_wait", "2s")
 	v.SetDefault("network.proxy.enabled", false)
@@ -546,7 +547,7 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("scanners.active.taint.depth", 5)
 	v.SetDefault("scanners.active.taint.concurrency", 10)
 	v.SetDefault("scanners.active.protopollution.enabled", true)
-	v.SetDefault("scanners.active.protopollution.wait_duration", 8*time.Second)
+	v.SetDefault("scanners.active.protopollution.wait_duration", 20*time.Second)
 	v.SetDefault("scanners.active.timeslip.enabled", false)
 	v.SetDefault("scanners.active.auth.ato.enabled", true)
 	v.SetDefault("scanners.active.auth.ato.seclists_path", "~/SecLists")
@@ -555,7 +556,7 @@ func SetDefaults(v *viper.Viper) {
 	// -- Discovery --
 	v.SetDefault("discovery.max_depth", 5)
 	v.SetDefault("discovery.concurrency", 20)
-	v.SetDefault("discovery.timeout", "15m")
+	v.SetDefault("discovery.timeout", "30m")
 	v.SetDefault("discovery.passive_enabled", true)
 	v.SetDefault("discovery.include_subdomains", true)
 	v.SetDefault("discovery.crtsh_rate_limit", 2.0)
@@ -754,9 +755,9 @@ func (c *Config) Validate() error {
 func setLLMDefaults(v *viper.Viper) {
 	// Define the map of default models
 	defaultModels := map[string]LLMModelConfig{
-		"gemini-1.5-pro": {
+		"gemini-2.5-pro": {
 			Provider:    ProviderGemini,
-			Model:       "gemini-1.5-pro-latest",
+			Model:       "gemini-2.5-pro-latest",
 			APIKey:      "", // Should be loaded from env
 			APITimeout:  2 * time.Minute,
 			Temperature: 0.7,
@@ -764,9 +765,9 @@ func setLLMDefaults(v *viper.Viper) {
 			TopK:        40,
 			MaxTokens:   8192,
 		},
-		"gemini-1.5-flash": {
+		"gemini-2.5-flash": {
 			Provider:    ProviderGemini,
-			Model:       "gemini-1.5-flash-latest",
+			Model:       "gemini-2.5-flash-latest",
 			APIKey:      "", // Should be loaded from env
 			APITimeout:  90 * time.Second,
 			Temperature: 0.8,

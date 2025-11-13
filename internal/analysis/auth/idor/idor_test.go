@@ -10,6 +10,7 @@ import (
 	"log"
 	"net/http"
 	"net/http/httptest"
+	"os"
 	"strconv"
 	"strings"
 	"sync"
@@ -17,9 +18,21 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/require"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/jsoncompare"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"go.uber.org/goleak"
 )
+
+func TestMain(m *testing.M) {
+	// Initialize the logger for all tests in this package.
+	observability.InitializeLogger(config.LoggerConfig{
+		Level:  "debug",
+		Format: "console",
+	})
+	// Run the tests.
+	os.Exit(m.Run())
+}
 
 // MockSession implements the Session interface for testing.
 type MockSession struct {
@@ -35,6 +48,14 @@ func (m *MockSession) IsAuthenticated() bool {
 func (m *MockSession) ApplyToRequest(req *http.Request) {
 	if m.Authenticated {
 		req.Header.Set("X-Test-User-ID", m.UserID)
+	}
+}
+
+// GetAuthArtifacts returns empty artifacts for the mock session.
+func (m *MockSession) GetAuthArtifacts() AuthArtifacts {
+	return AuthArtifacts{
+		HeaderNames: map[string]struct{}{"X-Test-User-ID": {}},
+		CookieNames: make(map[string]struct{}),
 	}
 }
 
@@ -191,25 +212,61 @@ func TestDetect_Integration(t *testing.T) {
 		HttpClient:        client,
 	}
 
-	findings, err := Detect(context.Background(), traffic, config, logger, comparer)
+	// (Test Adaptation): Manually create and populate the identifier pool for the test.
+	pool := NewIdentifierPool()
+	for _, pair := range traffic {
+		reqIdentifiers := ExtractIdentifiers(pair.Request, pair.RequestBody)
+		for _, ident := range reqIdentifiers {
+			pool.Add(ident)
+		}
+	}
+
+	findings, err := Detect(context.Background(), traffic, config, logger, comparer, pool)
 	require.NoError(t, err, "Detect returned an unexpected error")
 
-	if len(findings) != 2 {
-		t.Fatalf("Expected 2 findings, got %d. Findings: %+v", len(findings), findings)
+	if len(findings) != 6 {
+		t.Fatalf("Expected 6 findings, got %d. Findings: %+v", len(findings), findings)
 	}
 
 	foundHorizontal := false
 	foundManipulation := false
+	foundUnauthenticatedProfile := false
+	foundHorizontalManipulationProfile := false
+	foundResourceEnumeration := false
+	foundHorizontalManipulationSecure := false
+
 	for _, f := range findings {
-		if f.TestType == TestTypeHorizontal && strings.HasSuffix(f.URL, "/profile/101") {
-			foundHorizontal = true
-		}
-		if f.TestType == TestTypeManipulation && strings.HasSuffix(f.URL, "/profile/102") {
-			foundManipulation = true
+		switch f.TestType {
+		case TestTypeHorizontal:
+			if strings.HasSuffix(f.URL, "/profile/101") {
+				foundHorizontal = true
+			}
+		case TestTypeManipulation:
+			if strings.HasSuffix(f.URL, "/profile/102") {
+				foundManipulation = true
+			}
+		case TestTypeUnauthenticated:
+			if strings.HasSuffix(f.URL, "/profile/101") {
+				foundUnauthenticatedProfile = true
+			}
+		case TestTypeHorizontalManipulation:
+			if strings.HasSuffix(f.URL, "/profile/102") {
+				foundHorizontalManipulationProfile = true
+			} else if strings.HasSuffix(f.URL, "/secure/documents/102") {
+				foundHorizontalManipulationSecure = true
+			}
+		case TestTypeResourceEnumeration:
+			if strings.HasSuffix(f.URL, "/secure/documents/102") {
+				foundResourceEnumeration = true
+			}
 		}
 	}
 	require.True(t, foundHorizontal, "Missed Horizontal IDOR finding.")
 	require.True(t, foundManipulation, "Missed Manipulation IDOR finding.")
+	require.True(t, foundUnauthenticatedProfile, "Missed Unauthenticated on profile finding.")
+	require.True(t, foundHorizontalManipulationProfile, "Missed Horizontal Manipulation on profile finding.")
+	require.True(t, foundResourceEnumeration, "Missed Resource Enumeration finding.")
+	require.True(t, foundHorizontalManipulationSecure, "Missed Horizontal Manipulation on secure finding.")
 }
 
 // TestDetect_ConcurrencyAndCancellation verifies robust concurrency and context handling.
@@ -245,7 +302,8 @@ func TestDetect_ConcurrencyAndCancellation(t *testing.T) {
 
 	logger := log.New(io.Discard, "", 0)
 	startTime := time.Now()
-	_, err := Detect(ctx, traffic, config, logger, comparer)
+	// (Test Adaptation): Pass a new empty pool to the Detect function.
+	_, err := Detect(ctx, traffic, config, logger, comparer, NewIdentifierPool())
 	duration := time.Since(startTime)
 
 	require.Error(t, err, "Expected an error due to context timeout, but got nil")
@@ -296,7 +354,8 @@ func TestDetect_Robustness_tDeadlinePattern(t *testing.T) {
 	}
 
 	logger := log.New(io.Discard, "", 0)
-	_, err := Detect(ctx, traffic, config, logger, comparer)
+	// (Test Adaptation): Pass a new empty pool to the Detect function.
+	_, err := Detect(ctx, traffic, config, logger, comparer, NewIdentifierPool())
 
 	if err != nil && !errors.Is(err, context.DeadlineExceeded) {
 		t.Fatalf("Detect() returned unexpected error: %v", err)
@@ -358,7 +417,16 @@ func TestDetect_ConcurrencySafety(t *testing.T) {
 		return false // Stop iteration on first error
 	})
 
+	// (Test Adaptation): Manually create and populate the identifier pool for the test.
+	pool := NewIdentifierPool()
+	for _, pair := range traffic {
+		reqIdentifiers := ExtractIdentifiers(pair.Request, pair.RequestBody)
+		for _, ident := range reqIdentifiers {
+			pool.Add(ident)
+		}
+	}
+
 	logger := log.New(io.Discard, "", 0)
-	_, err := Detect(context.Background(), traffic, config, logger, comparer)
+	_, err := Detect(context.Background(), traffic, config, logger, comparer, pool)
 	require.NoError(t, err, "Detect() returned unexpected error")
 }

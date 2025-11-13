@@ -1,3 +1,4 @@
+// Filename: probes.go
 package taint
 
 import "github.com/xkilldash9x/scalpel-cli/api/schemas"
@@ -67,7 +68,8 @@ var ValidTaintFlows = map[TaintFlowPath]bool{
 func DefaultProbes() []ProbeDefinition {
 	// VULN-FIX: Use a template placeholder for the callback name in the execution proof.
 	// This will be replaced by the session-specific randomized name in the analyzer.
-	executionProofCall := `window.{{.ProofCallbackName}}('{{.Canary}}')`
+	// The XSS payload must call the function on the window object (or 'self' in workers).
+	executionProofCall := `self.{{.ProofCallbackName}}('{{.Canary}}')`
 
 	// OAST Integration: Define the OAST callback formats.
 	// {{.OASTServer}} is replaced by the Analyzer if an OAST provider is configured.
@@ -340,6 +342,8 @@ func DefaultSinks() []SinkDefinition {
 		// -- Inter-Process Communication (IPC) Sinks --
 
 		// window.postMessage (Taint flowing to other windows/iframes)
+		// Note: We instrument Window.prototype, but this might fail in some environments if Window is not exposed globally or is locked down.
+		// It generally works in standard browser contexts.
 		{Name: "Window.prototype.postMessage", Type: schemas.SinkPostMessage, Setter: false, ArgIndex: 0},
 		// Worker.postMessage (Taint flowing to Web Workers)
 		{Name: "Worker.prototype.postMessage", Type: schemas.SinkWorkerPostMessage, Setter: false, ArgIndex: 0},

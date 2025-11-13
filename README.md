@@ -92,17 +92,17 @@ scanners:
         seclists_path: "~/SecLists"
 agent:
   llm:
-    default_fast_model: "gemini-1.5-flash"
-    default_powerful_model: "gemini-1.5-pro"
+    default_fast_model: "gemini-2.5-flash"
+    default_powerful_model: "gemini-2.5-pro"
     models:
       # Configure your chosen LLM provider
-      gemini-1.5-flash:
+      gemini-2.5-flash:
         provider: "gemini"
-        model: "gemini-1.5-flash-latest"
+        model: "gemini-2.5-flash-latest"
         # API key should be set via environment variable: SCALPEL_GEMINI_API_KEY
-      gemini-1.5-pro:
+      gemini-2.5-pro:
         provider: "gemini"
-        model: "gemini-1.5-pro-latest"
+        model: "gemini-2.5-pro-latest"
 ```
 **Important:** It is strongly recommended to manage API keys and other secrets using environment variables. For example, set your Gemini API key with:
 `export SCALPEL_GEMINI_API_KEY="YOUR_API_KEY"`
