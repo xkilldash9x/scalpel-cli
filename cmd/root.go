@@ -41,9 +41,10 @@ func NewRootCommand() *cobra.Command {
 		PersistentPreRunE: func(cmd *cobra.Command, args []string) error {
 			v := viper.New()
 			if err := initializeConfig(cmd, v, cfgFile); err != nil {
-				basicLogger, _ := zap.NewDevelopment()
-				defer basicLogger.Sync()
-				basicLogger.Error("Failed to initialize configuration", zap.Error(err))
+				// Initialize a minimal logger for startup errors.
+				observability.InitializeLogger(config.LoggerConfig{Level: "info", Format: "console", ServiceName: "scalpel-cli"})
+				log := observability.GetLogger()
+				log.Error("Failed to initialize configuration", zap.Error(err))
 				return fmt.Errorf("failed to initialize configuration: %w", err)
 			}
 

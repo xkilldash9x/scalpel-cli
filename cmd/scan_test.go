@@ -15,8 +15,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
-	"github.com/xkilldash9x/scalpel-cli/internal/service" // FIX: Import the service package
-	"go.uber.org/zap"
+	"github.com/xkilldash9x/scalpel-cli/internal/service"
 	"go.uber.org/zap/zapcore"
 )
 
@@ -106,7 +105,7 @@ func TestApplyScanFlagOverrides(t *testing.T) {
 }
 
 func TestRunScanLogic(t *testing.T) {
-	logger := zap.NewNop()
+	observability.InitializeLogger(config.LoggerConfig{Level: "fatal"})
 	baseCtx := context.Background()
 	defaultTargets := []string{"https://example.com"}
 
@@ -122,7 +121,7 @@ func TestRunScanLogic(t *testing.T) {
 		mockOrchestrator.On("StartScan", mock.Anything, defaultTargets, mock.AnythingOfType("string")).Return(nil)
 
 		// Act
-		err := runScan(baseCtx, logger, cfg, defaultTargets, "", "", mockFactory)
+		err := runScan(baseCtx, cfg, defaultTargets, "", "", mockFactory)
 
 		// Assert
 		assert.NoError(t, err)
@@ -140,7 +139,7 @@ func TestRunScanLogic(t *testing.T) {
 		mockFactory.On("Create", mock.Anything, cfg, defaultTargets, mock.AnythingOfType("*zap.Logger")).Return(nil, factoryErr)
 
 		// Act
-		err := runScan(baseCtx, logger, cfg, defaultTargets, "", "", mockFactory)
+		err := runScan(baseCtx, cfg, defaultTargets, "", "", mockFactory)
 
 		// Assert
 		assert.Error(t, err)
@@ -162,7 +161,7 @@ func TestRunScanLogic(t *testing.T) {
 		mockOrchestrator.On("StartScan", mock.Anything, defaultTargets, mock.AnythingOfType("string")).Return(orchestratorError)
 
 		// Act
-		err := runScan(baseCtx, logger, cfg, defaultTargets, "", "", mockFactory)
+		err := runScan(baseCtx, cfg, defaultTargets, "", "", mockFactory)
 
 		// Assert
 		assert.Error(t, err)
@@ -191,7 +190,7 @@ func TestRunScanLogic(t *testing.T) {
 		mockStore.On("GetFindingsByScanID", mock.Anything, mock.AnythingOfType("string")).Return([]schemas.Finding{}, nil)
 
 		// Act
-		err = runScan(baseCtx, logger, cfg, defaultTargets, outputFile, format, mockFactory)
+		err = runScan(baseCtx, cfg, defaultTargets, outputFile, format, mockFactory)
 
 		// Assert
 		assert.NoError(t, err)
@@ -222,7 +221,7 @@ func TestRunScanLogic(t *testing.T) {
 		mockOrchestrator.On("StartScan", mock.Anything, expectedTargets, mock.AnythingOfType("string")).Return(nil)
 
 		// Act
-		err := runScan(baseCtx, logger, cfg, targetsInput, "", "", mockFactory)
+		err := runScan(baseCtx, cfg, targetsInput, "", "", mockFactory)
 
 		// Assert
 		assert.NoError(t, err)

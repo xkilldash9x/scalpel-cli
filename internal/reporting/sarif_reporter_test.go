@@ -12,7 +12,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap/zaptest"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/reporting"
@@ -45,10 +44,9 @@ func (m *MockWriteCloser) Close() error {
 }
 
 func setupSARIFTest(t *testing.T) (*reporting.SARIFReporter, *MockWriteCloser) {
-	logger := zaptest.NewLogger(t)
 	mockWriter := &MockWriteCloser{Buffer: new(bytes.Buffer)}
 	// Test the dependency injection of the version string
-	reporter := reporting.NewSARIFReporter(mockWriter, logger, "v1.2.3-test")
+	reporter := reporting.NewSARIFReporter(mockWriter, "v1.2.3-test")
 	return reporter, mockWriter
 }
 
@@ -274,10 +272,9 @@ func TestSARIFReporter_Concurrency(t *testing.T) {
 
 func TestSARIFReporter_ErrorHandling(t *testing.T) {
 	t.Run("Close Error", func(t *testing.T) {
-		logger := zaptest.NewLogger(t)
 		// Use the mock writer to simulate a close error
 		mockWriter := &MockWriteCloser{Buffer: new(bytes.Buffer), FailClose: true}
-		reporter := reporting.NewSARIFReporter(mockWriter, logger, "v1.0.0-test")
+		reporter := reporting.NewSARIFReporter(mockWriter, "v1.0.0-test")
 
 		err := reporter.Close()
 		assert.Error(t, err)
@@ -285,10 +282,9 @@ func TestSARIFReporter_ErrorHandling(t *testing.T) {
 	})
 
 	t.Run("Encode Error (simulated by write failure)", func(t *testing.T) {
-		logger := zaptest.NewLogger(t)
 		// JSON encoding writes to the writer. If the writer fails, encoding fails.
 		mockWriter := &MockWriteCloser{Buffer: new(bytes.Buffer), FailWrite: true}
-		reporter := reporting.NewSARIFReporter(mockWriter, logger, "v1.0.0-test")
+		reporter := reporting.NewSARIFReporter(mockWriter, "v1.0.0-test")
 
 		// Add data to ensure the encoder attempts to write
 		reporter.Write(&schemas.ResultEnvelope{Findings: []schemas.Finding{{}}})
