@@ -54,8 +54,6 @@ func newScanCmd(factory ComponentFactory) *cobra.Command {
 			// explicit argument. This is a clean way to provide request-scoped values.
 			ctx = context.WithValue(ctx, "verbose", verbose)
 
-			logger := observability.GetLogger()
-
 			cfg, err := getConfigFromContext(ctx)
 			if err != nil {
 				return err // Error is already descriptive
@@ -71,7 +69,7 @@ func newScanCmd(factory ComponentFactory) *cobra.Command {
 
 			// The core logic is delegated to a testable function that accepts
 			// the factory as a dependency.
-			return runScan(ctx, logger, cfg, targets, output, format, factory)
+			return runScan(ctx, cfg, targets, output, format, factory)
 		},
 	}
 
@@ -149,12 +147,12 @@ func normalizeTargets(targets []string) ([]string, error) {
 // interrupt signals (like Ctrl+C), allowing the application to terminate cleanly.
 func runScan(
 	ctx context.Context,
-	logger *zap.Logger,
 	cfg config.Interface,
 	targets []string,
 	output, format string,
 	factory ComponentFactory,
 ) error {
+	logger := observability.GetLogger()
 	// --- Graceful Shutdown Setup ---
 	// Create a context that can be canceled manually. This will be the main context for the scan.
 	scanCtx, cancelScan := context.WithCancel(ctx)
@@ -242,7 +240,7 @@ func runScan(
 	} else {
 		logger.Info("Scan execution completed successfully.", zap.String("scanID", scanID))
 		if output != "" {
-			if err := generateReport(ctx, components.Store, scanID, format, output, logger); err != nil {
+			if err := generateReport(ctx, components.Store, scanID, format, output); err != nil {
 				return err
 			}
 		}
@@ -259,7 +257,8 @@ func runScan(
 // and significantly improved with batching and robust shutdown handling.
 
 // generateReport handles result processing and report writing.
-func generateReport(_ context.Context, dbStore schemas.Store, scanID, format, outputPath string, logger *zap.Logger) error {
+func generateReport(_ context.Context, dbStore schemas.Store, scanID, format, outputPath string) error {
+	logger := observability.GetLogger()
 	logger.Info("Generating scan report...", zap.String("format", format), zap.String("output_path", outputPath))
 
 	// Use a background context for report generation to ensure it completes
@@ -267,7 +266,7 @@ func generateReport(_ context.Context, dbStore schemas.Store, scanID, format, ou
 	reportCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
 
-	reporter, err := reporting.New(format, outputPath, logger, Version)
+	reporter, err := reporting.New(format, outputPath, Version)
 	if err != nil {
 		return fmt.Errorf("failed to initialize reporter: %w", err)
 	}

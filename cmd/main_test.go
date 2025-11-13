@@ -31,9 +31,10 @@ func newPristineRootCmd() *cobra.Command {
 			// 1. Initialize configuration loading
 			// FIX: Pass the 'cfgFile' variable to match the function's signature.
 			if err := initializeConfig(cmd, v, cfgFile); err != nil {
-				basicLogger, _ := zap.NewDevelopment()
-				defer basicLogger.Sync()
-				basicLogger.Error("Failed to initialize configuration", zap.Error(err))
+				// Initialize a minimal logger for startup errors.
+				observability.InitializeLogger(config.LoggerConfig{Level: "info", Format: "console", ServiceName: "scalpel-cli"})
+				log := observability.GetLogger()
+				log.Error("Failed to initialize configuration", zap.Error(err))
 				return fmt.Errorf("failed to initialize configuration: %w", err)
 			}
 

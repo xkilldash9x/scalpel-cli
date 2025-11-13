@@ -154,7 +154,7 @@ func runReport(
 
 // writeReportFile handles writing the report to a file using the reporting module.
 func writeReportFile(logger *zap.Logger, envelope *schemas.ResultEnvelope, outputPath, format string) error {
-	reporter, err := reporting.New(format, outputPath, logger, Version)
+	reporter, err := reporting.New(format, outputPath, Version)
 	if err != nil {
 		return fmt.Errorf("failed to initialize reporter: %w", err)
 	}
