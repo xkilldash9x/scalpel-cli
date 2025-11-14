@@ -1,7 +1,7 @@
 // internal/agent/codebase_executor_test.go
 package agent
 
-import ( // This is a comment to force a change
+import (
 	"context"
 	"os"
 	"path/filepath"
@@ -9,13 +9,11 @@ import ( // This is a comment to force a change
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap/zaptest"
 )
 
 // setupCodebaseExecutorTest creates a temporary directory structure simulating a Go project.
 func setupCodebaseExecutorTest(t *testing.T) (*CodebaseExecutor, string) {
 	t.Helper()
-	logger := zaptest.NewLogger(t)
 	// Create a temporary directory for the test project
 	projectRoot, err := os.MkdirTemp("", "scalpel-codebase-test-*")
 	require.NoError(t, err)
@@ -25,7 +23,7 @@ func setupCodebaseExecutorTest(t *testing.T) (*CodebaseExecutor, string) {
 		os.RemoveAll(projectRoot)
 	})
 
-	executor := NewCodebaseExecutor(logger, projectRoot)
+	executor := NewCodebaseExecutor(projectRoot)
 	return executor, projectRoot
 }
 

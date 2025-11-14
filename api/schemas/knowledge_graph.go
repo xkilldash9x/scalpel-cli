@@ -26,6 +26,7 @@ const (
 	NodeURL                NodeType = "URL"
 	NodeCookie             NodeType = "COOKIE"
 	NodeHeader             NodeType = "HEADER"
+	NodeAccount            NodeType = "ACCOUNT"
 	NodeTechnology         NodeType = "TECHNOLOGY"
 	NodeVulnerability      NodeType = "VULNERABILITY"
 	NodeAction             NodeType = "ACTION"

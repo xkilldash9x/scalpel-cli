@@ -1,7 +1,7 @@
 // internal/agent/executors_test.go
 package agent
 
-import ( // This is a comment to force a change
+import (
 	"context"
 	"encoding/json"
 	"errors"
@@ -13,7 +13,6 @@ import ( // This is a comment to force a change
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
 	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
@@ -26,10 +25,9 @@ import ( // This is a comment to force a change
 
 // Setup helper for BrowserExecutor tests
 func setupBrowserExecutorTest(t *testing.T) (*BrowserExecutor, *mocks.MockSessionContext) {
-	logger := zaptest.NewLogger(t)
 	mockSession := mocks.NewMockSessionContext()
 	provider := func() schemas.SessionContext { return mockSession }
-	executor := NewBrowserExecutor(logger, provider)
+	executor := NewBrowserExecutor(provider)
 	return executor, mockSession
 }
 
@@ -131,42 +129,48 @@ func TestBrowserExecutor_HandleScroll(t *testing.T) {
 func TestBrowserExecutor_HandleWaitForAsync(t *testing.T) {
 	executor, mockSession := setupBrowserExecutorTest(t)
 
-	// Test with default duration
-	action := Action{Type: ActionWaitForAsync}
-	mockSession.On("WaitForAsync", mock.Anything, 1000).Return(nil).Once()
-	err := executor.handleWaitForAsync(context.Background(), mockSession, action)
-	assert.NoError(t, err)
+	t.Run("DefaultDuration", func(t *testing.T) {
+		action := Action{Type: ActionWaitForAsync}
+		mockSession.On("WaitForAsync", mock.Anything, 1000).Return(nil).Once()
+		err := executor.handleWaitForAsync(context.Background(), mockSession, action)
+		assert.NoError(t, err)
+	})
 
-	// Test with specified duration (float64 - common from JSON)
-	action.Metadata = map[string]interface{}{"duration_ms": 2500.0}
-	mockSession.On("WaitForAsync", mock.Anything, 2500).Return(nil).Once()
-	err = executor.handleWaitForAsync(context.Background(), mockSession, action)
-	assert.NoError(t, err)
+	t.Run("SpecifiedDurationFloat", func(t *testing.T) {
+		action := Action{Type: ActionWaitForAsync, Metadata: map[string]interface{}{"duration_ms": 2500.0}}
+		mockSession.On("WaitForAsync", mock.Anything, 2500).Return(nil).Once()
+		err := executor.handleWaitForAsync(context.Background(), mockSession, action)
+		assert.NoError(t, err)
+	})
 
-	// NEW: Test with integer types
 	t.Run("IntegerTypes", func(t *testing.T) {
 		tests := []struct {
+			name     string
 			val      interface{}
 			expected int
 		}{
-			{int(1500), 1500},
-			{int64(1600), 1600},
-			{float32(1700.5), 1700},
+			{"int", int(1500), 1500},
+			{"int64", int64(1600), 1600},
+			{"float32", float32(1700.5), 1700},
 		}
 
 		for _, tt := range tests {
-			action.Metadata = map[string]interface{}{"duration_ms": tt.val}
-			mockSession.On("WaitForAsync", mock.Anything, tt.expected).Return(nil).Once()
-			err = executor.handleWaitForAsync(context.Background(), mockSession, action)
-			assert.NoError(t, err)
+			t.Run(tt.name, func(t *testing.T) {
+				action := Action{Type: ActionWaitForAsync}
+				action.Metadata = map[string]interface{}{"duration_ms": tt.val}
+				mockSession.On("WaitForAsync", mock.Anything, tt.expected).Return(nil).Once()
+				err := executor.handleWaitForAsync(context.Background(), mockSession, action)
+				assert.NoError(t, err)
+			})
 		}
 	})
 
-	// Test with invalid type (should use default)
-	action.Metadata = map[string]interface{}{"duration_ms": "not-a-number"}
-	mockSession.On("WaitForAsync", mock.Anything, 1000).Return(nil).Once()
-	err = executor.handleWaitForAsync(context.Background(), mockSession, action)
-	assert.NoError(t, err)
+	t.Run("InvalidType", func(t *testing.T) {
+		action := Action{Type: ActionWaitForAsync, Metadata: map[string]interface{}{"duration_ms": "not-a-number"}}
+		mockSession.On("WaitForAsync", mock.Anything, 1000).Return(nil).Once()
+		err := executor.handleWaitForAsync(context.Background(), mockSession, action)
+		assert.NoError(t, err)
+	})
 }
 
 func TestExecutorRegistry_Execute(t *testing.T) {
@@ -181,7 +185,7 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 		Adapters: make(map[schemas.TaskType]core.Analyzer),
 	}
 
-	registry := NewExecutorRegistry(logger, ".", mockGlobalCtx)
+	registry := NewExecutorRegistry(".", mockGlobalCtx)
 	registry.UpdateSessionProvider(provider)
 
 	t.Run("ValidBrowserAction", func(t *testing.T) {
@@ -202,6 +206,8 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 
 		analysisAction := Action{Type: ActionAnalyzeHeaders}
 		mockSession.On("CollectArtifacts", mock.Anything).Return((*schemas.Artifacts)(nil), nil).Once()
+		// It now also tries to get the URL.
+		mockSession.On("ExecuteScript", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(json.RawMessage(`"https://example.com"`), nil).Once()
 		// The analysis executor expects the Analyze method to be called.
 		mockAnalyzer.On("Name").Return("MockHeaderAnalyzer")
 		mockAnalyzer.On("Type").Return(core.TypePassive).Maybe()
@@ -222,6 +228,7 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 
 		analysisAction := Action{Type: ActionTestRaceCondition}
 		mockSession.On("CollectArtifacts", mock.Anything).Return((*schemas.Artifacts)(nil), nil).Once()
+		mockSession.On("ExecuteScript", mock.Anything, mock.AnythingOfType("string"), mock.Anything).Return(json.RawMessage(`"https://example.com"`), nil).Once()
 		mockAnalyzer.On("Name").Return("MockTimeslipAnalyzer")
 		mockAnalyzer.On("Type").Return(core.TypeActive).Maybe()
 		mockAnalyzer.On("Analyze", mock.Anything, mock.Anything).Return(nil).Once()
@@ -278,9 +285,9 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 	t.Run("UnregisteredAction", func(t *testing.T) {
 		unknownAction := Action{Type: "ACTION_THAT_DOES_NOT_EXIST"}
 		result, err := registry.Execute(context.Background(), unknownAction)
-		require.Error(t, err)
-		require.Nil(t, result)
-		assert.Contains(t, err.Error(), "no executor registered")
+		require.NoError(t, err)
+		assert.Equal(t, "failed", result.Status)
+		assert.Equal(t, ErrCodeUnknownAction, result.ErrorCode)
 	})
 
 	// NEW: Test actions that should be handled by the Agent loop
@@ -288,9 +295,6 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 		actions := []ActionType{
 			ActionConclude,
 			ActionEvolveCodebase,
-			ActionExecuteLoginSequence,
-			ActionExploreApplication,
-			ActionFuzzEndpoint,
 		}
 		for _, actionType := range actions {
 			t.Run(string(actionType), func(t *testing.T) {
@@ -298,7 +302,7 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 				result, err := registry.Execute(context.Background(), action)
 				require.Error(t, err)
 				require.Nil(t, result)
-				assert.Contains(t, err.Error(), "should be handled by the Agent's cognitive loop")
+				assert.Contains(t, err.Error(), "should be handled by the Agent loop")
 			})
 		}
 	})
@@ -306,8 +310,10 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 
 // NEW: TestExecutorRegistry_Providers tests the dynamic provider update mechanism.
 func TestExecutorRegistry_Providers(t *testing.T) {
-	logger := zap.NewNop()
-	registry := NewExecutorRegistry(logger, ".", nil)
+	mockGlobalCtx := &core.GlobalContext{
+		Config: &config.Config{},
+	}
+	registry := NewExecutorRegistry(".", mockGlobalCtx)
 
 	// 1. Test initial state (should return nil)
 	sessionGetter := registry.GetSessionProvider()

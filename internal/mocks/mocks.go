@@ -543,6 +543,38 @@ func (m *MockHumanoidController) Shortcut(ctx context.Context, keysExpression st
 	return m.Called(ctx, keysExpression).Error(0)
 }
 
+func (m *MockHumanoidController) DispatchMouseEvent(ctx context.Context, data schemas.MouseEventData) error {
+	return m.Called(ctx, data).Error(0)
+}
+
+func (m *MockHumanoidController) DispatchStructuredKey(ctx context.Context, data schemas.KeyEventData) error {
+	return m.Called(ctx, data).Error(0)
+}
+
+func (m *MockHumanoidController) ExecuteScript(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
+	callArgs := m.Called(ctx, script, args)
+	if msg, ok := callArgs.Get(0).(json.RawMessage); ok {
+		return msg, callArgs.Error(1)
+	}
+	return nil, callArgs.Error(1)
+}
+
+func (m *MockHumanoidController) GetElementGeometry(ctx context.Context, selector string) (*schemas.ElementGeometry, error) {
+	args := m.Called(ctx, selector)
+	if geom, ok := args.Get(0).(*schemas.ElementGeometry); ok {
+		return geom, args.Error(1)
+	}
+	return nil, args.Error(1)
+}
+
+func (m *MockHumanoidController) SendKeys(ctx context.Context, keys string) error {
+	return m.Called(ctx, keys).Error(0)
+}
+
+func (m *MockHumanoidController) Sleep(ctx context.Context, d time.Duration) error {
+	return m.Called(ctx, d).Error(0)
+}
+
 // NewMockHumanoid creates a new mock instance for the humanoid controller.
 func NewMockHumanoid() *MockHumanoidController {
 	return &MockHumanoidController{}

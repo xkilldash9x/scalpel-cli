@@ -1,7 +1,7 @@
 // internal/agent/analysis_executor_test.go
 package agent
 
-import ( // This is a comment to force a change
+import (
 	"context"
 	"encoding/json"
 	"errors"
@@ -11,17 +11,17 @@ import ( // This is a comment to force a change
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap/zaptest"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 )
 
 // Setup function for AnalysisExecutor tests.
 func setupAnalysisExecutorTest(t *testing.T) (*AnalysisExecutor, *mocks.MockSessionContext, *core.GlobalContext, *mocks.MockAnalyzer) {
 	t.Helper()
-	logger := zaptest.NewLogger(t)
+	logger := observability.GetLogger()
 	mockSession := new(mocks.MockSessionContext)
 	mockAnalyzer := new(mocks.MockAnalyzer)
 
@@ -34,7 +34,7 @@ func setupAnalysisExecutorTest(t *testing.T) (*AnalysisExecutor, *mocks.MockSess
 	// Register the mock analyzer for a specific task type.
 	globalCtx.Adapters[schemas.TaskAnalyzeWebPageTaint] = mockAnalyzer
 
-	executor := NewAnalysisExecutor(logger, globalCtx, provider)
+	executor := NewAnalysisExecutor(globalCtx, provider)
 
 	return executor, mockSession, globalCtx, mockAnalyzer
 }
@@ -115,6 +115,7 @@ func TestAnalysisExecutor_Execute_AnalyzerFailure(t *testing.T) {
 	mockAnalyzer.On("Name").Return("TestTaintAnalyzer").Maybe()
 	mockAnalyzer.On("Type").Return(core.TypeActive).Maybe()
 	mockSession.On("CollectArtifacts", mock.Anything).Return(nil, nil).Once()
+	mockSession.On("ExecuteScript", mock.Anything, mock.Anything, mock.Anything).Return(json.RawMessage(`""`), nil).Maybe()
 	mockAnalyzer.On("Analyze", mock.Anything, mock.Anything).Return(expectedError).Once()
 
 	// Act
@@ -123,7 +124,7 @@ func TestAnalysisExecutor_Execute_AnalyzerFailure(t *testing.T) {
 	// Assert
 	require.NoError(t, err) // Executor returns a failed result, not an error
 	assert.Equal(t, "failed", result.Status)
-	assert.Equal(t, ErrCodeExecutionFailure, result.ErrorCode)
+	assert.Equal(t, ErrCodeAnalysisFailure, result.ErrorCode)
 	assert.Contains(t, result.ErrorDetails["message"], expectedError.Error())
 }
 
@@ -204,6 +205,7 @@ func TestAnalysisExecutor_Execute_ArtifactCollectionFailure(t *testing.T) {
 	// Mock artifact collection failure
 	expectedErr := errors.New("browser artifact timeout")
 	mockSession.On("CollectArtifacts", mock.Anything).Return(nil, expectedErr).Once()
+	mockSession.On("ExecuteScript", mock.Anything, mock.Anything, mock.Anything).Return(json.RawMessage(`""`), nil).Maybe()
 
 	// Expect Analyze to still be called, but with nil artifacts
 	mockAnalyzer.On("Analyze", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {

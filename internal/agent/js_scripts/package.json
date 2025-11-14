@@ -1,0 +1,12 @@
+{
+  "name": "agent-js-tests",
+  "version": "1.0.0",
+  "description": "Tests for browser-side agent logic",
+  "scripts": {
+    "test": "jest"
+  },
+  "devDependencies": {
+    "jest": "^29.7.0",
+    "jest-environment-jsdom": "^29.7.0"
+  }
+}
