@@ -8,6 +8,7 @@ import (
 
 	json "github.com/json-iterator/go"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"go.uber.org/zap"
 )
 
@@ -34,9 +35,9 @@ var _ ActionExecutor = (*HumanoidExecutor)(nil) // Verify interface compliance.
 
 // NewHumanoidExecutor creates and initializes a new HumanoidExecutor,
 // registering all of its action handlers.
-func NewHumanoidExecutor(logger *zap.Logger, provider HumanoidProvider) *HumanoidExecutor {
+func NewHumanoidExecutor(provider HumanoidProvider) *HumanoidExecutor {
 	e := &HumanoidExecutor{
-		logger:           logger.Named("humanoid_executor"),
+		logger:           observability.GetLogger().Named("humanoid_executor"),
 		humanoidProvider: provider,
 		handlers:         make(map[ActionType]humanoidActionHandler),
 	}

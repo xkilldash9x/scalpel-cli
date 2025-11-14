@@ -75,6 +75,7 @@ const (
 	// -- High-Level, Complex Actions --
 	// Complex tasks that might be decomposed into simpler actions by the executor or the Mind itself.
 	ActionExecuteLoginSequence ActionType = "EXECUTE_LOGIN_SEQUENCE" // Executes a predefined or discovered login sequence.
+	ActionSignUp               ActionType = "SIGN_UP"                // Executes a sign-up or registration sequence.
 	ActionExploreApplication   ActionType = "EXPLORE_APPLICATION"    // Initiates a comprehensive crawl/exploration of the application scope.
 	ActionFuzzEndpoint         ActionType = "FUZZ_ENDPOINT"          // Performs fuzzing against a specific API endpoint or form inputs.
 
@@ -171,6 +172,11 @@ const (
 
 	// -- Analysis & Security Testing Errors --
 	ErrCodeAnalysisFailure ErrorCode = "ANALYSIS_FAILURE" // Failure within an analysis module.
+
+	// -- Auth-specific errors --
+	ErrCodeAuthWorkflowFailed   ErrorCode = "AUTH_WORKFLOW_FAILED"
+	ErrCodeAuthCaptchaDetected  ErrorCode = "AUTH_CAPTCHA_DETECTED"
+	ErrCodeAuthValidationFailed ErrorCode = "AUTH_VALIDATION_FAILED"
 
 	// -- Evolution-specific errors --
 	ErrCodeEvolutionFailure ErrorCode = "EVOLUTION_FAILURE" // An error occurred during the self-improvement/evolution process.

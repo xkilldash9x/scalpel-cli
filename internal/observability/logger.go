@@ -103,6 +103,16 @@ func ResetForTest() {
 	once = sync.Once{}
 }
 
+// SetLogger is a test helper that forcibly replaces the global logger instance.
+// This should ONLY be used in tests to inject a specific logger (like a test logger)
+// and bypass the sync.Once mechanism.
+func SetLogger(logger *zap.Logger) {
+	globalLogger.Store(logger)
+	// Also replace the zap global logger to capture any logs from third-party libs
+	// that might use it.
+	zap.ReplaceGlobals(logger)
+}
+
 // newColorizedLevelEncoder creates a zapcore.LevelEncoder that colorizes the log level.
 func newColorizedLevelEncoder(colors config.ColorConfig) zapcore.LevelEncoder {
 	return func(level zapcore.Level, enc zapcore.PrimitiveArrayEncoder) {

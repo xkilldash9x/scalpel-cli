@@ -10,11 +10,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
-	"go.uber.org/zap"
-	"go.uber.org/zap/zaptest"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 )
 
 // setupHumanoidExecutorTest initializes the executor with a mock humanoid controller.
@@ -27,7 +26,6 @@ func setupHumanoidExecutorTest(t *testing.T) (*HumanoidExecutor, *mocks.MockHuma
 
 // setupHumanoidExecutorTestWithHandlerConfig allows configuring whether to use real or mocked handlers.
 func setupHumanoidExecutorTestWithHandlerConfig(t *testing.T, useMockHandlers bool) (*HumanoidExecutor, *mocks.MockHumanoidController) {
-	logger := zaptest.NewLogger(t)
 	mockHumanoid := new(mocks.MockHumanoidController)
 
 	// The dummyHumanoid needs a low-level executor (e.g., for mouse events).
@@ -46,7 +44,7 @@ func setupHumanoidExecutorTestWithHandlerConfig(t *testing.T, useMockHandlers bo
 		return dummyHumanoid
 	}
 
-	executor := NewHumanoidExecutor(logger, provider)
+	executor := NewHumanoidExecutor(provider)
 
 	// Override handlers to use the mock for testing dispatch logic, while retaining validation logic.
 	if useMockHandlers {
@@ -91,9 +89,8 @@ func setupHumanoidExecutorTestWithHandlerConfig(t *testing.T, useMockHandlers bo
 
 func TestHumanoidExecutor_Execute(t *testing.T) {
 	t.Run("FailsWhenHumanoidProviderIsNil", func(t *testing.T) {
-		logger := zap.NewNop()
 		// Initialize with a provider that returns nil
-		executor := NewHumanoidExecutor(logger, func() *humanoid.Humanoid { return nil })
+		executor := NewHumanoidExecutor(func() *humanoid.Humanoid { return nil })
 		action := Action{Type: ActionClick, Selector: "#btn"}
 
 		// The executor returns a structured result now instead of an error for this case.
@@ -323,7 +320,7 @@ func TestHumanoidExecutor_Execute(t *testing.T) {
 // NEW: TestParseInteractionOptions_InvalidInputs covers error paths in the options parser.
 func TestParseInteractionOptions_InvalidInputs(t *testing.T) {
 	// We only need the executor instance itself for this test.
-	executor := &HumanoidExecutor{logger: zaptest.NewLogger(t)}
+	executor := &HumanoidExecutor{logger: observability.GetLogger()}
 
 	tests := []struct {
 		name     string

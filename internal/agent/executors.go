@@ -9,9 +9,9 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
-	"go.uber.org/zap"
-
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"go.uber.org/zap"
 )
 
 // -- Executor Registry --
@@ -33,7 +33,8 @@ var _ ActionExecutor = (*ExecutorRegistry)(nil)
 
 // NewExecutorRegistry creates and initializes a new registry, populating it with
 // all the specialized executors (Browser, Codebase, Analysis, Humanoid).
-func NewExecutorRegistry(logger *zap.Logger, projectRoot string, globalCtx *core.GlobalContext) *ExecutorRegistry {
+func NewExecutorRegistry(projectRoot string, globalCtx *core.GlobalContext) *ExecutorRegistry {
+	logger := observability.GetLogger()
 	r := &ExecutorRegistry{
 		logger:          logger.Named("executor_registry"),
 		executors:       make(map[ActionType]ActionExecutor),
@@ -45,10 +46,19 @@ func NewExecutorRegistry(logger *zap.Logger, projectRoot string, globalCtx *core
 	safeHumanoidGetter := r.GetHumanoidProvider()
 
 	// Initialize the executors managed by this registry.
-	browserExec := NewBrowserExecutor(logger, safeProviderGetter)
-	codebaseExec := NewCodebaseExecutor(logger, projectRoot)
-	analysisExec := NewAnalysisExecutor(logger, globalCtx, safeProviderGetter)
-	humanoidExec := NewHumanoidExecutor(logger, safeHumanoidGetter)
+	browserExec := NewBrowserExecutor(safeProviderGetter)
+	codebaseExec := NewCodebaseExecutor(projectRoot)
+	analysisExec := NewAnalysisExecutor(globalCtx, safeProviderGetter)
+	humanoidExec := NewHumanoidExecutor(safeHumanoidGetter)
+	signUpExec, err := NewSignUpExecutor(safeHumanoidGetter, safeProviderGetter, globalCtx.Config)
+	if err != nil {
+		// Log a warning if initialization fails for any reason (e.g., SecLists path invalid).
+		// The feature will be unavailable.
+		r.logger.Warn("Failed to initialize SignUpExecutor. Sign-up actions will be disabled.", zap.Error(err))
+	} else if signUpExec != nil {
+		// Only register if the executor is not nil (i.e., it's enabled and initialized successfully).
+		r.register(signUpExec, ActionSignUp)
+	}
 
 	// Register browser actions.
 	r.register(browserExec, ActionNavigate, ActionSubmitForm, ActionScroll, ActionWaitForAsync)
@@ -167,9 +177,9 @@ var _ ActionExecutor = (*BrowserExecutor)(nil) // Verify interface compliance.
 
 // NewBrowserExecutor creates and initializes a new BrowserExecutor, registering
 // all of its action handlers.
-func NewBrowserExecutor(logger *zap.Logger, provider SessionProvider) *BrowserExecutor {
+func NewBrowserExecutor(provider SessionProvider) *BrowserExecutor {
 	e := &BrowserExecutor{
-		logger:          logger.Named("browser_executor"),
+		logger:          observability.GetLogger().Named("browser_executor"),
 		sessionProvider: provider,
 		handlers:        make(map[ActionType]ActionHandler),
 	}
@@ -267,6 +277,8 @@ func (e *BrowserExecutor) handleWaitForAsync(ctx context.Context, session schema
 		switch v := val.(type) {
 		case float64:
 			durationMs = int(v)
+		case float32:
+			durationMs = int(v)
 		case int:
 			durationMs = v
 		case int64:
@@ -317,7 +329,7 @@ func ParseBrowserError(err error, action Action) (ErrorCode, map[string]interfac
 	}
 
 	// 4. Check for element lookup failures.
-	if strings.Contains(errStr, "no element found") {
+	if strings.Contains(errStr, "no element found") || strings.Contains(errStr, "geometry retrieval failed") {
 		details["selector"] = action.Selector
 		return ErrCodeElementNotFound, details
 	}

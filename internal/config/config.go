@@ -349,8 +349,15 @@ type TimeSlipConfig struct {
 
 // AuthConfig aggregates configurations for all authentication-related scanners.
 type AuthConfig struct {
-	ATO  ATOConfig  `mapstructure:"ato" yaml:"ato"`
-	IDOR IDORConfig `mapstructure:"idor" yaml:"idor"`
+	ATO    ATOConfig     `mapstructure:"ato" yaml:"ato"`
+	IDOR   IDORConfig    `mapstructure:"idor" yaml:"idor"`
+	SignUp *SignUpConfig `mapstructure:"signup" yaml:"signup"`
+}
+
+// SignUpConfig defines settings for the autonomous sign-up feature.
+type SignUpConfig struct {
+	Enabled     bool   `mapstructure:"enabled" yaml:"enabled"`
+	EmailDomain string `mapstructure:"email_domain" yaml:"email_domain"`
 }
 
 // ATOConfig configures the Account Takeover (ATO) scanner, which performs
@@ -552,6 +559,8 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("scanners.active.auth.ato.enabled", true)
 	v.SetDefault("scanners.active.auth.ato.seclists_path", "~/SecLists")
 	v.SetDefault("scanners.active.auth.idor.enabled", true)
+	v.SetDefault("scanners.active.auth.signup.enabled", false)
+	v.SetDefault("scanners.active.auth.signup.email_domain", "example.com")
 
 	// -- Discovery --
 	v.SetDefault("discovery.max_depth", 5)
