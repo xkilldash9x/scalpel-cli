@@ -52,6 +52,7 @@ type InteractionOptions struct {
 // the primary actions that a user can perform on a web page, abstracting away
 // the complex simulation logic. This is the interface implemented by the
 // Humanoid struct.
+//go:generate mockery --name Controller --output ../../mocks --outpkg mocks
 type Controller interface {
 	MoveTo(ctx context.Context, selector string, opts *InteractionOptions) error
 	IntelligentClick(ctx context.Context, selector string, opts *InteractionOptions) error

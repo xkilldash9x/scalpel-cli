@@ -8,6 +8,7 @@ import (
 	"net/url"
 	"time"
 
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
@@ -29,9 +30,9 @@ var _ ActionExecutor = (*AnalysisExecutor)(nil)
 // NewAnalysisExecutor creates a new instance of the AnalysisExecutor.
 // It requires a logger, the global context for access to adapters, and a
 // session provider to get the current browser session if needed.
-func NewAnalysisExecutor(logger *zap.Logger, globalCtx *core.GlobalContext, provider SessionProvider) *AnalysisExecutor {
+func NewAnalysisExecutor(globalCtx *core.GlobalContext, provider SessionProvider) *AnalysisExecutor {
 	return &AnalysisExecutor{
-		logger:          logger.Named("analysis_executor"),
+		logger:          observability.GetLogger().Named("analysis_executor"),
 		globalCtx:       globalCtx,
 		sessionProvider: provider,
 	}

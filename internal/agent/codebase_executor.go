@@ -12,6 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"go.uber.org/zap"
 	"golang.org/x/tools/go/packages"
 )
@@ -23,9 +24,9 @@ type CodebaseExecutor struct {
 }
 
 // NewCodebaseExecutor creates a new instance of the CodebaseExecutor.
-func NewCodebaseExecutor(logger *zap.Logger, projectRoot string) *CodebaseExecutor {
+func NewCodebaseExecutor(projectRoot string) *CodebaseExecutor {
 	return &CodebaseExecutor{
-		logger:      logger.Named("codebase_executor"),
+		logger:      observability.GetLogger().Named("codebase_executor"),
 		projectRoot: projectRoot,
 	}
 }
