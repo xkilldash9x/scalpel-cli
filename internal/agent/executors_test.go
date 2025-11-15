@@ -24,7 +24,7 @@ import (
 // -- BrowserExecutor Tests --
 
 // Setup helper for BrowserExecutor tests
-func setupBrowserExecutorTest(t *testing.T) (*BrowserExecutor, *mocks.MockSessionContext) {
+func setupBrowserExecutorTest(_ *testing.T) (*BrowserExecutor, *mocks.MockSessionContext) {
 	mockSession := mocks.NewMockSessionContext()
 	provider := func() schemas.SessionContext { return mockSession }
 	executor := NewBrowserExecutor(provider)

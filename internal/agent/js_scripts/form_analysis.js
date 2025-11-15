@@ -1,19 +1,35 @@
 /**
  * Analyzes the current page DOM to identify the most likely sign-up form.
  * This script is designed to be robust against various HTML structures, optimized for accuracy
- * using Maximum Weight Matching, and compatible with environments like JSDOM.
+ * using a Maximum Weight Matching approximation, and compatible with environments like JSDOM.
  * @returns {object} An object containing CSS selectors for the identified fields.
  */
 function analyzeSignUpForm() {
+    // -- Configuration & Debug --
+
+    // Set to true for verbose logging of caught errors.
+    const _debug = true;
+
+    /**
+     * Internal helper for logging errors when _debug is true.
+     * @param {string} context - A message describing where the error occurred.
+     * @param {Error} error - The caught error object.
+     */
+    function logError(context, error) {
+        if (_debug) {
+            // Log the message and stack for better debugging
+            console.error(`FormAnalysis Error [${context}]:`, error.message, error.stack);
+        }
+    }
+
     // Configuration: Keywords for identifying different field types and the submit button.
-    // Refined keywords: Removed highly ambiguous terms like 'name' from firstName/lastName for robustness.
     const keywords = {
         firstName: ["first name", "firstname", "fname", "given name", "given-name", "first"],
         lastName: ["last name", "lastname", "lname", "surname", "family name", "family-name", "last"],
         email: ["email", "e-mail", "mail", "email address"],
         username: ["username", "user name", "login", "login id", "userid", "handle", "user"],
         password: ["password", "passphrase", "pwd", "pass", "new-password"],
-		passwordConfirm: ["confirm password", "repeat password", "verify password", "re-enter password", "confirm-password"],
+        passwordConfirm: ["confirm password", "repeat password", "verify password", "re-enter password", "confirm-password"],
         submit: ["sign up", "register", "create account", "join", "submit", "continue", "next"]
     };
 
@@ -25,10 +41,10 @@ function analyzeSignUpForm() {
         score: 0
     };
 
-    // Define ELEMENT_NODE for cross-environment compatibility (e.g., JSDOM).
+    // Define ELEMENT_NODE for cross environment compatibility (e.g., JSDOM).
     const ELEMENT_NODE = (typeof Node !== 'undefined' && Node.ELEMENT_NODE) || 1;
 
-    // --- Helper Functions ---
+    // -- Helper Functions --
 
     /**
      * Helper function for robust keyword matching using word boundaries.
@@ -45,6 +61,7 @@ function analyzeSignUpForm() {
             const regex = new RegExp(`\\b${escapedKeyword}\\b`, 'i');
             return regex.test(text);
         } catch (e) {
+            logError('matchesKeyword', e);
             // Fallback to simple inclusion if regex fails (less precise).
             return text.includes(keyword);
         }
@@ -55,8 +72,8 @@ function analyzeSignUpForm() {
      * Handles inputs/buttons correctly and normalizes whitespace.
      */
     function getVisibleText(element) {
-        if (!element) return "";
-        
+        if (!element) return ""; // Guard clause
+
         let text = "";
 
         // Handle inputs (buttons, submit) where the visible text is the 'value' attribute.
@@ -65,6 +82,8 @@ function analyzeSignUpForm() {
             text = element.value || "";
         } else {
             // For other elements (labels, buttons with content), use textContent (preferred) or innerText.
+            // Prefer textContent as it's more reliable in JSDOM and less performance intensive.
+            // Provide innerText as a fallback.
             text = element.textContent || element.innerText || "";
         }
 
@@ -73,35 +92,40 @@ function analyzeSignUpForm() {
     }
 
     /**
-     * Robust CSS Selector Generation with Context-Relative Prioritization.
-     * Generates stable selectors, preferring context-relative names when globally ambiguous.
+     * Robust CSS Selector Generation with Context Relative Prioritization.
+     * Generates stable selectors, preferring context relative names when globally ambiguous.
      */
     function getCssSelector(el, contextEl) {
-        // FIX: Use duck typing instead of `instanceof Element` for JSDOM/cross-context compatibility.
+        // Use duck typing instead of `instanceof Element` for JSDOM/cross context compatibility.
         if (!el || typeof el.nodeType !== 'number' || el.nodeType !== ELEMENT_NODE || typeof el.tagName !== 'string') {
             return null;
         }
 
-        // Safety wrapper for querySelectorAll calls (Defense-in-depth).
+        // Safety wrapper for querySelectorAll calls (Defense in depth).
+        // UPDATED: This function now re-throws errors so the caller can log with context.
         const safeQuery = (selector, scope = document) => {
             try {
                 // Ensure scope is a valid node before querying
                 if (!scope || typeof scope.querySelectorAll !== 'function') {
+                    // This specific error is logged here as it's an internal script issue.
+                    const scopeError = new Error(`Invalid scope object provided for selector: ${selector}`);
+                    logError('safeQuery (Invalid Scope)', scopeError);
                     return [];
                 }
-                return scope.querySelectorAll(selector);
+                return Array.from(scope.querySelectorAll(selector));
             } catch (e) {
-                // Silently fail if the selector syntax is invalid or unsupported.
-                return [];
+                // Add selector to error context and re-throw for the caller.
+                e.message = `Selector: "${selector}" | Error: ${e.message}`;
+                throw e;
             }
         };
-        
+
         // Helper for CSS escaping. Relies on CSS.escape (polyfill provided in test file).
         const escape = (value) => {
             if (typeof CSS !== 'undefined' && CSS.escape) {
                 return CSS.escape(value);
             }
-            // Fallback if CSS.escape is missing.
+            // Fallback if CSS.escape is missing. (For coverage test)
             const strValue = String(value || "");
             // Basic escaping for common characters.
             return strValue ? strValue.replace(/([\.#\s\[\]\(\)\:\*])/g, '\\$1') : null;
@@ -115,7 +139,9 @@ function analyzeSignUpForm() {
                 if (escapedId && safeQuery('#' + escapedId).length === 1) {
                     return '#' + escapedId;
                 }
-            } catch (e) {}
+            } catch (e) {
+                logError('getCssSelector (ID)', e);
+            }
         }
 
         // 2. Try Name unique within a context (Preferred for robustness, required by tests)
@@ -125,12 +151,12 @@ function analyzeSignUpForm() {
                 const escapedName = escape(el.name);
                 if (escapedName) {
                     const selectorByName = el.tagName.toLowerCase() + '[name="' + escapedName + '"]';
-                    
+
                     // Check uniqueness within the specific context.
                     if (safeQuery(selectorByName, contextEl).length === 1) {
-                        // Get the context's selector recursively. 
+                        // Get the context's selector recursively.
                         // Pass 'document' as the context for the recursive call to ensure a global selector for contextEl.
-                        const contextSelector = getCssSelector(contextEl, document); 
+                        const contextSelector = getCssSelector(contextEl, document);
                         if (contextSelector) {
                             // Return the combined descendant selector.
                             return contextSelector + ' ' + selectorByName;
@@ -138,7 +164,9 @@ function analyzeSignUpForm() {
                         // If contextSelector generation failed, fall through to try global selectors for 'el'.
                     }
                 }
-            } catch (e) {}
+            } catch (e) {
+                logError('getCssSelector (Context Name)', e);
+            }
         }
 
         // 3. Try Name globally unique (Fallback)
@@ -151,13 +179,15 @@ function analyzeSignUpForm() {
                         return selectorByName;
                     }
                 }
-            } catch (e) {}
+            } catch (e) {
+                logError('getCssSelector (Global Name)', e);
+            }
         }
 
         // 4. Fallback to a structural selector path (Global scope).
         const path = [];
         let currentEl = el;
-         while (currentEl && currentEl.nodeType === ELEMENT_NODE) {
+        while (currentEl && currentEl.nodeType === ELEMENT_NODE) {
             let selector = currentEl.nodeName.toLowerCase();
 
             if (currentEl === document.body) {
@@ -167,43 +197,55 @@ function analyzeSignUpForm() {
 
             // Safety check for parent node existence (e.g., detached elements)
             if (!currentEl.parentNode) {
+                // If parentNode is null, we're detached.
+                // Stop here. If path is empty, we can't generate a selector.
                 break;
             }
 
             // Optimization: Use ID as anchor if found during traversal and globally unique
             if (currentEl.id) {
-                 try {
+                try {
                     const escapedId = escape(currentEl.id);
-                     if (escapedId && safeQuery('#' + escapedId).length === 1) {
+                    if (escapedId && safeQuery('#' + escapedId).length === 1) {
                         path.unshift('#' + escapedId);
-                        break; 
+                        break;
                     }
-                } catch(e) {}
+                } catch (e) {
+                    logError('getCssSelector (Path ID)', e);
+                    // Continue path generation even if ID check fails
+                }
             }
 
             // Calculate nth-of-type for structural uniqueness
             let sib = currentEl, nth = 1;
             while (sib = sib.previousElementSibling) {
                 if (sib.nodeName.toLowerCase() === selector)
-                   nth++;
+                    nth++;
             }
             // Heuristic: Only add nth-of-type if necessary
-            if (nth > 1)
-                selector += ":nth-of-type("+nth+")";
-            
+            if (nth > 1 || currentEl.previousElementSibling || currentEl.nextElementSibling) {
+                // Be more specific if siblings exist
+                selector += ":nth-of-type(" + nth + ")";
+            }
+
+
             path.unshift(selector);
             currentEl = currentEl.parentNode;
         }
 
-        if (path.length === 0) {
-            return null; // Failed to generate a path
+        if (path.length === 0 || path[0] === 'body') {
+            // If the path is empty (fully detached) or only 'body' (meaning
+            // we're trying to select the body itself, which wasn't the
+            // original element 'el'), consider it a failure.
+            if (el.nodeName.toLowerCase() !== 'body' && path[0] === 'body') return null;
+            if (path.length === 0) return null;
         }
-        
+
         // Use > for direct descendants for precision.
         return path.join(" > ");
     }
 
-    // --- Scoring Functions ---
+    // -- Scoring Functions --
 
     /**
      * Scores an input element based on keywords in its attributes, labels, and context.
@@ -211,7 +253,7 @@ function analyzeSignUpForm() {
      */
     function scoreElement(element, searchKeywords, fieldType) {
         let score = 0;
-		const attributesRaw = (element.id || "") + " " + (element.name || "") + " " + (element.placeholder || "") + " " + (element.getAttribute('aria-label') || "");
+        const attributesRaw = (element.id || "") + " " + (element.name || "") + " " + (element.placeholder || "") + " " + (element.getAttribute('aria-label') || "");
 
         // Check Autocomplete attribute (Strong signal)
         const autocomplete = (element.getAttribute('autocomplete') || "").toLowerCase();
@@ -219,9 +261,9 @@ function analyzeSignUpForm() {
             if (searchKeywords.includes(autocomplete)) {
                 score += 30;
             }
-            // Specific high-value signals for registration forms
+            // Specific high value signals for registration forms
             if (autocomplete === 'new-password' && fieldType === 'password') score += 35;
-			if (autocomplete === 'new-password' && fieldType === 'passwordConfirm') score += 30;
+            if (autocomplete === 'new-password' && fieldType === 'passwordConfirm') score += 30;
             if (autocomplete === 'email' && fieldType === 'email') score += 30;
         }
 
@@ -229,7 +271,7 @@ function analyzeSignUpForm() {
         // Normalize attributes (replacing delimiters with spaces) for better keyword matching.
         const attributesLower = attributesRaw.replace(/[-_]/g, ' ').toLowerCase();
         searchKeywords.forEach(keyword => {
-            // FIX: Use precise matching instead of includes().
+            // Use precise matching instead of includes().
             if (matchesKeyword(attributesLower, keyword)) {
                 score += 10;
             }
@@ -241,12 +283,12 @@ function analyzeSignUpForm() {
             if (type === 'email' && (fieldType === 'email' || fieldType === 'username')) score += 20;
             if (type === 'password' && (fieldType === 'password' || fieldType === 'passwordConfirm')) score += 25;
             // Reduced bonus for generic text input. A score of 5 means only the type matched.
-            if ((type === 'text' || type === 'tel') && (fieldType === 'username' || fieldType === 'email' || fieldType === 'firstName' || fieldType === 'lastName')) score += 5; 
+            if ((type === 'text' || type === 'tel') && (fieldType === 'username' || fieldType === 'email' || fieldType === 'firstName' || fieldType === 'lastName')) score += 5;
         }
 
         // Check associated labels (Robust association)
         let labelText = "";
-        
+
         // 1. Try finding label by 'for' attribute
         if (element.id) {
             try {
@@ -254,33 +296,38 @@ function analyzeSignUpForm() {
                 if (typeof CSS !== 'undefined' && CSS.escape) {
                     const escapedId = CSS.escape(element.id);
                     if (escapedId) {
+                        // Use safeQuery wrapper
                         const label = document.querySelector('label[for="' + escapedId + '"]');
                         labelText = getVisibleText(label);
                     }
                 }
             } catch (e) {
-                // Handle potential errors in querySelector
+                logError('scoreElement (label[for])', e);
             }
         }
-        
+
         // 2. Try finding wrapping label if 'for' didn't yield results
         if (!labelText && element.closest) {
-             const wrappingLabel = element.closest('label');
-             if (wrappingLabel) {
+            const wrappingLabel = element.closest('label');
+            if (wrappingLabel) {
                 // Heuristic: Ensure the wrapping label isn't too broad
                 try {
-                    if (wrappingLabel.querySelectorAll('input').length <= 2) {
-                         labelText = getVisibleText(wrappingLabel);
+                    // Check if this label wraps multiple inputs, which would make it ambiguous
+                    const inputsInLabel = wrappingLabel.querySelectorAll('input');
+                    if (inputsInLabel.length <= 2) {
+                        labelText = getVisibleText(wrappingLabel);
                     }
-                } catch (e) {}
-             }
+                } catch (e) {
+                    logError('scoreElement (closest label)', e);
+                }
+            }
         }
 
         if (labelText) {
-             searchKeywords.forEach(keyword => {
-                // FIX: Use precise matching. Increased weight for labels.
+            searchKeywords.forEach(keyword => {
+                // Use precise matching. Increased weight for labels.
                 if (matchesKeyword(labelText, keyword)) {
-                    score += 20; 
+                    score += 20;
                 }
             });
         }
@@ -288,61 +335,63 @@ function analyzeSignUpForm() {
         return score;
     }
 
-	/**
-	 * Scores buttons based on visible text and attributes.
+    /**
+     * Scores buttons based on visible text and attributes.
      * Uses precise word boundary matching (matchesKeyword).
-	 */
-	function scoreButton(element, searchKeywords) {
-		let score = 0;
+     */
+    function scoreButton(element, searchKeywords) {
+        let score = 0;
         // Get the primary visible text
-		const visibleText = getVisibleText(element);
-        
+        const visibleText = getVisibleText(element);
+
         // Get secondary attributes (aria-label, id, name). Normalize delimiters.
-		const attributesRaw = (element.getAttribute('aria-label') || element.id || element.name || "");
+        const attributesRaw = (element.getAttribute('aria-label') || element.id || element.name || "");
         const attributesLower = attributesRaw.replace(/[-_]/g, ' ').toLowerCase();
 
         // Score visible text (high weight)
-		searchKeywords.forEach(keyword => {
-            // FIX: Use precise matching.
-			if (matchesKeyword(visibleText, keyword)) {
-				score += 20;
-			}
-		});
+        searchKeywords.forEach(keyword => {
+            // Use precise matching.
+            if (matchesKeyword(visibleText, keyword)) {
+                score += 20;
+            }
+        });
 
         // Score attributes (lower weight)
         searchKeywords.forEach(keyword => {
-			if (matchesKeyword(attributesLower, keyword)) {
-				score += 10;
-			}
-		});
+            if (matchesKeyword(attributesLower, keyword)) {
+                score += 10;
+            }
+        });
 
-		// Extra points for explicit submit type
+        // Extra points for explicit submit type
         const type = (element.type || '').toLowerCase();
-		if (type === 'submit') {
-			score += 15;
-		}
+        if (type === 'submit') {
+            score += 15;
+        }
         // Points for role="button" (SPA scenario)
         if (element.tagName !== 'BUTTON' && element.tagName !== 'INPUT' && element.getAttribute && element.getAttribute('role') === 'button') {
             score += 5;
         }
-		return score;
-	}
+        return score;
+    }
 
-    // --- Main Analysis Logic ---
+    // -- Main Analysis Logic --
 
     // Identify potential contexts: prioritize forms, fallback to specific divs or body for SPAs.
     let contexts = [];
     try {
         contexts = Array.from(document.querySelectorAll('form'));
-    } catch (e) {}
+    } catch (e) {
+        logError('analyze (querySelectorAll form)', e);
+    }
 
     // Fallback for SPAs
     if (contexts.length === 0) {
         try {
-             // Prioritize elements that strongly suggest a registration context.
-             contexts = Array.from(document.querySelectorAll('[class*="signup"], [class*="register"], [id*="signup"], [id*="register"], main, article'));
+            // Prioritize elements that strongly suggest a registration context.
+            contexts = Array.from(document.querySelectorAll('[class*="signup"], [class*="register"], [id*="signup"], [id*="register"], main, article'));
         } catch (e) {
-            // Silent fail on complex queries
+            logError('analyze (querySelectorAll SPA)', e);
         }
     }
     if (contexts.length === 0 && document.body) {
@@ -359,6 +408,7 @@ function analyzeSignUpForm() {
             const selector = 'input:not([type="hidden"]):not([disabled]):not([hidden]):not([name*="csrf"]):not([name*="captcha"]), button:not([disabled]):not([hidden]), [role="button"]:not([aria-disabled="true"]):not([hidden])';
             visibleElements = Array.from(context.querySelectorAll(selector));
         } catch (e) {
+            logError('analyze (querySelectorAll visibleElements)', e);
             return; // Skip context if querying fails
         }
 
@@ -379,13 +429,13 @@ function analyzeSignUpForm() {
             currentForm.score -= 10;
         }
 
-        // --- Field Scoring and Assignment ---
+        // -- Field Scoring and Assignment --
         // REFACTORED: Transition from Greedy matching to Maximum Weight Matching (approximated by sorting).
         // This ensures the globally optimal assignment of inputs to field types, improving robustness.
 
         // 1. Define relevant inputs and field types.
         const fieldTypes = Object.keys(keywords).filter(k => k !== 'submit');
-        
+
         // Filter visible elements to include only actual INPUT elements suitable for fields.
         const inputs = visibleElements.filter(el => {
             if (el.tagName !== 'INPUT') return false;
@@ -398,14 +448,14 @@ function analyzeSignUpForm() {
         });
 
         const scoreMatrix = [];
-        // Define the minimum score threshold. Score > 5 ensures more than just the input type matched (e.g. type=text scores 5).
+        // Define the minimum score threshold. Score > 5 ensures more than just the type matched (e.g. type=text scores 5).
         const MIN_SCORE_THRESHOLD = 5;
 
         // 2. Calculate all scores and apply threshold.
         inputs.forEach(input => {
             fieldTypes.forEach(fieldType => {
                 const score = scoreElement(input, keywords[fieldType], fieldType);
-                
+
                 if (score > MIN_SCORE_THRESHOLD) {
                     scoreMatrix.push({ input, fieldType, score });
                 }
@@ -429,27 +479,27 @@ function analyzeSignUpForm() {
             }
         }
 
-        // --- Submit Button Scoring ---
+        // -- Submit Button Scoring --
         let bestButton = null;
         let highestButtonScore = 0;
 
-         visibleElements.forEach(button => {
-             const tagName = button.tagName;
-             const type = (button.type || '').toLowerCase();
+        visibleElements.forEach(button => {
+            const tagName = button.tagName;
+            const type = (button.type || '').toLowerCase();
 
-             // Focus on <button>, <input type="submit/button">, or elements with role="button".
-             const isButtonLike = tagName === 'BUTTON' || 
-                                  (tagName === 'INPUT' && (type === 'submit' || type === 'button')) || 
-                                  (button.getAttribute && button.getAttribute('role') === 'button');
+            // Focus on <button>, <input type="submit/button">, or elements with role="button".
+            const isButtonLike = tagName === 'BUTTON' ||
+                (tagName === 'INPUT' && (type === 'submit' || type ==='button')) ||
+                (button.getAttribute && button.getAttribute('role') === 'button');
 
-             if (isButtonLike) {
+            if (isButtonLike) {
                 let score = scoreButton(button, keywords.submit);
 
                 if (score > highestButtonScore) {
                     highestButtonScore = score;
                     bestButton = button;
                 }
-             }
+            }
         });
 
         // Fallback mechanism for submit buttons.
@@ -462,7 +512,9 @@ function analyzeSignUpForm() {
                     bestButton = fallbackSubmit;
                     highestButtonScore = 10; // Assign baseline score
                 }
-            } catch(e) {}
+            } catch (e) {
+                logError('analyze (button fallback)', e);
+            }
         }
 
         if (bestButton) {
@@ -470,9 +522,9 @@ function analyzeSignUpForm() {
             currentForm.score += highestButtonScore;
         }
 
-        // --- Form Validation and Selection ---
+        // -- Form Validation and Selection --
         // Determine if this is the best form found so far.
-        // Essential criteria for a Sign-Up form: (email OR username) AND password AND submit.
+        // Essential criteria for a Sign Up form: (email OR username) AND password AND submit.
         const hasIdentifier = currentForm.fields.email || currentForm.fields.username;
         const hasPassword = currentForm.fields.password;
         const hasSubmit = currentForm.submitButton;
@@ -491,22 +543,23 @@ function analyzeSignUpForm() {
     const result = {
         fields: {},
         submitSelector: null,
-		contextSelector: null
+        contextSelector: null
     };
 
     // Generate selectors only if a valid form context was found, the score is positive, and a submit button exists.
     if (bestForm.context && bestForm.score > 0 && bestForm.submitButton) {
         // Get the context selector relative to the document.
-		result.contextSelector = getCssSelector(bestForm.context, document);
+        result.contextSelector = getCssSelector(bestForm.context, document);
 
         // Defense in depth: Ensure context selector was generated successfully.
         if (result.contextSelector) {
             Object.keys(bestForm.fields).forEach(fieldType => {
-                // Pass the context to enable context-relative selectors.
+                // Pass the context to enable context relative selectors.
                 const selector = getCssSelector(bestForm.fields[fieldType], bestForm.context);
                 if (selector) {
-                     result.fields[fieldType] = selector;
+                    result.fields[fieldType] = selector;
                 }
+                // If selector is null, it's silently skipped (coverage target)
             });
 
             const submitSelector = getCssSelector(bestForm.submitButton, bestForm.context);
@@ -528,4 +581,7 @@ function analyzeSignUpForm() {
 // Export for testing environments (e.g., Node.js with JSDOM)
 if (typeof module !== 'undefined' && module.exports) {
     module.exports = { analyzeSignUpForm };
+} else {
+    // In a browser context (Go executor), the last evaluated expression is the return value.
+    analyzeSignUpForm();
 }

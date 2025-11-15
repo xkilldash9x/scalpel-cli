@@ -25,7 +25,7 @@ func setupHumanoidExecutorTest(t *testing.T) (*HumanoidExecutor, *mocks.MockHuma
 }
 
 // setupHumanoidExecutorTestWithHandlerConfig allows configuring whether to use real or mocked handlers.
-func setupHumanoidExecutorTestWithHandlerConfig(t *testing.T, useMockHandlers bool) (*HumanoidExecutor, *mocks.MockHumanoidController) {
+func setupHumanoidExecutorTestWithHandlerConfig(_ *testing.T, useMockHandlers bool) (*HumanoidExecutor, *mocks.MockHumanoidController) {
 	mockHumanoid := new(mocks.MockHumanoidController)
 
 	// The dummyHumanoid needs a low-level executor (e.g., for mouse events).

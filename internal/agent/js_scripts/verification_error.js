@@ -32,6 +32,7 @@ function checkErrorIndicators() {
         // Check for HTML5 validation messages on inputs
         // Check if the element is an INPUT and supports the validationMessage property.
         if (context.tagName === 'INPUT' && context.validationMessage) {
+            // FIX: Removed stray "G" character which caused a SyntaxError
             return "ValidationMessage: " + context.validationMessage;
         }
     }

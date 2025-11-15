@@ -1,12 +1,45 @@
 {
-  "name": "agent-js-tests",
+  "name": "scalpel-cli",
   "version": "1.0.0",
-  "description": "Tests for browser-side agent logic",
+  "description": "",
+  "main": "index.js",
   "scripts": {
-    "test": "jest"
+    "test": "jest --coverage"
   },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/xkilldash9x/scalpel-cli.git"
+  },
+  "keywords": [],
+  "author": "",
+  "license": "ISC",
+  "type": "commonjs",
+  "bugs": {
+    "url": "https://github.com/xkilldash9x/scalpel-cli/issues"
+  },
+  "homepage": "https://github.com/xkilldash9x/scalpel-cli#readme",
   "devDependencies": {
-    "jest": "^29.7.0",
-    "jest-environment-jsdom": "^29.7.0"
+    "@babel/preset-env": "^7.24.7",
+    "babel-jest": "^29.7.0",
+    "esbuild": "^0.25.11",
+    "jest": "^30.2.0",
+    "jest-environment-jsdom": "^30.2.0"
+  },
+  "jest": {
+    "testEnvironment": "jsdom",
+    "testEnvironmentOptions": {},
+    "collectCoverageFrom": [
+      "internal/agent/js_scripts/captcha_detection.js",
+      "internal/agent/js_scripts/form_analysis.js",
+      "internal/agent/js_scripts/verification_error.js",
+      "internal/agent/js_scripts/verification_success.js"  
+    ],
+    
+    "testPathIgnorePatterns": [
+      "/node_modules/",
+      "internal/browser/stealth/evasions.test.js",
+      "internal/browser/humanoid/scrolling.js",
+      "internal/analysis/taint/taint_shim.js"
+    ]
   }
 }

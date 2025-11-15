@@ -50,7 +50,7 @@ func NewExecutorRegistry(projectRoot string, globalCtx *core.GlobalContext) *Exe
 	codebaseExec := NewCodebaseExecutor(projectRoot)
 	analysisExec := NewAnalysisExecutor(globalCtx, safeProviderGetter)
 	humanoidExec := NewHumanoidExecutor(safeHumanoidGetter)
-	signUpExec, err := NewSignUpExecutor(safeHumanoidGetter, safeProviderGetter, globalCtx.Config)
+	signUpExec, err := NewSignUpExecutor(safeHumanoidGetter, safeProviderGetter, globalCtx.Config, NewFileSystemSecListsLoader())
 	if err != nil {
 		// Log a warning if initialization fails for any reason (e.g., SecLists path invalid).
 		// The feature will be unavailable.
