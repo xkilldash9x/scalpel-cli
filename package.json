@@ -19,9 +19,9 @@
   },
   "homepage": "https://github.com/xkilldash9x/scalpel-cli#readme",
   "devDependencies": {
-    "@babel/preset-env": "^7.24.7",
-    "babel-jest": "^29.7.0",
-    "esbuild": "^0.25.11",
+    "@babel/preset-env": "^7.28.5",
+    "babel-jest": "^30.2.0",
+    "esbuild": "^0.27.0",
     "jest": "^30.2.0",
     "jest-environment-jsdom": "^30.2.0"
   },
@@ -34,7 +34,7 @@
       "internal/agent/js_scripts/captcha_detection.js",
       "internal/agent/js_scripts/form_analysis.js",
       "internal/agent/js_scripts/verification_error.js",
-      "internal/agent/js_scripts/verification_success.js"  
+      "internal/agent/js_scripts/verification_success.js"
     ],
     "transform": {
       "internal/analysis/active/taint/taint_shim\\.js$": "<rootDir>/jest-go-transform.js"
