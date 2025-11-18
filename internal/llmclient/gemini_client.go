@@ -1,247 +1,310 @@
 package llmclient
 
 import (
-	"bytes"
 	"context"
-	"encoding/json"
 	"fmt"
-	"io"
 	"net/http"
+	"net/url"
+	"strings"
 	"time"
 
-	"github.com/cenkalti/backoff/v4"
 	"go.uber.org/zap"
+	"google.golang.org/genai"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 )
 
-// GoogleClient implements the schemas.LLMClient interface for Google Gemini APIs.
+// GoogleClient implements the schemas.LLMClient interface for Google Gemini APIs
+// using the unified SDK (google.golang.org/genai).
 type GoogleClient struct {
-	apiKey     string
-	endpoint   string
-	httpClient *http.Client
-	logger     *zap.Logger
-	config     config.LLMModelConfig
-	// backoffFactory creates a new BackOff instance for each operation, ensuring thread safety and reset state.
-	backoffFactory func() backoff.BackOff
+	client *genai.Client
+	logger *zap.Logger
+	config config.LLMModelConfig
 }
 
 // Ensures GoogleClient implements the LLMClient interface.
 var _ schemas.LLMClient = (*GoogleClient)(nil)
 
-// -- Gemini API Request/Response Structures (Internal to this file) --
-type GeminiContent struct {
-	Parts []GeminiPart `json:"parts"`
-	Role  string       `json:"role,omitempty"`
+// endpointTransport is a custom RoundTripper that rewrites the request URL
+// to point to a specific endpoint (e.g., a mock server for testing) while
+// preserving the original path and body.
+type endpointTransport struct {
+	transport http.RoundTripper
+	endpoint  string
 }
 
-type GeminiPart struct {
-	Text string `json:"text"`
-}
-
-type GeminiSystemInstruction struct {
-	Parts []GeminiPart `json:"parts"`
-}
-
-type GeminiSafetySetting struct {
-	Category  string `json:"category"`
-	Threshold string `json:"threshold"`
-}
-
-type GeminiGenerationConfig struct {
-	Temperature      float64 `json:"temperature"`
-	ResponseMimeType string  `json:"response_mime_type,omitempty"`
-	TopP             float32 `json:"topP,omitempty"`
-	TopK             int     `json:"topK,omitempty"`
-	MaxOutputTokens  int     `json:"maxOutputTokens,omitempty"`
-}
-
-type GeminiRequestPayload struct {
-	Contents          []GeminiContent          `json:"contents"`
-	SystemInstruction *GeminiSystemInstruction `json:"system_instruction,omitempty"`
-	SafetySettings    []GeminiSafetySetting    `json:"safetySettings,omitempty"`
-	GenerationConfig  GeminiGenerationConfig   `json:"generationConfig,omitempty"`
-}
-
-type GeminiResponsePayload struct {
-	Candidates []struct {
-		Content      GeminiContent `json:"content"`
-		FinishReason string        `json:"finishReason"`
-	} `json:"candidates"`
-	UsageMetadata struct {
-		PromptTokenCount     int `json:"promptTokenCount"`
-		CandidatesTokenCount int `json:"candidatesTokenCount"`
-		TotalTokenCount      int `json:"totalTokenCount"`
-	} `json:"usageMetadata"`
-}
-
-// newDefaultBackOffFactory returns a function that creates the standard exponential backoff strategy.
-func newDefaultBackOffFactory() func() backoff.BackOff {
-	return func() backoff.BackOff {
-		b := backoff.NewExponentialBackOff()
-		b.MaxElapsedTime = 2 * time.Minute
-		b.MaxInterval = 30 * time.Second
-		return b
-	}
-}
-
-// NewGoogleClient initializes the client for the Gemini API.
-func NewGoogleClient(cfg config.LLMModelConfig, logger *zap.Logger) (*GoogleClient, error) {
-	if cfg.APIKey == "" {
-		return nil, fmt.Errorf("Google/Gemini API Key is required")
+// RoundTrip executes a single HTTP transaction, overriding the destination.
+func (t *endpointTransport) RoundTrip(req *http.Request) (*http.Response, error) {
+	if t.endpoint == "" {
+		return t.transport.RoundTrip(req)
 	}
 
-	endpoint := cfg.Endpoint
-	if endpoint == "" {
-		endpoint = fmt.Sprintf("https://generativelanguage.googleapis.com/v1beta/models/%s:generateContent", cfg.Model)
-	}
-
-	return &GoogleClient{
-		apiKey:   cfg.APIKey,
-		endpoint: endpoint,
-		config:   cfg,
-		httpClient: &http.Client{
-			Timeout: cfg.APITimeout,
-		},
-		logger:         logger.Named("llm_client.google"),
-		backoffFactory: newDefaultBackOffFactory(),
-	}, nil
-}
-
-// Generate is now the method that sends a structured request to the Gemini API and returns the generated content with retries.
-func (c *GoogleClient) Generate(ctx context.Context, req schemas.GenerationRequest) (string, error) {
-	payload := c.buildRequestPayload(req)
-
-	body, err := json.Marshal(payload)
+	targetURL, err := url.Parse(t.endpoint)
 	if err != nil {
-		return "", fmt.Errorf("failed to marshal request payload: %w", err)
+		return nil, fmt.Errorf("invalid endpoint URL: %w", err)
 	}
 
-	// Get a fresh backoff instance for this operation
-	b := c.backoffFactory()
+	// Clone the request to avoid modifying the original shared state.
+	newReq := req.Clone(req.Context())
+	newReq.URL.Scheme = targetURL.Scheme
+	newReq.URL.Host = targetURL.Host
 
-	var responseContent string
-
-	operation := func() error {
-		httpReq, err := http.NewRequestWithContext(ctx, http.MethodPost, c.endpoint, bytes.NewBuffer(body))
-		if err != nil {
-			return backoff.Permanent(fmt.Errorf("failed to create HTTP request: %w", err))
-		}
-
-		httpReq.Header.Set("Content-Type", "application/json")
-		httpReq.Header.Set("x-goog-api-key", c.apiKey)
-
-		startTime := time.Now()
-		resp, err := c.httpClient.Do(httpReq)
-		duration := time.Since(startTime)
-
-		if err != nil {
-			c.logger.Warn("Network error during LLM request, retrying...", zap.Error(err))
-			return fmt.Errorf("failed to execute HTTP request: %w", err)
-		}
-		defer resp.Body.Close()
-
-		respBody, err := io.ReadAll(resp.Body)
-		if err != nil {
-			return fmt.Errorf("failed to read response body: %w", err)
-		}
-
-		if resp.StatusCode != http.StatusOK {
-			return c.handleAPIError(resp.StatusCode, respBody)
-		}
-
-		var responsePayload GeminiResponsePayload
-		if err := json.Unmarshal(respBody, &responsePayload); err != nil {
-			return backoff.Permanent(fmt.Errorf("failed to decode response payload: %w", err))
-		}
-
-		if len(responsePayload.Candidates) == 0 {
-			return backoff.Permanent(fmt.Errorf("gemini API returned no candidates"))
-		}
-
-		candidate := responsePayload.Candidates[0]
-		if len(candidate.Content.Parts) == 0 {
-			if candidate.FinishReason == "SAFETY" || candidate.FinishReason == "BLOCKLIST" {
-				return backoff.Permanent(fmt.Errorf("gemini API blocked the request (Reason: %s)", candidate.FinishReason))
-			}
-			// Transient error if content is empty for other reasons (e.g., MAX_TOKENS, OTHER)
-			return fmt.Errorf("gemini API returned empty content parts (Reason: %s)", candidate.FinishReason)
-		}
-
-		c.logger.Info("LLM generation complete (Gemini)",
-			zap.Duration("duration", duration),
-			zap.Int("prompt_tokens", responsePayload.UsageMetadata.PromptTokenCount),
-			zap.Int("completion_tokens", responsePayload.UsageMetadata.CandidatesTokenCount),
-			zap.Int("total_tokens", responsePayload.UsageMetadata.TotalTokenCount),
-		)
-
-		responseContent = candidate.Content.Parts[0].Text
-		return nil
-	}
-
-	// Apply the backoff strategy with the context.
-	if err = backoff.Retry(operation, backoff.WithContext(b, ctx)); err != nil {
-		// Note: If the operation returned backoff.Permanent(e), backoff.Retry returns e directly (unwrapped).
-		return "", err
-	}
-
-	return responseContent, nil
+	// We return the response from the underlying transport (usually http.DefaultTransport)
+	// but with the modified request pointing to our custom endpoint.
+	return t.transport.RoundTrip(newReq)
 }
 
-func (c *GoogleClient) buildRequestPayload(req schemas.GenerationRequest) GeminiRequestPayload {
-	genConfig := GeminiGenerationConfig{
-		Temperature:     float64(req.Options.Temperature),
-		TopP:            c.config.TopP,
-		TopK:            c.config.TopK,
-		MaxOutputTokens: c.config.MaxTokens,
+// NewGoogleClient initializes the client for the Gemini API using the new unified Go SDK.
+func NewGoogleClient(ctx context.Context, cfg config.LLMModelConfig, logger *zap.Logger) (*GoogleClient, error) {
+	if cfg.APIKey == "" {
+		return nil, fmt.Errorf("Google/Gemini API Key is required but not configured")
 	}
 
-	if req.Options.ForceJSONFormat {
-		genConfig.ResponseMimeType = "application/json"
+	namedLogger := logger.Named("llm_client.google_sdk")
+
+	// Configure the client.
+	// FIX: Use "v1beta" to support system instructions and responseSchema (JSON mode).
+	// "v1" does not yet support these fields in the format sent by the SDK, leading to 400 errors.
+	clientCfg := &genai.ClientConfig{
+		APIKey:  cfg.APIKey,
+		Backend: genai.BackendGeminiAPI, // Explicitly select the Gemini backend (optional but good practice)
+		HTTPOptions: genai.HTTPOptions{
+			APIVersion: "v1beta",
+		},
 	}
 
-	payload := GeminiRequestPayload{
-		Contents: []GeminiContent{
-			{
-				Role: "user",
-				Parts: []GeminiPart{
-					{Text: req.UserPrompt},
-				},
+	// Handle custom endpoints (e.g., for testing or Vertex AI proxies).
+	// Since ClientConfig might not expose a BaseURL field in this version,
+	// we use a custom HTTPClient with a Transport that rewrites the host.
+	if cfg.Endpoint != "" {
+		namedLogger.Debug("Configuring custom endpoint via HTTP Client Transport", zap.String("endpoint", cfg.Endpoint))
+
+		clientCfg.HTTPClient = &http.Client{
+			// Use the custom transport to route requests to the configured endpoint.
+			Transport: &endpointTransport{
+				transport: http.DefaultTransport,
+				endpoint:  cfg.Endpoint,
+			},
+			// Inherit the timeout from the config if desirable, though the SDK
+			// often handles timeouts via Context.
+			Timeout: cfg.APITimeout,
+		}
+	}
+
+	// Initialize the client.
+	client, err := genai.NewClient(ctx, clientCfg)
+	if err != nil {
+		return nil, fmt.Errorf("failed to initialize Google AI client: %w", err)
+	}
+
+	gc := &GoogleClient{
+		client: client,
+		config: cfg,
+		logger: namedLogger,
+	}
+
+	return gc, nil
+}
+
+// Generate sends a structured request to the Gemini API using the SDK and returns the generated content.
+func (c *GoogleClient) Generate(ctx context.Context, req schemas.GenerationRequest) (string, error) {
+	// Enforce an overall timeout using the context if configured.
+	if c.config.APITimeout > 0 {
+		var cancel context.CancelFunc
+		ctx, cancel = context.WithTimeout(ctx, c.config.APITimeout)
+		defer cancel()
+	}
+
+	// build the generation config (Temperature, TopP, etc.)
+	genConfig := c.buildGenerationConfig(req)
+
+	// Prepare the content payload.
+	// The new SDK expects a list of *genai.Content.
+	contents := []*genai.Content{
+		{
+			Role: "user",
+			Parts: []*genai.Part{
+				{Text: req.UserPrompt},
 			},
 		},
-		SystemInstruction: &GeminiSystemInstruction{
-			Parts: []GeminiPart{
+	}
+
+	// Prepare the system instruction if present.
+	if req.SystemPrompt != "" {
+		genConfig.SystemInstruction = &genai.Content{
+			Parts: []*genai.Part{
 				{Text: req.SystemPrompt},
 			},
-		},
-		GenerationConfig: genConfig,
-		SafetySettings:   c.getSafetySettings(),
+		}
 	}
-	return payload
+
+	// Apply safety settings.
+	genConfig.SafetySettings = c.getSafetySettings()
+
+	startTime := time.Now()
+
+	// Execute the request.
+	// API Signature: client.Models.GenerateContent(ctx, modelName, contents, config)
+	resp, err := c.client.Models.GenerateContent(ctx, c.config.Model, contents, genConfig)
+	duration := time.Since(startTime)
+
+	if err != nil {
+		c.logger.Error("Gemini API generation failed", zap.Error(err), zap.Duration("duration", duration))
+		return "", fmt.Errorf("failed to generate content via Gemini API: %w", err)
+	}
+
+	return c.processResponse(resp, duration)
 }
 
-func (c *GoogleClient) handleAPIError(statusCode int, body []byte) error {
-	c.logger.Error("Gemini API returned error status", zap.Int("status", statusCode), zap.String("response", string(body)))
-	err := fmt.Errorf("gemini API error: status %d, body: %s", statusCode, string(body))
+// buildGenerationConfig creates the generation configuration struct.
+func (c *GoogleClient) buildGenerationConfig(req schemas.GenerationRequest) *genai.GenerateContentConfig {
+	// Initialize with nil to allow the SDK/API defaults to take over if we don't set them.
+	cfg := &genai.GenerateContentConfig{}
 
-	switch statusCode {
-	// Include common transient HTTP status codes.
-	case http.StatusTooManyRequests, http.StatusServiceUnavailable, http.StatusInternalServerError, http.StatusBadGateway, http.StatusGatewayTimeout:
-		return err // Transient errors, retry.
-	default:
-		// Permanent errors (4xx, etc.).
-		return backoff.Permanent(err)
+	// --- Apply Defaults from Config ---
+	// Note: The SDK uses *float32 for temperature/topP and *int32 (or int32) for tokens.
+	// We must cast explicitly.
+
+	if c.config.Temperature > 0 {
+		t := float32(c.config.Temperature)
+		cfg.Temperature = &t
 	}
+	if c.config.TopP > 0 {
+		p := float32(c.config.TopP)
+		cfg.TopP = &p
+	}
+	if c.config.TopK > 0 {
+		// Error indicated target is *float32 (unusual for TopK, but following compiler error).
+		k := float32(c.config.TopK)
+		cfg.TopK = &k
+	}
+	if c.config.MaxTokens > 0 {
+		// Error "cannot use &m (value of type *int64) as int32 value" implies the field is int32 (not pointer).
+		// If the SDK changes to *int32 later, this will need &m.
+		m := int32(c.config.MaxTokens)
+		cfg.MaxOutputTokens = m
+	}
+
+	// --- Apply Request Overrides ---
+
+	// Override temperature if specified in the request options.
+	requestTemp := req.Options.Temperature
+	if requestTemp >= 0 {
+		t := float32(requestTemp)
+		cfg.Temperature = &t
+	}
+
+	// Force JSON format.
+	if req.Options.ForceJSONFormat {
+		cfg.ResponseMIMEType = "application/json"
+	}
+
+	return cfg
 }
 
-func (c *GoogleClient) getSafetySettings() []GeminiSafetySetting {
-	settings := make([]GeminiSafetySetting, 0, len(c.config.SafetyFilters))
-	for category, threshold := range c.config.SafetyFilters {
-		settings = append(settings, GeminiSafetySetting{
-			Category:  category,
-			Threshold: threshold,
+// processResponse handles the response from the SDK.
+func (c *GoogleClient) processResponse(resp *genai.GenerateContentResponse, duration time.Duration) (string, error) {
+	if resp == nil {
+		return "", fmt.Errorf("received nil response from Gemini API")
+	}
+
+	// Log usage metadata if available.
+	// Fields are int32, so we cast to int64 for Zap compatibility.
+	if resp.UsageMetadata != nil {
+		c.logger.Info("LLM generation complete (Gemini)",
+			zap.Duration("duration", duration),
+			zap.String("model", c.config.Model),
+			zap.Int64("prompt_tokens", int64(resp.UsageMetadata.PromptTokenCount)),
+			zap.Int64("completion_tokens", int64(resp.UsageMetadata.CandidatesTokenCount)),
+			zap.Int64("total_tokens", int64(resp.UsageMetadata.TotalTokenCount)),
+		)
+	}
+
+	// Check for prompt feedback (blocking).
+	if resp.PromptFeedback != nil && resp.PromptFeedback.BlockReason != "" {
+		c.logger.Warn("Gemini prompt blocked",
+			zap.String("reason", string(resp.PromptFeedback.BlockReason)),
+		)
+		return "", fmt.Errorf("Gemini prompt blocked (Reason: %s)", resp.PromptFeedback.BlockReason)
+	}
+
+	if len(resp.Candidates) == 0 {
+		return "", fmt.Errorf("Gemini API returned no candidates")
+	}
+
+	candidate := resp.Candidates[0]
+
+	// Check finish reason.
+	if candidate.FinishReason != "" && candidate.FinishReason != "STOP" {
+		c.logger.Warn("Gemini generation finished unexpectedly",
+			zap.String("reason", string(candidate.FinishReason)),
+		)
+		if candidate.FinishReason == "SAFETY" {
+			return "", fmt.Errorf("Gemini response blocked due to SAFETY reasons")
+		}
+	}
+
+	return extractResponseText(candidate), nil
+}
+
+// extractResponseText combines the text parts from a candidate.
+func extractResponseText(cand *genai.Candidate) string {
+	if cand.Content == nil {
+		return ""
+	}
+	var builder strings.Builder
+	for _, part := range cand.Content.Parts {
+		if part.Text != "" {
+			builder.WriteString(part.Text)
+		}
+	}
+	return builder.String()
+}
+
+// Mappings for Safety Settings.
+var harmCategoryMap = map[string]string{
+	"HARM_CATEGORY_HARASSMENT":        "HARM_CATEGORY_HARASSMENT",
+	"HARM_CATEGORY_HATE_SPEECH":       "HARM_CATEGORY_HATE_SPEECH",
+	"HARM_CATEGORY_SEXUALLY_EXPLICIT": "HARM_CATEGORY_SEXUALLY_EXPLICIT",
+	"HARM_CATEGORY_DANGEROUS_CONTENT": "HARM_CATEGORY_DANGEROUS_CONTENT",
+	"HARM_CATEGORY_CIVIC_INTEGRITY":   "HARM_CATEGORY_CIVIC_INTEGRITY",
+}
+
+// blockThresholdMap defines the mappings from config strings to SDK constants.
+var blockThresholdMap = map[string]string{
+	"BLOCK_LOW_AND_ABOVE":              "BLOCK_LOW_AND_ABOVE",
+	"BLOCK_MEDIUM_AND_ABOVE":           "BLOCK_MEDIUM_AND_ABOVE",
+	"BLOCK_ONLY_HIGH":                  "BLOCK_ONLY_HIGH",
+	"BLOCK_NONE":                       "BLOCK_NONE",
+	"HARM_BLOCK_THRESHOLD_UNSPECIFIED": "HARM_BLOCK_THRESHOLD_UNSPECIFIED",
+}
+
+func (c *GoogleClient) getSafetySettings() []*genai.SafetySetting {
+	settings := make([]*genai.SafetySetting, 0, len(c.config.SafetyFilters))
+
+	for categoryStr, thresholdStr := range c.config.SafetyFilters {
+		category, ok := harmCategoryMap[categoryStr]
+		if !ok {
+			category = categoryStr
+		}
+
+		threshold, ok := blockThresholdMap[thresholdStr]
+		if !ok {
+			c.logger.Warn("Unknown safety threshold in config, using default (UNSPECIFIED)", zap.String("threshold", thresholdStr))
+			threshold = "HARM_BLOCK_THRESHOLD_UNSPECIFIED"
+		}
+
+		// Explicit casting to SDK types is required here.
+		settings = append(settings, &genai.SafetySetting{
+			Category:  genai.HarmCategory(category),
+			Threshold: genai.HarmBlockThreshold(threshold),
 		})
 	}
 	return settings
+}
+
+// Close cleans up the underlying client resources.
+func (c *GoogleClient) Close() error {
+	return nil
 }

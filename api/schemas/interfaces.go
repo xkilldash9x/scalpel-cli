@@ -106,25 +106,25 @@ type BrowserInteractor interface {
 //
 //go:generate mockery --name SessionContext --output ../../internal/mocks --outpkg mocks
 type SessionContext interface {
-	ID() string                                                       // Returns the unique ID of the session.
-	Navigate(ctx context.Context, url string) error                   // Navigates the session to a new URL.
-	Click(ctx context.Context, selector string) error                 // Clicks on an element matching the selector.
-	Type(ctx context.Context, selector string, text string) error     // Types text into an element.
-	Submit(ctx context.Context, selector string) error                // Submits a form.
-	ScrollPage(ctx context.Context, direction string) error           // Scrolls the page up or down.
-	WaitForAsync(ctx context.Context, milliseconds int) error         // Waits for a specified period.
+	ID() string                                                                  // Returns the unique ID of the session.
+	Navigate(ctx context.Context, url string) error                              // Navigates the session to a new URL.
+	Click(ctx context.Context, selector string) error                            // Clicks on an element matching the selector.
+	Type(ctx context.Context, selector string, text string) error                // Types text into an element.
+	Submit(ctx context.Context, selector string) error                           // Submits a form.
+	ScrollPage(ctx context.Context, direction string) error                      // Scrolls the page up or down.
+	WaitForAsync(ctx context.Context, milliseconds int) error                    // Waits for a specified period.
 	ExposeFunction(ctx context.Context, name string, function interface{}) error // Exposes a Go function to the browser's JS context.
-	InjectScriptPersistently(ctx context.Context, script string) error // Injects a script that persists across navigations.
-	Interact(ctx context.Context, config InteractionConfig) error     // Executes a complex sequence of interactions.
-	Close(ctx context.Context) error                                  // Closes the browser session.
-	CollectArtifacts(ctx context.Context) (*Artifacts, error)         // Gathers all available data (HAR, DOM, etc.).
-	AddFinding(ctx context.Context, finding Finding) error            // Reports a new finding discovered in this session.
-	Sleep(ctx context.Context, d time.Duration) error                 // Pauses execution for a duration.
-	DispatchMouseEvent(ctx context.Context, data MouseEventData) error // Dispatches a low-level mouse event.
-	SendKeys(ctx context.Context, keys string) error                  // Sends a sequence of keystrokes.
+	InjectScriptPersistently(ctx context.Context, script string) error           // Injects a script that persists across navigations.
+	Interact(ctx context.Context, config InteractionConfig) error                // Executes a complex sequence of interactions.
+	Close(ctx context.Context) error                                             // Closes the browser session.
+	CollectArtifacts(ctx context.Context) (*Artifacts, error)                    // Gathers all available data (HAR, DOM, etc.).
+	AddFinding(ctx context.Context, finding Finding) error                       // Reports a new finding discovered in this session.
+	Sleep(ctx context.Context, d time.Duration) error                            // Pauses execution for a duration.
+	DispatchMouseEvent(ctx context.Context, data MouseEventData) error           // Dispatches a low-level mouse event.
+	SendKeys(ctx context.Context, keys string) error                             // Sends a sequence of keystrokes.
 	// DispatchStructuredKey sends a key press event with modifiers (e.g., Ctrl+C).
 	DispatchStructuredKey(ctx context.Context, data KeyEventData) error
-	GetElementGeometry(ctx context.Context, selector string) (*ElementGeometry, error) // Gets the geometry of an element.
+	GetElementGeometry(ctx context.Context, selector string) (*ElementGeometry, error)             // Gets the geometry of an element.
 	ExecuteScript(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) // Executes a JavaScript snippet.
 }
 
@@ -150,10 +150,10 @@ const (
 // GenerationOptions provides detailed parameters to control the text generation
 // process of the LLM, such as creativity (temperature) and output format.
 type GenerationOptions struct {
-	Temperature     float32 `json:"temperature"`      // Controls randomness. Lower is more deterministic.
+	Temperature     float64 `json:"temperature"`       // Controls randomness. Lower is more deterministic.
 	ForceJSONFormat bool    `json:"force_json_format"` // If true, forces the model to output valid JSON.
-	TopP            float32 `json:"top_p"`              // Nucleus sampling parameter.
-	TopK            int     `json:"top_k"`              // Top-k sampling parameter.
+	TopP            float64 `json:"top_p"`             // Nucleus sampling parameter.
+	TopK            int     `json:"top_k"`             // Top-k sampling parameter.
 }
 
 // GenerationRequest encapsulates a complete request to the LLM, including the
@@ -170,6 +170,8 @@ type GenerationRequest struct {
 type LLMClient interface {
 	// Generate produces a text completion based on the provided request.
 	Generate(ctx context.Context, req GenerationRequest) (string, error)
+	// Close cleans up any resources held by the client (e.g., network connections, SDK resources).
+	Close() error
 }
 
 // -- OAST Schemas & Interface --

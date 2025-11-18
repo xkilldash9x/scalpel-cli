@@ -224,7 +224,7 @@ func TestNew_InitializationFailures(t *testing.T) {
 		// FIX: Mock the LLM client creation as well to completely isolate this test
 		// to the SelfHealOrchestrator initialization logic.
 		originalNewLLMClient := NewLLMClient
-		NewLLMClient = func(cfg config.AgentConfig, logger *zap.Logger) (schemas.LLMClient, error) {
+		NewLLMClient = func(ctx context.Context, cfg config.AgentConfig, logger *zap.Logger) (schemas.LLMClient, error) {
 			return new(mocks.MockLLMClient), nil
 		}
 		t.Cleanup(func() { NewLLMClient = originalNewLLMClient })

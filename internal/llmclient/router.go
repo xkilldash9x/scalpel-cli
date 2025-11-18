@@ -50,3 +50,19 @@ func (r *LLMRouter) GenerateResponse(ctx context.Context, req schemas.Generation
 func (r *LLMRouter) Generate(ctx context.Context, req schemas.GenerationRequest) (string, error) {
 	return r.GenerateResponse(ctx, req)
 }
+
+// Close closes all underlying LLM clients.
+func (r *LLMRouter) Close() error {
+	var err error
+	if e := r.clients[schemas.TierFast].Close(); e != nil {
+		err = fmt.Errorf("error closing fast client: %w", e)
+	}
+	if e := r.clients[schemas.TierPowerful].Close(); e != nil {
+		if err != nil {
+			err = fmt.Errorf("%v; error closing powerful client: %w", err, e)
+		} else {
+			err = fmt.Errorf("error closing powerful client: %w", e)
+		}
+	}
+	return err
+}

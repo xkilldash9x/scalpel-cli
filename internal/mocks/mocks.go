@@ -202,6 +202,11 @@ func (m *MockLLMClient) Generate(ctx context.Context, req schemas.GenerationRequ
 	return args.String(0), args.Error(1)
 }
 
+func (m *MockLLMClient) Close() error {
+	args := m.Called()
+	return args.Error(0)
+}
+
 // -- Knowledge Graph Client Mock --
 
 type MockKGClient struct {

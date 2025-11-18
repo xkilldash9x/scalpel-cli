@@ -15,6 +15,7 @@
 package config
 
 import (
+	"encoding/json"
 	"fmt"
 	"os"
 	"time"
@@ -604,13 +605,15 @@ type LLMRouterConfig struct {
 // LLMModelConfig specifies the connection and generation parameters for a single
 // Large Language Model.
 type LLMModelConfig struct {
-	Provider      LLMProvider       `mapstructure:"provider" yaml:"provider"`
-	Model         string            `mapstructure:"model" yaml:"model"`
-	APIKey        string            `mapstructure:"api_key" yaml:"api_key"`
+	Provider LLMProvider `mapstructure:"provider" yaml:"provider"`
+	Model    string      `mapstructure:"model" yaml:"model"`
+	// APIKey can be set in YAML or injected via environment variables (preferred).
+	APIKey string `mapstructure:"api_key" yaml:"api_key"`
+	// Endpoint specifies the API endpoint. Format depends on the provider and SDK (e.g., "hostname:port" for Gemini SDK).
 	Endpoint      string            `mapstructure:"endpoint" yaml:"endpoint"`
 	APITimeout    time.Duration     `mapstructure:"api_timeout" yaml:"api_timeout"`
-	Temperature   float32           `mapstructure:"temperature" yaml:"temperature"`
-	TopP          float32           `mapstructure:"top_p" yaml:"top_p"`
+	Temperature   float64           `mapstructure:"temperature" yaml:"temperature"`
+	TopP          float64           `mapstructure:"top_p" yaml:"top_p"`
 	TopK          int               `mapstructure:"top_k" yaml:"top_k"`
 	MaxTokens     int               `mapstructure:"max_tokens" yaml:"max_tokens"`
 	SafetyFilters map[string]string `mapstructure:"safety_filters" yaml:"safety_filters"`
@@ -628,6 +631,18 @@ func NewDefaultConfig() *Config {
 		// This should not happen with defaults, but good to be safe.
 		panic(fmt.Sprintf("failed to unmarshal default config: %v", err))
 	}
+
+	// Apply the robust merge logic here too, just in case Viper fails to unmarshal defaults correctly.
+	if cfg.AgentCfg.LLM.Models == nil {
+		cfg.AgentCfg.LLM.Models = make(map[string]LLMModelConfig)
+	}
+	defaultModels := getDefaultLLMModels()
+	for key, model := range defaultModels {
+		if _, exists := cfg.AgentCfg.LLM.Models[key]; !exists {
+			cfg.AgentCfg.LLM.Models[key] = model
+		}
+	}
+
 	return &cfg
 }
 
@@ -708,7 +723,7 @@ func SetDefaults(v *viper.Viper) {
 	// -- Agent --
 	v.SetDefault("agent.llm.default_fast_model", "gemini-2.5-flash")
 	v.SetDefault("agent.llm.default_powerful_model", "gemini-2.5-pro")
-	// Set up default model configurations in the map.
+	// Set up default model configurations in the map using the robust method.
 	setLLMDefaults(v)
 	v.SetDefault("agent.knowledge_graph.type", "postgres")
 	v.SetDefault("agent.knowledge_graph.postgres.host", "localhost")
@@ -856,6 +871,14 @@ func NewConfigFromViper(v *viper.Viper) (*Config, error) {
 	v.BindEnv("autofix.github.token", "SCALPEL_AUTOFIX_GH_TOKEN")
 	v.BindEnv("agent.knowledge_graph.postgres.password", "SCALPEL_KG_PASSWORD")
 
+	// Bind environment variables for LLM API keys.
+	// We define internal Viper keys (e.g., "llm.keys.gemini") for binding, as binding directly
+	// to nested map elements (agent.llm.models.gemini-2.5-pro.api_key) can be unreliable in Viper.
+	// We allow multiple environment variable names for flexibility (e.g., standard GEMINI_API_KEY, GOOGLE_API_KEY or app-specific SCALPEL_GEMINI_API_KEY).
+	v.BindEnv("llm.keys.gemini", "SCALPEL_GEMINI_API_KEY", "GEMINI_API_KEY", "GOOGLE_API_KEY")
+	v.BindEnv("llm.keys.openai", "SCALPEL_OPENAI_API_KEY", "OPENAI_API_KEY")
+	v.BindEnv("llm.keys.anthropic", "SCALPEL_ANTHROPIC_API_KEY", "ANTHROPIC_API_KEY")
+
 	if err := v.Unmarshal(&cfg); err != nil {
 		return nil, fmt.Errorf("error unmarshaling config: %w", err)
 	}
@@ -869,20 +892,62 @@ func NewConfigFromViper(v *viper.Viper) (*Config, error) {
 		}
 	}
 
-	// --- MERGED BLOCK ---
-	// Get default models and merge them if not present in the loaded config.
-	// This prevents an empty 'models: {}' in config.yaml from breaking
-	// the default model configuration.
-	defaultCfg := NewDefaultConfig()
+	// --- ROBUST MERGE BLOCK ---
+	// Ensure the models map is populated, merging defaults if necessary.
+	// Viper can sometimes struggle to unmarshal complex maps, especially when keys contain dots,
+	// or if the config file explicitly sets 'models: {}'.
+
+	// 1. Initialize the map if nil.
 	if cfg.AgentCfg.LLM.Models == nil {
 		cfg.AgentCfg.LLM.Models = make(map[string]LLMModelConfig)
 	}
-	for key, model := range defaultCfg.AgentCfg.LLM.Models {
+
+	// 2. Get the definitive defaults.
+	// We use the explicit function rather than relying on NewDefaultConfig() or Viper's internal
+	// default unmarshaling, as those might also fail to populate the map correctly.
+	defaultModels := getDefaultLLMModels()
+
+	// 3. Merge defaults into the loaded configuration if they are missing.
+	for key, model := range defaultModels {
 		if _, exists := cfg.AgentCfg.LLM.Models[key]; !exists {
+			// If the config file was loaded but didn't define the model (or Viper failed to read it), add the default.
 			cfg.AgentCfg.LLM.Models[key] = model
 		}
 	}
-	// --- END MERGED BLOCK ---
+	// --- END ROBUST MERGE BLOCK ---
+
+	// --- API KEY INJECTION BLOCK ---
+	// Manually inject API keys from environment variables if they are not set in the config file.
+	// This follows security best practices by allowing users to keep secrets out of config.yaml.
+
+	geminiKey := v.GetString("llm.keys.gemini")
+	openAIKey := v.GetString("llm.keys.openai")
+	anthropicKey := v.GetString("llm.keys.anthropic")
+
+	// Iterate over the models (must iterate over keys and update the map because range iteration variables are copies)
+	for key, modelCfg := range cfg.AgentCfg.LLM.Models {
+		// Check if the APIKey is empty (not present in YAML or explicitly empty).
+		if modelCfg.APIKey == "" {
+			switch modelCfg.Provider {
+			case ProviderGemini:
+				if geminiKey != "" {
+					modelCfg.APIKey = geminiKey
+				}
+			case ProviderOpenAI:
+				if openAIKey != "" {
+					modelCfg.APIKey = openAIKey
+				}
+			case ProviderAnthropic:
+				if anthropicKey != "" {
+					modelCfg.APIKey = anthropicKey
+				}
+				// Ollama typically doesn't require an API key.
+			}
+			// Update the map entry with the potentially modified config
+			cfg.AgentCfg.LLM.Models[key] = modelCfg
+		}
+	}
+	// --- END API KEY INJECTION BLOCK ---
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
@@ -909,49 +974,107 @@ func (c *Config) Validate() error {
 	return nil
 }
 
-// setLLMDefaults populates the models map with default configurations for the LLM router.
-func setLLMDefaults(v *viper.Viper) {
-	// Define the map of default models
-	defaultModels := map[string]LLMModelConfig{
+// getDefaultSafetyFilters returns the standard set of safety filters applied to LLM requests by default.
+func getDefaultSafetyFilters() map[string]string {
+	// We set these to BLOCK_NONE by default to ensure the LLM can analyze security-related content.
+	// Users can override this in their config.yaml if they prefer stricter settings.
+	return map[string]string{
+		"HARM_CATEGORY_HATE_SPEECH":       "BLOCK_NONE",
+		"HARM_CATEGORY_SEXUALLY_EXPLICIT": "BLOCK_NONE",
+		"HARM_CATEGORY_HARASSMENT":        "BLOCK_NONE",
+		"HARM_CATEGORY_DANGEROUS_CONTENT": "BLOCK_NONE",
+		// Added CIVIC_INTEGRITY to match the updated client map.
+		"HARM_CATEGORY_CIVIC_INTEGRITY": "BLOCK_NONE",
+	}
+}
+
+// getDefaultLLMModels returns the default LLM configuration map.
+// This provides a definitive source of truth for defaults, used for robust merging.
+func getDefaultLLMModels() map[string]LLMModelConfig {
+	return map[string]LLMModelConfig{
 		"gemini-2.5-pro": {
-			Provider:    ProviderGemini,
-			Model:       "gemini-2.5-pro-latest",
-			APIKey:      "", // Should be loaded from env
-			APITimeout:  2 * time.Minute,
-			Temperature: 0.7,
-			TopP:        0.9,
-			TopK:        40,
-			MaxTokens:   8192,
+			Provider:      ProviderGemini,
+			Model:         "gemini-2.5-pro-latest",
+			APIKey:        "", // Should be loaded from env
+			APITimeout:    2 * time.Minute,
+			Temperature:   0.7,
+			TopP:          0.9,
+			TopK:          40,
+			MaxTokens:     8192,
+			SafetyFilters: getDefaultSafetyFilters(),
 		},
 		"gemini-2.5-flash": {
-			Provider:    ProviderGemini,
-			Model:       "gemini-2.5-flash-latest",
-			APIKey:      "", // Should be loaded from env
-			APITimeout:  90 * time.Second,
-			Temperature: 0.8,
-			TopP:        0.95,
-			TopK:        50,
-			MaxTokens:   4096,
+			Provider:      ProviderGemini,
+			Model:         "gemini-2.5-flash-latest",
+			APIKey:        "", // Should be loaded from env
+			APITimeout:    90 * time.Second,
+			Temperature:   0.8,
+			TopP:          0.95,
+			TopK:          50,
+			MaxTokens:     4096,
+			SafetyFilters: getDefaultSafetyFilters(),
 		},
 	}
+}
 
-	// Set the entire map as the default for the 'agent.llm.models' key.
-	// Viper requires the map to be of type map[string]interface{} for defaults.
-	modelDefaults := make(map[string]interface{})
-	for key, modelCfg := range defaultModels {
-		modelDefaults[key] = map[string]interface{}{
-			"provider":       string(modelCfg.Provider),
-			"model":          modelCfg.Model,
-			"api_key":        modelCfg.APIKey,
-			"api_timeout":    modelCfg.APITimeout.String(),
-			"temperature":    modelCfg.Temperature,
-			"top_p":          modelCfg.TopP,
-			"top_k":          modelCfg.TopK,
-			"max_tokens":     modelCfg.MaxTokens,
-			"safety_filters": modelCfg.SafetyFilters,
+// setLLMDefaults populates the models map with default configurations for the LLM router.
+func setLLMDefaults(v *viper.Viper) {
+	defaultModels := getDefaultLLMModels()
+
+	// Convert the structured Go map to the map[string]interface{} format Viper prefers for defaults.
+	// This ensures Viper can correctly merge defaults when keys contain dots.
+	viperDefaults := make(map[string]interface{})
+	for key, model := range defaultModels {
+		// We need to convert the struct to a map[string]interface{}.
+		// We use json Marshal/Unmarshal for a quick conversion.
+		// We must use standard encoding/json here for reliability in this conversion step.
+
+		// Create a temporary struct using json tags that match the mapstructure/yaml tags for conversion.
+		// This is necessary because the main LLMModelConfig uses mapstructure tags, not json tags.
+		type viperModel struct {
+			Provider LLMProvider `json:"provider"`
+			Model    string      `json:"model"`
+			APIKey   string      `json:"api_key"`
+			Endpoint string      `json:"endpoint,omitempty"`
+			// APITimeout is handled separately below
+			Temperature   float64           `json:"temperature"`
+			TopP          float64           `json:"top_p"`
+			TopK          int               `json:"top_k"`
+			MaxTokens     int               `json:"max_tokens"`
+			SafetyFilters map[string]string `json:"safety_filters"`
 		}
+
+		tempModel := viperModel{
+			Provider:      model.Provider,
+			Model:         model.Model,
+			APIKey:        model.APIKey,
+			Endpoint:      model.Endpoint,
+			Temperature:   model.Temperature,
+			TopP:          model.TopP,
+			TopK:          model.TopK,
+			MaxTokens:     model.MaxTokens,
+			SafetyFilters: model.SafetyFilters,
+		}
+
+		modelBytes, err := json.Marshal(tempModel)
+		if err != nil {
+			// Should not happen with this struct, but good practice.
+			panic(fmt.Sprintf("Failed to marshal default LLM model config for Viper: %v", err))
+		}
+
+		modelMap := make(map[string]interface{})
+		if err := json.Unmarshal(modelBytes, &modelMap); err != nil {
+			panic(fmt.Sprintf("Failed to unmarshal default LLM model config for Viper: %v", err))
+		}
+
+		// Viper needs time.Duration represented as strings for defaults/config files.
+		modelMap["api_timeout"] = model.APITimeout.String()
+
+		viperDefaults[key] = modelMap
 	}
-	v.SetDefault("agent.llm.models", modelDefaults)
+
+	// Set the default for the entire map key.
+	v.SetDefault("agent.llm.models", viperDefaults)
 }
 
 // Validate checks the AutofixConfig for correctness, ensuring that if the feature
@@ -1030,6 +1153,9 @@ func (l *LLMRouterConfig) Validate() error {
 		if modelCfg.Model == "" {
 			return fmt.Errorf("model key '%s' has no 'model' name property", key)
 		}
+		// Note: We do not strictly validate the presence of APIKey here, as some providers (like Ollama) do not require it,
+		// and keys might be loaded via environment variables just before this validation runs.
+		// The specific client implementation (e.g., NewGoogleClient) will perform the final validation if a key is required.
 	}
 
 	return nil

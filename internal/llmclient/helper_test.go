@@ -20,12 +20,17 @@ func setupTestLogger(t *testing.T) *zap.Logger {
 // getValidLLMConfig returns a valid LLMModelConfig for testing purposes.
 func getValidLLMConfig() config.LLMModelConfig {
 	return config.LLMModelConfig{
-		Provider:    config.ProviderGemini,
-		APIKey:      "test-api-key",
-		Model:       "test-model",
-		APITimeout:  5 * time.Second,
-		Temperature: 0.7,
+		// Matches config.ProviderGemini ("gemini")
+		Provider: "gemini",
+		Model:    "gemini-2.5-flash",
+		APIKey:   "test-api-key",
+		SafetyFilters: map[string]string{
+			"HARM_CATEGORY_HARASSMENT": "BLOCK_NONE",
+		},
+		Temperature: 0.5,
 		TopP:        0.9,
-		TopK:        50,
+		TopK:        40,
+		MaxTokens:   2048,
+		APITimeout:  30 * time.Second,
 	}
 }

@@ -86,7 +86,7 @@ type Response struct {
 	// Custom fields for storing CDP network data for later analysis.
 	// The underscore prefix indicates they are non-standard HAR fields.
 	RemoteIPSpace   string `json:"_remoteIPAddressSpace,omitempty"` // The IP address space of the remote server.
-	RemoteIPAddress string `json:"_remoteIPAddress,omitempty"`    // The IP address of the remote server.
+	RemoteIPAddress string `json:"_remoteIPAddress,omitempty"`      // The IP address of the remote server.
 }
 
 // Timings provides a detailed breakdown of the time spent in various phases of
@@ -129,10 +129,10 @@ type PostData struct {
 
 // Content describes the content of an HTTP response body.
 type Content struct {
-	Size     int64  `json:"size"`      // The size of the content in bytes.
-	MimeType string `json:"mimeType"`  // The MIME type of the content.
-	Text     string `json:"text,omitempty"`      // The content text, if it's not binary.
-	Encoding string `json:"encoding,omitempty"`  // The encoding of the content (e.g., "base64").
+	Size     int64  `json:"size"`               // The size of the content in bytes.
+	MimeType string `json:"mimeType"`           // The MIME type of the content.
+	Text     string `json:"text,omitempty"`     // The content text, if it's not binary.
+	Encoding string `json:"encoding,omitempty"` // The encoding of the content (e.g., "base64").
 }
 
 // NewHAR is a factory function that creates and initializes a new HAR object
@@ -143,7 +143,7 @@ func NewHAR() *HAR {
 			Version: "1.2",
 			Creator: Creator{
 				Name:    "Scalpel-CLI",
-				Version: "2.0",
+				Version: "1.0",
 			},
 			Entries: make([]Entry, 0),
 		},

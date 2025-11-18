@@ -1,6 +1,7 @@
 package llmclient
 
 import (
+	"context"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -16,6 +17,8 @@ import (
 // Verifies that the factory correctly initializes the LLMRouter by looking up configurations from the map.
 func TestNewClient_Success_RouterInitialization(t *testing.T) {
 	logger := setupTestLogger(t)
+	// Use a background context for initialization tests.
+	ctx := context.Background()
 
 	// Define configurations for models in the map
 	fastConfig := getValidLLMConfig()
@@ -42,11 +45,14 @@ func TestNewClient_Success_RouterInitialization(t *testing.T) {
 	}
 
 	// Execute
-	client, err := NewClient(cfg, logger)
+	// Pass context to the updated NewClient signature.
+	client, err := NewClient(ctx, cfg, logger)
 
 	// Verification
 	require.NoError(t, err, "NewClient should succeed for a valid configuration")
 	require.NotNil(t, client)
+	// Ensure the client resources are cleaned up after the test.
+	t.Cleanup(func() { client.Close() })
 
 	// Type assertion to ensure the LLMRouter implementation was instantiated
 	router, ok := client.(*LLMRouter)
@@ -58,16 +64,19 @@ func TestNewClient_Success_RouterInitialization(t *testing.T) {
 		fastClient, okFast := router.clients[schemas.TierFast].(*GoogleClient)
 		assert.True(t, okFast, "Fast client should be an instance of *GoogleClient")
 		if okFast {
-			assert.Equal(t, "key-fast", fastClient.apiKey)
+			// APIKey is no longer directly accessible on GoogleClient; we verify the model name and config instead.
 			assert.Equal(t, "gemini-flash", fastClient.config.Model)
+			assert.Equal(t, "key-fast", fastClient.config.APIKey)
+			assert.NotNil(t, fastClient.client, "SDK client should be initialized")
 		}
 
 		// Check Powerful Client
 		powerfulClient, okPowerful := router.clients[schemas.TierPowerful].(*GoogleClient)
 		assert.True(t, okPowerful, "Powerful client should be an instance of *GoogleClient")
 		if okPowerful {
-			assert.Equal(t, "key-powerful", powerfulClient.apiKey)
 			assert.Equal(t, "gemini-pro", powerfulClient.config.Model)
+			assert.Equal(t, "key-powerful", powerfulClient.config.APIKey)
+			assert.NotNil(t, powerfulClient.client, "SDK client should be initialized")
 		}
 	}
 }
@@ -75,6 +84,7 @@ func TestNewClient_Success_RouterInitialization(t *testing.T) {
 // Verifies the robustness check against missing default model names or missing entries in the map.
 func TestNewClient_Failure_MissingConfiguration(t *testing.T) {
 	logger := setupTestLogger(t)
+	ctx := context.Background()
 	validConfig := getValidLLMConfig()
 	const validName = "ValidModel"
 
@@ -88,7 +98,7 @@ func TestNewClient_Failure_MissingConfiguration(t *testing.T) {
 			routerConfig: config.LLMRouterConfig{
 				// DefaultFastModel: "",
 				DefaultPowerfulModel: validName,
-				Models: map[string]config.LLMModelConfig{validName: validConfig},
+				Models:               map[string]config.LLMModelConfig{validName: validConfig},
 			},
 			expectedError: "configuration error: DefaultFastModel is not specified in LLMRouterConfig",
 		},
@@ -106,7 +116,7 @@ func TestNewClient_Failure_MissingConfiguration(t *testing.T) {
 			routerConfig: config.LLMRouterConfig{
 				DefaultFastModel:     "MissingModel",
 				DefaultPowerfulModel: validName,
-				Models: map[string]config.LLMModelConfig{validName: validConfig},
+				Models:               map[string]config.LLMModelConfig{validName: validConfig},
 			},
 			expectedError: "configuration error: DefaultFastModel 'MissingModel' not found in the models map",
 		},
@@ -115,7 +125,7 @@ func TestNewClient_Failure_MissingConfiguration(t *testing.T) {
 			routerConfig: config.LLMRouterConfig{
 				DefaultFastModel:     validName,
 				DefaultPowerfulModel: "MissingModel",
-				Models: map[string]config.LLMModelConfig{validName: validConfig},
+				Models:               map[string]config.LLMModelConfig{validName: validConfig},
 			},
 			expectedError: "configuration error: DefaultPowerfulModel 'MissingModel' not found in the models map",
 		},
@@ -129,7 +139,8 @@ func TestNewClient_Failure_MissingConfiguration(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cfg := config.AgentConfig{LLM: tt.routerConfig}
-			client, err := NewClient(cfg, logger)
+			// Pass context to the updated NewClient signature.
+			client, err := NewClient(ctx, cfg, logger)
 			assert.Error(t, err)
 			assert.Nil(t, client)
 			assert.Contains(t, err.Error(), tt.expectedError)
@@ -140,6 +151,7 @@ func TestNewClient_Failure_MissingConfiguration(t *testing.T) {
 // Verifies that the factory propagates errors from the specific client's constructor.
 func TestNewClient_Failure_ProviderInitializationError(t *testing.T) {
 	logger := setupTestLogger(t)
+	ctx := context.Background()
 	validConfig := getValidLLMConfig()
 
 	// Scenario: Configuration is present but required parameters (API Key for Gemini) are missing.
@@ -161,7 +173,8 @@ func TestNewClient_Failure_ProviderInitializationError(t *testing.T) {
 		},
 	}
 
-	client, err := NewClient(cfgMissingKey, logger)
+	// Pass context to the updated NewClient signature.
+	client, err := NewClient(ctx, cfgMissingKey, logger)
 	assert.Error(t, err)
 	assert.Nil(t, client)
 	// Verifying the error originates from the GoogleClient constructor and is wrapped by the factory
@@ -172,6 +185,7 @@ func TestNewClient_Failure_ProviderInitializationError(t *testing.T) {
 // Verifies the factory returns an error for unknown providers in any tier.
 func TestNewClient_Failure_UnsupportedProvider(t *testing.T) {
 	logger := setupTestLogger(t)
+	ctx := context.Background()
 	validConfig := getValidLLMConfig()
 
 	unsupportedConfig := getValidLLMConfig()
@@ -193,7 +207,8 @@ func TestNewClient_Failure_UnsupportedProvider(t *testing.T) {
 	}
 
 	// Execute
-	client, err := NewClient(cfg, logger)
+	// Pass context to the updated NewClient signature.
+	client, err := NewClient(ctx, cfg, logger)
 
 	// Verification
 	assert.Error(t, err, "NewClient should fail for an unsupported provider")
@@ -207,6 +222,7 @@ func TestNewClient_Failure_UnsupportedProvider(t *testing.T) {
 // Verifies the factory returns an error if a model is defined but missing the provider field.
 func TestNewClient_Failure_MissingProviderField(t *testing.T) {
 	logger := setupTestLogger(t)
+	ctx := context.Background()
 	validConfig := getValidLLMConfig()
 
 	// Config where the Provider field is empty
@@ -228,7 +244,8 @@ func TestNewClient_Failure_MissingProviderField(t *testing.T) {
 	}
 
 	// Execute
-	client, err := NewClient(cfg, logger)
+	// Pass context to the updated NewClient signature.
+	client, err := NewClient(ctx, cfg, logger)
 
 	// Verification
 	assert.Error(t, err)

@@ -35,7 +35,7 @@ func newSelfHealCmd() *cobra.Command {
 			originalArgs, _ := cmd.Flags().GetStringSlice("original-args")
 
 			// Initialize the LLM client using the centralized initializer.
-			llmClient, err := service.InitializeLLMClient(cfg.Agent(), logger)
+			llmClient, err := service.InitializeLLMClient(ctx, cfg.Agent(), logger)
 			if err != nil {
 				return err // Error is already logged and formatted by the initializer
 			}

@@ -91,7 +91,7 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 		return nil, fmt.Errorf("failed to create knowledge graph store: %w", err)
 	}
 
-	llmRouter, err := NewLLMClient(globalCtx.Config.Agent(), logger)
+	llmRouter, err := NewLLMClient(ctx, globalCtx.Config.Agent(), logger)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create LLM router for agent: %w", err)
 	}

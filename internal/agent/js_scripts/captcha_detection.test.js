@@ -284,4 +284,4 @@ describe('detectCaptcha', () => {
             jest.resetModules(); // Clean up
         }
     });
-});
+}); 
