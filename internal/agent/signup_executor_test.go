@@ -61,7 +61,7 @@ func (m *MockConfig) SetBrowserHeadless(b bool)                   {}
 func (m *MockConfig) SetBrowserDisableCache(b bool)               {}
 func (m *MockConfig) SetBrowserDisableGPU(b bool)                 {}
 func (m *MockConfig) SetBrowserIgnoreTLSErrors(b bool)            {}
-func (m*MockConfig) SetBrowserDebug(b bool)                       {}
+func (m *MockConfig) SetBrowserDebug(b bool)                      {}
 func (m *MockConfig) SetBrowserHumanoidEnabled(b bool)            {}
 func (m *MockConfig) SetBrowserHumanoidClickHoldMinMs(ms int)     {}
 func (m *MockConfig) SetBrowserHumanoidClickHoldMaxMs(ms int)     {}
@@ -71,7 +71,7 @@ func (m *MockConfig) SetNetworkNavigationTimeout(d time.Duration) {}
 func (m *MockConfig) SetNetworkPostLoadWait(d time.Duration)      {}
 func (m *MockConfig) SetNetworkIgnoreTLSErrors(b bool)            {}
 func (m *MockConfig) SetIASTEnabled(b bool)                       {}
-func (mE *MockConfig) SetJWTEnabled(b bool)                        {}
+func (mE *MockConfig) SetJWTEnabled(b bool)                       {}
 func (mType *MockConfig) SetJWTBruteForceEnabled(b bool)          {}
 func (m *MockConfig) SetATOConfig(atoCfg config.ATOConfig)        {}
 
@@ -266,16 +266,14 @@ func TestNewSignUpExecutor_Initialization(t *testing.T) {
 }
 
 // TestSignUpExecutor_Execute_Success_AuthStateChange verifies the "happy path" execution flow.
-// REFACTOR: This test is modified per Tier 1 Recommendation 
-// It now tests a direct success path on the first attempt, removing the retry logic
-// and avoiding the WaitForAsync panic.
+// It mocks a direct success path on the first attempt, ensuring the retry logic
+// is not triggered and avoiding unnecessary WaitForAsync calls.
 func TestSignUpExecutor_Execute_Success_AuthStateChange(t *testing.T) {
 	cfg := defaultEnabledConfig("")
 	executor, mockHumanoid, mockSession := setupExecutorForExecute(t, cfg)
 
 	// Ensure the embedded script is loaded before attempting to use it for matching.
 	if formAnalysisScript == "" {
-		// If go:embed fails during test execution, we cannot construct the exact match.
 		t.Fatal("formAnalysisScript is empty during test execution. Check go:embed configuration in signup_executor.go.")
 	}
 
@@ -288,10 +286,7 @@ func TestSignUpExecutor_Execute_Success_AuthStateChange(t *testing.T) {
 	captchaScriptMatcher := scriptContaining("captchaSelectors")
 	storageScriptMatcher := scriptContaining("localStorageKeys")
 
-	// Use mock.Anything for the args list to avoid
-	// potential deep-equality issues with `[]interface{}{}` vs `nil`.
-
-	// Expected successful analysis result
+	// Define a successful analysis result to be returned immediately.
 	analysisResult := formAnalysisResult{
 		ContextSelector: "#form",
 		SubmitSelector:  "#submit",
@@ -301,44 +296,54 @@ func TestSignUpExecutor_Execute_Success_AuthStateChange(t *testing.T) {
 		},
 	}
 
-	// --- MOCKING ATTEMPT 1 (SUCCESS) ---
-	// This test now only mocks a single, successful attempt. [cite: 175]
+	// --- Expectations for a Single Successful Run ---
 
-	// 1. Pre-check: Mock CAPTCHA detection
+	// 1. Pre-check: CAPTCHA detection (Return nil to indicate no CAPTCHA).
+	// We expect this exactly once because we are not retrying.
 	mockSession.On("ExecuteScript", mock.Anything, captchaScriptMatcher, mock.Anything).Return(marshal(t, nil), nil).Once()
 
-	// 2. Initial State Capture: Mock Initial Auth State
+	// 2. Initial State Capture.
+	// These are called once during the initial setup phase of the attempt.
 	mockSession.On("ExecuteScript", mock.Anything, storageScriptMatcher, mock.Anything).Return(marshal(t, map[string][]string{}), nil).Once()
 	mockSession.On("CollectArtifacts", mock.Anything).Return(&schemas.Artifacts{
 		Storage: schemas.StorageState{Cookies: []*schemas.Cookie{}},
 	}, nil).Once()
 	mockSession.On("ExecuteScript", mock.Anything, "window.location.href", mock.Anything).Return(marshal(t, "http://example.com/signup"), nil).Once()
 
-	// 3. Form Analysis: Mock Form Analysis Script Execution (SUCCESS)
-	// This now returns a valid result on the first try. [cite: 174]
+	// 3. Form Analysis: SUCCESS ON FIRST ATTEMPT.
+	// By returning a valid analysis result immediately, we prevent the loop in Execute() from triggering retries.
 	mockSession.On("ExecuteScript", mock.Anything, analysisScriptMatcher, mock.Anything).Return(marshal(t, analysisResult), nil).Once()
 
-	// 4. Fill Form
+	// 4. Fill Form.
+	// Expect typing into the fields identified in analysisResult.
 	mockHumanoid.On("Type", mock.Anything, "#email", mock.AnythingOfType("string"), mock.Anything).Return(nil).Once()
 	mockHumanoid.On("Type", mock.Anything, "#password", mock.AnythingOfType("string"), mock.Anything).Return(nil).Once()
 
-	// 6. Form Submission: Mock Strategy 1 (Button Click)
+	// 5. Handle Checkboxes (Optional interactions).
+	// The executor attempts to find terms/privacy checkboxes. We allow these calls using Maybe()
+	// and return an error to simulate that no checkboxes were found (which is a valid, non-failure state).
+	mockHumanoid.On("IntelligentClick", mock.MatchedBy(func(selector string) bool {
+		return strings.Contains(selector, "checkbox")
+	}), mock.Anything).Return(errors.New("checkbox not found")).Maybe()
+
+	// 6. Form Submission: Strategy 1 (Button Click).
 	mockHumanoid.On("IntelligentClick", mock.Anything, "#submit", mock.Anything).Return(nil).Once()
 
-	// 7. Stabilization: Mock WaitForAsync
+	// 7. Stabilization: Wait for page load.
+	// We explicitly expect only the stabilization wait. If the code were retrying, it would call WaitForAsync with retryWaitMs.
+	// By asserting this call with stabilizationWaitMs, we verify we reached the post-submission phase.
 	mockSession.On("WaitForAsync", mock.Anything, stabilizationWaitMs).Return(nil).Once()
 
-	// 8. Verification: Mock Auth State Change (Success)
+	// 8. Verification: Auth State Change (Success).
+	// Return a state with a new session cookie ("session_token") to simulate a successful login/signup.
 	mockSession.On("ExecuteScript", mock.Anything, storageScriptMatcher, mock.Anything).Return(marshal(t, map[string][]string{}), nil).Once()
 	mockSession.On("CollectArtifacts", mock.Anything).Return(&schemas.Artifacts{
 		Storage: schemas.StorageState{
-			// The key indicator of success: a new session token.
-			Cookies: []*schemas.Cookie{{Name: "session_token", Value: "abc"}},
+			Cookies: []*schemas.Cookie{{Name: "session_token", Value: "new_session_value"}},
 		},
 	}, nil).Once()
 
 	// --- Execution ---
-	// The original panic is avoided as WaitForAsync(retryWaitMs) is no longer called. [cite: 176]
 	result, err := executor.Execute(ctx, action)
 
 	// --- Assertions ---
@@ -347,24 +352,23 @@ func TestSignUpExecutor_Execute_Success_AuthStateChange(t *testing.T) {
 	assert.Equal(t, "success", result.Status)
 	assert.Equal(t, ObservedAuthResult, result.ObservationType)
 
-	// Verify the verification method reported.
-	resultData := result.Data.(map[string]interface{})
+	// Verify the specific verification method that triggered success.
+	resultData, ok := result.Data.(map[string]interface{})
+	require.True(t, ok)
 	assert.Equal(t, "auth_state_change", resultData["verification_method"])
 
-	// Verify Knowledge Graph updates were generated for the new account.
+	// Verify Knowledge Graph updates were generated.
 	assert.NotNil(t, result.KGUpdates)
 	require.Len(t, result.KGUpdates.NodesToAdd, 1)
 	assert.Equal(t, schemas.NodeAccount, result.KGUpdates.NodesToAdd[0].Type)
 
-	// Ensure all mocks were called as expected.
+	// Ensure all expectations were met.
 	mockHumanoid.AssertExpectations(t)
 	mockSession.AssertExpectations(t)
 }
 
 // TestSignUpExecutor_Execute_Failure_RetriesExhausted verifies the "unhappy path"
 // where form analysis fails repeatedly, exhausting all retries.
-// REFACTOR: This new test is added per Tier 2 Recommendation. 
-// It validates the retry mechanism that was previously breaking the success test.
 func TestSignUpExecutor_Execute_Failure_RetriesExhausted(t *testing.T) {
 	cfg := defaultEnabledConfig("")
 	executor, _, mockSession := setupExecutorForExecute(t, cfg)
@@ -380,7 +384,7 @@ func TestSignUpExecutor_Execute_Failure_RetriesExhausted(t *testing.T) {
 	// We expect 3 attempts total (1 initial + 2 retries)
 	// These constants must match the executor's configuration.
 	const totalAttempts = maxSignUpRetries + 1 // 3
-	const retryCount = maxSignUpRetries      // 2
+	const retryCount = maxSignUpRetries        // 2
 
 	// Mock pre-checks (called 3 times)
 	mockSession.On("ExecuteScript", mock.Anything, captchaScriptMatcher, mock.Anything).Return(marshal(t, nil), nil).Times(totalAttempts)
@@ -388,13 +392,11 @@ func TestSignUpExecutor_Execute_Failure_RetriesExhausted(t *testing.T) {
 	mockSession.On("CollectArtifacts", mock.Anything).Return(&schemas.Artifacts{Storage: schemas.StorageState{Cookies: []*schemas.Cookie{}}}, nil).Times(totalAttempts)
 	mockSession.On("ExecuteScript", mock.Anything, "window.location.href", mock.Anything).Return(marshal(t, "http://example.com/signup"), nil).Times(totalAttempts)
 
-	// Mock form analysis to FAIL every time. [cite: 193]
-	// Per the Tier 3 refactor, we return an empty object,
-	// not a `null` primitive.
+	// Mock form analysis to FAIL every time.
 	emptyAnalysisResult := formAnalysisResult{Fields: map[string]string{}}
 	mockSession.On("ExecuteScript", mock.Anything, analysisScriptMatcher, mock.Anything).Return(marshal(t, emptyAnalysisResult), nil).Times(totalAttempts)
 
-	// Mock the retry waits (called 2 times). [cite: 194]
+	// Mock the retry waits (called 2 times).
 	mockSession.On("WaitForAsync", mock.Anything, retryWaitMs).Return(nil).Times(retryCount)
 
 	// --- Execution ---
@@ -405,7 +407,7 @@ func TestSignUpExecutor_Execute_Failure_RetriesExhausted(t *testing.T) {
 	require.NotNil(t, result)
 	assert.Equal(t, "failed", result.Status)
 	// It should fail with the error from the last attempt.
-	assert.Equal(t, ErrCodeElementNotFound, result.ErrorCode) // This is the error code mapped from the empty analysis result [cite: 79]
+	assert.Equal(t, ErrCodeElementNotFound, result.ErrorCode) // This is the error code mapped from the empty analysis result
 	assert.Contains(t, result.ErrorDetails["message"], "Failed to analyze and identify the sign-up form")
 
 	// Ensure all mocks were called the expected number of times
@@ -420,10 +422,6 @@ func TestSignUpExecutor_Execute_Failure_CaptchaDetected(t *testing.T) {
 
 	ctx := context.Background()
 	var action Action
-
-	// **FIX**: Use mock.Anything for the args list for consistency.
-	// Use explicit argument matching for robustness.
-	// expectedArgs := []interface{}{}
 
 	// Mock CAPTCHA detection (returns the detected selector string)
 	mockSession.On("ExecuteScript", mock.Anything, scriptContaining("captchaSelectors"), mock.Anything).Return(marshal(t, ".g-recaptcha"), nil).Once()

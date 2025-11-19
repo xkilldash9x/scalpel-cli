@@ -22,7 +22,6 @@ logs/
 # Local configuration overrides and environment files
 # It's good practice to commit config.yaml as a template,
 # but ignore local versions with secrets.
-config.yaml
 *.local.yaml
 .credentials.json
 .env
