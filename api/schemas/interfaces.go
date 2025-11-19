@@ -150,10 +150,10 @@ const (
 // GenerationOptions provides detailed parameters to control the text generation
 // process of the LLM, such as creativity (temperature) and output format.
 type GenerationOptions struct {
-	Temperature     float64 `json:"temperature"`       // Controls randomness. Lower is more deterministic.
-	ForceJSONFormat bool    `json:"force_json_format"` // If true, forces the model to output valid JSON.
-	TopP            float64 `json:"top_p"`             // Nucleus sampling parameter.
-	TopK            int     `json:"top_k"`             // Top-k sampling parameter.
+	Temperature     *float64 `json:"temperature"`       // Controls randomness. Lower is more deterministic.
+	ForceJSONFormat bool     `json:"force_json_format"` // If true, forces the model to output valid JSON.
+	TopP            float64  `json:"top_p"`             // Nucleus sampling parameter.
+	TopK            int      `json:"top_k"`             // Top-k sampling parameter.
 }
 
 // GenerationRequest encapsulates a complete request to the LLM, including the

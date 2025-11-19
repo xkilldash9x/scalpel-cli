@@ -56,11 +56,12 @@ func setupGeminiClient(t *testing.T, handler http.HandlerFunc) (*GoogleClient, *
 }
 
 func createTestRequest() schemas.GenerationRequest {
+	temp := 0.7
 	return schemas.GenerationRequest{
 		SystemPrompt: "System prompt instructions.",
 		UserPrompt:   "User query.",
 		Options: schemas.GenerationOptions{
-			Temperature: 0.7,
+			Temperature: &temp,
 		},
 	}
 }
@@ -260,4 +261,32 @@ func TestGenerate_Failure_PromptSafetyBlock(t *testing.T) {
 	assert.Empty(t, response)
 	assert.Contains(t, err.Error(), "Gemini prompt blocked")
 	assert.Equal(t, 1, observedLogs.FilterLevelExact(zap.WarnLevel).Len())
+}
+
+func TestGenerate_WithZeroTemperature(t *testing.T) {
+	req := createTestRequest()
+	zeroTemp := 0.0
+	req.Options.Temperature = &zeroTemp
+
+	handler := func(w http.ResponseWriter, r *http.Request) {
+		body, _ := io.ReadAll(r.Body)
+		var payload map[string]interface{}
+		json.Unmarshal(body, &payload)
+
+		genConfig, ok := payload["generationConfig"].(map[string]interface{})
+		require.True(t, ok, "generationConfig should be present in the payload")
+
+		temp, ok := genConfig["temperature"].(float64)
+		require.True(t, ok, "temperature should be present in generationConfig")
+		assert.Equal(t, zeroTemp, temp, "temperature value should be 0")
+
+		responseJSON := map[string]interface{}{"candidates": []map[string]interface{}{{"finishReason": "STOP", "content": map[string]interface{}{"parts": []map[string]interface{}{{"text": "ok"}}}}}}
+		w.WriteHeader(http.StatusOK)
+		json.NewEncoder(w).Encode(responseJSON)
+	}
+
+	client, _, _, _ := setupGeminiClient(t, handler)
+
+	_, err := client.Generate(context.Background(), req)
+	assert.NoError(t, err)
 }
