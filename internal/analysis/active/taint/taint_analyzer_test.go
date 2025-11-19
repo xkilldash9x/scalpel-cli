@@ -824,6 +824,7 @@ func TestCheckSanitization(t *testing.T) {
 		{"Intact (XSS)", schemas.ProbeTypeXSS, `<img src=x>` + canary, `<div><img src=x>` + canary + `</div>`, SanitizationNone, ""},
 		{"HTML Stripped (XSS)", schemas.ProbeTypeXSS, `<img src=x>` + canary, `img src=x` + canary, SanitizationPartial, "HTML tags modified or stripped"},
 		{"Quotes Escaped (XSS)", schemas.ProbeTypeXSS, `"onclick="` + canary, `\"onclick=\"` + canary, SanitizationPartial, "Quotes escaped"},
+		{"Incorrectly reports quotes escaped due to unrelated content", schemas.ProbeTypeXSS, `"payload"` + canary, `var x = "foo \" bar"; var y = "payload` + canary + `";`, SanitizationPartial, "Quotes removed or encoded"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

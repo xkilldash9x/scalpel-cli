@@ -1308,10 +1308,16 @@ func (a *Analyzer) checkSanitization(sinkValue string, probe ActiveProbe) (Sanit
 		}
 		// FIX: Enhanced detection for escaped quotes (backslash) vs removed/encoded quotes.
 		if strings.Contains(probe.Value, `"`) {
-			if !strings.Contains(sinkValue, `"`) {
-				details = append(details, "Quotes removed or encoded")
-			} else if strings.Contains(sinkValue, `\"`) {
+			// Create versions of the probe with quotes escaped and removed.
+			probeWithEscapedQuotes := strings.ReplaceAll(probe.Value, `"`, `\"`)
+			probeWithoutQuotes := strings.ReplaceAll(probe.Value, `"`, "")
+
+			// Prioritize checking for escaped quotes first. This is a more specific transformation.
+			if strings.Contains(sinkValue, probeWithEscapedQuotes) {
 				details = append(details, "Quotes escaped")
+			} else if strings.Contains(sinkValue, probeWithoutQuotes) {
+				// If not escaped, check if the quotes were simply removed.
+				details = append(details, "Quotes removed or encoded")
 			}
 		}
 	}
