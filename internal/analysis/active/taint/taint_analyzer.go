@@ -997,7 +997,23 @@ func (a *Analyzer) isErrorPageContext(pageURL, pageTitle string) bool {
 	}
 	// Check for status codes in the path (often used by frameworks e.g. /404).
 	// We ensure they are path segments to avoid matching "node404" or similar IDs.
-	if strings.HasSuffix(u, "/404") || strings.HasSuffix(u, "/500") {
+	parsedURL, err := url.Parse(pageURL)
+	if err != nil {
+		// Fallback to basic string matching if URL parsing fails
+		if strings.Contains(u, "/404/") || strings.HasSuffix(u, "/404") {
+			return true
+		}
+		if strings.Contains(u, "/500/") || strings.HasSuffix(u, "/500") {
+			return true
+		}
+		return false
+	}
+	path := parsedURL.Path
+	// BUG-FIX: Check for contains /404/ or suffix /404 to be more flexible.
+	if strings.Contains(path, "/404/") || strings.HasSuffix(path, "/404") {
+		return true
+	}
+	if strings.Contains(path, "/500/") || strings.HasSuffix(path, "/500") {
 		return true
 	}
 

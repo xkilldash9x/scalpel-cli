@@ -749,6 +749,39 @@ func TestProcessPrototypePollutionConfirmation_Valid(t *testing.T) {
 
 // Test Cases: False Positive Reduction Logic (Unit Tests)
 
+func TestIsErrorPageContext_URLPathHeuristics(t *testing.T) {
+	analyzer, _, _ := setupAnalyzer(t, nil, false)
+	tests := []struct {
+		name      string
+		pageURL   string
+		pageTitle string
+		isError   bool
+	}{
+		// Existing logic checks
+		{"Suffix Match 404", "http://example.com/page/404", "", true},
+		{"Suffix Match 500", "http://example.com/page/500", "", true},
+		{"Path Contains error.", "http://example.com/error.html", "", true},
+		{"Path Contains /errors/", "http://example.com/errors/", "", true},
+		{"Normal Page", "http://example.com/normal/page", "", false},
+		{"Title Match 404", "http://example.com/normal", "404 Not Found", true},
+		{"Title Match Server Error", "http://example.com/normal", "Internal Server Error", true},
+		{"Normal Title", "http://example.com/normal", "Welcome!", false},
+
+		// BUG: New failing tests for more flexible path matching
+		{"Contains /404/", "http://example.com/error/404/details", "", true},
+		{"Contains /500/", "http://example.com/a/500/b", "", true},
+		{"Path ends with /404/", "http://example.com/error/404/", "", true},
+		{"Path with query params", "http://example.com/path/404?a=1", "", true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := analyzer.isErrorPageContext(tt.pageURL, tt.pageTitle)
+			assert.Equal(t, tt.isError, result, "URL: %s", tt.pageURL)
+		})
+	}
+}
+
 func TestIsContextValid(t *testing.T) {
 	analyzer, _, _ := setupAnalyzer(t, nil, false)
 	tests := []struct {
