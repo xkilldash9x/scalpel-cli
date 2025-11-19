@@ -1,0 +1,197 @@
+database:
+  # Database URL can also be set via SCALPEL_DATABASE_URL environment variable.
+  url: "postgres://k:Thebay2123@127.0.0.1:5432/scalpel-db?sslmode=disable"
+
+logger:
+  service_name: "scalpel-cli"
+  log_file: "logs/scalpel.log"
+  level: "info"
+  format: "json"
+  add_source: false
+  max_size: 10
+  max_backups: 3
+  max_age: 7
+  compress: true
+  colors:
+    debug: "cyan"
+    info: "green"
+    warn: "yellow"
+    error: "red"
+    dpanic: "magenta"
+    panic: "magenta"
+    fatal: "magenta"
+engine:
+  queue_size: 1000
+  worker_concurrency: 8
+  default_task_timeout: "15m"
+
+browser:
+  headless: true
+  disable_cache: true
+  ignore_tls_errors: false
+  concurrency: 2
+  debug: true
+  args:
+    - "--no-sandbox"
+    - "--disable-setuid-sandbox"
+    - "--disable-dev-shm-usage"
+    - "--disable-gpu"
+    - "--no-first-run"
+    - "--no-default-browser-check"
+    - "--disable-popup-blocking"
+    - "--disable-prompt-on-repost"
+    - "--disable-extensions"
+    - "--disable-translate"
+    - "--disable-sync"
+    - "--disable-background-networking"
+    - "--disable-component-update"
+    - "--metrics-recording-only"
+    - "--mute-audio"
+    - "--safebrowsing-disable-auto-update"
+  viewport:
+    width: 1920
+    height: 1080
+  humanoid: {}
+
+network:
+  timeout: "30s"
+  navigation_timeout: "900s"
+  post_load_wait: "2s"
+  capture_response_bodies: true
+  ignore_tls_errors: false
+  headers:
+    User-Agent: "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36"
+  proxy:
+    enabled: true
+    address: "127.0.0.1:8080"
+    ca_cert: ""
+    ca_key: ""
+
+iast:
+  enabled: true
+  shim_path: "./internal/analysis/active/taint"
+  config_path: "./internal/config"
+
+scanners:
+  passive:
+    headers:
+      enabled: true
+  static:
+    jwt:
+      enabled: true
+      known_secrets: []
+      brute_force_enabled: true
+      dictionary_file: "config/jwt.secrets.list"
+  active:
+    taint:
+      enabled: true
+      depth: 3
+      concurrency: 2
+    protopollution:
+      enabled: true
+      wait_duration: "8s"
+    timeslip:
+      enabled: true
+      request_count: 25
+      max_concurrency: 10
+      threshold_ms: 500
+    auth:
+      ato:
+        enabled: true
+        seclists_path: "~/SecLists"
+        concurrency: 4
+        min_request_delay_ms: 500
+        request_delay_jitter_ms: 500
+        success_keywords:
+          - "welcome"
+          - "redirect"
+          - "dashboard"
+          - "logout"
+          - '"success":true'
+        user_failure_keywords:
+          - "user not found"
+          - "invalid user"
+          - "no such account"
+          - "user does not exist"
+        pass_failure_keywords:
+          - "invalid password"
+          - "incorrect password"
+          - "authentication failed"
+        generic_failure_keywords:
+          - "login failed"
+          - "invalid credentials"
+        lockout_keywords:
+          - "account locked"
+          - "too many attempts"
+      idor:
+        enabled: true
+        ignore_list:
+          - "csrf_token"
+          - "X-CSRF-Token"
+          - "nonce"
+          - "viewstate"
+        test_strategies:
+          NumericID: ["increment", "decrement"]
+          UUID: ["horizontal_swap"]
+          Base64Encoded: ["bit_flip"]
+          ObjectID: ["increment_char"]
+
+discovery:
+  max_depth: 5
+  concurrency: 20
+  timeout: "15m"
+  passive_enabled: true
+  include_subdomains: true
+  crtsh_rate_limit: 2.0
+  cache_dir: "/.cache"
+  passive_concurrency: 10
+
+agent:
+  llm:
+    default_fast_model: "gemini-2.5-flash"
+    default_powerful_model: "gemini-2.5-pro"
+    models:
+      gemini-2.5-flash:
+        provider: "gemini"
+        model: "gemini-2.5-flash"
+        # api_key: "YOUR_API_KEY" 
+        api_timeout: "2m"
+        temperature: 0.8
+        top_p: 0.95
+        top_k: 50
+        max_tokens: 4096
+        safety_filters:
+          HARM_CATEGORY_HATE_SPEECH: "BLOCK_NONE"
+          HARM_CATEGORY_SEXUALLY_EXPLICIT: "BLOCK_NONE"
+          HARM_CATEGORY_HARASSMENT: "BLOCK_NONE"
+          HARM_CATEGORY_DANGEROUS_CONTENT: "BLOCK_NONE"
+      gemini-2.5-pro:
+        provider: "gemini"
+        model: "gemini-2.5-pro"
+        # api_key: "YOUR_API_KEY" 
+        api_timeout: "5m"
+        temperature: 0.8
+        top_p: 0.9
+        top_k: 40
+        max_tokens: 8192
+        safety_filters:
+          HARM_CATEGORY_HATE_SPEECH: "BLOCK_NONE"
+          HARM_CATEGORY_SEXUALLY_EXPLICIT: "BLOCK_NONE"
+          HARM_CATEGORY_HARASSMENT: "BLOCK_NONE"
+          HARM_CATEGORY_DANGEROUS_CONTENT: "BLOCK_NONE"
+  knowledge_graph:
+    type: "postgres"
+autofix:
+  enabled: false
+  project_root: ""
+  dast_log_path: ""
+  min_confidence_threshold: 0.75
+  cooldown_seconds: 300
+  keep_workspace_on_failure: false
+  git:
+    author_name: "Kyle McAllister"
+    author_email: "xkilldash9x@proton.me"
+  github:
+    repo_owner: "xkilldash9x"
+    repo_name: "scalpel-cli"
+    base_branch: "main"
