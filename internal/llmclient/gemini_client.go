@@ -189,9 +189,8 @@ func (c *GoogleClient) buildGenerationConfig(req schemas.GenerationRequest) *gen
 	// --- Apply Request Overrides ---
 
 	// Override temperature if specified in the request options.
-	requestTemp := req.Options.Temperature
-	if requestTemp >= 0 {
-		t := float32(requestTemp)
+	if req.Options.Temperature != nil {
+		t := float32(*req.Options.Temperature)
 		cfg.Temperature = &t
 	}
 
