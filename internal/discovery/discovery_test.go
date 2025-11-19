@@ -53,6 +53,20 @@ func (m *mockBrowserInteractor) NavigateAndExtract(ctx context.Context, url stri
 	return nil, fmt.Errorf("mockBrowserInteractor: no page data for %s", url)
 }
 
+// mockScopeManager is a simple implementation for testing purposes, especially for servers with IP-based hosts.
+type mockScopeManager struct {
+	rootDomain string
+}
+
+func (m *mockScopeManager) IsInScope(u *url.URL) bool {
+	// A simple check for test servers; in a real scenario, this would be more robust.
+	return u.Hostname() == m.rootDomain
+}
+
+func (m *mockScopeManager) GetRootDomain() string {
+	return m.rootDomain
+}
+
 // -- Test Cases --
 
 // TestBasicScopeManager verifies that our scope logic correctly identifies
@@ -221,9 +235,8 @@ func TestPassiveRunner(t *testing.T) {
 		serverURL, err := url.Parse(server.URL)
 		require.NoError(t, err)
 
-		// A more specific scope for this test case.
-		testScope, err := NewBasicScopeManager(server.URL, true)
-		require.NoError(t, err)
+		// Use the mock scope manager to handle the httptest server's IP-based hostname.
+		testScope := &mockScopeManager{rootDomain: serverURL.Hostname()}
 
 		runner := NewPassiveRunner(mockConfig, client, testScope, logger)
 		resultsChan := make(chan string, 100)
@@ -359,4 +372,85 @@ func TestEngine_Start(t *testing.T) {
 		// Verify the mock's expectations were met.
 		kgClient.AssertExpectations(t)
 	})
+}
+
+// TestEngine_ShutdownRaceCondition is designed to specifically trigger the
+// "send on closed channel" panic that can occur during shutdown.
+// It does this by creating a scenario where a worker finishes a task,
+// momentarily setting the taskWG to zero, but then immediately tries to
+// add a new task from the results of the first one. The shutdown goroutine
+// can mistakenly see the zero WaitGroup and close the queue too early.
+
+// mockDelayedBrowserInteractor is a specialized mock for the race condition test.
+type mockDelayedBrowserInteractor struct {
+	pages map[string][]string
+}
+
+// NavigateAndExtract introduces a small delay to widen the window for a race condition.
+func (m *mockDelayedBrowserInteractor) NavigateAndExtract(ctx context.Context, url string) ([]string, error) {
+	// This tiny sleep is often enough to allow the scheduler to switch goroutines
+	// and expose the race condition where the queue is closed prematurely.
+	time.Sleep(1 * time.Millisecond)
+	if links, ok := m.pages[url]; ok {
+		return links, nil
+	}
+	return nil, fmt.Errorf("mockDelayedBrowserInteractor: no page data for %s", url)
+}
+
+func TestEngine_ShutdownRaceCondition(t *testing.T) {
+	// We run this multiple times to increase the chance of hitting the race condition.
+	// A proper fix should make this pass consistently.
+	for i := 0; i < 20; i++ {
+		t.Run(fmt.Sprintf("Attempt_%d", i), func(t *testing.T) {
+			t.Parallel() // Run attempts in parallel to further stress the scheduler.
+
+			scope, err := NewBasicScopeManager("https://example.com", false)
+			require.NoError(t, err)
+
+			kgClient := new(mocks.MockKGClient)
+			kgClient.On("AddNode", mock.Anything, mock.Anything).Return(nil)
+			kgClient.On("AddEdge", mock.Anything, mock.Anything).Return(nil)
+
+			browser := &mockDelayedBrowserInteractor{
+				pages: map[string][]string{
+					"https://example.com/":      {"/page1"},
+					"https://example.com/page1": {"/page2"},
+					"https://example.com/page2": {}, // an empty page to terminate
+				},
+			}
+
+			passiveDisabled := false
+			mockConfig := &mocks.MockConfig{}
+			discoveryConfig := config.DiscoveryConfig{
+				MaxDepth:       10, // High depth to ensure it tries to crawl everything
+				Concurrency:    2,  // Concurrency > 1 increases chance of race
+				Timeout:        5 * time.Second,
+				PassiveEnabled: &passiveDisabled,
+			}
+			scannersConfig := config.ScannersConfig{
+				Active: config.ActiveScannersConfig{
+					Taint: config.TaintConfig{Enabled: true},
+				},
+			}
+			mockConfig.On("Discovery").Return(discoveryConfig)
+			mockConfig.On("Scanners").Return(scannersConfig)
+
+			engine := NewEngine(mockConfig, scope, kgClient, browser, nil, zap.NewNop())
+
+			// We will run the engine and simply consume from the channel.
+			// The test passes if it completes without a panic.
+			// A panic ("send on closed channel") indicates failure.
+			ctx, cancel := context.WithTimeout(context.Background(), 5*time.Second)
+			defer cancel()
+
+			taskChan, err := engine.Start(ctx, []string{"https://example.com/"})
+			require.NoError(t, err)
+
+			// Drain the channel
+			for range taskChan {
+			}
+
+			// If we reach here without a panic, this attempt was successful.
+		})
+	}
 }
