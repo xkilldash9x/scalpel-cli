@@ -14,6 +14,7 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/llmutil"
 )
 
 // Analyzer is a component of the self-healing system responsible for Phase 2:
@@ -70,7 +71,7 @@ func (a *Analyzer) GeneratePatch(ctx context.Context, report PostMortem) (*Analy
 		Tier:         schemas.TierPowerful,
 		Options: schemas.GenerationOptions{
 			ForceJSONFormat: true,
-			Temperature:     0.1,
+			Temperature:     llmutil.Float64Ptr(0.1),
 		},
 	}
 

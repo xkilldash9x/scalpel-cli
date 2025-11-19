@@ -99,7 +99,7 @@ type Config struct {
 	ScanCfg ScanConfig `mapstructure:"-" yaml:"-"`
 }
 
-// --- Interface Method Implementations (Getters) ---
+// -- Interface Method Implementations (Getters) --
 
 func (c *Config) Logger() LoggerConfig       { return c.LoggerCfg }
 func (c *Config) Database() DatabaseConfig   { return c.DatabaseCfg }
@@ -114,7 +114,7 @@ func (c *Config) Discovery() DiscoveryConfig { return c.DiscoveryCfg }
 func (c *Config) Autofix() AutofixConfig     { return c.AutofixCfg }
 func (c *Config) Scan() ScanConfig           { return c.ScanCfg }
 
-// --- Interface Method Implementations (Setters) ---
+// -- Interface Method Implementations (Setters) --
 
 func (c *Config) SetScanConfig(sc ScanConfig) { c.ScanCfg = sc }
 
@@ -257,23 +257,23 @@ type BrowserConfig struct {
 // which aims to produce realistic, non-deterministic mouse movements,
 // typing, and scrolling behavior to evade bot detection.
 type HumanoidConfig struct {
-	// --- Main Switch ---
+	// -- Main Switch --
 	Enabled   bool     `mapstructure:"enabled" yaml:"enabled"`
 	Providers []string `mapstructure:"providers" yaml:"providers"`
 
-	// --- General Physics & Limits ---
+	// -- General Physics & Limits --
 	MaxVelocity float64       `mapstructure:"max_velocity" yaml:"max_velocity"`
 	TimeStep    time.Duration `mapstructure:"time_step" yaml:"time_step"`
 	MaxSimTime  time.Duration `mapstructure:"max_sim_time" yaml:"max_sim_time"`
 
-	// --- Movement Physics (Spring-Damped Model) ---
+	// -- Movement Physics (Spring-Damped Model) --
 	// Omega: Angular frequency (stiffness of the "spring"). Higher is faster.
 	Omega float64 `mapstructure:"omega" yaml:"omega"`
 	// Zeta: Damping ratio. Zeta=1 is critically damped, >1 is overdamped (slow),
 	// <1 is underdamped (overshoots). 0.85 is a good "human-like" value.
 	Zeta float64 `mapstructure:"zeta" yaml:"zeta"`
 
-	// --- Fitts's Law (Terminal Pause Estimation) ---
+	// -- Fitts's Law (Terminal Pause Estimation) --
 	// Models the time taken to hit a target. Used to estimate pause times.
 	// t = a + b * log2(D/W + 1)
 	FittsA             float64 `mapstructure:"fitts_a" yaml:"fitts_a"`
@@ -281,7 +281,7 @@ type HumanoidConfig struct {
 	FittsWTerminal     float64 `mapstructure:"fitts_w_terminal" yaml:"fitts_w_terminal"`
 	FittsJitterPercent float64 `mapstructure:"fitts_jitter_percent" yaml:"fitts_jitter_percent"`
 
-	// --- Ex-Gaussian Timing Model (Cognitive & Action Delays) ---
+	// -- Ex-Gaussian Timing Model (Cognitive & Action Delays) --
 	// Models human reaction times. Sum of a Normal(mu, sigma) and Exponential(tau).
 	// Used for delays *before* an action (e.g., time to "find" the button).
 	ExGaussianMu    float64 `mapstructure:"ex_gaussian_mu" yaml:"ex_gaussian_mu"`
@@ -292,7 +292,7 @@ type HumanoidConfig struct {
 	TaskSwitchSigma float64 `mapstructure:"task_switch_sigma" yaml:"task_switch_sigma"`
 	TaskSwitchTau   float64 `mapstructure:"task_switch_tau" yaml:"task_switch_tau"`
 
-	// --- Noise and Perturbations ---
+	// -- Noise and Perturbations --
 	// Pink Noise: Simulates 1/f noise (tremor) in human motor control.
 	PinkNoiseAmplitude float64 `mapstructure:"pink_noise_amplitude" yaml:"pink_noise_amplitude"`
 	// Gaussian Strength: General random noise added to the physics model.
@@ -304,12 +304,12 @@ type HumanoidConfig struct {
 	// SDNFactor: State-Dependent Noise factor (noise increases with velocity).
 	SDNFactor float64 `mapstructure:"sdn_factor" yaml:"sdn_factor"`
 
-	// --- Anti-Periodicity (Breaking Rhythmic Patterns) ---
+	// -- Anti-Periodicity (Breaking Rhythmic Patterns) --
 	AntiPeriodicityMinPause      time.Duration `mapstructure:"anti_periodicity_min_pause" yaml:"anti_periodicity_min_pause"`
 	AntiPeriodicityTimeJitter    time.Duration `mapstructure:"anti_periodicity_time_jitter" yaml:"anti_periodicity_time_jitter"`
 	AntiPeriodicityFrameDropProb float64       `mapstructure:"anti_periodicity_frame_drop_prob" yaml:"anti_periodicity_frame_drop_prob"`
 
-	// --- Trajectory Behavior & Micro-corrections ---
+	// -- Trajectory Behavior & Micro-corrections --
 	// If the cursor is > this distance from the "ideal" path, a correction may occur.
 	MicroCorrectionThreshold float64 `mapstructure:"micro_correction_threshold" yaml:"micro_correction_threshold"`
 	// How far "into" the target to aim (0.8 = 80% of the way to the center).
@@ -330,17 +330,17 @@ type HumanoidConfig struct {
 	AnticipatoryMovementOmegaFactor float64       `mapstructure:"anticipatory_movement_omega_factor" yaml:"anticipatory_movement_omega_factor"`
 	AnticipatoryMovementZetaFactor  float64       `mapstructure:"anticipatory_movement_zeta_factor" yaml:"anticipatory_movement_zeta_factor"`
 
-	// --- Fatigue & Habituation Modeling ---
+	// -- Fatigue & Habituation Modeling --
 	// Simulates long-term session behavior.
 	FatigueIncreaseRate float64 `mapstructure:"fatigue_increase_rate" yaml:"fatigue_increase_rate"`
 	FatigueRecoveryRate float64 `mapstructure:"fatigue_recovery_rate" yaml:"fatigue_recovery_rate"`
 	HabituationRate     float64 `mapstructure:"habituation_rate" yaml:"habituation_rate"`
 
-	// --- Clicking Behavior ---
+	// -- Clicking Behavior --
 	ClickHoldMinMs int `mapstructure:"click_hold_min_ms" yaml:"click_hold_min_ms"`
 	ClickHoldMaxMs int `mapstructure:"click_hold_max_ms" yaml:"click_hold_max_ms"`
 
-	// --- Inter-Key Delay (IKD) Modeling ---
+	// -- Inter-Key Delay (IKD) Modeling --
 	// KeyHold: How long a single key is pressed down (Ex-Gaussian).
 	KeyHoldMu    float64 `mapstructure:"key_hold_mu" yaml:"key_hold_mu"`
 	KeyHoldSigma float64 `mapstructure:"key_hold_sigma" yaml:"key_hold_sigma"`
@@ -359,7 +359,7 @@ type HumanoidConfig struct {
 	KeyPauseFatigueFactor    float64 `mapstructure:"key_pause_fatigue_factor" yaml:"key_pause_fatigue_factor"`
 	KeyBurstPauseProbability float64 `mapstructure:"key_burst_pause_probability" yaml:"key_burst_pause_probability"`
 
-	// --- Typo Simulation ---
+	// -- Typo Simulation --
 	TypoRate                       float64 `mapstructure:"typo_rate" yaml:"typo_rate"`
 	TypoHomoglyphRate              float64 `mapstructure:"typo_homoglyph_rate" yaml:"typo_homoglyph_rate"`
 	TypoNeighborRate               float64 `mapstructure:"typo_neighbor_rate" yaml:"typo_neighbor_rate"`
@@ -372,14 +372,14 @@ type HumanoidConfig struct {
 	TypoCorrectionPauseMeanScale   float64 `mapstructure:"typo_correction_pause_mean_scale" yaml:"typo_correction_pause_mean_scale"`
 	TypoCorrectionPauseStdDevScale float64 `mapstructure:"typo_correction_pause_std_dev_scale" yaml:"typo_correction_pause_std_dev_scale"`
 
-	// --- Scrolling Behavior ---
+	// -- Scrolling Behavior --
 	ScrollReadDensityFactor      float64 `mapstructure:"scroll_read_density_factor" yaml:"scroll_read_density_factor"`
 	ScrollOvershootProbability   float64 `mapstructure:"scroll_overshoot_probability" yaml:"scroll_overshoot_probability"`
 	ScrollRegressionProbability  float64 `mapstructure:"scroll_regression_probability" yaml:"scroll_regression_probability"`
 	ScrollMouseWheelProbability  float64 `mapstructure:"scroll_mouse_wheel_probability" yaml:"scroll_mouse_wheel_probability"`
 	ScrollDetentWheelProbability float64 `mapstructure:"scroll_detent_wheel_probability" yaml:"scroll_detent_wheel_probability"`
 
-	// --- Session Persona Randomization ---
+	// -- Session Persona Randomization --
 	// Applies a jitter to key parameters at the start of each session
 	// to create a unique "persona".
 	PersonaJitterMovement float64 `mapstructure:"persona_jitter_movement" yaml:"persona_jitter_movement"`
@@ -722,7 +722,7 @@ func SetDefaults(v *viper.Viper) {
 
 	// -- Agent --
 	v.SetDefault("agent.llm.default_fast_model", "gemini-2.5-flash")
-	v.SetDefault("agent.llm.default_powerful_model", "gemini-2.5-pro")
+	v.SetDefault("agent.llm.default_powerful_model", "gemini-3-pro")
 	// Set up default model configurations in the map using the robust method.
 	setLLMDefaults(v)
 	v.SetDefault("agent.knowledge_graph.type", "postgres")
@@ -755,25 +755,25 @@ func SetDefaults(v *viper.Viper) {
 // setHumanoidDefaults provides a comprehensive set of default values for the humanoid simulation.
 func setHumanoidDefaults(v *viper.Viper) {
 	const prefix = "browser.humanoid."
-	// --- Main Switch ---
+	// -- Main Switch --
 	v.SetDefault(prefix+"enabled", true)
 
-	// --- General Physics & Limits ---
+	// -- General Physics & Limits --
 	v.SetDefault(prefix+"max_velocity", 2500.0)
 	v.SetDefault(prefix+"time_step", "8ms")
 	v.SetDefault(prefix+"max_sim_time", "5s")
 
-	// --- Movement Physics (Spring-Damped Model) ---
+	// -- Movement Physics (Spring-Damped Model) --
 	v.SetDefault(prefix+"omega", 25.0)
 	v.SetDefault(prefix+"zeta", 0.85)
 
-	// --- Fitts's Law (Terminal Pause Estimation) ---
+	// -- Fitts's Law (Terminal Pause Estimation) --
 	v.SetDefault(prefix+"fitts_a", 120.0)
 	v.SetDefault(prefix+"fitts_b", 140.0)
 	v.SetDefault(prefix+"fitts_w_terminal", 10.0)
 	v.SetDefault(prefix+"fitts_jitter_percent", 0.15)
 
-	// --- Ex-Gaussian Timing Model (Cognitive & Action Delays) ---
+	// -- Ex-Gaussian Timing Model (Cognitive & Action Delays) --
 	v.SetDefault(prefix+"ex_gaussian_mu", 150.0)
 	v.SetDefault(prefix+"ex_gaussian_sigma", 40.0)
 	v.SetDefault(prefix+"ex_gaussian_tau", 80.0)
@@ -781,19 +781,19 @@ func setHumanoidDefaults(v *viper.Viper) {
 	v.SetDefault(prefix+"task_switch_sigma", 60.0)
 	v.SetDefault(prefix+"task_switch_tau", 120.0)
 
-	// --- Noise and Perturbations ---
+	// -- Noise and Perturbations --
 	v.SetDefault(prefix+"pink_noise_amplitude", 2.5)
 	v.SetDefault(prefix+"gaussian_strength", 0.7)
 	v.SetDefault(prefix+"click_noise", 1.5)
 	v.SetDefault(prefix+"hesitation_drift_factor", 1.5)
 	v.SetDefault(prefix+"sdn_factor", 0.001)
 
-	// --- Anti-Periodicity (Breaking Rhythmic Patterns) ---
+	// -- Anti-Periodicity (Breaking Rhythmic Patterns) --
 	v.SetDefault(prefix+"anti_periodicity_min_pause", "200ms")
 	v.SetDefault(prefix+"anti_periodicity_time_jitter", "3ms")
 	v.SetDefault(prefix+"anti_periodicity_frame_drop_prob", 0.05)
 
-	// --- Trajectory Behavior & Micro-corrections ---
+	// -- Trajectory Behavior & Micro-corrections --
 	v.SetDefault(prefix+"micro_correction_threshold", 150.0)
 	v.SetDefault(prefix+"target_inner_aim_percent", 0.8)
 	v.SetDefault(prefix+"target_velocity_bias_max", 0.1)
@@ -807,16 +807,16 @@ func setHumanoidDefaults(v *viper.Viper) {
 	v.SetDefault(prefix+"anticipatory_movement_omega_factor", 0.3)
 	v.SetDefault(prefix+"anticipatory_movement_zeta_factor", 2.0)
 
-	// --- Fatigue & Habituation Modeling ---
+	// -- Fatigue & Habituation Modeling --
 	v.SetDefault(prefix+"fatigue_increase_rate", 0.01)
 	v.SetDefault(prefix+"fatigue_recovery_rate", 0.02)
 	v.SetDefault(prefix+"habituation_rate", 0.005)
 
-	// --- Clicking Behavior ---
+	// -- Clicking Behavior --
 	v.SetDefault(prefix+"click_hold_min_ms", 40)
 	v.SetDefault(prefix+"click_hold_max_ms", 120)
 
-	// --- Inter-Key Delay (IKD) Modeling ---
+	// -- Inter-Key Delay (IKD) Modeling --
 	v.SetDefault(prefix+"key_hold_mu", 50.0)
 	v.SetDefault(prefix+"key_hold_sigma", 15.0)
 	v.SetDefault(prefix+"key_hold_tau", 25.0)
@@ -832,7 +832,7 @@ func setHumanoidDefaults(v *viper.Viper) {
 	v.SetDefault(prefix+"key_pause_fatigue_factor", 0.4)
 	v.SetDefault(prefix+"key_burst_pause_probability", 0.03)
 
-	// --- Typo Simulation ---
+	// -- Typo Simulation --
 	v.SetDefault(prefix+"typo_rate", 0.04)
 	v.SetDefault(prefix+"typo_homoglyph_rate", 0.10)
 	v.SetDefault(prefix+"typo_neighbor_rate", 0.40)
@@ -845,14 +845,14 @@ func setHumanoidDefaults(v *viper.Viper) {
 	v.SetDefault(prefix+"typo_correction_pause_mean_scale", 4.0)
 	v.SetDefault(prefix+"typo_correction_pause_std_dev_scale", 2.0)
 
-	// --- Scrolling Behavior ---
+	// -- Scrolling Behavior --
 	v.SetDefault(prefix+"scroll_read_density_factor", 0.7)
 	v.SetDefault(prefix+"scroll_overshoot_probability", 0.20)
 	v.SetDefault(prefix+"scroll_regression_probability", 0.10)
 	v.SetDefault(prefix+"scroll_mouse_wheel_probability", 0.60)
 	v.SetDefault(prefix+"scroll_detent_wheel_probability", 0.75)
 
-	// --- Session Persona Randomization ---
+	// -- Session Persona Randomization --
 	v.SetDefault(prefix+"persona_jitter_movement", 0.15)
 	v.SetDefault(prefix+"persona_jitter_damping", 0.10)
 	v.SetDefault(prefix+"persona_jitter_skill", 0.20)
@@ -892,7 +892,7 @@ func NewConfigFromViper(v *viper.Viper) (*Config, error) {
 		}
 	}
 
-	// --- ROBUST MERGE BLOCK ---
+	// -- ROBUST MERGE BLOCK --
 	// Ensure the models map is populated, merging defaults if necessary.
 	// Viper can sometimes struggle to unmarshal complex maps, especially when keys contain dots,
 	// or if the config file explicitly sets 'models: {}'.
@@ -914,9 +914,9 @@ func NewConfigFromViper(v *viper.Viper) (*Config, error) {
 			cfg.AgentCfg.LLM.Models[key] = model
 		}
 	}
-	// --- END ROBUST MERGE BLOCK ---
+	// -- END ROBUST MERGE BLOCK --
 
-	// --- API KEY INJECTION BLOCK ---
+	// -- API KEY INJECTION BLOCK --
 	// Manually inject API keys from environment variables if they are not set in the config file.
 	// This follows security best practices by allowing users to keep secrets out of config.yaml.
 
@@ -947,7 +947,7 @@ func NewConfigFromViper(v *viper.Viper) (*Config, error) {
 			cfg.AgentCfg.LLM.Models[key] = modelCfg
 		}
 	}
-	// --- END API KEY INJECTION BLOCK ---
+	// -- END API KEY INJECTION BLOCK --
 
 	if err := cfg.Validate(); err != nil {
 		return nil, fmt.Errorf("invalid configuration: %w", err)
@@ -992,6 +992,19 @@ func getDefaultSafetyFilters() map[string]string {
 // This provides a definitive source of truth for defaults, used for robust merging.
 func getDefaultLLMModels() map[string]LLMModelConfig {
 	return map[string]LLMModelConfig{
+		// Gemini 2.5 Flash (Stable) - High speed, lower cost
+		"gemini-2.5-flash": {
+			Provider:      ProviderGemini,
+			Model:         "gemini-2.5-flash-latest",
+			APIKey:        "", // Should be loaded from env
+			APITimeout:    90 * time.Second,
+			Temperature:   0.8,
+			TopP:          0.95,
+			TopK:          50,
+			MaxTokens:     8192, // Increased standard for 2.5
+			SafetyFilters: getDefaultSafetyFilters(),
+		},
+		// Gemini 2.5 Pro (Stable) - Reliable production workhorse
 		"gemini-2.5-pro": {
 			Provider:      ProviderGemini,
 			Model:         "gemini-2.5-pro-latest",
@@ -1003,15 +1016,16 @@ func getDefaultLLMModels() map[string]LLMModelConfig {
 			MaxTokens:     8192,
 			SafetyFilters: getDefaultSafetyFilters(),
 		},
-		"gemini-2.5-flash": {
+		// Gemini 3.0 Pro (Preview) - The new default for complex reasoning
+		"gemini-3-pro": {
 			Provider:      ProviderGemini,
-			Model:         "gemini-2.5-flash-latest",
-			APIKey:        "", // Should be loaded from env
-			APITimeout:    90 * time.Second,
-			Temperature:   0.8,
+			Model:         "gemini-3-pro-preview",
+			APIKey:        "",
+			APITimeout:    4 * time.Minute, // Increased timeout for deep reasoning
+			Temperature:   0.7,
 			TopP:          0.95,
-			TopK:          50,
-			MaxTokens:     4096,
+			TopK:          64,
+			MaxTokens:     65536, // Significantly higher output limit
 			SafetyFilters: getDefaultSafetyFilters(),
 		},
 	}
@@ -1120,14 +1134,14 @@ func (a *AgentConfig) Validate() error {
 	if err := a.LTM.Validate(); err != nil {
 		return err
 	}
-	// --- MERGED LINE ---
+	// -- MERGED LINE --
 	if err := a.LLM.Validate(); err != nil {
 		return fmt.Errorf("llm config invalid: %w", err)
 	}
 	return nil
 }
 
-// --- MERGED FUNCTION ---
+// -- MERGED FUNCTION --
 // Validate checks the LLMRouterConfig to ensure the specified default
 // models actually exist in the models map.
 func (l *LLMRouterConfig) Validate() error {

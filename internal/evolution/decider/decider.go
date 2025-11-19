@@ -13,6 +13,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/evolution/bus"
 	"github.com/xkilldash9x/scalpel-cli/internal/evolution/models"
+	"github.com/xkilldash9x/scalpel-cli/internal/llmutil"
 	"go.uber.org/zap"
 )
 
@@ -163,7 +164,7 @@ func (d *Decider) generateNextAction(ctx context.Context, goalID string, strateg
 		Tier:         schemas.TierPowerful,
 		Options: schemas.GenerationOptions{
 			ForceJSONFormat: true,
-			Temperature:     0.1, // Low temperature for deterministic output.
+			Temperature:     llmutil.Float64Ptr(0.1), // Low temperature for deterministic output.
 		},
 	}
 

@@ -21,6 +21,7 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/llmutil"
 )
 
 // Developer is a component of the self-healing system responsible for Phase 3:
@@ -197,7 +198,7 @@ func (d *Developer) generateTestCase(ctx context.Context, report PostMortem, wsT
 		SystemPrompt: "You are a senior Go developer specializing in writing precise, targeted test cases to reproduce bugs. Ensure tests are idiomatic and include necessary imports.",
 		UserPrompt:   prompt,
 		Tier:         schemas.TierPowerful,
-		Options:      schemas.GenerationOptions{Temperature: 0.1},
+		Options:      schemas.GenerationOptions{Temperature: llmutil.Float64Ptr(0.1)},
 	}
 
 	newTestCode, err := d.llmClient.Generate(ctx, req)

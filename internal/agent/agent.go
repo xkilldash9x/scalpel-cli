@@ -22,6 +22,7 @@ import ( // This is a comment to force a change
 	"github.com/xkilldash9x/scalpel-cli/internal/evolution/analyst"
 	"github.com/xkilldash9x/scalpel-cli/internal/knowledgegraph"
 	"github.com/xkilldash9x/scalpel-cli/internal/llmclient"
+	"github.com/xkilldash9x/scalpel-cli/internal/llmutil"
 )
 
 // Agent is the core orchestrator for an autonomous security mission. It integrates
@@ -486,7 +487,7 @@ func (a *Agent) concludeMission(ctx context.Context) (*MissionResult, error) {
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,
 		Tier:         schemas.TierPowerful,
-		Options:      schemas.GenerationOptions{ForceJSONFormat: false, Temperature: 0.1},
+		Options:      schemas.GenerationOptions{ForceJSONFormat: false, Temperature: llmutil.Float64Ptr(0.1)},
 	}
 
 	summaryCtx, cancel := context.WithTimeout(ctx, 60*time.Second)

@@ -17,6 +17,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/autofix/coroner"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/llmutil"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"go.uber.org/zap"
 )
@@ -224,7 +225,7 @@ func (m *Metalyst) analyzeAndGeneratePatch(ctx context.Context, report *coroner.
 		Tier:         schemas.TierPowerful,
 		Options: schemas.GenerationOptions{
 			ForceJSONFormat: true,
-			Temperature:     0.1,
+			Temperature:     llmutil.Float64Ptr(0.1),
 		},
 	}
 

@@ -14,6 +14,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/evolution/bus"
 	"github.com/xkilldash9x/scalpel-cli/internal/evolution/models"
+	"github.com/xkilldash9x/scalpel-cli/internal/llmutil"
 	"go.uber.org/zap"
 )
 
@@ -237,7 +238,7 @@ func (s *Synthesizer) synthesizeAndStrategize(ctx context.Context, goal models.G
 		Tier:         schemas.TierPowerful,
 		Options: schemas.GenerationOptions{
 			ForceJSONFormat: true,
-			Temperature:     0.3, // Slightly higher temperature for strategic creativity.
+			Temperature:     llmutil.Float64Ptr(0.3), // Slightly higher temperature for strategic creativity.
 		},
 	}
 

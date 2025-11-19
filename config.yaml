@@ -149,7 +149,7 @@ discovery:
 agent:
   llm:
     default_fast_model: "gemini-2.5-flash"
-    default_powerful_model: "gemini-2.5-pro"
+    default_powerful_model: "gemini-3-pro"
     models:
       gemini-2.5-flash:
         provider: "gemini"
@@ -159,26 +159,29 @@ agent:
         temperature: 0.8
         top_p: 0.95
         top_k: 50
-        max_tokens: 4096
-        safety_filters:
-          HARM_CATEGORY_HATE_SPEECH: "BLOCK_NONE"
-          HARM_CATEGORY_SEXUALLY_EXPLICIT: "BLOCK_NONE"
-          HARM_CATEGORY_HARASSMENT: "BLOCK_NONE"
-          HARM_CATEGORY_DANGEROUS_CONTENT: "BLOCK_NONE"
-      gemini-2.5-pro:
-        provider: "gemini"
-        model: "gemini-2.5-pro"
-        # api_key: "YOUR_API_KEY" 
-        api_timeout: "5m"
-        temperature: 0.8
-        top_p: 0.9
-        top_k: 40
         max_tokens: 8192
         safety_filters:
           HARM_CATEGORY_HATE_SPEECH: "BLOCK_NONE"
           HARM_CATEGORY_SEXUALLY_EXPLICIT: "BLOCK_NONE"
           HARM_CATEGORY_HARASSMENT: "BLOCK_NONE"
           HARM_CATEGORY_DANGEROUS_CONTENT: "BLOCK_NONE"
+          HARM_CATEGORY_CIVIC_INTEGRITY: "BLOCK_NONE"
+
+      gemini-3-pro:
+        provider: "gemini"
+        model: "gemini-3-pro-preview"
+        # api_key: "YOUR_API_KEY" 
+        api_timeout: "4m"
+        temperature: 0.7
+        top_p: 0.95
+        top_k: 64
+        max_tokens: 65536
+        safety_filters:
+          HARM_CATEGORY_HATE_SPEECH: "BLOCK_NONE"
+          HARM_CATEGORY_SEXUALLY_EXPLICIT: "BLOCK_NONE"
+          HARM_CATEGORY_HARASSMENT: "BLOCK_NONE"
+          HARM_CATEGORY_DANGEROUS_CONTENT: "BLOCK_NONE"
+          HARM_CATEGORY_CIVIC_INTEGRITY: "BLOCK_NONE"
   knowledge_graph:
     type: "postgres"
 autofix:
