@@ -197,3 +197,5 @@ type OASTInteraction struct {
 	InteractionTime time.Time // The timestamp of the interaction.
 	RawRequest      string    // The raw request data, if available.
 }
+
+func (OASTInteraction) isEvent() {}

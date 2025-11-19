@@ -8,6 +8,10 @@ import (
 	"time"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	// Import core definitions (Step 1)
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	// Import static javascript package for correlation (Step 5)
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/static/javascript"
 )
 
 // Constants defining the base names of Go functions exposed to the browser's
@@ -25,6 +29,14 @@ type Event interface {
 	isEvent()
 }
 
+// -- Compile-Time Assertions --
+// These lines force the compiler to verify that these structs satisfy the Event
+// interface. This silences "unused function" warnings and prevents regression.
+var _ Event = (*SinkEvent)(nil)
+var _ Event = (*ExecutionProofEvent)(nil)
+var _ Event = (*ShimErrorEvent)(nil)
+var _ Event = (*OASTInteraction)(nil)
+
 // SanitizationLevel categorizes the degree to which a payload has been altered
 // by the application before it reaches a sink.
 type SanitizationLevel int
@@ -35,6 +47,9 @@ const (
 	// SanitizationPartial indicates that the core canary was found, but the
 	// surrounding payload was modified (e.g., HTML tags stripped or quotes escaped).
 	SanitizationPartial
+	// SanitizationFull indicates that the canary was not found in the sink,
+	// implying the payload was completely removed or altered beyond recognition.
+	SanitizationFull
 )
 
 // ProbeDefinition defines the blueprint for a single attack payload, including
@@ -95,17 +110,14 @@ type ShimErrorEvent struct {
 
 func (ShimErrorEvent) isEvent() {}
 
-// OASTInteraction represents an out-of-band interaction (e.g., an HTTP or DNS
-// request) received by the OAST server. It implements the Event interface so it
-// can be processed by the correlation engine.
+// OASTInteraction wraps the canonical schema definition to satisfy the local Event
+// interface required by the analysis engine.
+// This avoids duplicating the struct definition while enforcing the interface contract.
 type OASTInteraction struct {
-	Canary          string
-	Protocol        string
-	SourceIP        string
-	InteractionTime time.Time
-	RawRequest      string
+	schemas.OASTInteraction
 }
 
+// isEvent marks this struct as a valid Event for the correlation engine.
 func (OASTInteraction) isEvent() {}
 
 // CorrelatedFinding is the final, structured output of the taint analysis
@@ -129,6 +141,14 @@ type CorrelatedFinding struct {
 	SanitizationLevel SanitizationLevel
 	StackTrace        string
 	OASTDetails       *OASTInteraction // Details if confirmed via OAST.
+
+	// Step 5: Unified Reporting (Correlated Findings)
+	// Confirmation flags
+	ConfirmedStatic  bool // Found via AST analysis (SAST)
+	ConfirmedDynamic bool // Found via Shim/Execution Proof (IAST/DAST)
+
+	// Link to the static finding if correlated.
+	StaticFinding *javascript.StaticFinding
 }
 
 // OASTProvider is an alias for the canonical `schemas.OASTProvider` interface,
@@ -144,16 +164,9 @@ type ResultsReporter interface {
 	Report(finding CorrelatedFinding)
 }
 
-// SinkDefinition provides the blueprint for instrumenting a single JavaScript
-// sink. It specifies the full property path, its sink type, and whether it's a
-// function call or a property setter.
-type SinkDefinition struct {
-	Name        string            `json:"Name" yaml:"name"`                                    // Full property path (e.g., "Element.prototype.innerHTML").
-	Type        schemas.TaintSink `json:"Type" yaml:"type"`                                    // The canonical sink type.
-	Setter      bool              `json:"Setter" yaml:"setter"`                                // True if this is a property setter.
-	ArgIndex    int               `json:"ArgIndex" yaml:"arg_index"`                           // The argument index to inspect for taint (for function calls).
-	ConditionID string            `json:"ConditionID,omitempty" yaml:"condition_id,omitempty"` // An optional ID for a JS-side pre-condition.
-}
+// SinkDefinition provides the blueprint for instrumenting a single JavaScript sink.
+// (Step 1: Alias to the unified definition in core)
+type SinkDefinition = core.SinkDefinition
 
 // Config encapsulates all settings and parameters for a single taint analysis
 // task, from the target and probes to performance tuning and timeouts.
@@ -161,7 +174,7 @@ type Config struct {
 	TaskID      string                    `json:"task_id" yaml:"task_id"`
 	Target      *url.URL                  `json:"target" yaml:"target"`
 	Probes      []ProbeDefinition         `json:"probes" yaml:"probes"`
-	Sinks       []SinkDefinition          `json:"sinks" yaml:"sinks"`
+	Sinks       []SinkDefinition          `json:"sinks" yaml:"sinks"` // Uses the alias to core.SinkDefinition
 	Interaction schemas.InteractionConfig `json:"interaction" yaml:"interaction"`
 
 	// AnalysisTimeout is the total maximum duration for the entire analysis task.

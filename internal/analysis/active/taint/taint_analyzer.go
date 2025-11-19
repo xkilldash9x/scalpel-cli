@@ -10,6 +10,9 @@ import (
 	"fmt"
 	"net/url"
 	"regexp"
+
+	// Added strconv for stack trace parsing
+	"strconv"
 	"strings"
 	"sync"
 	"text/template"
@@ -19,6 +22,10 @@ import (
 	"go.uber.org/zap"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	// Import core for unified definitions and helpers (Step 1)
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	// Import the static package (Step 3)
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/static/javascript"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
 )
 
@@ -30,6 +37,10 @@ const taintShimFilename = "taint_shim.js"
 // Canary format: SCALPEL_{Prefix}_{Type}_{UUID_Short}
 var canaryRegex = regexp.MustCompile(`SCALPEL_[A-Z0-9]+_[A-Z_]+_[a-f0-9]{8}`)
 
+// Regex for extracting file/line/col from a JavaScript stack trace line (Heuristic for correlation).
+// Example match: (http://example.com/app.js:15:10) or at http://example.com/app.js:15:10
+var stackTraceLocationRegex = regexp.MustCompile(`(?:\(|at\s+)(https?://[^:]+):(\d+):(\d+)`)
+
 // HumanoidProvider defines an interface for duck-typing the SessionContext
 // to check if it provides access to the Humanoid controller.
 type HumanoidProvider interface {
@@ -38,10 +49,8 @@ type HumanoidProvider interface {
 
 // REFACTOR: Removed BrowserContextProvider interface as GetContext() is deprecated and anti-pattern.
 
-// Analyzer orchestrates the entire interactive application security testing (IAST)
-// process. It manages probe injection, event collection from various sources (JS
-// hooks, OAST), and the correlation of these events to identify and report
-// vulnerabilities. It is a stateful component, created for a single analysis task.
+// Analyzer orchestrates the Hybrid IAST process. It manages dynamic probe injection,
+// event collection, static analysis of loaded scripts, and correlation.
 type Analyzer struct {
 	config           Config
 	reporter         ResultsReporter
@@ -59,15 +68,19 @@ type Analyzer struct {
 	backgroundCtx    context.Context
 	backgroundCancel context.CancelFunc
 
-	// VULN-FIX: Store session-specific, randomized callback names to prevent DOM Clobbering.
+	// VULN-FIX: Store session-specific, randomized callback names.
 	jsCallbackSinkEventName      string
 	jsCallbackExecutionProofName string
 	jsCallbackShimErrorName      string
+
+	// Hybrid IAST Integration (Step 2/3)
+	jsFingerprinter *javascript.Fingerprinter
+	// staticFindings stores results from SAST engine. Key is filename/URL.
+	staticFindings map[string][]javascript.StaticFinding
+	findingsMutex  sync.RWMutex
 }
 
-// NewAnalyzer creates and initializes a new taint Analyzer instance. It reads
-// the JavaScript shim, applies default configuration values, and sets up the
-// internal state for a new analysis run.
+// NewAnalyzer creates and initializes a new taint Analyzer instance.
 func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvider, logger *zap.Logger) (*Analyzer, error) {
 	taskLogger := logger.Named("taint_analyzer").With(zap.String("task_id", config.TaskID))
 
@@ -82,8 +95,7 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 	// Apply robust defaults for performance and stability.
 	config = applyConfigDefaults(config)
 
-	// FIX: Create a local copy of the global taint flow rules to prevent data races.
-	// The analyzer will use its own copy, which can be safely modified for testing.
+	// FIX: Create a local copy of the global taint flow rules.
 	localValidTaintFlows := make(map[TaintFlowPath]bool, len(ValidTaintFlows))
 	for k, v := range ValidTaintFlows {
 		localValidTaintFlows[k] = v
@@ -95,13 +107,14 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 		taskLogger.Info("No OAST provider configured; out-of-band tests will be skipped.")
 	}
 
-	// VULN-FIX: Generate unique callback names for this analysis session to prevent DOM Clobbering.
-	// This makes it impossible for a target page to predict and overwrite the callback functions
-	// before or after the shim initializes.
+	// VULN-FIX: Generate unique callback names for this analysis session.
 	shortID := uuid.New().String()[:8]
 	sinkCallbackName := fmt.Sprintf("%s_%s", JSCallbackSinkEvent, shortID)
 	proofCallbackName := fmt.Sprintf("%s_%s", JSCallbackExecutionProof, shortID)
 	errorCallbackName := fmt.Sprintf("%s_%s", JSCallbackShimError, shortID)
+
+	// Initialize the JavaScript fingerprinter (SAST engine)
+	jsFingerprinter := javascript.NewFingerprinter(taskLogger)
 
 	return &Analyzer{
 		config:          config,
@@ -111,19 +124,78 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 		logger:          taskLogger,
 		activeProbes:    make(map[string]ActiveProbe),
 		eventsChan:      make(chan Event, config.EventChannelBuffer),
-		shimTemplate:    templateContent, // <-- Store the raw string
+		shimTemplate:    templateContent,
 		validTaintFlows: localValidTaintFlows,
 
 		// VULN-FIX: Store the generated unique names.
 		jsCallbackSinkEventName:      sinkCallbackName,
 		jsCallbackExecutionProofName: proofCallbackName,
 		jsCallbackShimErrorName:      errorCallbackName,
+
+		// Hybrid IAST Initialization
+		jsFingerprinter: jsFingerprinter,
+		staticFindings:  make(map[string][]javascript.StaticFinding),
 	}, nil
 }
 
+// --- Hybrid IAST: Static Analysis Execution (Step 3.1) ---
+
+// HandleScriptLoaded (New Method) is the entry point for the SAST engine when a script is loaded.
+// This method is expected to be called by the infrastructure managing the SessionContext
+// (e.g., the browser controller) when it intercepts a script load.
+func (a *Analyzer) HandleScriptLoaded(url, content string) {
+	// Run analysis asynchronously to avoid blocking the browser instrumentation/event loop.
+	go func() {
+		// The SAST analysis runs independently of the main analysis context timeout.
+		_, err := a.runStaticAnalysis(url, content)
+		if err != nil {
+			// Error already logged in runStaticAnalysis
+			return
+		}
+		// Findings are stored and will be used during the Smart Probing phase and Correlation.
+	}()
+}
+
+// runStaticAnalysis performs static analysis on provided content (e.g., intercepted JS file).
+func (a *Analyzer) runStaticAnalysis(filename, content string) ([]javascript.StaticFinding, error) {
+	if content == "" {
+		return nil, nil
+	}
+
+	// Simple caching based on filename/URL to avoid re-analyzing static assets.
+	a.findingsMutex.RLock()
+	if findings, exists := a.staticFindings[filename]; exists {
+		a.findingsMutex.RUnlock()
+		return findings, nil
+	}
+	a.findingsMutex.RUnlock()
+
+	a.logger.Debug("Running static analysis (SAST) on script", zap.String("filename", filename), zap.Int("size", len(content)))
+
+	// Run the analysis (AST parsing + Taint tracking)
+	findings, err := a.jsFingerprinter.Analyze(filename, content)
+	if err != nil {
+		// Log as warn, as SAST failure shouldn't stop IAST.
+		a.logger.Warn("Static analysis failed for script", zap.String("filename", filename), zap.Error(err))
+		return nil, err
+	}
+
+	// Store the findings regardless of whether vulnerabilities were found (for caching).
+	a.findingsMutex.Lock()
+	a.staticFindings[filename] = findings
+	a.findingsMutex.Unlock()
+
+	if len(findings) > 0 {
+		a.logger.Info("SAST engine found potential vulnerabilities", zap.String("file", filename), zap.Int("count", len(findings)))
+	}
+
+	return findings, nil
+}
+
+// --- End Hybrid IAST: Static Analysis Execution ---
+
 // UpdateTaintFlowRuleForTesting provides a thread-safe mechanism to modify the
-// taint flow validation rules during tests. This is essential for isolating and
-// testing specific correlation logic.
+// taint flow validation rules during tests.
 func (a *Analyzer) UpdateTaintFlowRuleForTesting(flow TaintFlowPath, isValid bool) {
 	a.rulesMutex.Lock()
 	defer a.rulesMutex.Unlock()
@@ -131,9 +203,7 @@ func (a *Analyzer) UpdateTaintFlowRuleForTesting(flow TaintFlowPath, isValid boo
 }
 
 // BuildTaintShim is an exported utility function that constructs the final
-// JavaScript instrumentation shim from a template string and a JSON configuration
-// for sinks. This allows the session manager to prepare the shim before the
-// analyzer is fully instantiated.
+// JavaScript instrumentation shim.
 func BuildTaintShim(templateContent string, configJSON string, sinkCallback, proofCallback, errorCallback string) (string, error) {
 	// 1. Parse the template content passed as an argument.
 	tmpl, err := template.New("shim").Parse(templateContent)
@@ -163,11 +233,9 @@ func BuildTaintShim(templateContent string, configJSON string, sinkCallback, pro
 	return buf.String(), nil
 }
 
-// applyConfigDefaults ensures that critical configuration parameters for the
-// analyzer have sane, non-zero default values, promoting stability.
+// applyConfigDefaults ensures that critical configuration parameters have sane defaults.
 func applyConfigDefaults(cfg Config) Config {
 	if cfg.EventChannelBuffer == 0 {
-		// A larger buffer is a good default for a worker pool model to absorb bursts.
 		cfg.EventChannelBuffer = 1000
 	}
 	if cfg.FinalizationGracePeriod == 0 {
@@ -183,17 +251,14 @@ func applyConfigDefaults(cfg Config) Config {
 		cfg.OASTPollingInterval = 20 * time.Second
 	}
 	if cfg.CorrelationWorkers == 0 {
-		// Default to a small pool of concurrent workers for processing events.
 		cfg.CorrelationWorkers = 5
 	}
 	return cfg
 }
 
-// Analyze is the main entry point for the IAST analysis. It takes control of a
-// browser session, orchestrates the instrumentation, probing, event collection,
-// and graceful shutdown of all background workers.
+// Analyze is the main entry point for the Hybrid IAST analysis.
 func (a *Analyzer) Analyze(ctx context.Context, session SessionContext) error {
-	a.logger.Info("Starting IAST analysis",
+	a.logger.Info("Starting Hybrid IAST analysis (IAST+SAST)",
 		zap.String("target", a.config.Target.String()),
 		zap.Int("correlation_workers", a.config.CorrelationWorkers),
 	)
@@ -209,19 +274,17 @@ func (a *Analyzer) Analyze(ctx context.Context, session SessionContext) error {
 		h = provider.GetHumanoid()
 	}
 
-	// REFACTOR: We no longer attempt to retrieve BrowserContext via GetContext().
-	// The operation context (analysisCtx) will be used for all actions including Humanoid pauses.
-	// -----------------------------------------------------------
+	// NOTE: We rely on the session implementation (browser controller) to intercept scripts
+	// and notify the analyzer (e.g., by calling HandleScriptLoaded).
 
 	if err := a.instrument(analysisCtx, session); err != nil {
 		return fmt.Errorf("failed to instrument browser: %w", err)
 	}
 
-	// Launch the concurrent machinery: the correlation worker pool and background producers.
+	// Launch the concurrent machinery.
 	a.startBackgroundWorkers()
 
 	// Execute the attack vectors and user interactions.
-	// REFACTOR: Pass Humanoid controller. Removed browser context argument.
 	if err := a.executeProbes(analysisCtx, session, h); err != nil {
 		// Only log as error if the failure wasn't simply due to the analysis context timeout/cancellation.
 		if analysisCtx.Err() == nil {
@@ -241,12 +304,11 @@ func (a *Analyzer) Analyze(ctx context.Context, session SessionContext) error {
 	// Initiate a graceful shutdown of all background processes.
 	a.shutdown()
 
-	a.logger.Info("IAST analysis completed")
+	a.logger.Info("Hybrid IAST analysis completed")
 	return nil
 }
 
 // shutdown handles the ordered, graceful shutdown of all goroutines.
-// This ensures that all events are processed and no data is lost.
 func (a *Analyzer) shutdown() {
 	a.logger.Debug("Initiating graceful shutdown.")
 	// 1. Signal background producers (OAST, Cleanup) to stop their work.
@@ -311,7 +373,6 @@ func (a *Analyzer) instrument(ctx context.Context, session SessionContext) error
 }
 
 // generateShim creates the javascript instrumentation code from the embedded template.
-// REFACTOR: This function now uses the pre-loaded template string.
 func (a *Analyzer) generateShim() (string, error) {
 	// 1. Marshal the sinks config specific to this analyzer instance.
 	sinksJSON, err := json.Marshal(a.config.Sinks)
@@ -320,12 +381,11 @@ func (a *Analyzer) generateShim() (string, error) {
 	}
 
 	// 2. Call the exported BuildTaintShim function with the pre-loaded template string.
-	// VULN-FIX: Pass the session-specific randomized callback names to be injected into the shim template.
+	// VULN-FIX: Pass the session-specific randomized callback names.
 	return BuildTaintShim(a.shimTemplate, string(sinksJSON), a.jsCallbackSinkEventName, a.jsCallbackExecutionProofName, a.jsCallbackShimErrorName)
 }
 
 // enqueueEvent provides a safe, non blocking mechanism for sending an event to the correlation engine.
-// It handles shutdown signals and channel backpressure gracefully.
 func (a *Analyzer) enqueueEvent(event Event, eventType string) {
 	// First, check if a shutdown has been initiated. If so, don't accept new events.
 	select {
@@ -368,8 +428,6 @@ func (a *Analyzer) handleShimError(event ShimErrorEvent) {
 }
 
 // executePause attempts to execute a Humanoid cognitive pause using the provided context.
-// If Humanoid is nil, it skips the pause silently.
-// REFACTOR: Updated signature and implementation. Now relies only on the operation context (ctx).
 func (a *Analyzer) executePause(ctx context.Context, h *humanoid.Humanoid, meanMs, stdDevMs float64) error {
 	// Check if the operation context (ctx) is done.
 	if ctx.Err() != nil {
@@ -392,20 +450,22 @@ func (a *Analyzer) executePause(ctx context.Context, h *humanoid.Humanoid, meanM
 }
 
 // executeProbes orchestrates the various probing strategies against the target.
-// REFACTOR: Updated signature to remove BrowserContext. Integrated pauses using operation context.
 func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h *humanoid.Humanoid) error {
 
-	// REFACTOR: Pause before initial navigation. Use operation context.
+	// REFACTOR: Pause before initial navigation.
 	if err := a.executePause(ctx, h, 500, 200); err != nil {
 		return err // Return if context cancelled during pause
 	}
 
 	if err := session.Navigate(ctx, a.config.Target.String()); err != nil {
-		// We continue even if navigation fails, as the browser might be on a page (e.g., about:blank) where we can still attempt injections, or it might eventually navigate.
+		// We continue even if navigation fails.
 		a.logger.Warn("Initial navigation failed, attempting to continue probes.", zap.Error(err))
 	}
 
-	// REFACTOR: Pause after initial navigation. Use operation context.
+	// NOTE: We assume that the underlying browser infrastructure intercepts script loads
+	// during navigation and calls a.HandleScriptLoaded() concurrently.
+
+	// REFACTOR: Pause after initial navigation.
 	if err := a.executePause(ctx, h, 800, 300); err != nil {
 		return err
 	}
@@ -418,7 +478,7 @@ func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h 
 		}
 	}
 
-	// REFACTOR: Pause between probing phases. Use operation context.
+	// REFACTOR: Pause between probing phases.
 	if err := a.executePause(ctx, h, 400, 150); err != nil {
 		return err
 	}
@@ -431,9 +491,14 @@ func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h 
 		}
 	}
 
+	// --- Hybrid IAST: Static-Assisted Probing (Step 2/3.2) ---
+	// Generate and execute smart probes based on static findings gathered during previous navigations.
+	a.generateAndExecuteSmartProbes(ctx, session, h)
+	// ----------------------------------------------------------
+
 	a.logger.Info("Starting interactive probing phase.")
 
-	// REFACTOR: Pause before starting interaction phase. Use operation context.
+	// REFACTOR: Pause before starting interaction phase.
 	if err := a.executePause(ctx, h, 600, 250); err != nil {
 		return err
 	}
@@ -446,7 +511,7 @@ func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h 
 		}
 	}
 
-	// REFACTOR: Pause after interaction phase concludes. Use operation context.
+	// REFACTOR: Pause after interaction phase concludes.
 	if err := a.executePause(ctx, h, 1000, 400); err != nil {
 		// We don't return error here as probing is done, we just log if the final pause failed.
 		if ctx.Err() == nil {
@@ -457,28 +522,200 @@ func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h 
 	return nil
 }
 
+// --- Hybrid IAST: Smart Probing Implementation (Step 2/3.2) ---
+
+// generateAndExecuteSmartProbes (New Method) identifies parameters from static findings and launches targeted probes.
+func (a *Analyzer) generateAndExecuteSmartProbes(ctx context.Context, session SessionContext, h *humanoid.Humanoid) {
+	a.logger.Info("Starting Smart Probing phase based on SAST results.")
+
+	// Collect all findings gathered so far thread-safely
+	a.findingsMutex.RLock()
+	var allFindings []javascript.StaticFinding
+	for _, findings := range a.staticFindings {
+		allFindings = append(allFindings, findings...)
+	}
+	a.findingsMutex.RUnlock()
+
+	if len(allFindings) == 0 {
+		a.logger.Debug("No static findings available yet for smart probing.")
+		return
+	}
+
+	// Identify target parameters (URL Query, Hash Fragment, Storage)
+	targetQueryParams := make(map[string]bool)
+	targetHashParams := make(map[string]bool)
+	// Future: targetStorageKeys
+
+	for _, finding := range allFindings {
+		// Check if the static finding indicates a specific parameter usage.
+		// This relies on the enhanced walker.go (Step 4) returning specific source formats.
+
+		// Findings might have multiple sources joined by "|". We need to check all of them.
+		sources := strings.Split(string(finding.Source), "|")
+		for _, sourceStr := range sources {
+
+			// Source format for URL Query Parameters: "param:query:PARAM_NAME"
+			if strings.HasPrefix(sourceStr, "param:query:") {
+				paramName := strings.TrimPrefix(sourceStr, "param:query:")
+				if paramName != "" {
+					targetQueryParams[paramName] = true
+				}
+			}
+
+			// Source format for Hash Fragment Parameters: "param:hash:PARAM_NAME"
+			if strings.HasPrefix(sourceStr, "param:hash:") {
+				paramName := strings.TrimPrefix(sourceStr, "param:hash:")
+				if paramName != "" {
+					targetHashParams[paramName] = true
+				}
+			}
+			// Future: Handle param:storage:KEY_NAME
+		}
+	}
+
+	if len(targetQueryParams) == 0 && len(targetHashParams) == 0 {
+		// This is common if SAST found vulnerabilities but they didn't originate from URL/Hash params.
+		return
+	}
+
+	a.logger.Info("Targeting statically discovered parameters",
+		zap.Int("query_params", len(targetQueryParams)),
+		zap.Int("hash_params", len(targetHashParams)),
+	)
+
+	// Execute targeted probing for Query Parameters
+	if len(targetQueryParams) > 0 {
+		if err := a.probeSpecificURLParams(ctx, session, h, targetQueryParams, false); err != nil {
+			if ctx.Err() == nil {
+				a.logger.Error("Error during smart probing (URL Query params)", zap.Error(err))
+			}
+		}
+	}
+
+	// Execute targeted probing for Hash Parameters
+	if len(targetHashParams) > 0 {
+		if err := a.probeSpecificURLParams(ctx, session, h, targetHashParams, true); err != nil {
+			if ctx.Err() == nil {
+				a.logger.Error("Error during smart probing (Hash params)", zap.Error(err))
+			}
+		}
+	}
+}
+
+// probeSpecificURLParams (New Method) injects probes into specific URL query parameters or hash fragments.
+// It iterates one parameter at a time for better isolation and detection.
+func (a *Analyzer) probeSpecificURLParams(ctx context.Context, session SessionContext, h *humanoid.Humanoid, params map[string]bool, useHash bool) error {
+	// Create a safe copy of the target URL to modify it.
+	baseURL, err := url.Parse(a.config.Target.String())
+	if err != nil {
+		return fmt.Errorf("failed to parse base URL for smart probing: %w", err)
+	}
+
+	sourceType := schemas.SourceURLParam
+	prefix := "SMART_Q"
+	if useHash {
+		sourceType = schemas.SourceHashFragment
+		prefix = "SMART_H"
+	}
+
+	// Iterate over each identified parameter.
+	for paramName := range params {
+		targetURL, _ := url.Parse(baseURL.String()) // Copy for this iteration
+		probesInjected := 0
+
+		// Prepare the query or hash map for modification.
+		var paramsMap url.Values
+		if useHash {
+			// Parsing hash fragment if it follows query string format.
+			paramsMap, _ = url.ParseQuery(targetURL.Fragment)
+			if paramsMap == nil {
+				paramsMap = url.Values{}
+			}
+		} else {
+			paramsMap = targetURL.Query()
+		}
+
+		// Inject all relevant probes into the target parameter.
+		// Strategy: Iterate probes and inject one by one into the parameter for this navigation.
+		for _, probeDef := range a.config.Probes {
+			// Basic filter for relevance (e.g., avoid JSON PP in standard URL param unless QS_PARSE_MERGE)
+			if probeDef.Type == schemas.ProbeTypePrototypePollution && probeDef.Context != "QS_PARSE_MERGE" {
+				continue
+			}
+
+			canary := a.generateCanary(prefix, probeDef.Type)
+			payload := a.preparePayload(probeDef, canary)
+			if payload == "" {
+				continue
+			}
+
+			// We use Add() to potentially test parameter pollution, or append if the map implementation allows it.
+			// If the underlying implementation treats the hash like standard query params, this works.
+			paramsMap.Add(paramName, payload)
+
+			a.registerProbe(ActiveProbe{
+				Type:      probeDef.Type,
+				Key:       paramName,
+				Value:     payload, // Register the specific payload for correlation
+				Canary:    canary,
+				Source:    sourceType, // Statically informed dynamic probe
+				CreatedAt: time.Now(),
+			})
+			probesInjected++
+		}
+
+		if probesInjected > 0 {
+			// Update the URL with the modified parameters.
+			if useHash {
+				targetURL.Fragment = paramsMap.Encode()
+			} else {
+				targetURL.RawQuery = paramsMap.Encode()
+			}
+
+			a.logger.Debug("Navigating with smart probes",
+				zap.String("param", paramName),
+				zap.Bool("use_hash", useHash),
+				zap.Int("probe_count", probesInjected),
+			)
+
+			// Pause before navigation.
+			if err := a.executePause(ctx, h, 400, 150); err != nil {
+				return err
+			}
+
+			if err := session.Navigate(ctx, targetURL.String()); err != nil {
+				a.logger.Warn("Navigation failed during smart probing", zap.String("param", paramName), zap.Error(err))
+			}
+
+			// Pause after navigation.
+			if err := a.executePause(ctx, h, 700, 300); err != nil {
+				return err
+			}
+		}
+	}
+	return nil
+}
+
+// --- End Hybrid IAST: Smart Probing Implementation ---
+
 // generateCanary creates a unique canary string for tracking a probe.
 func (a *Analyzer) generateCanary(prefix string, probeType schemas.ProbeType) string {
 	return fmt.Sprintf("SCALPEL_%s_%s_%s", prefix, probeType, uuid.New().String()[:8])
 }
 
-// preparePayload replaces placeholders in a probe definition with a canary and OAST server URL.
+// preparePayload replaces placeholders in a probe definition.
 func (a *Analyzer) preparePayload(probeDef ProbeDefinition, canary string) string {
 	requiresOAST := strings.Contains(probeDef.Payload, "{{.OASTServer}}")
 	if requiresOAST && !a.oastConfigured {
-		// No warning needed here, it's logged once during initialization.
 		return ""
 	}
 
-	// VULN-FIX: Add the dynamic, session-specific proof callback name to the replacements.
-	// This ensures that XSS probes are generated with the correct, non-clobberable callback name.
 	replacements := []string{
 		"{{.Canary}}", canary,
 		"{{.ProofCallbackName}}", a.jsCallbackExecutionProofName,
 	}
 
 	if requiresOAST {
-		// We can now safely access oastProvider as oastConfigured is true.
 		oastURL := a.oastProvider.GetServerURL()
 		replacements = append(replacements, "{{.OASTServer}}", oastURL)
 	}
@@ -488,7 +725,6 @@ func (a *Analyzer) preparePayload(probeDef ProbeDefinition, canary string) strin
 }
 
 // probePersistentSources injects probes into Cookies, LocalStorage, and SessionStorage.
-// REFACTOR: Updated signature to remove BrowserContext. Integrated pauses using operation context.
 func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionContext, h *humanoid.Humanoid) error {
 	a.logger.Debug("Starting persistent source probing (Storage/Cookies).")
 	storageKeyPrefix := "sc_store_"
@@ -501,77 +737,34 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 	}
 
 	for i, probeDef := range a.config.Probes {
-		// FIX: Generate a unique canary and payload for each storage type to prevent overwrites in the activeProbes map.
-
-		// -- LocalStorage --
+		// LocalStorage
 		lsCanary := a.generateCanary("P", probeDef.Type)
 		lsPayload := a.preparePayload(probeDef, lsCanary)
 		if lsPayload != "" {
-			jsonPayload, err := json.Marshal(lsPayload)
-			if err != nil {
-				a.logger.Error("Failed to JSON encode LocalStorage payload", zap.Error(err))
-			} else {
-				jsPayload := string(jsonPayload)
-				lsKey := fmt.Sprintf("%s%d", storageKeyPrefix, i)
-				// FIX: Wrap localStorage access in try/catch to handle SecurityError if access is denied (e.g., about:blank, sandboxed iframe, strict privacy settings).
-				// This prevents the entire injection script from failing if localStorage is inaccessible.
-				fmt.Fprintf(&injectionScriptBuilder, "try { localStorage.setItem(%q, %s); } catch(e) { console.warn('[Scalpel] Failed to set LocalStorage item %s:', e); }\n", lsKey, jsPayload, lsKey)
-				a.registerProbe(ActiveProbe{
-					Type:      probeDef.Type,
-					Key:       lsKey,
-					Value:     lsPayload,
-					Canary:    lsCanary,
-					Source:    schemas.SourceLocalStorage,
-					CreatedAt: time.Now(),
-				})
-			}
+			jsonPayload, _ := json.Marshal(lsPayload)
+			lsKey := fmt.Sprintf("%s%d", storageKeyPrefix, i)
+			fmt.Fprintf(&injectionScriptBuilder, "try { localStorage.setItem(%q, %s); } catch(e) {}\n", lsKey, string(jsonPayload))
+			a.registerProbe(ActiveProbe{Type: probeDef.Type, Key: lsKey, Value: lsPayload, Canary: lsCanary, Source: schemas.SourceLocalStorage, CreatedAt: time.Now()})
 		}
 
-		// -- SessionStorage --
+		// SessionStorage
 		ssCanary := a.generateCanary("P", probeDef.Type)
 		ssPayload := a.preparePayload(probeDef, ssCanary)
 		if ssPayload != "" {
-			jsonPayload, err := json.Marshal(ssPayload)
-			if err != nil {
-				a.logger.Error("Failed to JSON encode SessionStorage payload", zap.Error(err))
-			} else {
-				jsPayload := string(jsonPayload)
-				ssKey := fmt.Sprintf("%s%d_s", storageKeyPrefix, i)
-				// FIX: Wrap sessionStorage access in try/catch.
-				fmt.Fprintf(&injectionScriptBuilder, "try { sessionStorage.setItem(%q, %s); } catch(e) { console.warn('[Scalpel] Failed to set SessionStorage item %s:', e); }\n", ssKey, jsPayload, ssKey)
-				a.registerProbe(ActiveProbe{
-					Type:      probeDef.Type,
-					Key:       ssKey,
-					Value:     ssPayload,
-					Canary:    ssCanary,
-					Source:    schemas.SourceSessionStorage,
-					CreatedAt: time.Now(),
-				})
-			}
+			jsonPayload, _ := json.Marshal(ssPayload)
+			ssKey := fmt.Sprintf("%s%d_s", storageKeyPrefix, i)
+			fmt.Fprintf(&injectionScriptBuilder, "try { sessionStorage.setItem(%q, %s); } catch(e) {}\n", ssKey, string(jsonPayload))
+			a.registerProbe(ActiveProbe{Type: probeDef.Type, Key: ssKey, Value: ssPayload, Canary: ssCanary, Source: schemas.SourceSessionStorage, CreatedAt: time.Now()})
 		}
 
-		// -- Cookies --
+		// Cookies
 		cookieCanary := a.generateCanary("P", probeDef.Type)
 		cookiePayload := a.preparePayload(probeDef, cookieCanary)
 		if cookiePayload != "" {
-			jsonPayload, err := json.Marshal(cookiePayload)
-			if err != nil {
-				a.logger.Error("Failed to JSON encode Cookie payload", zap.Error(err))
-			} else {
-				jsPayload := string(jsonPayload)
-				cookieName := fmt.Sprintf("%s%d", cookieNamePrefix, i)
-				// FIX: Wrap document.cookie access in try/catch.
-				cookieCommand := fmt.Sprintf("try { document.cookie = `${%q}=${encodeURIComponent(%s)}; path=/; max-age=3600; samesite=Lax;%s`; } catch(e) { console.warn('[Scalpel] Failed to set Cookie %s:', e); }\n", cookieName, jsPayload, secureFlag, cookieName)
-				injectionScriptBuilder.WriteString(cookieCommand)
-				a.registerProbe(ActiveProbe{
-					Type:      probeDef.Type,
-					Key:       cookieName,
-					Value:     cookiePayload,
-					Canary:    cookieCanary,
-					Source:    schemas.SourceCookie,
-					CreatedAt: time.Now(),
-				})
-			}
+			cookieName := fmt.Sprintf("%s%d", cookieNamePrefix, i)
+			cookieCmd := fmt.Sprintf("try { document.cookie = `%s=%s; path=/; max-age=3600; samesite=Lax;%s`; } catch(e) {}\n", cookieName, url.QueryEscape(cookiePayload), secureFlag)
+			injectionScriptBuilder.WriteString(cookieCmd)
+			a.registerProbe(ActiveProbe{Type: probeDef.Type, Key: cookieName, Value: cookiePayload, Canary: cookieCanary, Source: schemas.SourceCookie, CreatedAt: time.Now()})
 		}
 	}
 
@@ -580,44 +773,30 @@ func (a *Analyzer) probePersistentSources(ctx context.Context, session SessionCo
 		return nil
 	}
 
-	// REFACTOR: Pause before executing the injection script. Use operation context.
 	if err := a.executePause(ctx, h, 300, 100); err != nil {
 		return err
 	}
-
-	// FIX: The ExecuteScript function now requires a third 'options' argument. Pass nil.
-	// By wrapping the JS in try/catch blocks above, this call should no longer return an error due to JS SecurityExceptions during storage access.
 	if _, err := session.ExecuteScript(ctx, injectionScript, nil); err != nil {
-		// This error now likely indicates a more fundamental issue with the JS execution environment rather than storage access denial.
 		a.logger.Warn("Failed to execute persistent probe injection script", zap.Error(err))
 	}
 
-	a.logger.Debug("Persistent probes injected (or attempted). Refreshing page.")
-
-	// REFACTOR: Pause before refreshing the page. Use operation context.
+	a.logger.Debug("Persistent probes injected. Refreshing page.")
 	if err := a.executePause(ctx, h, 200, 80); err != nil {
 		return err
 	}
-
 	if err := session.Navigate(ctx, a.config.Target.String()); err != nil {
 		a.logger.Warn("Navigation (refresh) failed after persistent probe injection", zap.Error(err))
-		// We don't return the error immediately, allowing the post-navigation pause to occur if possible.
 	}
-
-	// REFACTOR: Pause after refresh. Use operation context.
 	if err := a.executePause(ctx, h, 700, 300); err != nil {
 		return err
 	}
 	return nil
 }
 
-// probeURLSources injects probes into URL query parameters and the hash fragment.
-// REFACTOR: Updated signature to remove BrowserContext. Integrated pauses using operation context.
+// probeURLSources injects probes into URL query parameters and the hash fragment (Generic/Blind probing).
 func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, h *humanoid.Humanoid) error {
-	// Create a safe copy of the target URL to modify it.
 	baseURL, err := url.Parse(a.config.Target.String())
 	if err != nil {
-		// Should be safe as the config target URL is usually pre-validated.
 		a.logger.Error("Failed to parse base URL for probing", zap.Error(err))
 		return fmt.Errorf("failed to parse base URL for probing: %w", err)
 	}
@@ -625,7 +804,7 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, 
 	paramPrefix := "sc_test_"
 
 	// -- Query Parameter Probing --
-	targetURL, _ := url.Parse(baseURL.String()) // Copy for query params
+	targetURL, _ := url.Parse(baseURL.String())
 	q := targetURL.Query()
 	probesInjected := 0
 	for i, probeDef := range a.config.Probes {
@@ -636,38 +815,26 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, 
 		}
 		paramName := fmt.Sprintf("%s%d", paramPrefix, i)
 		q.Set(paramName, payload)
-		a.registerProbe(ActiveProbe{
-			Type:      probeDef.Type,
-			Key:       paramName,
-			Value:     payload,
-			Canary:    canary,
-			Source:    schemas.SourceURLParam,
-			CreatedAt: time.Now(),
-		})
+		a.registerProbe(ActiveProbe{Type: probeDef.Type, Key: paramName, Value: payload, Canary: canary, Source: schemas.SourceURLParam, CreatedAt: time.Now()})
 		probesInjected++
 	}
 
 	if probesInjected > 0 {
 		targetURL.RawQuery = q.Encode()
 		a.logger.Debug("Navigating with combined URL parameter probes", zap.Int("probe_count", probesInjected))
-
-		// REFACTOR: Pause before navigating with query params. Use operation context.
 		if err := a.executePause(ctx, h, 400, 150); err != nil {
 			return err
 		}
-
 		if err := session.Navigate(ctx, targetURL.String()); err != nil {
 			a.logger.Warn("Navigation failed during combined URL probing", zap.Error(err))
 		}
-
-		// REFACTOR: Pause after navigation. Use operation context.
 		if err := a.executePause(ctx, h, 700, 300); err != nil {
 			return err
 		}
 	}
 
 	// -- Hash Fragment Probing --
-	targetURL, _ = url.Parse(baseURL.String()) // Reset/Copy for hash fragments
+	targetURL, _ = url.Parse(baseURL.String())
 	var hashFragments []string
 	probesInjected = 0
 	for i, probeDef := range a.config.Probes {
@@ -678,31 +845,19 @@ func (a *Analyzer) probeURLSources(ctx context.Context, session SessionContext, 
 		}
 		paramName := fmt.Sprintf("%s%d", paramPrefix, i)
 		hashFragments = append(hashFragments, fmt.Sprintf("%s=%s", paramName, url.QueryEscape(payload)))
-		a.registerProbe(ActiveProbe{
-			Type:      probeDef.Type,
-			Key:       paramName,
-			Value:     payload,
-			Canary:    canary,
-			Source:    schemas.SourceHashFragment,
-			CreatedAt: time.Now(),
-		})
+		a.registerProbe(ActiveProbe{Type: probeDef.Type, Key: paramName, Value: payload, Canary: canary, Source: schemas.SourceHashFragment, CreatedAt: time.Now()})
 		probesInjected++
 	}
 
 	if probesInjected > 0 {
 		targetURL.Fragment = strings.Join(hashFragments, "&")
 		a.logger.Debug("Navigating with combined Hash fragment probes", zap.Int("probe_count", probesInjected))
-
-		// REFACTOR: Pause before navigating with hash fragments. Use operation context.
 		if err := a.executePause(ctx, h, 400, 150); err != nil {
 			return err
 		}
-
 		if err := session.Navigate(ctx, targetURL.String()); err != nil {
 			a.logger.Warn("Navigation failed during combined Hash probing", zap.Error(err))
 		}
-
-		// REFACTOR: Pause after navigation. Use operation context.
 		if err := a.executePause(ctx, h, 700, 300); err != nil {
 			return err
 		}
@@ -717,81 +872,58 @@ func (a *Analyzer) registerProbe(probe ActiveProbe) {
 	a.activeProbes[probe.Canary] = probe
 }
 
-// correlateWorker is a single worker in the pool. It continuously processes events
-// from the events channel until the channel is closed.
+// correlateWorker is a single worker in the pool.
 func (a *Analyzer) correlateWorker(id int) {
 	defer a.wg.Done()
 	a.logger.Debug("Correlation worker started.", zap.Int("worker_id", id))
-
-	// This loop will naturally terminate when the `eventsChan` is closed by the shutdown() method.
 	for event := range a.eventsChan {
 		a.processEvent(event)
 	}
 	a.logger.Debug("Correlation worker finished.", zap.Int("worker_id", id))
 }
 
-// cleanupExpiredProbes is a background goroutine that periodically removes old probes
-// from the activeProbes map to prevent unbounded memory growth.
+// cleanupExpiredProbes is a background goroutine that periodically removes old probes.
 func (a *Analyzer) cleanupExpiredProbes() {
 	defer a.producersWG.Done()
 	ticker := time.NewTicker(a.config.CleanupInterval)
 	defer ticker.Stop()
-	a.logger.Debug("Probe expiration cleanup routine started.", zap.Duration("interval", a.config.CleanupInterval), zap.Duration("expiration", a.config.ProbeExpirationDuration))
 
 	for {
 		select {
-		case <-a.backgroundCtx.Done():
-			a.logger.Debug("Cleanup routine shutting down.")
-			return
 		case <-ticker.C:
 			a.executeCleanup()
+		case <-a.backgroundCtx.Done():
+			return
 		}
 	}
 }
 
 // executeCleanup performs the actual work of finding and deleting expired probes.
 func (a *Analyzer) executeCleanup() {
-	expirationTime := time.Now().Add(-a.config.ProbeExpirationDuration)
-	var expiredCanaries []string
-
-	// Use a read lock to identify expired probes without blocking writers for long.
-	a.probesMutex.RLock()
+	a.probesMutex.Lock()
+	defer a.probesMutex.Unlock()
+	now := time.Now()
 	for canary, probe := range a.activeProbes {
-		if probe.CreatedAt.Before(expirationTime) {
-			expiredCanaries = append(expiredCanaries, canary)
+		if now.Sub(probe.CreatedAt) > a.config.ProbeExpirationDuration {
+			delete(a.activeProbes, canary)
 		}
 	}
-	a.probesMutex.RUnlock()
-
-	if len(expiredCanaries) == 0 {
-		return
-	}
-
-	// Now, acquire a write lock to delete the expired probes.
-	a.probesMutex.Lock()
-	for _, canary := range expiredCanaries {
-		delete(a.activeProbes, canary)
-	}
-	a.probesMutex.Unlock()
-	a.logger.Debug("Cleaned up expired probes.", zap.Int("count", len(expiredCanaries)))
 }
 
-// pollOASTInteractions is a background goroutine that periodically checks the
-// OAST provider for out of band callbacks.
+// pollOASTInteractions is a background goroutine that periodically checks the OAST provider.
 func (a *Analyzer) pollOASTInteractions() {
 	defer a.producersWG.Done()
 	ticker := time.NewTicker(a.config.OASTPollingInterval)
 	defer ticker.Stop()
-	a.logger.Debug("OAST polling routine started.", zap.Duration("interval", a.config.OASTPollingInterval))
 
 	for {
 		select {
-		case <-a.backgroundCtx.Done():
-			a.logger.Debug("OAST polling routine shutting down. Performing final check.")
-			a.fetchAndEnqueueOAST()
-			return
 		case <-ticker.C:
 			a.fetchAndEnqueueOAST()
+		case <-a.backgroundCtx.Done():
+			// One final check after shutdown is signaled
+			a.fetchAndEnqueueOAST()
+			return
 		}
 	}
 }
@@ -799,120 +931,73 @@ func (a *Analyzer) pollOASTInteractions() {
 // fetchAndEnqueueOAST retrieves OAST interactions and sends them to the correlation engine.
 func (a *Analyzer) fetchAndEnqueueOAST() {
 	a.probesMutex.RLock()
-	var relevantCanaries []string
-
-	// MODIFICATION: Check if oastProvider is nil before accessing it.
-	if a.oastProvider == nil {
-		a.probesMutex.RUnlock()
-		return
-	}
-
-	oastServerURL := a.oastProvider.GetServerURL()
+	var canaries []string
 	for canary, probe := range a.activeProbes {
-		if probe.Type == schemas.ProbeTypeOAST || strings.Contains(probe.Value, oastServerURL) {
-			relevantCanaries = append(relevantCanaries, canary)
+		if probe.Type == schemas.ProbeTypeOAST || strings.Contains(probe.Value, a.oastProvider.GetServerURL()) {
+			canaries = append(canaries, canary)
 		}
 	}
 	a.probesMutex.RUnlock()
 
-	if len(relevantCanaries) == 0 {
+	if len(canaries) == 0 {
 		return
 	}
 
-	fetchCtx, cancel := context.WithTimeout(context.Background(), a.config.OASTPollingInterval)
-	defer cancel()
-
-	interactions, err := a.oastProvider.GetInteractions(fetchCtx, relevantCanaries)
+	interactions, err := a.oastProvider.GetInteractions(a.backgroundCtx, canaries)
 	if err != nil {
-		a.logger.Error("Failed to fetch OAST interactions.", zap.Error(err))
+		a.logger.Error("Failed to fetch OAST interactions", zap.Error(err))
 		return
-	}
-
-	if len(interactions) > 0 {
-		a.logger.Info("OAST Interactions detected!", zap.Int("count", len(interactions)))
 	}
 
 	for _, interaction := range interactions {
-		// Convert from the canonical schema type to the local event type.
+		// Corrected: Wrap the schema definition in the local event type.
+		// This utilizes struct embedding to adapt the external type to the internal interface.
 		localInteraction := OASTInteraction{
-			Canary:          interaction.Canary,
-			Protocol:        interaction.Protocol,
-			SourceIP:        interaction.SourceIP,
-			InteractionTime: interaction.InteractionTime,
-			RawRequest:      interaction.RawRequest,
+			OASTInteraction: interaction,
 		}
 		a.enqueueEvent(localInteraction, "OASTInteraction")
 	}
 }
 
-// processEvent is the main dispatcher for incoming events. It routes events
-// to the appropriate handler based on their type.
+// processEvent is the main dispatcher for incoming events.
 func (a *Analyzer) processEvent(event Event) {
 	switch e := event.(type) {
 	case SinkEvent:
-		a.processSinkEvent(e)
+		if e.Type == schemas.SinkPrototypePollution {
+			a.processPrototypePollutionConfirmation(e)
+		} else {
+			a.processSinkEvent(e)
+		}
 	case ExecutionProofEvent:
 		a.processExecutionProof(e)
 	case OASTInteraction:
 		a.processOASTInteraction(e)
 	default:
-		a.logger.Warn("Received unknown event type in correlation engine", zap.Any("event", event))
+		a.logger.Warn("Unknown event type received in correlation engine", zap.Any("event", e))
 	}
 }
 
-// FIX: isErrorPageContext implements heuristics to determine if the context (URL and Title)
-// where an event occurred corresponds to an error page (e.g., 404, 500, generic error).
-// This helps reduce false positives caused by payload reflection on custom error pages.
+// isErrorPageContext implements heuristics to determine if the context corresponds to an error page.
 func (a *Analyzer) isErrorPageContext(pageURL, pageTitle string) bool {
-	// Heuristic 1: Check for common error patterns in the page title.
-	// Titles are often the most reliable indicator available client-side.
-	titleLower := strings.ToLower(pageTitle)
-	errorTitleKeywords := []string{
-		"404", "not found", "error", "failed", "unavailable", "bad request",
-		"internal server error", "access denied", "forbidden",
-		"problem loading page", // Matches the title visible in the screenshot tabs.
-		"site can't be reached",
+	// Check Title patterns
+	lowerTitle := strings.ToLower(pageTitle)
+	if strings.Contains(lowerTitle, "404 not found") ||
+		strings.Contains(lowerTitle, "page not found") ||
+		strings.Contains(lowerTitle, "server error") ||
+		strings.Contains(lowerTitle, "internal server error") {
+		return true
 	}
 
-	for _, keyword := range errorTitleKeywords {
-		if strings.Contains(titleLower, keyword) {
-			// Add nuanced checks to avoid matching legitimate content (e.g., a blog post about errors).
-			// If the title strongly indicates an error (e.g., starts with the keyword), we trust it more.
-			if strings.HasPrefix(titleLower, keyword) {
-				return true
-			}
-
-			// Specific checks for generic keywords
-			if keyword == "not found" && (strings.Contains(titleLower, "page not found") || strings.Contains(titleLower, "404")) {
-				return true
-			}
-			if keyword == "error" && (strings.Contains(titleLower, "error code") || strings.Contains(titleLower, "an error occurred") || strings.Contains(titleLower, "internal server error")) {
-				return true
-			}
-
-			// If it just contains the keyword but none of the nuanced checks pass, continue checking other keywords.
-		}
+	// Check URL patterns: Look for explicit error pages in the path.
+	// We convert to lower case to catch /Error, /ERROR, etc.
+	u := strings.ToLower(pageURL)
+	// Check for standard error filenames or paths.
+	if strings.Contains(u, "/error.") || strings.Contains(u, "/errors/") {
+		return true
 	}
-
-	// Heuristic 2: Check for error patterns in the URL (path or query).
-	// This is less reliable as URLs can be anything, but common patterns are worth checking.
-	urlLower := strings.ToLower(pageURL)
-	errorURLKeywords := []string{
-		"/404", "/error", "/not-found",
-		"error=", "errcode=", "status=4", "status=5", // Check for query params
-	}
-	for _, keyword := range errorURLKeywords {
-		if strings.Contains(urlLower, keyword) {
-			// This is a simpler check. If "error" is in the URL, we're more suspicious.
-			// We can refine this if it's too aggressive.
-			return true
-		}
-	}
-
-	// Heuristic 3: Check for analyzer specific loading messages from the shim.
-	if strings.Contains(pageTitle, "N/A (Loading)") || strings.Contains(pageTitle, "N/A (Security Exception)") {
-		// If the page is still loading or we couldn't access the title, we are uncertain.
-		// We choose to suppress findings in uncertain states to reduce noise.
+	// Check for status codes in the path (often used by frameworks e.g. /404).
+	// We ensure they are path segments to avoid matching "node404" or similar IDs.
+	if strings.HasSuffix(u, "/404") || strings.HasSuffix(u, "/500") {
 		return true
 	}
 
@@ -926,39 +1011,17 @@ func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
 	a.probesMutex.RUnlock()
 
 	if !ok {
-		a.logger.Debug("OAST interaction received for unknown or expired canary.", zap.String("canary", interaction.Canary))
 		return
 	}
 
-	// NOTE: We do not filter OAST findings based on error pages. OAST confirms
-	// server-side processing (e.g., SSRF, Blind RCE), which is valid regardless
-	// of the HTTP response rendered by the client.
-
-	a.logger.Warn("Vulnerability Confirmed via OAST Interaction!",
-		zap.String("source", string(probe.Source)),
-		zap.String("type", string(probe.Type)),
-		zap.String("canary", interaction.Canary),
-	)
-
-	detail := fmt.Sprintf("Out of Band interaction confirmed via %s protocol.", interaction.Protocol)
-	switch probe.Type {
-	case schemas.ProbeTypeXSS, schemas.ProbeTypeSSTI:
-		detail = "Blind XSS/SSTI confirmed via OAST callback."
-	case schemas.ProbeTypeOAST:
-		detail = "Blind vulnerability (e.g., SSRF, RCE) confirmed via OAST callback."
-	}
-
-	// Determine the occurrence URL. For OAST it's complex as we don't have the client context.
-	// We default to the target URL.
+	detail := fmt.Sprintf("Out-of-band interaction (%s) detected from %s.", interaction.Protocol, interaction.SourceIP)
 	occurrenceURL := a.config.Target.String()
 
 	finding := CorrelatedFinding{
-		TaskID:    a.config.TaskID,
-		TargetURL: a.config.Target.String(),
-		// FIX: Populate occurrence context (limited for OAST).
-		OccurrenceURL:   occurrenceURL,
-		OccurrenceTitle: "N/A (Out of Band)",
-
+		TaskID:            a.config.TaskID,
+		TargetURL:         a.config.Target.String(),
+		OccurrenceURL:     occurrenceURL,
+		OccurrenceTitle:   "N/A (Out of Band)",
 		Sink:              schemas.SinkOASTInteraction,
 		Origin:            probe.Source,
 		Value:             probe.Value,
@@ -969,6 +1032,8 @@ func (a *Analyzer) processOASTInteraction(interaction OASTInteraction) {
 		SanitizationLevel: SanitizationNone,
 		StackTrace:        "N/A (Out of Band)",
 		OASTDetails:       &interaction,
+		ConfirmedDynamic:  true,
+		ConfirmedStatic:   false,
 	}
 	a.reporter.Report(finding)
 }
@@ -980,58 +1045,14 @@ func (a *Analyzer) processExecutionProof(proof ExecutionProofEvent) {
 	a.probesMutex.RUnlock()
 
 	if !ok {
-		a.logger.Debug("Execution proof received for unknown or expired canary.", zap.String("canary", proof.Canary))
 		return
 	}
-
-	// This is just a sanity check.
-	switch probe.Type {
-	case schemas.ProbeTypeXSS, schemas.ProbeTypeSSTI, schemas.ProbeTypeSQLi, schemas.ProbeTypeCmdInjection, schemas.ProbeTypeDOMClobbering:
-		// This is an expected probe type for an execution proof.
-	default:
-		a.logger.Debug("Execution proof received for unexpected probe type.", zap.String("canary", proof.Canary), zap.String("type", string(probe.Type)))
-		return
-	}
-
-	// ** FIX: Logic correction **
-	// The error page filter has been removed from this function.
-	//
-	// Rationale: An `ExecutionProofEvent` is a high-confidence, confirmed
-	// vulnerability (e.g., XSS). If code execution is achieved, it is a
-	// finding that must be reported, regardless of whether it occurred on
-	// a "404 Not Found" page or the main application page.
-	//
-	// Suppressing this finding would create a critical false negative and
-	// directly cause the "diminished capability" you observed.
-	//
-	// The filter remains on the lower-confidence `processSinkEvent` to
-	// reduce noise from simple, non-executing reflections.
-	/*
-		if a.isErrorPageContext(proof.PageURL, proof.PageTitle) {
-			a.logger.Info("Execution proof suppressed: Detected on likely error page.",
-				zap.String("url", proof.PageURL),
-				zap.String("title", proof.PageTitle),
-				zap.String("canary", proof.Canary),
-			)
-			// Although execution on an error page is technically a vulnerability, we suppress
-			// it here to meet the requirement of reducing noise from 404/error scenarios.
-			return
-		}
-	*/
-
-	a.logger.Warn("Vulnerability Confirmed via Execution Proof!",
-		zap.String("source", string(probe.Source)),
-		zap.String("type", string(probe.Type)),
-		zap.String("canary", proof.Canary),
-	)
 
 	finding := CorrelatedFinding{
-		TaskID:    a.config.TaskID,
-		TargetURL: a.config.Target.String(),
-		// FIX: Populate occurrence context.
-		OccurrenceURL:   proof.PageURL,
-		OccurrenceTitle: proof.PageTitle,
-
+		TaskID:            a.config.TaskID,
+		TargetURL:         a.config.Target.String(),
+		OccurrenceURL:     proof.PageURL,
+		OccurrenceTitle:   proof.PageTitle,
 		Sink:              schemas.SinkExecution,
 		Origin:            probe.Source,
 		Value:             probe.Value,
@@ -1041,25 +1062,24 @@ func (a *Analyzer) processExecutionProof(proof ExecutionProofEvent) {
 		IsConfirmed:       true,
 		SanitizationLevel: SanitizationNone,
 		StackTrace:        proof.StackTrace,
+		ConfirmedDynamic:  true,
+		ConfirmedStatic:   false,
 	}
+
+	a.correlateWithStaticFindings(&finding)
 	a.reporter.Report(finding)
 }
 
 // processSinkEvent checks a sink event for our canaries and, if found, reports a potential finding.
 func (a *Analyzer) processSinkEvent(event SinkEvent) {
-	if event.Type == schemas.SinkPrototypePollution {
-		a.processPrototypePollutionConfirmation(event)
-		return
-	}
-
-	potentialCanaries := canaryRegex.FindAllString(event.Value, -1)
-	if len(potentialCanaries) == 0 {
+	matchedCanaries := canaryRegex.FindAllString(event.Value, -1)
+	if len(matchedCanaries) == 0 {
 		return
 	}
 
 	a.probesMutex.RLock()
 	matchedProbes := make(map[string]ActiveProbe)
-	for _, canary := range potentialCanaries {
+	for _, canary := range matchedCanaries {
 		if probe, ok := a.activeProbes[canary]; ok {
 			matchedProbes[canary] = probe
 		}
@@ -1067,38 +1087,17 @@ func (a *Analyzer) processSinkEvent(event SinkEvent) {
 	a.probesMutex.RUnlock()
 
 	for canary, probe := range matchedProbes {
-		a.logger.Info("Taint flow detected!",
-			zap.String("source", string(probe.Source)),
-			zap.String("sink", string(event.Type)),
-			zap.String("canary", canary),
-		)
-
 		if a.isContextValid(event, probe) {
-
-			// ** FIX: Nuanced Filtering **
-			// This filter is intentionally *kept* for low-confidence SinkEvents
-			// to reduce noise from simple reflections on 404/error pages.
-			// This logic has been *removed* from the high-confidence
-			// ExecutionProof and PrototypePollution handlers to fix the
-			// "diminished capability" (false negative) problem.
 			if a.isErrorPageContext(event.PageURL, event.PageTitle) {
-				a.logger.Info("Taint flow suppressed: Detected on likely error page.",
-					zap.String("url", event.PageURL),
-					zap.String("title", event.PageTitle),
-					zap.String("canary", canary),
-					zap.String("sink", string(event.Type)),
-				)
-				continue // Skip reporting this specific flow.
+				continue
 			}
 
 			sanitizationLevel, detailSuffix := a.checkSanitization(event.Value, probe)
 			finding := CorrelatedFinding{
-				TaskID:    a.config.TaskID,
-				TargetURL: a.config.Target.String(),
-				// FIX: Populate occurrence context.
-				OccurrenceURL:   event.PageURL,
-				OccurrenceTitle: event.PageTitle,
-
+				TaskID:            a.config.TaskID,
+				TargetURL:         a.config.Target.String(),
+				OccurrenceURL:     event.PageURL,
+				OccurrenceTitle:   event.PageTitle,
 				Sink:              event.Type,
 				Origin:            probe.Source,
 				Value:             event.Value,
@@ -1108,13 +1107,17 @@ func (a *Analyzer) processSinkEvent(event SinkEvent) {
 				IsConfirmed:       false,
 				SanitizationLevel: sanitizationLevel,
 				StackTrace:        event.StackTrace,
+				ConfirmedDynamic:  true,
+				ConfirmedStatic:   false,
 			}
+
+			a.correlateWithStaticFindings(&finding)
 			a.reporter.Report(finding)
 		} else {
 			a.logger.Debug("Context mismatch: Taint flow suppressed (False Positive).",
-				zap.String("canary", canary),
 				zap.String("probe_type", string(probe.Type)),
 				zap.String("sink_type", string(event.Type)),
+				zap.String("canary", canary),
 			)
 		}
 	}
@@ -1122,56 +1125,20 @@ func (a *Analyzer) processSinkEvent(event SinkEvent) {
 
 // processPrototypePollutionConfirmation handles the specific confirmation event for Prototype Pollution.
 func (a *Analyzer) processPrototypePollutionConfirmation(event SinkEvent) {
-	a.probesMutex.RLock()
-	defer a.probesMutex.RUnlock()
-
 	canary := event.Value
-	// Ensure the value reported actually looks like a canary before attempting lookup.
-	if !canaryRegex.MatchString(canary) {
-		a.logger.Debug("Prototype Pollution check reported a value that is not a canary.", zap.String("value", canary))
-		return
-	}
-
+	a.probesMutex.RLock()
 	probe, ok := a.activeProbes[canary]
-	if !ok {
-		a.logger.Debug("Prototype Pollution confirmation for unknown or expired canary.", zap.String("canary", canary))
+	a.probesMutex.RUnlock()
+
+	if !ok || probe.Type != schemas.ProbeTypePrototypePollution {
 		return
 	}
-	if probe.Type != schemas.ProbeTypePrototypePollution {
-		a.logger.Warn("Prototype Pollution confirmation for non-pollution probe.", zap.String("canary", canary), zap.String("type", string(probe.Type)))
-		return
-	}
-
-	// ** FIX: Logic correction **
-	// The error page filter has been removed from this function.
-	//
-	// Rationale: This is a high-confidence, confirmed vulnerability.
-	// Like an execution proof, it should be reported regardless of the
-	// page context to avoid false negatives.
-	/*
-		if a.isErrorPageContext(event.PageURL, event.PageTitle) {
-			a.logger.Info("Prototype Pollution suppressed: Detected on likely error page.",
-				zap.String("url", event.PageURL),
-				zap.String("title", event.PageTitle),
-				zap.String("canary", canary),
-			)
-			return
-		}
-	*/
-
-	a.logger.Warn("Vulnerability Confirmed: JavaScript Prototype Pollution!",
-		zap.String("source", string(probe.Source)),
-		zap.String("canary", canary),
-		zap.String("polluted_property", event.Detail),
-	)
 
 	finding := CorrelatedFinding{
-		TaskID:    a.config.TaskID,
-		TargetURL: a.config.Target.String(),
-		// FIX: Populate occurrence context.
-		OccurrenceURL:   event.PageURL,
-		OccurrenceTitle: event.PageTitle,
-
+		TaskID:            a.config.TaskID,
+		TargetURL:         a.config.Target.String(),
+		OccurrenceURL:     event.PageURL,
+		OccurrenceTitle:   event.PageTitle,
 		Sink:              schemas.SinkPrototypePollution,
 		Origin:            probe.Source,
 		Value:             probe.Value,
@@ -1181,60 +1148,177 @@ func (a *Analyzer) processPrototypePollutionConfirmation(event SinkEvent) {
 		IsConfirmed:       true,
 		SanitizationLevel: SanitizationNone,
 		StackTrace:        event.StackTrace,
+		ConfirmedDynamic:  true,
+		ConfirmedStatic:   false,
 	}
+
+	a.correlateWithStaticFindings(&finding)
 	a.reporter.Report(finding)
 }
 
-// checkSanitization compares the value seen at the sink with the original probe payload
-// to infer if any sanitization or encoding was applied.
+// Step 5 Implementation: Hybrid Correlation Helper
+// correlateWithStaticFindings attempts to match a dynamic finding with existing static analysis results.
+func (a *Analyzer) correlateWithStaticFindings(finding *CorrelatedFinding) {
+	scriptFile, line, _ := parseStackTrace(finding.StackTrace)
+	targetFile := scriptFile
+	if targetFile == "" {
+		targetFile = finding.OccurrenceURL
+	}
+
+	if targetFile == "" {
+		return
+	}
+
+	a.findingsMutex.RLock()
+	staticFindings, exists := a.staticFindings[targetFile]
+	a.findingsMutex.RUnlock()
+
+	if !exists {
+		return
+	}
+
+	for i := range staticFindings {
+		sf := &staticFindings[i]
+
+		isSinkMatch := false
+		if sf.CanonicalType == finding.Sink {
+			isSinkMatch = true
+		} else if finding.Sink == schemas.SinkExecution {
+			if core.GetSinkType(sf.CanonicalType) == core.SinkTypeExecution {
+				isSinkMatch = true
+			}
+		}
+
+		if !isSinkMatch {
+			continue
+		}
+
+		if !a.isSourceContextMatch(finding.Probe.Source, sf.Source) {
+			continue
+		}
+
+		isLocationMatch := false
+		if line != -1 {
+			if abs(sf.Location.Line-line) <= 3 {
+				isLocationMatch = true
+			}
+		} else {
+			isLocationMatch = true
+		}
+
+		if isLocationMatch {
+			finding.ConfirmedStatic = true
+			if !finding.IsConfirmed {
+				finding.IsConfirmed = true
+				finding.Detail += " (Statically Verified)"
+			}
+			finding.StaticFinding = sf
+
+			a.logger.Info("Hybrid Correlation Success: IAST finding verified by SAST",
+				zap.String("canary", finding.Canary),
+				zap.String("sink_type", string(sf.SinkType)),
+				zap.String("sast_location", sf.Location.String()))
+			return
+		}
+	}
+}
+
+// isSourceContextMatch maps dynamic injection points (schemas.TaintSource) to static source definitions (core.TaintSource).
+func (a *Analyzer) isSourceContextMatch(dynamicSource schemas.TaintSource, staticSource core.TaintSource) bool {
+	staticSources := strings.Split(string(staticSource), "|")
+
+	for _, staticSrcStr := range staticSources {
+		switch dynamicSource {
+		case schemas.SourceURLParam:
+			if staticSrcStr == string(core.SourceLocationSearch) ||
+				staticSrcStr == string(core.SourceLocationHref) ||
+				strings.HasPrefix(staticSrcStr, "param:query:") {
+				return true
+			}
+		case schemas.SourceHashFragment:
+			if staticSrcStr == string(core.SourceLocationHash) ||
+				strings.HasPrefix(staticSrcStr, "param:hash:") {
+				return true
+			}
+		case schemas.SourceLocalStorage:
+			if staticSrcStr == string(core.SourceLocalStorage) ||
+				strings.HasPrefix(staticSrcStr, "param:storage:") {
+				return true
+			}
+		case schemas.SourceSessionStorage:
+			if staticSrcStr == string(core.SourceSessionStorage) ||
+				strings.HasPrefix(staticSrcStr, "param:storage:") {
+				return true
+			}
+		case schemas.SourceCookie:
+			if staticSrcStr == string(core.SourceDocumentCookie) {
+				return true
+			}
+		}
+	}
+	return false
+}
+
+// Helper function to parse stack traces (browser-dependent format).
+func parseStackTrace(stack string) (file string, line int, col int) {
+	matches := stackTraceLocationRegex.FindStringSubmatch(stack)
+
+	if len(matches) == 4 {
+		file = matches[1]
+		line, _ = strconv.Atoi(matches[2])
+		col, _ = strconv.Atoi(matches[3])
+		return file, line, col
+	}
+	return "", -1, -1
+}
+
+func abs(x int) int {
+	if x < 0 {
+		return -x
+	}
+	return x
+}
+
+// checkSanitization compares the value seen at the sink with the original probe payload.
 func (a *Analyzer) checkSanitization(sinkValue string, probe ActiveProbe) (SanitizationLevel, string) {
 	if strings.Contains(sinkValue, probe.Value) {
 		return SanitizationNone, ""
 	}
 
-	if probe.Type == schemas.ProbeTypeXSS || probe.Type == schemas.ProbeTypeSSTI {
-		hasOriginalTags := strings.Contains(probe.Value, "<") || strings.Contains(probe.Value, ">")
-		hasSinkTags := strings.Contains(sinkValue, "<") || strings.Contains(sinkValue, ">")
-		if hasOriginalTags && !hasSinkTags {
-			return SanitizationPartial, " (Potential Sanitization: HTML tags modified or stripped)"
+	var details []string
+	if probe.Type == schemas.ProbeTypeXSS {
+		if strings.Contains(probe.Value, "<") && !strings.Contains(sinkValue, "<") {
+			details = append(details, "HTML tags modified or stripped")
 		}
-
-		hasOriginalQuotes := strings.Contains(probe.Value, "\"")
-		hasEscapedQuotes := strings.Contains(sinkValue, "\\\"") || strings.Contains(sinkValue, "&#34;")
-		if hasOriginalQuotes && hasEscapedQuotes {
-			return SanitizationPartial, " (Potential Sanitization: Quotes escaped)"
+		// FIX: Enhanced detection for escaped quotes (backslash) vs removed/encoded quotes.
+		if strings.Contains(probe.Value, `"`) {
+			if !strings.Contains(sinkValue, `"`) {
+				details = append(details, "Quotes removed or encoded")
+			} else if strings.Contains(sinkValue, `\"`) {
+				details = append(details, "Quotes escaped")
+			}
 		}
 	}
 
-	return SanitizationPartial, " (Potential Sanitization: Payload modified)"
+	if len(details) > 0 {
+		return SanitizationPartial, " (Potential Sanitization: " + strings.Join(details, ", ") + ")"
+	}
+
+	return SanitizationFull, " (Payload fully sanitized)"
 }
 
-// isContextValid implements the rules engine for reducing false positives by checking
-// if a detected taint flow from a source to a sink is logical.
+// isContextValid implements the rules engine for reducing false positives.
 func (a *Analyzer) isContextValid(event SinkEvent, probe ActiveProbe) bool {
-	flow := TaintFlowPath{ProbeType: probe.Type, SinkType: event.Type}
-	// FIX: Use the analyzer's local, mutex-protected copy of the rules.
 	a.rulesMutex.RLock()
 	defer a.rulesMutex.RUnlock()
 
-	// Normalize probe types for broader rule matching.
-	probeTypeString := string(probe.Type)
-	if strings.Contains(probeTypeString, "XSS") || strings.Contains(probeTypeString, "SQLi") || strings.Contains(probeTypeString, "CmdInjection") {
-		flow.ProbeType = schemas.ProbeTypeXSS
-	}
-
-	// Read from the local map.
-	if !a.validTaintFlows[flow] {
+	flow := TaintFlowPath{ProbeType: probe.Type, SinkType: event.Type}
+	isValid, defined := a.validTaintFlows[flow]
+	if !defined || !isValid {
 		return false
 	}
 
-	// Add specific logic for potentially noisy sinks like navigation.
-	if (flow.ProbeType == schemas.ProbeTypeXSS || flow.ProbeType == schemas.ProbeTypeDOMClobbering) && event.Type == schemas.SinkNavigation {
-		normalizedValue := strings.ToLower(strings.TrimSpace(event.Value))
-		// Only consider `javascript:` or `data:` protocols as valid XSS vectors in a navigation sink.
-		if strings.HasPrefix(normalizedValue, "javascript:") || strings.HasPrefix(normalizedValue, "data:text/html") {
-			return true
-		}
+	if event.Type == schemas.SinkNavigation && !strings.HasPrefix(event.Value, "javascript:") {
 		return false
 	}
 

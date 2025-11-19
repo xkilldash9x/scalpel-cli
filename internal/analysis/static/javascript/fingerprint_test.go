@@ -3,6 +3,7 @@ package javascript
 import (
 	"testing"
 
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -29,7 +30,7 @@ func assertFindings(t *testing.T, findings []StaticFinding, expectedCount int) {
 	}
 }
 
-func assertSourceAndSink(t *testing.T, finding StaticFinding, source TaintSource, sink TaintSink) {
+func assertSourceAndSink(t *testing.T, finding StaticFinding, source core.TaintSource, sink core.TaintSink) {
 	t.Helper()
 	if finding.Source != source {
 		t.Errorf("Expected source %s, got %s", source, finding.Source)
@@ -48,7 +49,7 @@ func TestBasicTaintFlow(t *testing.T) {
 	`
 	findings := runAnalysis(t, code)
 	assertFindings(t, findings, 1)
-	assertSourceAndSink(t, findings[0], SourceLocationHash, "document.write")
+	assertSourceAndSink(t, findings[0], core.SourceLocationHash, core.TaintSink("document.write"))
 }
 
 func TestSanitization(t *testing.T) {
@@ -75,7 +76,7 @@ func TestObjectSensitivity(t *testing.T) {
 	`
 	findings := runAnalysis(t, code)
 	assertFindings(t, findings, 1)
-	assertSourceAndSink(t, findings[0], SourceLocationSearch, "eval")
+	assertSourceAndSink(t, findings[0], core.SourceLocationSearch, core.TaintSink("eval"))
 }
 
 func TestObjectAssignments(t *testing.T) {

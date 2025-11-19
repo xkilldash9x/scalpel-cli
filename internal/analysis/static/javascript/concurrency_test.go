@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"go.uber.org/zap/zaptest"
 )
 
@@ -121,13 +122,13 @@ func TestGlobalDefinitions_Concurrency(t *testing.T) {
 			defer wg.Done()
 
 			// Hammer the lookup functions with various inputs
-			_ = CheckIfSanitizer([]string{"DOMPurify", "sanitize"})
+			_ = core.CheckIfSanitizer([]string{"DOMPurify", "sanitize"})
 
 			_, _ = CheckIfSinkProperty([]string{"script", "src"})
 			_, _ = CheckIfSinkProperty([]string{"innerHTML"}) // Fallback check
 
-			_, _ = CheckIfPropertySource([]string{"location", "hash"})
-			_, _ = CheckIfFunctionSource([]string{"localStorage", "getItem"})
+			_, _ = core.CheckIfPropertySource([]string{"location", "hash"})
+			_, _ = core.CheckIfFunctionSource([]string{"localStorage", "getItem"})
 
 			_, _ = CheckIfSinkFunction([]string{"eval"})
 		}()
@@ -151,7 +152,7 @@ func TestState_MergeSafety(t *testing.T) {
 	// 1. Setup a complex "Shared State" that acts as a read-only template.
 	// This represents a heavily populated object (like a global scope) being read by many threads.
 	sharedState := NewObjectTaint()
-	sharedState.SetPropertyTaint("tainted_prop", NewSimpleTaint(SourceLocationHash, 1))
+	sharedState.SetPropertyTaint("tainted_prop", NewSimpleTaint(core.SourceLocationHash, 1))
 	sharedState.SetPropertyTaint("safe_prop", NewSimpleTaint("", 0))
 
 	var wg sync.WaitGroup
@@ -164,7 +165,7 @@ func TestState_MergeSafety(t *testing.T) {
 
 			// 2. Create a thread-local state
 			localState := NewObjectTaint()
-			localState.SetPropertyTaint("local_val", NewSimpleTaint(SourceDocumentCookie, id))
+			localState.SetPropertyTaint("local_val", NewSimpleTaint(core.SourceDocumentCookie, id))
 
 			// 3. Perform the Merge.
 			// If Merge writes to sharedState (the receiver or argument) in any way,

@@ -10,15 +10,22 @@ import (
 	sitter "github.com/smacker/go-tree-sitter"
 	"github.com/smacker/go-tree-sitter/javascript"
 	"go.uber.org/zap"
+
+	// Import core definitions and schemas (Step 1 and Step 5)
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
 // StaticFinding represents a potential vulnerability found via static analysis.
 type StaticFinding struct {
-	Source     TaintSource
-	Sink       TaintSink
-	SinkType   SinkType
+	Source     core.TaintSource
+	Sink       core.TaintSink // The specific sink name identified statically
+	SinkType   core.SinkType  // The impact category
 	Location   LocationInfo
 	Confidence string // High, Medium, Low
+
+	// CanonicalType is crucial for correlation with dynamic findings (Step 5).
+	CanonicalType schemas.TaintSink
 }
 
 // Fingerprinter analyzes JavaScript source code to find potential taint flows.

@@ -10,6 +10,9 @@ import (
 
 	sitter "github.com/smacker/go-tree-sitter"
 	"go.uber.org/zap"
+
+	// Import core definitions (Step 1)
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
 // WalkerMode defines the operation mode of the AST walker.
@@ -193,7 +196,7 @@ func (w *astWalker) initializeParameters(fnNode *sitter.Node) {
 // initializeParameterTaint initiates the assignment of symbolic taint sources, handling destructuring with path sensitivity.
 func (w *astWalker) initializeParameterTaint(paramNode *sitter.Node, index int) {
 	// Create the base symbolic taint source "param:N".
-	baseSource := TaintSource(fmt.Sprintf("param:%d", index))
+	baseSource := core.TaintSource(fmt.Sprintf("param:%d", index))
 	loc := int(paramNode.StartPoint().Row)
 
 	// Use a recursive helper to handle potential destructuring with path sensitivity.
@@ -201,7 +204,7 @@ func (w *astWalker) initializeParameterTaint(paramNode *sitter.Node, index int) 
 }
 
 // initializeDestructuredParameter recursively assigns symbolic taint sources (e.g., param:0.prop) to bindings in a parameter pattern.
-func (w *astWalker) initializeDestructuredParameter(pattern *sitter.Node, currentSource TaintSource, loc int) {
+func (w *astWalker) initializeDestructuredParameter(pattern *sitter.Node, currentSource core.TaintSource, loc int) {
 	if pattern == nil {
 		return
 	}
@@ -221,7 +224,7 @@ func (w *astWalker) initializeDestructuredParameter(pattern *sitter.Node, curren
 			case "shorthand_property_identifier_pattern":
 				// { a } -> a gets source.a
 				propName := child.Content(w.source)
-				nextSource := TaintSource(fmt.Sprintf("%s.%s", currentSource, propName))
+				nextSource := core.TaintSource(fmt.Sprintf("%s.%s", currentSource, propName))
 				w.initializeDestructuredParameter(child, nextSource, loc)
 
 			case "pair_pattern":
@@ -230,9 +233,9 @@ func (w *astWalker) initializeDestructuredParameter(pattern *sitter.Node, curren
 				valuePattern := child.ChildByFieldName("value")
 
 				propName, staticallyKnown := w.extractStaticKeyName(key)
-				var nextSource TaintSource
+				var nextSource core.TaintSource
 				if staticallyKnown {
-					nextSource = TaintSource(fmt.Sprintf("%s.%s", currentSource, propName))
+					nextSource = core.TaintSource(fmt.Sprintf("%s.%s", currentSource, propName))
 				} else {
 					// Computed property in parameter destructuring.
 					nextSource = currentSource // Approximation: lose path sensitivity
@@ -323,7 +326,7 @@ func (w *astWalker) finalizeSummary() {
 		sources := strings.Split(string(finding.Source), "|")
 		for _, source := range sources {
 			if strings.HasPrefix(source, "param:") {
-				paramIndex, ok := w.extractParamIndex(TaintSource(source))
+				paramIndex, ok := w.extractParamIndex(core.TaintSource(source))
 				if ok {
 					summary.TaintedParams[paramIndex] = true
 				}
@@ -362,7 +365,7 @@ func (w *astWalker) finalizeSummary() {
 }
 
 // extractParamIndex parses the index N from sources like "param:N" or "param:N.prop".
-func (w *astWalker) extractParamIndex(source TaintSource) (int, bool) {
+func (w *astWalker) extractParamIndex(source core.TaintSource) (int, bool) {
 	s := string(source)
 	if !strings.HasPrefix(s, "param:") {
 		return 0, false
@@ -476,7 +479,8 @@ func (w *astWalker) evaluatePropertyAccessTaint(node *sitter.Node) TaintState {
 	// 1. Global Source Check
 	path := flattenPropertyAccess(node, w.source)
 	if path != nil {
-		if source, isSource := CheckIfPropertySource(path); isSource {
+		// Use the unified check from core (Step 1)
+		if source, isSource := core.CheckIfPropertySource(path); isSource {
 			return NewSimpleTaint(source, int(node.StartPoint().Row))
 		}
 	}
@@ -500,7 +504,7 @@ func (w *astWalker) evaluatePropertyAccessTaint(node *sitter.Node) TaintState {
 		if objTaint.IsTainted() {
 			// If any part of the object is tainted, the result of computed access is tainted.
 			// We merge the object's taint sources with SourceUnknown to signify approximation.
-			return NewSimpleTaint(SourceUnknown, int(node.StartPoint().Row)).Merge(objTaint)
+			return NewSimpleTaint(core.SourceUnknown, int(node.StartPoint().Row)).Merge(objTaint)
 		}
 	}
 
@@ -508,7 +512,7 @@ func (w *astWalker) evaluatePropertyAccessTaint(node *sitter.Node) TaintState {
 	if targetState.IsTainted() {
 		// We propagate the taint but lose precision on the property access itself.
 		// We merge SourceUnknown into the existing taint state.
-		return targetState.Merge(NewSimpleTaint(SourceUnknown, int(node.StartPoint().Row)))
+		return targetState.Merge(NewSimpleTaint(core.SourceUnknown, int(node.StartPoint().Row)))
 	}
 
 	return nil
@@ -630,6 +634,67 @@ func (w *astWalker) evaluateObjectLiteralTaint(node *sitter.Node) TaintState {
 	return nil
 }
 
+// Step 4 Implementation: Helper function to identify specific parameter extraction patterns.
+// This checks for methods like .get(), .getItem() called on objects derived from known sources.
+func (w *astWalker) checkSpecificParameterExtraction(callNode, callee *sitter.Node, path []string, argsNode *sitter.Node) TaintState {
+	if len(path) == 0 {
+		return nil
+	}
+
+	methodName := path[len(path)-1]
+	// Check for common extraction methods.
+	if methodName == "get" || methodName == "getItem" || methodName == "getAll" {
+
+		// Get the receiver object (the object the method is called on).
+		var receiver *sitter.Node
+		if callee.Type() == "member_expression" {
+			receiver = callee.ChildByFieldName("object")
+		}
+		// Add support for subscript_expression if needed (e.g. obj['get']('id')).
+
+		if receiver != nil {
+			// Evaluate the taint of the receiver (e.g., the URLSearchParams object or localStorage).
+			receiverTaint := w.evaluateTaint(receiver)
+
+			if receiverTaint != nil && receiverTaint.IsTainted() {
+				// Check if the taint originates from relevant sources (URL params, storage).
+				sources := receiverTaint.GetSources()
+
+				// Determine the source prefix for refinement (Step 4 refinement).
+				sourcePrefix := ""
+				if sources[core.SourceLocationSearch] || sources[core.SourceLocationHref] {
+					// Prioritize query if Href is present, as Href includes Search.
+					sourcePrefix = "param:query:"
+				} else if sources[core.SourceLocationHash] {
+					sourcePrefix = "param:hash:"
+				} else if sources[core.SourceLocalStorage] || sources[core.SourceSessionStorage] {
+					// We can refine storage keys as well.
+					sourcePrefix = "param:storage:"
+				}
+
+				if sourcePrefix != "" {
+					// We found a relevant extraction call. Now extract the argument (parameter/key name).
+					args := w.extractArguments(argsNode)
+					if len(args) > 0 {
+						// We only refine if the first argument is a static string literal.
+						arg := args[0]
+						if arg.Type() == "string" {
+							raw := NodeContent(arg, w.source)
+							paramName := strings.Trim(raw, "\"'`") // Unquote the string literal
+
+							specificSource := core.TaintSource(sourcePrefix + paramName)
+
+							// Return the refined taint state.
+							return NewSimpleTaint(specificSource, int(callNode.StartPoint().Row))
+						}
+					}
+				}
+			}
+		}
+	}
+	return nil
+}
+
 func (w *astWalker) evaluateCallTaint(node *sitter.Node) TaintState {
 	callee := node.ChildByFieldName("function")
 	argsNode := node.ChildByFieldName("arguments")
@@ -638,10 +703,16 @@ func (w *astWalker) evaluateCallTaint(node *sitter.Node) TaintState {
 
 	// 1. Check known APIs (Sources, Sanitizers)
 	if path != nil {
-		if source, isSource := CheckIfFunctionSource(path); isSource {
+		// Step 4 Implementation: Check for specific parameter extraction first.
+		if refinedTaint := w.checkSpecificParameterExtraction(node, callee, path, argsNode); refinedTaint != nil {
+			return refinedTaint
+		}
+
+		// Use the unified checks from core (Step 1)
+		if source, isSource := core.CheckIfFunctionSource(path); isSource {
 			return NewSimpleTaint(source, int(node.StartPoint().Row))
 		}
-		if CheckIfSanitizer(path) {
+		if core.CheckIfSanitizer(path) {
 			return nil
 		}
 	}
@@ -686,13 +757,13 @@ func (w *astWalker) evaluateCallTaint(node *sitter.Node) TaintState {
 	// Approximation: Method call side effects obj.method(tainted) -> taint obj
 	if mergedTaint != nil && mergedTaint.IsTainted() && callee != nil && callee.Type() == "member_expression" {
 		obj := callee.ChildByFieldName("object")
-		w.updateTaintTarget(obj, NewSimpleTaint(SourceUnknown, int(node.StartPoint().Row)))
+		w.updateTaintTarget(obj, NewSimpleTaint(core.SourceUnknown, int(node.StartPoint().Row)))
 	}
 
 	// Approximation: Return value inherits argument taint for unknown functions.
 	if mergedTaint != nil {
 		// We merge the existing taint with SourceUnknown to signify approximation.
-		return mergedTaint.Merge(NewSimpleTaint(SourceUnknown, int(node.StartPoint().Row)))
+		return mergedTaint.Merge(NewSimpleTaint(core.SourceUnknown, int(node.StartPoint().Row)))
 	}
 
 	return nil
@@ -703,7 +774,7 @@ func (w *astWalker) evaluateCallWithSummary(callNode, argsNode *sitter.Node, sum
 	if summary.TaintsReturn {
 		funcName := string(summary.RefID)
 		// Propagate the specific return source marker.
-		source := TaintSource(fmt.Sprintf("return:%s", funcName))
+		source := core.TaintSource(fmt.Sprintf("return:%s", funcName))
 		return NewSimpleTaint(source, int(callNode.StartPoint().Row))
 	}
 
@@ -754,174 +825,19 @@ func (w *astWalker) evaluateCallWithSummary(callNode, argsNode *sitter.Node, sum
 
 // -- Propagation Handlers (State Updates) --
 
-// handleVarDecl processes variable declarations, now supporting destructuring.
 func (w *astWalker) handleVarDecl(node *sitter.Node) {
-	// Iterate over variable_declarator children.
+	// variable_declaration or lexical_declaration can have multiple declarators
 	for i := 0; i < int(node.ChildCount()); i++ {
-		child := node.Child(i)
-		if child.Type() == "variable_declarator" {
-			// 'namePattern' can be identifier, object_pattern, or array_pattern.
-			namePattern := child.ChildByFieldName("name")
-			value := child.ChildByFieldName("value")
+		declarator := node.Child(i)
+		if declarator.Type() == "variable_declarator" {
+			nameNode := declarator.ChildByFieldName("name")
+			valueNode := declarator.ChildByFieldName("value")
 
-			if value != nil {
-				taintState := w.evaluateTaint(value)
-				// Use the general destructuring handler for all pattern types.
-				w.handleDestructuring(namePattern, taintState)
-			} else {
-				// Declaration without initialization (e.g., var x;). Ensure state is cleared (untainted).
-				w.handleDestructuring(namePattern, nil)
+			// A declarator might not have a value (e.g. `let x;`)
+			if nameNode != nil && valueNode != nil {
+				rhsTaint := w.evaluateTaint(valueNode)
+				w.handleDestructuring(nameNode, rhsTaint)
 			}
-		}
-	}
-}
-
-// handleDestructuring recursively propagates taint from a source state to bindings defined in a pattern.
-func (w *astWalker) handleDestructuring(pattern *sitter.Node, sourceState TaintState) {
-	if pattern == nil {
-		return
-	}
-
-	switch pattern.Type() {
-	case "identifier", "shorthand_property_identifier_pattern":
-		// Base case: Bind the source state directly to the identifier.
-		ref := RefID(pattern.Content(w.source))
-		w.taintBinding(ref, sourceState)
-
-	case "object_pattern":
-		// { a, b: c } = sourceState
-		w.handleObjectDestructuring(pattern, sourceState)
-
-	case "array_pattern":
-		// [ a, b ] = sourceState
-		w.handleArrayDestructuring(pattern, sourceState)
-
-	case "assignment_pattern":
-		// { a = defaultValue } = sourceState or (a = defaultValue)
-		left := pattern.ChildByFieldName("left")
-		// Approximation: If sourceState is tainted, it overrides the default.
-		if sourceState != nil && sourceState.IsTainted() {
-			w.handleDestructuring(left, sourceState)
-		} else {
-			// If sourceState is untainted (or nil/missing), the default value is used.
-			right := pattern.ChildByFieldName("right")
-			defaultValueTaint := w.evaluateTaint(right)
-			w.handleDestructuring(left, defaultValueTaint)
-		}
-
-	case "rest_parameter":
-		// { ...rest } = sourceState or [...rest] or function(...rest)
-		// The argument is often at index 1 or by field name 'argument'.
-		arg := pattern.ChildByFieldName("argument")
-		if arg == nil && pattern.ChildCount() > 1 {
-			arg = pattern.Child(1)
-		}
-		// Approximation: 'rest' inherits the overall taint status of the source.
-		w.handleDestructuring(arg, sourceState)
-
-	}
-}
-
-// handleObjectDestructuring processes object patterns { key: binding, shorthand }.
-func (w *astWalker) handleObjectDestructuring(pattern *sitter.Node, sourceState TaintState) {
-	// If the source is not tainted, clear all bindings in the pattern.
-	if sourceState == nil || !sourceState.IsTainted() {
-		// Recurse with nil state to clear bindings.
-		// We must iterate children explicitly here to handle nested patterns correctly.
-		for i := 0; i < int(pattern.ChildCount()); i++ {
-			child := pattern.Child(i)
-			switch child.Type() {
-			case "pair_pattern":
-				w.handleDestructuring(child.ChildByFieldName("value"), nil)
-			case "shorthand_property_identifier_pattern", "rest_parameter", "assignment_pattern":
-				w.handleDestructuring(child, nil)
-			}
-		}
-		return
-	}
-
-	objTaint, isObject := sourceState.(*ObjectTaint)
-
-	// Helper function to determine the taint for a binding.
-	getBindingTaint := func(propName string, staticallyKnown bool) TaintState {
-		if isObject {
-			if staticallyKnown {
-				return objTaint.GetPropertyTaint(propName)
-			}
-			// Computed access or structure tainted.
-			if objTaint.IsTainted() {
-				// Propagate the object's taint sources approximately.
-				return NewSimpleTaint(SourceUnknown, int(pattern.StartPoint().Row)).Merge(objTaint)
-			}
-			return nil
-		}
-		// Destructuring a SimpleTaint value. Propagate the exact source state.
-		return sourceState
-	}
-
-	for i := 0; i < int(pattern.ChildCount()); i++ {
-		child := pattern.Child(i)
-		switch child.Type() {
-		case "pair_pattern":
-			// { key: binding_pattern }
-			key := child.ChildByFieldName("key")
-			value := child.ChildByFieldName("value") // The binding pattern
-
-			propName, staticallyKnown := w.extractStaticKeyName(key)
-			bindingTaint := getBindingTaint(propName, staticallyKnown)
-
-			w.handleDestructuring(value, bindingTaint)
-
-		case "shorthand_property_identifier_pattern":
-			// { shorthand }
-			propName := NodeContent(child, w.source)
-			bindingTaint := getBindingTaint(propName, true)
-
-			// The child node IS the binding target.
-			w.handleDestructuring(child, bindingTaint)
-
-		case "rest_parameter", "assignment_pattern":
-			// Handled in the generic handleDestructuring switch.
-			// For rest, we approximate with the full source state.
-			// For assignment, handleDestructuring manages the default value logic.
-			w.handleDestructuring(child, sourceState)
-		}
-	}
-}
-
-// handleArrayDestructuring processes array patterns [a, , b].
-func (w *astWalker) handleArrayDestructuring(pattern *sitter.Node, sourceState TaintState) {
-	if sourceState == nil || !sourceState.IsTainted() {
-		// Clear bindings
-		for i := 0; i < int(pattern.ChildCount()); i++ {
-			child := pattern.Child(i)
-			if child.Type() != "[" && child.Type() != "]" && child.Type() != "," {
-				w.handleDestructuring(child, nil)
-			}
-		}
-		return
-	}
-
-	// If the source is tainted, propagate that taint to all elements.
-	// We lose precision on specific indices for array destructuring in this model.
-
-	// We use the sourceState directly if it's SimpleTaint.
-	taintToPropagate := sourceState
-
-	// If it's an ObjectTaint (representing an Array), we treat array access as generally tainted.
-	if obj, ok := sourceState.(*ObjectTaint); ok && obj.IsTainted() {
-		// Approximation for array elements when structure is known but indices are not tracked.
-		taintToPropagate = NewSimpleTaint(SourceUnknown, int(pattern.StartPoint().Row)).Merge(obj)
-	}
-
-	for i := 0; i < int(pattern.ChildCount()); i++ {
-		child := pattern.Child(i)
-		switch child.Type() {
-		case "[", "]", ",":
-			continue
-		default:
-			// identifier, rest_parameter, or nested pattern (e.g., assignment_pattern)
-			w.handleDestructuring(child, taintToPropagate)
 		}
 	}
 }
@@ -929,147 +845,153 @@ func (w *astWalker) handleArrayDestructuring(pattern *sitter.Node, sourceState T
 func (w *astWalker) handleAssignment(node *sitter.Node) {
 	left := node.ChildByFieldName("left")
 	right := node.ChildByFieldName("right")
-	// Operator detection robustness: use field name or traversal.
-	operatorNode := node.ChildByFieldName("operator")
 
-	// 1. Evaluate RHS.
-	rhsTaint := w.evaluateTaint(right)
-	isTainted := rhsTaint != nil && rhsTaint.IsTainted()
-
-	// 2. Determine operator.
-	var op string
-	if operatorNode != nil {
-		op = operatorNode.Content(w.source)
-	} else {
-		// Fallback logic if named field is missing (e.g., simple '=' might be anonymous).
-		// We traverse children to find the token between LHS and RHS.
-		if left != nil && right != nil {
-			cursor := sitter.NewTreeCursor(node)
-			defer cursor.Close()
-			if cursor.GoToFirstChild() {
-				foundLeft := false
-				for {
-					current := cursor.CurrentNode()
-					if current == left {
-						foundLeft = true
-					} else if current == right {
-						break // Reached RHS
-					} else if foundLeft {
-						// This node is between LHS and RHS, it must be the operator.
-						op = current.Content(w.source)
-						break
-					}
-					if !cursor.GoToNextSibling() {
-						break
-					}
-				}
-			}
-		}
-	}
-
-	// Final fallback if detection fails (e.g. complex destructuring might lack explicit operator node).
-	if op == "" {
-		op = "="
-	}
-
-	// 3. Check for Sinks.
-	// We only check sinks for standard assignments, not destructuring patterns (patterns on LHS).
-	isPattern := left != nil && (left.Type() == "object_pattern" || left.Type() == "array_pattern")
-	if op == "=" && isTainted && !isPattern {
+	if left != nil && right != nil {
+		rhsTaint := w.evaluateTaint(right)
+		w.updateTaintTarget(left, rhsTaint)
 		w.checkAssignmentSink(left, rhsTaint, node)
 	}
+}
 
-	// 4. Update State (Propagation).
-	if op == "=" {
-		// Strong update (overwrite).
-		w.updateTaintTarget(left, rhsTaint)
-	} else {
-		// Compound assignment (+=) - Weak update (merge).
-		lhsTaint := w.evaluateTaint(left)
+func (w *astWalker) handleDestructuring(pattern *sitter.Node, state TaintState) {
+	if pattern == nil {
+		return
+	}
 
-		var finalState TaintState
-		if lhsTaint != nil {
-			finalState = lhsTaint.Merge(rhsTaint)
-		} else {
-			finalState = rhsTaint
+	switch pattern.Type() {
+	case "identifier", "shorthand_property_identifier":
+		ref := RefID(pattern.Content(w.source))
+		w.taintBinding(ref, state)
+
+	case "object_pattern":
+		w.handleObjectDestructuring(pattern, state)
+
+	case "array_pattern":
+		w.handleArrayDestructuring(pattern, state)
+	}
+}
+
+func (w *astWalker) handleObjectDestructuring(pattern *sitter.Node, state TaintState) {
+	objTaint, isObject := state.(*ObjectTaint)
+
+	for i := 0; i < int(pattern.ChildCount()); i++ {
+		child := pattern.Child(i)
+		switch child.Type() {
+		case "pair_pattern": // { key: value }
+			keyNode := child.ChildByFieldName("key")
+			valuePattern := child.ChildByFieldName("value")
+			propName, staticallyKnown := w.extractStaticKeyName(keyNode)
+
+			var propTaint TaintState
+			if isObject && staticallyKnown {
+				propTaint = objTaint.GetPropertyTaint(propName)
+			} else if state != nil && state.IsTainted() {
+				// If the source is not an object or property is computed, approximate.
+				propTaint = NewSimpleTaint(core.SourceUnknown, int(child.StartPoint().Row))
+			}
+			w.handleDestructuring(valuePattern, propTaint)
+
+		case "shorthand_property_identifier_pattern": // { prop }
+			propName := NodeContent(child, w.source)
+			var propTaint TaintState
+			if isObject {
+				propTaint = objTaint.GetPropertyTaint(propName)
+			} else if state != nil && state.IsTainted() {
+				propTaint = NewSimpleTaint(core.SourceUnknown, int(child.StartPoint().Row))
+			}
+			w.handleDestructuring(child, propTaint)
 		}
+	}
+}
 
-		// We update the target even if the final state is untainted (e.g., "safe" += "").
-		w.updateTaintTarget(left, finalState)
+func (w *astWalker) handleArrayDestructuring(pattern *sitter.Node, state TaintState) {
+	// Approximation: If the array is tainted, all destructured elements are tainted.
+	var elemTaint TaintState
+	if state != nil && state.IsTainted() {
+		elemTaint = NewSimpleTaint(core.SourceUnknown, int(pattern.StartPoint().Row))
+	}
+
+	for i := 0; i < int(pattern.ChildCount()); i++ {
+		child := pattern.Child(i)
+		// Skip punctuation
+		if child.Type() != "[" && child.Type() != "]" && child.Type() != "," {
+			w.handleDestructuring(child, elemTaint)
+		}
 	}
 }
 
 func (w *astWalker) taintBinding(ref RefID, state TaintState) {
-	if state == nil || !state.IsTainted() {
-		delete(w.symbolTaint, ref)
-	} else {
+	if state != nil && state.IsTainted() {
 		w.symbolTaint[ref] = state
+	} else {
+		// If the new state is not tainted, remove the old taint.
+		delete(w.symbolTaint, ref)
 	}
 }
 
-// updateTaintTarget updates the state of a variable, property, or destructuring pattern.
 func (w *astWalker) updateTaintTarget(target *sitter.Node, state TaintState) {
 	if target == nil {
 		return
 	}
 
-	// handleDestructuring handles all identifier, pattern, and assignment types.
-	if target.Type() == "member_expression" || target.Type() == "subscript_expression" {
+	switch target.Type() {
+	case "identifier":
+		ref := RefID(target.Content(w.source))
+		w.taintBinding(ref, state)
+	case "member_expression", "subscript_expression":
 		w.updatePropertyTaint(target, state)
-	} else {
-		// This covers identifiers and destructuring patterns (object_pattern, array_pattern).
+	case "object_pattern", "array_pattern":
+		// This is destructuring assignment
 		w.handleDestructuring(target, state)
 	}
 }
 
 func (w *astWalker) updatePropertyTaint(target *sitter.Node, state TaintState) {
-	object := target.ChildByFieldName("object")
-
-	// Simplified tracking: only track properties on simple identifiers (variables) or 'this'.
-	if object == nil || (object.Type() != "identifier" && object.Type() != "this") {
-		// Complex base (e.g. getObj().prop = x). We skip precise tracking for this assignment.
+	objectNode := target.ChildByFieldName("object")
+	if objectNode == nil {
 		return
 	}
 
-	ref := RefID(object.Content(w.source))
-	baseState := w.symbolTaint[ref]
-
-	// If the base state is SimpleTaint, assignment to a property overwrites it with an ObjectTaint.
-	// This correctly models JavaScript behavior where types can change dynamically (e.g. x=taint; x.p=1;).
-	objTaint, ok := baseState.(*ObjectTaint)
-	if !ok {
-		// Initialize a new object structure, overwriting previous state.
-		objTaint = NewObjectTaint()
-	}
-
-	// Determine the property name.
 	propName, staticallyKnown := w.determinePropertyName(target)
 
-	updated := false
-	if staticallyKnown {
-		// Strong update: overwrite the property state.
-		objTaint.SetPropertyTaint(propName, state)
-		updated = true
-	} else if state != nil && state.IsTainted() {
-		// Weak update (Computed access assignment): loss of precision.
-		objTaint.StructureTainted = true
-		updated = true
+	// Get the existing taint state of the object.
+	existingTaint := w.evaluateTaint(objectNode)
+
+	if !staticallyKnown {
+		// Computed property assignment: Taint the whole object structure.
+		var newTaint TaintState
+		if existingTaint != nil {
+			newTaint = existingTaint.Merge(state)
+		} else {
+			newTaint = state
+		}
+		// Mark the structure as tainted if it's an object.
+		if objTaint, ok := newTaint.(*ObjectTaint); ok {
+			objTaint.StructureTainted = true
+		}
+		w.updateTaintTarget(objectNode, newTaint)
+		return
 	}
 
-	// Update the symbol table if the object state changed or was newly created.
-	if updated {
-		// We update the symbol table if the object has properties or is structure tainted.
-		if objTaint.IsTainted() || len(objTaint.Properties) > 0 {
-			w.symbolTaint[ref] = objTaint
-		} else {
-			// Clean up if the object is now empty and untainted.
-			delete(w.symbolTaint, ref)
+	// Static property assignment.
+	var objTaint *ObjectTaint
+	if ot, ok := existingTaint.(*ObjectTaint); ok {
+		objTaint = ot
+	} else {
+		objTaint = NewObjectTaint()
+		// If there was existing simple taint, merge it into the structure.
+		if existingTaint != nil && existingTaint.IsTainted() {
+			objTaint.StructureTainted = true
 		}
 	}
+
+	objTaint.SetPropertyTaint(propName, state)
+	w.updateTaintTarget(objectNode, objTaint)
 }
 
 // -- Sink Detection --
 
+// checkAssignmentSink uses StaticSinkDefinition
 func (w *astWalker) checkAssignmentSink(target *sitter.Node, rhsState TaintState, fullNode *sitter.Node) {
 	if target == nil {
 		return
@@ -1084,6 +1006,7 @@ func (w *astWalker) checkAssignmentSink(target *sitter.Node, rhsState TaintState
 		return
 	}
 
+	// CheckIfSinkProperty returns StaticSinkDefinition
 	if sinkDef, isSink := CheckIfSinkProperty(path); isSink {
 		w.reportFinding(rhsState.GetSource(), sinkDef, fullNode)
 	}
@@ -1121,6 +1044,7 @@ func (w *astWalker) checkCallForSinks(callee *sitter.Node, argsNode *sitter.Node
 	// 1. Check known sink functions.
 	path := flattenPropertyAccess(callee, w.source)
 	if path != nil {
+		// CheckIfSinkFunction returns StaticSinkDefinition
 		if sinkDef, isSink := CheckIfSinkFunction(path); isSink {
 			w.checkArgsAgainstSink(sinkDef, argsNode, fullNode)
 			return
@@ -1136,7 +1060,8 @@ func (w *astWalker) checkCallForSinks(callee *sitter.Node, argsNode *sitter.Node
 	}
 }
 
-func (w *astWalker) checkArgsAgainstSink(sinkDef SinkDefinition, argsNode *sitter.Node, fullNode *sitter.Node) {
+// checkArgsAgainstSink uses StaticSinkDefinition
+func (w *astWalker) checkArgsAgainstSink(sinkDef StaticSinkDefinition, argsNode *sitter.Node, fullNode *sitter.Node) {
 	args := w.extractArguments(argsNode)
 
 	for _, argIndex := range sinkDef.TaintedArgs {
@@ -1204,11 +1129,13 @@ func (w *astWalker) checkCallWithSummary(argsNode *sitter.Node, fullNode *sitter
 			if argTaint != nil && argTaint.IsTainted() {
 				// Found inter-procedural sink
 				funcName := string(summary.RefID)
-				sinkDef := SinkDefinition{
+				// Create a StaticSinkDefinition for reporting
+				sinkDef := StaticSinkDefinition{
 					// We report the argument index i.
-					Name: TaintSink(fmt.Sprintf("call:%s(arg:%d)", funcName, i)),
+					Name: core.TaintSink(fmt.Sprintf("call:%s(arg:%d)", funcName, i)),
 					// Approximation: We assume the worst-case sink type if not tracked in summary.
-					Type: SinkTypeExecution,
+					Type: core.SinkTypeExecution,
+					// CanonicalType is unknown here for summarized functions.
 				}
 				w.reportFinding(argTaint.GetSource(), sinkDef, fullNode)
 				return
@@ -1218,11 +1145,12 @@ func (w *astWalker) checkCallWithSummary(argsNode *sitter.Node, fullNode *sitter
 }
 
 // reportFinding records a detected taint flow.
-func (w *astWalker) reportFinding(source TaintSource, sinkDef SinkDefinition, node *sitter.Node) {
+// Uses core.TaintSource and StaticSinkDefinition
+func (w *astWalker) reportFinding(source core.TaintSource, sinkDef StaticSinkDefinition, node *sitter.Node) {
 	// source here is the representative source string (potentially joined by "|").
 
 	if source == "" {
-		source = SourceUnknown
+		source = core.SourceUnknown
 	}
 
 	location := FormatLocation(w.filename, node, w.source)
@@ -1238,17 +1166,24 @@ func (w *astWalker) reportFinding(source TaintSource, sinkDef SinkDefinition, no
 	confidence := "High"
 	// If the source is ambiguous (contains SourceUnknown), derived from an unknown function return,
 	// or the sink is inter-procedural (call:...), reduce confidence.
-	if strings.Contains(string(source), string(SourceUnknown)) ||
+	if strings.Contains(string(source), string(core.SourceUnknown)) ||
 		strings.HasPrefix(string(sinkDef.Name), "call:") {
 		confidence = "Medium"
 	}
 
+	// If the source is a specific parameter identified for Hybrid IAST (Step 4), we can note this.
+	if strings.HasPrefix(string(source), "param:query:") || strings.HasPrefix(string(source), "param:hash:") || strings.HasPrefix(string(source), "param:storage:") {
+		// This indicates a refined source from Step 4.
+	}
+
 	finding := StaticFinding{
-		Source:     source,
-		Sink:       sinkDef.Name,
-		SinkType:   sinkDef.Type,
-		Location:   location,
-		Confidence: confidence,
+		Source:   source,
+		Sink:     sinkDef.Name,
+		SinkType: sinkDef.Type,
+		// Ensure CanonicalType is set for correlation (Step 5)
+		CanonicalType: sinkDef.CanonicalType,
+		Location:      location,
+		Confidence:    confidence,
 	}
 
 	// --- Data Flow Logic for IPA ---

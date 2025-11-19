@@ -4,6 +4,8 @@ package javascript
 import (
 	"strings"
 	"testing"
+
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
 
 // -- State Unit Tests --
@@ -14,8 +16,8 @@ func TestSimpleTaint_Merge(t *testing.T) {
 
 	clean := NewSimpleTaint("", 0)
 	// Use sources that guarantee a specific sort order for deterministic checks.
-	sourceA := TaintSource("source_A") // Sorts first
-	sourceB := TaintSource("source_B")
+	sourceA := core.TaintSource("source_A") // Sorts first
+	sourceB := core.TaintSource("source_B")
 	taintedA := NewSimpleTaint(sourceA, 10)
 	taintedB := NewSimpleTaint(sourceB, 20)
 
@@ -39,7 +41,7 @@ func TestSimpleTaint_Merge(t *testing.T) {
 	}
 
 	// Verify union of sources. GetSource() returns a sorted, joined string.
-	expectedUnion := TaintSource("source_A|source_B")
+	expectedUnion := core.TaintSource("source_A|source_B")
 	if res3.GetSource() != expectedUnion {
 		t.Errorf("Expected union of sources %s, got %s", expectedUnion, res3.GetSource())
 	}
@@ -62,7 +64,7 @@ func TestObjectTaint_PropertyTracking(t *testing.T) {
 	t.Parallel()
 
 	obj := NewObjectTaint()
-	taintVal := NewSimpleTaint(SourceLocationHash, 1)
+	taintVal := NewSimpleTaint(core.SourceLocationHash, 1)
 
 	// 1. Set and Get Property
 	obj.SetPropertyTaint("dangerous", taintVal)
@@ -86,12 +88,12 @@ func TestObjectTaint_Merge(t *testing.T) {
 
 	// Obj1: { a: tainted(Hash) }
 	obj1 := NewObjectTaint()
-	obj1.SetPropertyTaint("a", NewSimpleTaint(SourceLocationHash, 1))
+	obj1.SetPropertyTaint("a", NewSimpleTaint(core.SourceLocationHash, 1))
 
 	// Obj2: { b: tainted(Cookie), a: tainted(Search) }
 	obj2 := NewObjectTaint()
-	obj2.SetPropertyTaint("b", NewSimpleTaint(SourceDocumentCookie, 2))
-	obj2.SetPropertyTaint("a", NewSimpleTaint(SourceLocationSearch, 3))
+	obj2.SetPropertyTaint("b", NewSimpleTaint(core.SourceDocumentCookie, 2))
+	obj2.SetPropertyTaint("a", NewSimpleTaint(core.SourceLocationSearch, 3))
 
 	// Merge
 	mergedState := obj1.Merge(obj2)
@@ -112,7 +114,9 @@ func TestObjectTaint_Merge(t *testing.T) {
 		t.Fatal("Merged object lost taint for property 'a'")
 	}
 	sourceA := string(taintA.GetSource())
-	if !strings.Contains(sourceA, string(SourceLocationHash)) || !strings.Contains(sourceA, string(SourceLocationSearch)) {
+
+	// FIX: Added 'core.' prefix to resolve name collision with local functions in state.go
+	if !strings.Contains(sourceA, string(core.SourceLocationHash)) || !strings.Contains(sourceA, string(core.SourceLocationSearch)) {
 		t.Errorf("Expected union of sources for property 'a', got %s", sourceA)
 	}
 }
@@ -128,8 +132,8 @@ func TestState_TypeMixing(t *testing.T) {
 	// (Simulating: if (c) { x = {a: sourceA} } else { x = sourceB })
 
 	// Use sources that guarantee a specific sort order.
-	sourceA := TaintSource("source_A")
-	sourceB := TaintSource("source_B")
+	sourceA := core.TaintSource("source_A")
+	sourceB := core.TaintSource("source_B")
 
 	// Obj: { a: tainted(A) }
 	obj := NewObjectTaint()
@@ -148,7 +152,7 @@ func TestState_TypeMixing(t *testing.T) {
 
 	// 2. Source Check (Union)
 	// The resulting SimpleTaint must include sources from the Object and the original SimpleTaint.
-	expectedSource := TaintSource("source_A|source_B")
+	expectedSource := core.TaintSource("source_A|source_B")
 	if res.GetSource() != expectedSource {
 		t.Errorf("Result should be the union of sources. Expected %s, got %s", expectedSource, res.GetSource())
 	}

@@ -4,18 +4,54 @@
 package javascript
 
 import (
+	"fmt"
 	"sort"
 	"strings"
 	"sync"
+
+	"github.com/cespare/xxhash/v2"
+	// Import core definitions (Step 1)
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 )
+
+// SourceLocation represents a location in a source file.
+type SourceLocation struct {
+	File   string `json:"file"`
+	Line   int    `json:"line"`
+	Column int    `json:"column"`
+}
+
+// String returns a string representation of the source location.
+func (s *SourceLocation) String() string {
+	return fmt.Sprintf("%s:%d:%d", s.File, s.Line, s.Column)
+}
+
+// SourceLocationHash computes a hash of a source location.
+func SourceLocationHash(loc *SourceLocation) string {
+	if loc == nil {
+		return ""
+	}
+	h := xxhash.Sum64String(loc.String())
+	return fmt.Sprintf("%x", h)
+}
+
+// SourceLocationSearch searches for a source location in a slice of source locations.
+func SourceLocationSearch(locs []*SourceLocation, loc *SourceLocation) bool {
+	for _, l := range locs {
+		if l.File == loc.File && l.Line == loc.Line && l.Column == loc.Column {
+			return true
+		}
+	}
+	return false
+}
 
 // TaintState represents the abstract taint status of a variable or property.
 type TaintState interface {
 	IsTainted() bool
 	// GetSource returns a representative origin of the taint (for reporting).
-	GetSource() TaintSource
+	GetSource() core.TaintSource
 	// GetSources returns the set of all taint origins.
-	GetSources() map[TaintSource]bool
+	GetSources() map[core.TaintSource]bool
 	// Merge combines this state with another TaintState (the lattice join operation).
 	Merge(other TaintState) TaintState
 }
@@ -26,19 +62,19 @@ type TaintState interface {
 // It is the Least Upper Bound (LUB) of SimpleTaint and ObjectTaint.
 type SimpleTaint struct {
 	// Sources is a set of origins for the taint.
-	Sources map[TaintSource]bool
+	Sources map[core.TaintSource]bool
 	// Line tracking represents the location of the earliest introduced source.
 	Line int
 }
 
 // NewSimpleTaint creates a new SimpleTaint record.
-func NewSimpleTaint(source TaintSource, line int) SimpleTaint {
+func NewSimpleTaint(source core.TaintSource, line int) SimpleTaint {
 	// If source is explicitly empty, return an untainted record.
 	if source == "" {
 		return SimpleTaint{}
 	}
 	return SimpleTaint{
-		Sources: map[TaintSource]bool{source: true},
+		Sources: map[core.TaintSource]bool{source: true},
 		Line:    line,
 	}
 }
@@ -48,7 +84,7 @@ func (t SimpleTaint) IsTainted() bool {
 }
 
 // GetSource returns a representative source string for reporting.
-func (t SimpleTaint) GetSource() TaintSource {
+func (t SimpleTaint) GetSource() core.TaintSource {
 	if !t.IsTainted() {
 		return ""
 	}
@@ -66,10 +102,10 @@ func (t SimpleTaint) GetSource() TaintSource {
 		sources = append(sources, string(s))
 	}
 	sort.Strings(sources)
-	return TaintSource(strings.Join(sources, "|"))
+	return core.TaintSource(strings.Join(sources, "|"))
 }
 
-func (t SimpleTaint) GetSources() map[TaintSource]bool {
+func (t SimpleTaint) GetSources() map[core.TaintSource]bool {
 	return t.Sources
 }
 
@@ -118,7 +154,7 @@ func (t SimpleTaint) Merge(other TaintState) TaintState {
 }
 
 // mergeSources creates a new SimpleTaint by merging the provided sources and line number.
-func (t SimpleTaint) mergeSources(otherSources map[TaintSource]bool, otherLine int) SimpleTaint {
+func (t SimpleTaint) mergeSources(otherSources map[core.TaintSource]bool, otherLine int) SimpleTaint {
 	merged := t.clone()
 	for source := range otherSources {
 		merged.Sources[source] = true
@@ -133,7 +169,7 @@ func (t SimpleTaint) mergeSources(otherSources map[TaintSource]bool, otherLine i
 
 // Helper to clone the SimpleTaint (for functional state updates).
 func (t SimpleTaint) clone() SimpleTaint {
-	newSources := make(map[TaintSource]bool, len(t.Sources))
+	newSources := make(map[core.TaintSource]bool, len(t.Sources))
 	for k, v := range t.Sources {
 		newSources[k] = v
 	}
@@ -173,19 +209,19 @@ func (t *ObjectTaint) IsTainted() bool {
 }
 
 // GetSource returns a generic source marker as an object doesn't have a single origin.
-func (t *ObjectTaint) GetSource() TaintSource {
+func (t *ObjectTaint) GetSource() core.TaintSource {
 	if t.IsTainted() {
 		// For reporting, we can rely on GetSources() if needed, but often SourceUnknown is sufficient for objects.
-		return SourceUnknown
+		return core.SourceUnknown
 	}
 	return ""
 }
 
 // GetSources returns the union of sources from all properties.
-func (t *ObjectTaint) GetSources() map[TaintSource]bool {
-	sources := make(map[TaintSource]bool)
+func (t *ObjectTaint) GetSources() map[core.TaintSource]bool {
+	sources := make(map[core.TaintSource]bool)
 	if t.StructureTainted {
-		sources[SourceUnknown] = true
+		sources[core.SourceUnknown] = true
 	}
 
 	for _, state := range t.Properties {
@@ -206,7 +242,7 @@ func (t *ObjectTaint) GetPropertyTaint(propName string) TaintState {
 	// If the specific property isn't tracked, but the structure is generally tainted, return a generic taint.
 	if t.StructureTainted {
 		// Line 0 indicates unknown origin line within the structure.
-		return NewSimpleTaint(SourceUnknown, 0)
+		return NewSimpleTaint(core.SourceUnknown, 0)
 	}
 	return nil
 }
