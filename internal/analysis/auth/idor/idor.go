@@ -9,6 +9,7 @@ import (
 	"log"
 	"mime" // Added for improved content type handling
 	"net/http"
+	"net/url"
 	"strings"
 	"sync"
 
@@ -413,6 +414,32 @@ func evaluateResponse(
 
 	// Handle Redirects (3xx)
 	if replayResp.StatusCode >= 300 && replayResp.StatusCode < 400 {
+		replayLocationStr := replayResp.Header.Get("Location")
+		isOriginalRedirect := originalResp.StatusCode >= 300 && originalResp.StatusCode < 400
+
+		// Vulnerability Scenario: A successful (2xx) request by User A becomes a redirect for User B.
+		if !isOriginalRedirect && replayLocationStr != "" {
+			// Resolve the redirect location to handle relative paths.
+			// The base for resolution should be the URL of the request that *received* the redirect.
+			baseRequestURL := replayResp.Request.URL
+			redirectURL, err := url.Parse(replayLocationStr)
+			if err == nil {
+				resolvedRedirectURL := baseRequestURL.ResolveReference(redirectURL)
+				// If the redirect location is the same as the original requested URL, it's a strong indicator of a flawed auth check.
+				if resolvedRedirectURL.String() == originalPair.Request.URL.String() {
+					return EvaluationResult{
+						Vulnerable:       true,
+						SeverityOverride: SeverityHigh, // This is a form of horizontal IDOR
+						EvidenceOverride: fmt.Sprintf("Request as another user resulted in a redirect back to the resource URL (%s), indicating a flawed authorization check.", replayLocationStr),
+						ComparisonResult: &jsoncompare.ComparisonResult{
+							AreEquivalent: true, // Mark as equivalent because it confirms the vulnerability pattern
+							Diff:          fmt.Sprintf("Original request was successful (Status %d), but replay was a self-referential redirect (Status %d)", originalResp.StatusCode, replayResp.StatusCode),
+						},
+					}, nil
+				}
+			}
+		}
+
 		// If Unauthenticated, a redirect likely means redirection to a login page (secure).
 		if testType == TestTypeUnauthenticated {
 			return EvaluationResult{Vulnerable: false}, nil
@@ -420,15 +447,12 @@ func evaluateResponse(
 
 		// For other types, if both original and replay redirect to the same location, it might be IDOR.
 		originalLocation := originalResp.Header.Get("Location")
-		replayLocation := replayResp.Header.Get("Location")
-		isOriginalRedirect := originalResp.StatusCode >= 300 && originalResp.StatusCode < 400
-
-		if isOriginalRedirect && originalLocation != "" && originalLocation == replayLocation {
+		if isOriginalRedirect && originalLocation != "" && originalLocation == replayLocationStr {
 			return EvaluationResult{
 				Vulnerable: true,
 				ComparisonResult: &jsoncompare.ComparisonResult{
 					AreEquivalent: true,
-					Diff:          fmt.Sprintf("Both requests redirected to the same location: %s", replayLocation),
+					Diff:          fmt.Sprintf("Both requests redirected to the same location: %s", replayLocationStr),
 				},
 			}, nil
 		}

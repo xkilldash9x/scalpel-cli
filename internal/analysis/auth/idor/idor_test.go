@@ -125,6 +125,30 @@ func SetupTestAPI(t *testing.T) *httptest.Server {
 			}
 		}
 
+		// Endpoint 4: /redirect-vuln/{id} (Vulnerable to IDOR via redirect loop)
+		if strings.HasPrefix(r.URL.Path, "/redirect-vuln/") {
+			resourceIDStr := strings.TrimPrefix(r.URL.Path, "/redirect-vuln/")
+			resourceID, _ := strconv.Atoi(resourceIDStr)
+
+			// User A is the owner of resource 101
+			if resourceID == 101 && requestingUserID == "UserA" {
+				// Successful access for the owner
+				w.WriteHeader(http.StatusOK)
+				fmt.Fprintf(w, `{"id": %d, "content": "secret-data"}`, resourceID)
+				return
+			}
+
+			// Vulnerability: Any other user is redirected back to the resource they just requested.
+			// A secure implementation would redirect to a login or error page.
+			if resourceID == 101 && requestingUserID != "UserA" {
+				http.Redirect(w, r, r.URL.String(), http.StatusFound)
+				return
+			}
+
+			http.NotFound(w, r)
+			return
+		}
+
 		http.NotFound(w, r)
 	})
 
@@ -429,4 +453,57 @@ func TestDetect_ConcurrencySafety(t *testing.T) {
 	logger := log.New(io.Discard, "", 0)
 	_, err := Detect(context.Background(), traffic, config, logger, comparer, pool)
 	require.NoError(t, err, "Detect() returned unexpected error")
+}
+
+// TestDetect_RedirectVulnerability verifies that IDOR is detected when a replay results
+// in a self-referential redirect, which the original request did not.
+func TestDetect_RedirectVulnerability(t *testing.T) {
+	t.Parallel()
+	server := SetupTestAPI(t)
+	client := server.Client()
+	// Prevent the test client from following redirects, so we can analyze the 302 response.
+	client.CheckRedirect = func(req *http.Request, via []*http.Request) error {
+		return http.ErrUseLastResponse
+	}
+	t.Cleanup(client.CloseIdleConnections)
+	logger := log.New(io.Discard, "", 0)
+	comparer := jsoncompare.NewService()
+
+	userA := &MockSession{UserID: "UserA", Authenticated: true}
+	userB := &MockSession{UserID: "UserB", Authenticated: true}
+
+	// 1. User A (owner) successfully accesses the resource.
+	req, err := http.NewRequest(http.MethodGet, server.URL+"/redirect-vuln/101", nil)
+	require.NoError(t, err)
+
+	pair, err := createTestPair(t, client, req, userA)
+	require.NoError(t, err, "Setup for redirect vulnerability test pair failed")
+	require.Equal(t, http.StatusOK, pair.Response.StatusCode, "Original request should be successful (200 OK)")
+
+	traffic := []RequestResponsePair{pair}
+
+	config := Config{
+		Session:       userA, // The original session
+		SecondSession: userB, // The session to test for horizontal privilege escalation
+		ComparisonOptions: jsoncompare.DefaultOptions(),
+		ConcurrencyLevel:  5,
+		HttpClient:    client,
+		// Test the Horizontal strategy, which is where this bug lies.
+		SkipManipulation:    true,
+		SkipUnauthenticated: true,
+	}
+
+	// (Test Adaptation): The pool is not strictly needed as we are not testing manipulation, but we pass it for correctness.
+	pool := NewIdentifierPool()
+
+	// 2. Run detection. The logic should replay User A's request with User B's session.
+	findings, err := Detect(context.Background(), traffic, config, logger, comparer, pool)
+	require.NoError(t, err, "Detect returned an unexpected error")
+
+	// 3. Assert the vulnerability is found.
+	require.Len(t, findings, 1, "Expected exactly one finding for the redirect vulnerability, but got %d", len(findings))
+	finding := findings[0]
+	require.Equal(t, TestTypeHorizontal, finding.TestType, "Finding should be of type Horizontal")
+	require.Contains(t, finding.Evidence, "flawed authorization check", "Evidence should explain the redirect loop")
+	require.Equal(t, SeverityHigh, finding.Severity, "Severity should be high for this type of horizontal IDOR")
 }
