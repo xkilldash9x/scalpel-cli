@@ -66,3 +66,35 @@ func TestFlattenPropertyAccess(t *testing.T) {
 		})
 	}
 }
+
+func TestFindLineStart(t *testing.T) {
+	content := `line one
+line two
+line three`
+	source := []byte(content)
+
+	tests := []struct {
+		name     string
+		idx      int
+		expected int
+	}{
+		{"middle of first line", 3, 0},
+		{"start of first line", 0, 0},
+		{"end of first line", 7, 0},
+		{"on newline char", 8, 9},
+		{"start of second line", 9, 9}, // This is the failing case
+		{"middle of second line", 12, 9},
+		{"end of last line", len(content) - 1, 18},
+		{"out of bounds high", len(content) + 5, 18},
+		{"out of bounds low", -5, 0},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := findLineStart(source, tt.idx)
+			if got != tt.expected {
+				t.Errorf("expected findLineStart(..., %d) to be %d, but got %d", tt.idx, tt.expected, got)
+			}
+		})
+	}
+}
