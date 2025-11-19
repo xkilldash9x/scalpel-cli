@@ -153,6 +153,21 @@ func (a *Analyzer) Analyze(ctx context.Context, candidate *RaceCandidate) error 
 			continue // Try the next strategy.
 		}
 
+		// FIX: If all responses are errors, the strategy is considered unsupported for this target.
+		if result != nil && len(result.Responses) > 0 {
+			allErrors := true
+			for _, resp := range result.Responses {
+				if resp.Error == nil {
+					allErrors = false
+					break
+				}
+			}
+			if allErrors {
+				a.logger.Warn("Strategy resulted in 100% errors, treating as unsupported.", zap.String("strategy", string(strategy)))
+				continue // Skip to the next strategy.
+			}
+		}
+
 		// Analyze the results.
 		analysis := a.analyzeResults(result, a.config)
 

@@ -264,7 +264,6 @@ func (c *H2Client) dialH2Connection(ctx context.Context) (net.Conn, error) {
 
 	// Ensure H2 is prioritized in ALPN.
 	// We include "http/1.1" as a fallback indicator, but we strictly check for "h2" success below.
-	// FIX: Changed "http/1.live" (which caused the failures) to the standard "http/1.1".
 	dialerConfig.TLSConfig.NextProtos = []string{"h2", "http/1.1"}
 
 	dialerConfig.TLSConfig.InsecureSkipVerify = c.Config.InsecureSkipVerify
