@@ -233,12 +233,8 @@ function analyzeSignUpForm() {
             currentEl = currentEl.parentNode;
         }
 
-        if (path.length === 0 || path[0] === 'body') {
-            // If the path is empty (fully detached) or only 'body' (meaning
-            // we're trying to select the body itself, which wasn't the
-            // original element 'el'), consider it a failure.
-            if (el.nodeName.toLowerCase() !== 'body' && path[0] === 'body') return null;
-            if (path.length === 0) return null;
+        if (path.length === 0) {
+            return null;
         }
 
         // Use > for direct descendants for precision.

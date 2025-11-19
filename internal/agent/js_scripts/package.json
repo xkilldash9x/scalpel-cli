@@ -32,9 +32,8 @@
       "internal/agent/js_scripts/captcha_detection.js",
       "internal/agent/js_scripts/form_analysis.js",
       "internal/agent/js_scripts/verification_error.js",
-      "internal/agent/js_scripts/verification_success.js"  
+      "internal/agent/js_scripts/verification_success.js"
     ],
-    
     "testPathIgnorePatterns": [
       "/node_modules/",
       "internal/browser/stealth/evasions.test.js",
