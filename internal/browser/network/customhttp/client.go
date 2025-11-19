@@ -172,6 +172,19 @@ func (c *CustomClient) executeWithRetries(ctx context.Context, req *http.Request
 	attempt := 0
 
 	for {
+		// Immediately check for cancellation before proceeding with the attempt.
+		// This prevents new requests from being initiated if the context has been cancelled
+		// during the backoff period of the previous attempt, or if the loop is spinning.
+		select {
+		case <-ctx.Done():
+			// Return the last known error, or the context error if none exists.
+			if err != nil {
+				return resp, err
+			}
+			return nil, ctx.Err()
+		default:
+		}
+
 		// CRITICAL FIX: Clear the response from the previous attempt if this is a retry.
 		// If the previous attempt returned a retryable status code (e.g., 503), 'resp' is non-nil.
 		// The execution logic (like H1 fallback check `if resp == nil`) requires resp to be nil
