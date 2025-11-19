@@ -772,6 +772,7 @@ func TestIsErrorPageContext_URLPathHeuristics(t *testing.T) {
 		{"Contains /500/", "http://example.com/a/500/b", "", true},
 		{"Path ends with /404/", "http://example.com/error/404/", "", true},
 		{"Path with query params", "http://example.com/path/404?a=1", "", true},
+		{"Path with file extension and query", "http://example.com/error/404.php?id=123", "", true},
 	}
 
 	for _, tt := range tests {

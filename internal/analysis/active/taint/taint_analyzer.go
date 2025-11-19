@@ -1010,10 +1010,10 @@ func (a *Analyzer) isErrorPageContext(pageURL, pageTitle string) bool {
 	}
 	path := parsedURL.Path
 	// BUG-FIX: Check for contains /404/ or suffix /404 to be more flexible.
-	if strings.Contains(path, "/404/") || strings.HasSuffix(path, "/404") {
+	if strings.Contains(path, "/404/") || strings.HasSuffix(path, "/404") || strings.Contains(path, "/404.") {
 		return true
 	}
-	if strings.Contains(path, "/500/") || strings.HasSuffix(path, "/500") {
+	if strings.Contains(path, "/500/") || strings.HasSuffix(path, "/500") || strings.Contains(path, "/500.") {
 		return true
 	}
 
