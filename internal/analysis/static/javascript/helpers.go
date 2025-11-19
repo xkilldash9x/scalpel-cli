@@ -143,14 +143,7 @@ func findLineStart(source []byte, idx int) int {
 		return 0
 	}
 
-	// Start searching backwards from the character *before* the index,
-	// unless the index is 0.
-	searchStart := idx
-	if searchStart > 0 {
-		searchStart--
-	}
-
-	for i := searchStart; i >= 0; i-- {
+	for i := idx; i >= 0; i-- {
 		if source[i] == '\n' {
 			return i + 1
 		}
