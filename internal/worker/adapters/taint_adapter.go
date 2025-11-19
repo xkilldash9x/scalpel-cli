@@ -2,7 +2,7 @@
 // internal/worker/adapters/taint_adapter.go
 package adapters
 
-import ( // This is a comment to force a change
+import (
 	"context"
 	"fmt"
 	"time"
@@ -10,6 +10,7 @@ import ( // This is a comment to force a change
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/active/taint"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"go.uber.org/zap"
 )
 
@@ -24,7 +25,7 @@ func NewTaintAdapter() *TaintAdapter {
 }
 
 func (a *TaintAdapter) Analyze(ctx context.Context, analysisCtx *core.AnalysisContext) error {
-	logger := analysisCtx.Logger.With(zap.String("adapter", a.Name()))
+	logger := observability.GetLogger().With(zap.String("adapter", a.Name()))
 	logger.Info("Initializing taint analysis")
 
 	if analysisCtx.Global.BrowserManager == nil {

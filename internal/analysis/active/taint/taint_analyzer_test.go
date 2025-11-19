@@ -1,4 +1,3 @@
-// File: internal/analysis/active/taint/taint_analyzer_test.go
 package taint
 
 import (
@@ -21,6 +20,8 @@ import (
 	"go.uber.org/zap/zaptest/observer"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/static/javascript"
 	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
 )
 
@@ -85,6 +86,184 @@ func setupAnalyzer(t *testing.T, configMod func(*Config), oastEnabled bool) (*An
 	analyzer, err := NewAnalyzer(config, reporter, oastProviderIface, logger)
 	require.NoError(t, err, "NewAnalyzer should not return an error")
 	return analyzer, reporter, oastProvider
+}
+
+// --- NEW SUITE: Hybrid IAST (Smart Probing & Correlation) ---
+
+func TestHybrid_SmartProbing_GeneratesProbes(t *testing.T) {
+	// 1. Setup Analyzer with standard probes
+	probes := []ProbeDefinition{
+		{Type: schemas.ProbeTypeXSS, Payload: "XSS_{{.Canary}}"},
+	}
+	analyzer, _, _ := setupAnalyzer(t, func(c *Config) {
+		c.Probes = probes
+		c.Target, _ = url.Parse("http://example.com/app")
+	}, false)
+
+	// 2. Inject Fake Static Findings (Simulating SAST results)
+	// Finding 1: Vulnerability using a query parameter "q"
+	// Finding 2: Vulnerability using a hash parameter "state"
+	analyzer.findingsMutex.Lock()
+	analyzer.staticFindings["app.js"] = []javascript.StaticFinding{
+		{
+			Source:        "param:query:q", // Unified source format
+			CanonicalType: schemas.SinkInnerHTML,
+			Location:      javascript.LocationInfo{Line: 10},
+		},
+		{
+			Source:        "param:hash:state",
+			CanonicalType: schemas.SinkEval,
+			Location:      javascript.LocationInfo{Line: 20},
+		},
+	}
+	analyzer.findingsMutex.Unlock()
+
+	// 3. Mock Session to capture Navigation
+	mockSession := mocks.NewMockSessionContext()
+	ctx := context.Background()
+
+	// We expect Navigations.
+	// One for Query Params logic, one for Hash Params logic.
+	// The order depends on map iteration, so we use Matchers.
+
+	var visitedURLs []string
+	mockSession.On("Navigate", ctx, mock.MatchedBy(func(u string) bool {
+		visitedURLs = append(visitedURLs, u)
+		return true
+	})).Return(nil)
+
+	// Mock Humanoid pause (return nil)
+	// We need to check if analyzer implements HumanoidProvider or handles nil.
+	// The code checks `if h == nil { return nil }`, so we don't need to mock Humanoid if we don't provide it.
+
+	// 4. Execute Smart Probes
+	analyzer.generateAndExecuteSmartProbes(ctx, mockSession, nil)
+
+	// 5. Verify Results
+	assert.GreaterOrEqual(t, len(visitedURLs), 2, "Should navigate at least twice (once for q, once for state)")
+
+	// Check for Query Param Injection
+	foundQueryInjection := false
+	for _, u := range visitedURLs {
+		parsed, _ := url.Parse(u)
+		if parsed.Query().Get("q") != "" && strings.Contains(parsed.Query().Get("q"), "SCALPEL_SMART_Q_XSS_") {
+			foundQueryInjection = true
+		}
+	}
+	assert.True(t, foundQueryInjection, "Smart Probe failed to inject into discovered query param 'q'")
+
+	// Check for Hash Param Injection
+	foundHashInjection := false
+	for _, u := range visitedURLs {
+		parsed, _ := url.Parse(u)
+		// Hash might be encoded, e.g. state=...
+		if strings.Contains(parsed.Fragment, "state=") && strings.Contains(parsed.Fragment, "SCALPEL_SMART_H_XSS_") {
+			foundHashInjection = true
+		}
+	}
+	assert.True(t, foundHashInjection, "Smart Probe failed to inject into discovered hash param 'state'")
+}
+
+func TestHybrid_Correlation_LinksStaticAndDynamic(t *testing.T) {
+	analyzer, _, _ := setupAnalyzer(t, nil, false)
+
+	// 1. Setup Static Finding (SAST)
+	sastLocation := javascript.LocationInfo{Line: 50, Column: 10, File: "main.js"}
+	staticFinding := javascript.StaticFinding{
+		CanonicalType: schemas.SinkInnerHTML,
+		Source:        core.SourceLocationSearch, // Corresponds to schemas.SourceURLParam
+		Location:      sastLocation,
+		Confidence:    "High",
+	}
+
+	analyzer.findingsMutex.Lock()
+	// Map keys usually match the file path or URL
+	analyzer.staticFindings["http://example.com/main.js"] = []javascript.StaticFinding{staticFinding}
+	analyzer.findingsMutex.Unlock()
+
+	// 2. Create a Dynamic Finding (IAST) that matches
+	// - Same Sink (InnerHTML)
+	// - Same Source (URLParam)
+	// - Nearby Location (Line 50 vs Line 52)
+	canary := "TEST_CANARY"
+	probe := ActiveProbe{Type: schemas.ProbeTypeXSS, Source: schemas.SourceURLParam, Canary: canary}
+
+	dynamicFinding := CorrelatedFinding{
+		Sink:             schemas.SinkInnerHTML,
+		Probe:            probe,
+		Canary:           canary,
+		StackTrace:       "at func (http://example.com/main.js:52:15)", // Within 3 lines of 50
+		ConfirmedDynamic: true,
+		ConfirmedStatic:  false, // Initially false
+	}
+
+	// 3. Run Correlation
+	analyzer.correlateWithStaticFindings(&dynamicFinding)
+
+	// 4. Verify Linking
+	assert.True(t, dynamicFinding.ConfirmedStatic, "Should be confirmed by SAST")
+	assert.True(t, dynamicFinding.IsConfirmed, "IsConfirmed should be set to true due to SAST verification")
+	assert.NotNil(t, dynamicFinding.StaticFinding, "StaticFinding struct should be linked")
+	assert.Equal(t, sastLocation, dynamicFinding.StaticFinding.Location)
+}
+
+func TestHybrid_Correlation_NoMatch(t *testing.T) {
+	analyzer, _, _ := setupAnalyzer(t, nil, false)
+
+	// 1. Static Finding (Source: Cookie)
+	staticFinding := javascript.StaticFinding{
+		CanonicalType: schemas.SinkInnerHTML,
+		Source:        core.SourceDocumentCookie,
+		Location:      javascript.LocationInfo{Line: 50},
+	}
+	analyzer.findingsMutex.Lock()
+	analyzer.staticFindings["http://example.com/main.js"] = []javascript.StaticFinding{staticFinding}
+	analyzer.findingsMutex.Unlock()
+
+	// 2. Dynamic Finding (Source: URL Param) - Mismatch!
+	dynamicFinding := CorrelatedFinding{
+		Sink:             schemas.SinkInnerHTML,
+		Probe:            ActiveProbe{Source: schemas.SourceURLParam}, // Mismatch
+		StackTrace:       "at func (http://example.com/main.js:50:10)",
+	}
+
+	// 3. Run Correlation
+	analyzer.correlateWithStaticFindings(&dynamicFinding)
+
+	// 4. Verify NO Linking
+	assert.False(t, dynamicFinding.ConfirmedStatic)
+	assert.Nil(t, dynamicFinding.StaticFinding)
+}
+
+// --- NEW: Robustness for External Interactions ---
+
+func TestAnalyze_HandlesNavigationFailure(t *testing.T) {
+	analyzer, _, _ := setupAnalyzer(t, nil, false)
+	mockSession := mocks.NewMockSessionContext()
+	ctx := context.Background()
+
+	// Mock Instrumentation Success
+	mockSession.On("ExposeFunction", mock.Anything, mock.Anything, mock.Anything).Return(nil)
+	mockSession.On("InjectScriptPersistently", mock.Anything, mock.Anything).Return(nil)
+
+	// Mock Navigation FAILURE
+	navErr := fmt.Errorf("network unreachable")
+	mockSession.On("Navigate", mock.Anything, mock.Anything).Return(navErr).Once()
+
+	// Probing phases follow...
+	// Persistent Source Probing calls ExecuteScript
+	mockSession.On("ExecuteScript", mock.Anything, mock.Anything, mock.Anything).Return(json.RawMessage("null"), nil).Maybe()
+	// And Navigates to refresh
+	mockSession.On("Navigate", mock.Anything, mock.Anything).Return(nil).Maybe()
+	// Interaction phase
+	mockSession.On("Interact", mock.Anything, mock.Anything).Return(nil).Maybe()
+
+	// Execute
+	err := analyzer.Analyze(ctx, mockSession)
+
+	// We expect NO error returned from Analyze, it should log the warning and continue
+	assert.NoError(t, err)
+	mockSession.AssertCalled(t, "Navigate", mock.Anything, mock.Anything)
 }
 
 // Test Cases: Initialization and Configuration
@@ -492,7 +671,17 @@ func TestProcessOASTInteraction_Valid(t *testing.T) {
 
 	analyzer.registerProbe(probe)
 	interactionTime := time.Now().UTC()
-	oastEvent := OASTInteraction{Canary: canary, Protocol: "DNS", SourceIP: "1.2.3.4", InteractionTime: interactionTime}
+
+	// FIX: Initialize using the embedded schema struct because OASTInteraction uses struct embedding.
+	oastEvent := OASTInteraction{
+		OASTInteraction: schemas.OASTInteraction{
+			Canary:          canary,
+			Protocol:        "DNS",
+			SourceIP:        "1.2.3.4",
+			InteractionTime: interactionTime,
+		},
+	}
+
 	reporter.On("Report", mock.Anything).Return().Once()
 	analyzer.eventsChan <- oastEvent
 	finalizeCorrelationTest(t, analyzer)

@@ -1,7 +1,11 @@
 // Filename: probes.go
 package taint
 
-import "github.com/xkilldash9x/scalpel-cli/api/schemas"
+import (
+	"github.com/xkilldash9x/scalpel-cli/api/schemas"
+	// Import core definitions (Step 1)
+	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
+)
 
 // TaintFlowPath represents a logical path from a probe (representing a taint
 // source) to a sink. This is used to define a ruleset for valid and invalid
@@ -264,90 +268,9 @@ func DefaultProbes() []ProbeDefinition {
 	}
 }
 
-// DefaultSinks provides a default list of JavaScript functions, properties, and
-// methods to be instrumented by the taint analysis shim. This list covers a wide
-// range of common sinks for vulnerabilities like XSS, open redirect, and data
-// exfiltration.
+// DefaultSinks provides a default list of JavaScript sinks to be instrumented by the taint analysis shim.
+// (Step 1: Delegate to the unified core list)
 func DefaultSinks() []SinkDefinition {
-	return []SinkDefinition{
-		// -- Execution Sinks (High Risk) --
-		{Name: "eval", Type: schemas.SinkEval, Setter: false, ArgIndex: 0}, // Global eval
-		// setTimeout/setInterval are only dangerous if the first argument is a string.
-		{Name: "setTimeout", Type: schemas.SinkEval, Setter: false, ArgIndex: 0, ConditionID: "IS_STRING_ARG0"},
-		{Name: "setInterval", Type: schemas.SinkEval, Setter: false, ArgIndex: 0, ConditionID: "IS_STRING_ARG0"},
-		// Function constructor sinks
-		{Name: "Function", Type: schemas.SinkFunctionConstructor, Setter: false, ArgIndex: 0},
-		{Name: "Function.prototype.constructor", Type: schemas.SinkFunctionConstructor, Setter: false, ArgIndex: 0},
-
-		// -- DOM Manipulation & HTML Rendering Sinks --
-		{Name: "document.write", Type: schemas.SinkDocumentWrite, Setter: false, ArgIndex: 0},
-		{Name: "document.writeln", Type: schemas.SinkDocumentWrite, Setter: false, ArgIndex: 0},
-
-		// These apply to standard DOM and Shadow DOM elements due to prototype inheritance.
-		{Name: "Element.prototype.innerHTML", Type: schemas.SinkInnerHTML, Setter: true},
-		{Name: "Element.prototype.outerHTML", Type: schemas.SinkOuterHTML, Setter: true},
-		{Name: "Element.prototype.insertAdjacentHTML", Type: schemas.SinkInnerHTML, Setter: false, ArgIndex: 1},
-
-		// DOMParser sink
-		{Name: "DOMParser.prototype.parseFromString", Type: schemas.SinkInnerHTML, Setter: false, ArgIndex: 0},
-
-		// jQuery sinks (Common sources of DOM XSS)
-		{Name: "jQuery.prototype.html", Type: schemas.SinkInnerHTML, Setter: false, ArgIndex: 0},
-		{Name: "jQuery.prototype.append", Type: schemas.SinkInnerHTML, Setter: false, ArgIndex: 0},
-		{Name: "jQuery.prototype.prepend", Type: schemas.SinkInnerHTML, Setter: false, ArgIndex: 0},
-		{Name: "jQuery.prototype.after", Type: schemas.SinkInnerHTML, Setter: false, ArgIndex: 0},
-		{Name: "jQuery.prototype.before", Type: schemas.SinkInnerHTML, Setter: false, ArgIndex: 0},
-		{Name: "jQuery.prototype.replaceWith", Type: schemas.SinkInnerHTML, Setter: false, ArgIndex: 0},
-		{Name: "jQuery.globalEval", Type: schemas.SinkEval, Setter: false, ArgIndex: 0},
-		{Name: "jQuery.parseHTML", Type: schemas.SinkInnerHTML, Setter: false, ArgIndex: 0},
-
-		// -- Navigation Sinks (Open Redirect / Protocol-based XSS / SPA Routing) --
-		/*
-			FIX: Instrument Location.prototype instead of the 'location' instance (e.g., window.location).
-			Browsers lock down the 'location' object instance ([LegacyUnforgeable] attributes in WebIDL),
-			preventing modification of its methods/properties directly on the instance.
-			Instrumenting the prototype is allowed and effective across modern browsers.
-		*/
-		// Instrumenting the 'href' setter on the prototype covers both `location.href = X` and `location = X`.
-		{Name: "Location.prototype.href", Type: schemas.SinkNavigation, Setter: true},
-		{Name: "Location.prototype.assign", Type: schemas.SinkNavigation, Setter: false, ArgIndex: 0},
-		{Name: "Location.prototype.replace", Type: schemas.SinkNavigation, Setter: false, ArgIndex: 0},
-
-		{Name: "open", Type: schemas.SinkNavigation, Setter: false, ArgIndex: 0}, // Global open (window.open)
-
-		// History API (SPA Navigation/DOM XSS vectors) - Added for increased effectiveness in SPAs.
-		// The URL is the 3rd argument (index 2).
-		{Name: "History.prototype.pushState", Type: schemas.SinkNavigation, Setter: false, ArgIndex: 2},
-		{Name: "History.prototype.replaceState", Type: schemas.SinkNavigation, Setter: false, ArgIndex: 2},
-
-		// -- Resource Loading Sinks --
-		{Name: "HTMLScriptElement.prototype.src", Type: schemas.SinkScriptSrc, Setter: true},
-		{Name: "HTMLIFrameElement.prototype.src", Type: schemas.SinkIframeSrc, Setter: true},
-		{Name: "HTMLIFrameElement.prototype.srcdoc", Type: schemas.SinkIframeSrcDoc, Setter: true},
-
-		// -- Data Exfiltration / Network Sinks --
-		{Name: "WebSocket.prototype.send", Type: schemas.SinkWebSocketSend, Setter: false, ArgIndex: 0},
-
-		// navigator.sendBeacon (Arg 1 is the data)
-		{Name: "navigator.sendBeacon", Type: schemas.SinkSendBeacon, Setter: false, ArgIndex: 1, ConditionID: "SEND_BEACON_DATA_EXISTS"},
-
-		// XHR: Body (send) or URL (open)
-		{Name: "XMLHttpRequest.prototype.send", Type: schemas.SinkXMLHTTPRequest, Setter: false, ArgIndex: 0, ConditionID: "XHR_SEND_DATA_EXISTS"},
-		{Name: "XMLHttpRequest.prototype.open", Type: schemas.SinkXMLHTTPRequestURL, Setter: false, ArgIndex: 1},
-
-		// Fetch: URL (arg 0) or Body (arg 1) - Handled dynamically in JS Shim
-		{Name: "fetch", Type: schemas.SinkFetchURL, Setter: false, ArgIndex: 0},
-		{Name: "fetch", Type: schemas.SinkFetch, Setter: false, ArgIndex: 1},
-
-		// -- Inter-Process Communication (IPC) Sinks --
-
-		// window.postMessage (Taint flowing to other windows/iframes)
-		// Note: We instrument Window.prototype, but this might fail in some environments if Window is not exposed globally or is locked down.
-		// It generally works in standard browser contexts.
-		{Name: "Window.prototype.postMessage", Type: schemas.SinkPostMessage, Setter: false, ArgIndex: 0},
-		// Worker.postMessage (Taint flowing to Web Workers)
-		{Name: "Worker.prototype.postMessage", Type: schemas.SinkWorkerPostMessage, Setter: false, ArgIndex: 0},
-		// DedicatedWorkerGlobalScope.postMessage (Taint flowing from Worker back to main thread)
-		{Name: "DedicatedWorkerGlobalScope.prototype.postMessage", Type: schemas.SinkPostMessage, Setter: false, ArgIndex: 0},
-	}
+	// SinkDefinition is aliased to core.SinkDefinition in types.go
+	return core.DefaultSinks()
 }

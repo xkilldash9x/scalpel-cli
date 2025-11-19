@@ -122,9 +122,11 @@ func FormatLocation(filename string, node *sitter.Node, source []byte) LocationI
 	}
 
 	return LocationInfo{
-		File:    filename,
-		Line:    int(startPoint.Row) + 1, // 0-indexed to 1-indexed
-		Column:  int(startPoint.Column),
+		File: filename,
+		Line: int(startPoint.Row) + 1, // 0-indexed to 1-indexed
+		// Column is typically 1-indexed in reports, but Tree-sitter uses 0-indexed byte offset.
+		// We add 1 for display consistency.
+		Column:  int(startPoint.Column) + 1,
 		Snippet: snippet,
 	}
 }
@@ -141,7 +143,14 @@ func findLineStart(source []byte, idx int) int {
 		return 0
 	}
 
-	for i := idx; i >= 0; i-- {
+	// Start searching backwards from the character *before* the index,
+	// unless the index is 0.
+	searchStart := idx
+	if searchStart > 0 {
+		searchStart--
+	}
+
+	for i := searchStart; i >= 0; i-- {
 		if source[i] == '\n' {
 			return i + 1
 		}
