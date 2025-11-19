@@ -8,6 +8,7 @@ import (
 
 	// Import the package containing the schemas using its full module path.
 	schemas "github.com/xkilldash9x/scalpel-cli/api/schemas"
+	"github.com/xkilldash9x/scalpel-cli/internal/llmutil"
 
 	"github.com/google/go-cmp/cmp"
 	"github.com/stretchr/testify/require"
@@ -445,7 +446,7 @@ func TestHumanoidAndLLMSerialization(t *testing.T) {
 			UserPrompt:   "What is the capital of France?",
 			Tier:         schemas.TierPowerful,
 			Options: schemas.GenerationOptions{
-				Temperature:     0.7,
+				Temperature:     llmutil.Float64Ptr(0.7),
 				ForceJSONFormat: true,
 				TopP:            0.9,
 				TopK:            40,

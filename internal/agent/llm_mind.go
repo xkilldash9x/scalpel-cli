@@ -17,6 +17,7 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/llmutil"
 )
 
 // LLMMind is the cognitive core of the agent, implementing the `Mind` interface
@@ -379,7 +380,7 @@ func (m *LLMMind) decideNextAction(ctx context.Context, contextSnapshot *schemas
 		SystemPrompt: systemPrompt,
 		UserPrompt:   userPrompt,
 		Tier:         schemas.TierPowerful,
-		Options:      schemas.GenerationOptions{ForceJSONFormat: true, Temperature: 0.2},
+		Options:      schemas.GenerationOptions{ForceJSONFormat: true, Temperature: llmutil.Float64Ptr(0.2)},
 	}
 
 	response, err := m.llmClient.Generate(apiCtx, req)
