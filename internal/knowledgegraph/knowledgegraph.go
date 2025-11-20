@@ -53,6 +53,7 @@ func (kg *InMemoryKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 	kg.mu.Lock()
 	defer kg.mu.Unlock()
 
+	// 1. Validate existence of source and destination nodes.
 	if _, exists := kg.nodes[edge.From]; !exists {
 		return fmt.Errorf("source node with id '%s' not found for edge", edge.From)
 	}
@@ -60,19 +61,42 @@ func (kg *InMemoryKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 		return fmt.Errorf("destination node with id '%s' not found for edge", edge.To)
 	}
 
-	isNew := true
-	if _, exists := kg.edges[edge.ID]; exists {
-		isNew = false
-	}
+	// Fix 6: Check if the edge already exists and handle updates to the outgoingEdges index.
+	existingEdge, exists := kg.edges[edge.ID]
 
-	kg.edges[edge.ID] = edge
-
-	if isNew {
+	if exists {
+		// If the source node is changing (the edge is "moving"), we must update the index.
+		if existingEdge.From != edge.From {
+			// Remove from the old source node's list.
+			kg.removeFromOutgoing(existingEdge.From, edge.ID)
+			// Add to the new source node's list. (We know it's not there yet because the source changed)
+			kg.outgoingEdges[edge.From] = append(kg.outgoingEdges[edge.From], edge.ID)
+		}
+		// If the source node is the same, the index doesn't need changing.
+	} else {
+		// If it's a new edge, simply add it to the index.
 		kg.outgoingEdges[edge.From] = append(kg.outgoingEdges[edge.From], edge.ID)
 	}
 
+	// 3. Store the edge data (handles both insert and update of properties).
+	kg.edges[edge.ID] = edge
+
 	kg.log.Debug("Edge added or updated", zap.String("ID", edge.ID), zap.String("From", edge.From), zap.String("To", edge.To))
 	return nil
+}
+
+// removeFromOutgoing removes an edge ID from a node's outgoing list.
+// Assumes the caller holds the write lock (kg.mu.Lock()).
+func (kg *InMemoryKG) removeFromOutgoing(nodeID, edgeID string) {
+	edges := kg.outgoingEdges[nodeID]
+	for i, id := range edges {
+		if id == edgeID {
+			// Efficiently remove the element (order doesn't matter): swap with the last element and truncate.
+			edges[i] = edges[len(edges)-1]
+			kg.outgoingEdges[nodeID] = edges[:len(edges)-1]
+			return
+		}
+	}
 }
 
 // GetNode retrieves a node by its ID.
@@ -115,8 +139,17 @@ func (kg *InMemoryKG) GetNeighbors(ctx context.Context, nodeID string) ([]schema
 
 	neighbors := make([]schemas.Node, 0, len(edgeIDs))
 	for _, edgeID := range edgeIDs {
-		edge := kg.edges[edgeID]
-		neighborNode := kg.nodes[edge.To]
+		// Added checks for consistency, although internal logic should prevent these cases.
+		edge, ok := kg.edges[edgeID]
+		if !ok {
+			kg.log.Warn("Inconsistency found: edge ID in index but not in edges map", zap.String("edge_id", edgeID))
+			continue
+		}
+		neighborNode, ok := kg.nodes[edge.To]
+		if !ok {
+			kg.log.Warn("Inconsistency found: destination node not found", zap.String("node_id", edge.To))
+			continue
+		}
 		neighbors = append(neighbors, neighborNode)
 	}
 	return neighbors, nil
@@ -138,7 +171,11 @@ func (kg *InMemoryKG) GetEdges(ctx context.Context, nodeID string) ([]schemas.Ed
 
 	edges := make([]schemas.Edge, 0, len(edgeIDs))
 	for _, edgeID := range edgeIDs {
-		edge := kg.edges[edgeID]
+		edge, ok := kg.edges[edgeID]
+		if !ok {
+			kg.log.Warn("Inconsistency found: edge ID in index but not in edges map", zap.String("edge_id", edgeID))
+			continue
+		}
 		edges = append(edges, edge)
 	}
 
@@ -156,6 +193,12 @@ func (kg *InMemoryKG) QueryImprovementHistory(ctx context.Context, goalObjective
 	// This in-memory version requires a full scan and unmarshalling to filter.
 	for _, node := range kg.nodes {
 		if node.Type == schemas.NodeImprovementAttempt {
+
+			// Fix 7: Check if Properties is valid JSON before unmarshalling
+			if len(node.Properties) == 0 || string(node.Properties) == "null" {
+				continue
+			}
+
 			var props schemas.ImprovementAttemptProperties
 			if err := json.Unmarshal(node.Properties, &props); err != nil {
 				kg.log.Warn("Failed to unmarshal properties for history query", zap.String("node_id", node.ID), zap.Error(err))

@@ -79,7 +79,7 @@ func (p *PostgresKG) AddNode(ctx context.Context, node schemas.Node) error {
 	return nil
 }
 
-// AddEdge inserts a new edge or updates an existing one based on its logical uniqueness.
+// AddEdge inserts a new edge or updates an existing one based on its ID.
 func (p *PostgresKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 	props := edge.Properties
 	if len(props) == 0 || string(props) == "null" {
@@ -87,12 +87,15 @@ func (p *PostgresKG) AddEdge(ctx context.Context, edge schemas.Edge) error {
 	}
 
 	// The query is synchronized with the kg_edges table structure.
-	// This relies on the PRIMARY KEY (from_node, to_node, type) defined in the migration.
+	// Fix 8: Changed conflict target to (id) to align with InMemoryKG behavior and allow structural updates.
+	// We must update all fields as they might have changed.
 	_, err := p.pool.Exec(ctx, `
         INSERT INTO kg_edges (id, from_node, to_node, type, label, properties, created_at, last_seen)
         VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
-        ON CONFLICT (from_node, to_node, type) DO UPDATE SET
-            id = EXCLUDED.id, -- Ensure the application-provided ID is updated on conflict
+        ON CONFLICT (id) DO UPDATE SET
+            from_node = EXCLUDED.from_node,
+            to_node = EXCLUDED.to_node,
+            type = EXCLUDED.type,
             label = EXCLUDED.label,
             properties = EXCLUDED.properties,
             last_seen = EXCLUDED.last_seen;
@@ -169,6 +172,11 @@ func (p *PostgresKG) GetEdge(ctx context.Context, id string) (schemas.Edge, erro
 
 // GetNeighbors retrieves all nodes directly connected from a given node.
 func (p *PostgresKG) GetNeighbors(ctx context.Context, nodeID string) ([]schemas.Node, error) {
+	// Fix 9: Verify the node exists to ensure consistency with InMemoryKG.
+	if err := p.checkNodeExists(ctx, nodeID); err != nil {
+		return nil, err
+	}
+
 	rows, err := p.pool.Query(ctx, `
         SELECT n.id, n.type, n.label, n.status, n.properties, n.created_at, n.last_seen
         FROM kg_nodes n
@@ -202,6 +210,11 @@ func (p *PostgresKG) GetNeighbors(ctx context.Context, nodeID string) ([]schemas
 
 // GetEdges finds all outgoing edges originating from a specific node.
 func (p *PostgresKG) GetEdges(ctx context.Context, nodeID string) ([]schemas.Edge, error) {
+	// Fix 9: Verify the node exists.
+	if err := p.checkNodeExists(ctx, nodeID); err != nil {
+		return nil, err
+	}
+
 	rows, err := p.pool.Query(ctx, `
         SELECT id, from_node, to_node, type, label, properties, created_at, last_seen
         FROM kg_edges WHERE from_node = $1;
@@ -230,6 +243,20 @@ func (p *PostgresKG) GetEdges(ctx context.Context, nodeID string) ([]schemas.Edg
 
 	p.log.Debug("Retrieved edges successfully", zap.String("node_id", nodeID), zap.Int("count", len(edges)))
 	return edges, nil
+}
+
+// checkNodeExists is a helper function to verify if a node exists.
+func (p *PostgresKG) checkNodeExists(ctx context.Context, nodeID string) error {
+	var exists bool
+	err := p.pool.QueryRow(ctx, "SELECT EXISTS(SELECT 1 FROM kg_nodes WHERE id = $1)", nodeID).Scan(&exists)
+	if err != nil {
+		p.log.Error("Failed to check for node existence", zap.String("node_id", nodeID), zap.Error(err))
+		return fmt.Errorf("failed to verify node existence: %w", err)
+	}
+	if !exists {
+		return fmt.Errorf("node with id '%s' not found", nodeID)
+	}
+	return nil
 }
 
 // QueryImprovementHistory retrieves past improvement attempts using efficient JSONB queries.

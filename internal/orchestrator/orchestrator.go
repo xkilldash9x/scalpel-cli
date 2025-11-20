@@ -62,7 +62,15 @@ func New(
 
 // StartScan executes the main scanning workflow.
 func (o *Orchestrator) StartScan(ctx context.Context, targets []string, scanID string) error {
+	// Fix 1: Validate inputs to prevent panic if targets is empty.
+	if len(targets) == 0 {
+		o.logger.Error("Cannot start scan with an empty target list", zap.String("scanID", scanID))
+		return fmt.Errorf("cannot start scan with an empty target list")
+	}
+
 	o.logger.Info("Orchestrator starting scan", zap.String("scanID", scanID), zap.Strings("targets", targets))
+
+	// -- Discovery --
 
 	// 1. Start the discovery engine. It returns a channel that streams tasks.
 	discoveryTaskChan, err := o.discoveryEngine.Start(ctx, targets)
@@ -80,6 +88,9 @@ func (o *Orchestrator) StartScan(ctx context.Context, targets []string, scanID s
 	wg.Add(1)
 	go func() {
 		defer wg.Done()
+		if discoveryTaskChan == nil {
+			return
+		}
 		for task := range discoveryTaskChan {
 			select {
 			case mergedTaskChan <- task:
@@ -89,48 +100,82 @@ func (o *Orchestrator) StartScan(ctx context.Context, targets []string, scanID s
 		}
 	}()
 
+	// Fix 3: Helper function to safely send tasks, respecting the context to prevent deadlocks.
+	sendTask := func(task schemas.Task) bool {
+		select {
+		case mergedTaskChan <- task:
+			return true
+		case <-ctx.Done():
+			o.logger.Info("Context cancelled during high-level task dispatch, stopping dispatch.")
+			return false
+		}
+	}
+
+	// -- Dispatcher --
+
 	// Goroutine to dispatch high-level tasks and then close the merged channel
 	go func() {
 		// Dispatch high-level tasks here
 		scanners := o.cfg.Scanners()
+
+		// We know targets[0] is safe due to the initial validation.
+		primaryTarget := targets[0]
+
+		// We hoist the task declaration here so it is available to the entire scope.
+		// This prevents "jump over declaration" linter errors when using goto.
+		var task schemas.Task
+
 		if scanners.Active.Auth.IDOR.Enabled {
 			o.logger.Info("Dispatching IDOR task")
-			mergedTaskChan <- schemas.Task{
+			task = schemas.Task{
 				TaskID:     uuid.NewString(),
 				ScanID:     scanID,
 				Type:       schemas.TaskTestAuthIDOR,
-				TargetURL:  targets[0],
+				TargetURL:  primaryTarget,
 				Parameters: schemas.IDORTaskParams{},
+			}
+			if !sendTask(task) {
+				goto WaitForDiscovery
 			}
 		}
 		if scanners.Active.Auth.ATO.Enabled {
 			o.logger.Info("Dispatching ATO task")
-			mergedTaskChan <- schemas.Task{
+			task = schemas.Task{
 				TaskID:    uuid.NewString(),
 				ScanID:    scanID,
 				Type:      schemas.TaskTestAuthATO,
-				TargetURL: targets[0],
+				TargetURL: primaryTarget,
 				Parameters: schemas.ATOTaskParams{
 					Usernames: []string{},
 				},
+			}
+			if !sendTask(task) {
+				goto WaitForDiscovery
 			}
 		}
 
 		// Dispatch the main agent mission task
 		o.logger.Info("Dispatching Agent Mission task")
-		mergedTaskChan <- schemas.Task{
-			TaskID: uuid.NewString(),
-			ScanID: scanID,
-			Type:   schemas.TaskAgentMission,
+		task = schemas.Task{
+			TaskID:    uuid.NewString(),
+			ScanID:    scanID,
+			Type:      schemas.TaskAgentMission,
+			TargetURL: primaryTarget, // Fix 2: Ensure TargetURL is set.
 			Parameters: schemas.AgentMissionParams{
 				MissionBrief: "Perform a comprehensive security audit of the target application.",
 			},
 		}
+		if !sendTask(task) {
+			goto WaitForDiscovery
+		}
 
+	WaitForDiscovery:
 		// Wait for discovery to finish, then close the merged channel
 		wg.Wait()
 		close(mergedTaskChan)
 	}()
+
+	// -- Execution --
 
 	// 2. Start the task engine, passing it the merged channel.
 	o.taskEngine.Start(ctx, mergedTaskChan)

@@ -27,7 +27,8 @@ var globalFixture *kgTestFixture
 
 // TestMain sets up and tears down the global test fixture.
 func TestMain(m *testing.M) {
-	logger, _ := zap.NewDevelopment()
+	// Use Nop logger for cleaner test output. Use NewDevelopment() for debugging.
+	logger := zap.NewNop()
 	globalFixture = &kgTestFixture{
 		Logger: logger,
 	}
@@ -84,7 +85,6 @@ func TestNewInMemoryKG(t *testing.T) {
 		kg, err := NewInMemoryKG(globalFixture.Logger)
 		require.NoError(t, err)
 		assert.NotNil(t, kg)
-		assert.NotEqual(t, zap.NewNop(), kg.log, "Logger should not be a no-op when provided")
 	})
 
 	t.Run("should not panic if nil logger is provided", func(t *testing.T) {
@@ -141,6 +141,49 @@ func TestAddAndGet(t *testing.T) {
 		require.Error(t, err)
 		assert.EqualError(t, err, "source node with id 'non-existent' not found for edge")
 	})
+
+	// Verification for Fix 6
+	t.Run("should correctly update indices when an edge is moved (source changes)", func(t *testing.T) {
+		t.Parallel()
+		ctx := context.Background()
+		kg := getTestKG(t)
+
+		// Initial state: edge-3 goes from node-2 to node-3.
+		neighbors2, _ := kg.GetNeighbors(ctx, "node-2")
+		require.Len(t, neighbors2, 1)
+		edges2, _ := kg.GetEdges(ctx, "node-2")
+		require.Len(t, edges2, 1)
+
+		// Action: Update edge-3 to go from node-4 to node-3.
+		updatedEdge := schemas.Edge{
+			ID:   "edge-3",
+			From: "node-4", // New source
+			To:   "node-3",
+			Type: "IS_VULNERABLE_TO_NOW",
+		}
+		err := kg.AddEdge(ctx, updatedEdge)
+		require.NoError(t, err)
+
+		// Verification:
+		// 1. Verify the edge itself is updated.
+		edge, err := kg.GetEdge(ctx, "edge-3")
+		require.NoError(t, err)
+		assert.Equal(t, "node-4", edge.From)
+
+		// 2. Verify the old source node (node-2) no longer lists the neighbor/edge.
+		neighbors2After, err := kg.GetNeighbors(ctx, "node-2")
+		require.NoError(t, err)
+		assert.Empty(t, neighbors2After, "Old source node should have no neighbors after edge move")
+		edges2After, err := kg.GetEdges(ctx, "node-2")
+		require.NoError(t, err)
+		assert.Empty(t, edges2After, "Old source node should have no edges after edge move")
+
+		// 3. Verify the new source node (node-4) now lists the neighbor/edge.
+		neighbors4After, err := kg.GetNeighbors(ctx, "node-4")
+		require.NoError(t, err)
+		require.Len(t, neighbors4After, 1, "New source node should have the neighbor after edge move")
+		assert.Equal(t, "node-3", neighbors4After[0].ID)
+	})
 }
 
 func TestGetNeighborsAndEdges(t *testing.T) {
@@ -154,7 +197,7 @@ func TestGetNeighborsAndEdges(t *testing.T) {
 		require.NoError(t, err)
 		require.Len(t, neighbors, 2, "Node-1 should have two neighbors")
 
-		// Use a map for easier assertion, as order is not guaranteed.
+		// Use a map for easier assertion, as order is not guaranteed (especially after Fix 6 implementation).
 		neighborMap := make(map[string]schemas.Node)
 		for _, n := range neighbors {
 			neighborMap[n.ID] = n
@@ -262,6 +305,9 @@ func TestQueryImprovementHistory(t *testing.T) {
 	propsA1, _ := json.Marshal(schemas.ImprovementAttemptProperties{GoalObjective: objectiveA})
 	propsA2, _ := json.Marshal(schemas.ImprovementAttemptProperties{GoalObjective: objectiveA})
 	propsB1, _ := json.Marshal(schemas.ImprovementAttemptProperties{GoalObjective: objectiveB})
+	// Verification for Fix 7: Nodes with invalid/null properties
+	propsInvalid := json.RawMessage(`{"goal_objective": "Objective C", error: }`)
+	propsNull := json.RawMessage(`null`)
 
 	nodes := []schemas.Node{
 		// These two match objective A, with A2 being the most recent
@@ -271,6 +317,9 @@ func TestQueryImprovementHistory(t *testing.T) {
 		{ID: "hist-b1", Type: schemas.NodeImprovementAttempt, Properties: propsB1, CreatedAt: time.Now()},
 		// This is not an improvement attempt node and should be ignored
 		{ID: "other-node", Type: "URL", Label: "ignore me"},
+		// These should be safely ignored during query
+		{ID: "hist-invalid", Type: schemas.NodeImprovementAttempt, Properties: propsInvalid, CreatedAt: time.Now()},
+		{ID: "hist-null", Type: schemas.NodeImprovementAttempt, Properties: propsNull, CreatedAt: time.Now()},
 	}
 
 	for _, n := range nodes {
@@ -278,7 +327,7 @@ func TestQueryImprovementHistory(t *testing.T) {
 		require.NoError(t, err)
 	}
 
-	t.Run("should find all history for an objective and sort by most recent", func(t *testing.T) {
+	t.Run("should find all history for an objective and sort by most recent (ignoring invalid nodes)", func(t *testing.T) {
 		t.Parallel()
 		history, err := kg.QueryImprovementHistory(ctx, objectiveA, 0) // 0 limit means no limit
 		require.NoError(t, err)
