@@ -2,6 +2,11 @@
 package reporting
 
 import (
+	// Added imports for fingerprinting (Bug 1)
+	"crypto/sha1"
+	"encoding/hex"
+	"sort"
+
 	"encoding/json"
 	"fmt"
 	"io"
@@ -14,6 +19,7 @@ import (
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+
 	// The import "github.com/xkilldash9x/scalpel-cli/cmd" has been removed to break the import cycle.
 	"github.com/xkilldash9x/scalpel-cli/internal/reporting/sarif"
 )
@@ -27,8 +33,38 @@ const (
 )
 
 // ruleIDSanitizer replaces characters not typically safe or allowed in SARIF Rule IDs.
-// We allow alphanumeric, underscore, dot, and hyphen. Everything else is replaced by a hyphen.
-var ruleIDSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_.-]+`)
+// FIX (Bug 3): We allow alphanumeric, underscore, and dot. Everything else (including hyphens) is replaced
+// by a single hyphen, collapsing consecutive sequences.
+var ruleIDSanitizer = regexp.MustCompile(`[^a-zA-Z0-9_.]+`)
+
+// RuleFingerprint is used to uniquely identify a rule definition based on its content.
+// (Implementation for Bug 1)
+type RuleFingerprint string
+
+// calculateFingerprint generates a unique hash for the defining characteristics of a finding.
+func calculateFingerprint(finding schemas.Finding) RuleFingerprint {
+	// Sort CWEs to ensure consistent hashing regardless of input order.
+	sortedCWEs := append([]string(nil), finding.CWE...)
+	sort.Strings(sortedCWEs)
+
+	data := struct {
+		Name           string
+		Description    string
+		Recommendation string
+		CWEs           []string
+	}{
+		Name:           finding.VulnerabilityName,
+		Description:    finding.Description,
+		Recommendation: finding.Recommendation,
+		CWEs:           sortedCWEs,
+	}
+
+	// Use SHA1 to hash the structure.
+	h := sha1.New()
+	// Encoding errors are highly unlikely for this simple struct.
+	_ = json.NewEncoder(h).Encode(data)
+	return RuleFingerprint(hex.EncodeToString(h.Sum(nil)))
+}
 
 // SARIFReporter implements the Reporter interface for the SARIF 2.1.0 format.
 // It is thread safe.
@@ -36,9 +72,12 @@ type SARIFReporter struct {
 	writer io.WriteCloser
 	logger *zap.Logger
 	log    *sarif.Log
-	// mu protects the log structure and rulesSeen map.
-	mu        sync.Mutex
-	rulesSeen map[string]struct{} // Cache for rule IDs
+	// mu protects the log structure and the maps.
+	mu sync.Mutex
+	// rulesByFingerprint maps a content fingerprint to the generated Rule ID. (Bug 1)
+	rulesByFingerprint map[RuleFingerprint]string
+	// ruleIDUsage tracks how many times a base Rule ID has been used, to handle collisions. (Bug 1)
+	ruleIDUsage map[string]int
 }
 
 // NewSARIFReporter creates a new reporter that writes SARIF output.
@@ -69,10 +108,11 @@ func NewSARIFReporter(writer io.WriteCloser, toolVersion string) *SARIFReporter 
 	}
 
 	return &SARIFReporter{
-		writer:    writer,
-		logger:    logger,
-		log:       log,
-		rulesSeen: make(map[string]struct{}), // Initialize the cache
+		writer:             writer,
+		logger:             logger,
+		log:                log,
+		rulesByFingerprint: make(map[RuleFingerprint]string),
+		ruleIDUsage:        make(map[string]int),
 	}
 }
 
@@ -161,37 +201,56 @@ func (r *SARIFReporter) Close() error {
 	return nil
 }
 
-// ensureRule checks if a rule for the finding's vulnerability type already exists.
-// Implements robust sanitization for the Rule ID.
-// NOTE: Must be called while holding the mutex.
-func (r *SARIFReporter) ensureRule(finding schemas.Finding) string {
-	// REFACTOR: Use flattened finding.VulnerabilityName field.
-	baseID := finding.VulnerabilityName
-	if baseID == "" {
-		baseID = "Unnamed-Vulnerability"
+// sanitizeRuleName creates a standardized base name for the rule ID. (Refactored for Bug 1)
+func (r *SARIFReporter) sanitizeRuleName(name string) string {
+	if name == "" {
+		return "UNNAMED-VULNERABILITY"
 	}
 
 	// 1. Convert to uppercase.
-	sanitizedName := strings.ToUpper(baseID)
-	// 2. Sanitize invalid characters using regex.
+	sanitizedName := strings.ToUpper(name)
+	// 2. Sanitize invalid characters and collapse sequences using regex. (Relies on Bug 3 fix)
 	sanitizedName = ruleIDSanitizer.ReplaceAllString(sanitizedName, "-")
 	// 3. Trim potential leading/trailing hyphens resulting from sanitization.
 	sanitizedName = strings.Trim(sanitizedName, "-")
 
 	// Robustness: Fallback for empty names after sanitization (e.g., if the name was only symbols).
 	if sanitizedName == "" {
-		sanitizedName = "UNKNOWN-VULNERABILITY"
+		return "UNKNOWN-VULNERABILITY"
 	}
+	return sanitizedName
+}
 
-	ruleID := "SCALPEL-" + sanitizedName
-
-	// O(1) Lookup
-	if _, exists := r.rulesSeen[ruleID]; exists {
+// ensureRule ensures a unique rule definition exists for the finding and returns its ID.
+// (Rewritten for Bug 1, incorporates Bug 2 fix)
+// NOTE: Must be called while holding the mutex.
+func (r *SARIFReporter) ensureRule(finding schemas.Finding) string {
+	// 1. Check if we have already seen this exact rule definition (Bug 1).
+	fingerprint := calculateFingerprint(finding)
+	if ruleID, exists := r.rulesByFingerprint[fingerprint]; exists {
 		return ruleID
 	}
 
-	// Rule does not exist, create it.
-	r.logger.Debug("Registering new SARIF rule definition", zap.String("rule_id", ruleID))
+	// 2. This is a new rule definition. Generate a unique Rule ID (Bug 1).
+	baseName := r.sanitizeRuleName(finding.VulnerabilityName)
+	baseRuleID := "SCALPEL-" + baseName
+
+	// Track usage to generate suffixes if necessary.
+	usageCount := r.ruleIDUsage[baseRuleID]
+	r.ruleIDUsage[baseRuleID] = usageCount + 1
+
+	finalRuleID := baseRuleID
+	if usageCount > 0 {
+		// If the base ID has already been used (by a different fingerprint), append a suffix.
+		finalRuleID = fmt.Sprintf("%s-%d", baseRuleID, usageCount)
+		r.logger.Debug("Rule ID collision detected, generated new ID with suffix",
+			zap.String("base_id", baseRuleID),
+			zap.String("final_id", finalRuleID),
+		)
+	}
+
+	// 3. Register the new rule.
+	r.logger.Debug("Registering new SARIF rule definition", zap.String("rule_id", finalRuleID))
 
 	driver := r.log.Runs[0].Tool.Driver
 
@@ -203,10 +262,11 @@ func (r *SARIFReporter) ensureRule(finding schemas.Finding) string {
 	// Create a new rule.
 	// REFACTOR: Use flattened finding.VulnerabilityName field.
 	newRule := &sarif.ReportingDescriptor{
-		ID:               ruleID,
+		ID:               finalRuleID,
 		Name:             pString(finding.VulnerabilityName),
 		ShortDescription: &sarif.MultiformatMessageString{Text: pString(finding.VulnerabilityName)},
-		FullDescription:  &sarif.MultiformatMessageString{Text: pString(finding.Recommendation)},
+		// FIX (Bug 2): Use Description for FullDescription, not Recommendation.
+		FullDescription: &sarif.MultiformatMessageString{Text: pString(finding.Description)},
 		Help: &sarif.MultiformatMessageString{
 			Text:     pString(finding.Recommendation),
 			Markdown: pString(markdownHelp),
@@ -219,8 +279,8 @@ func (r *SARIFReporter) ensureRule(finding schemas.Finding) string {
 		},
 	}
 	driver.Rules = append(driver.Rules, newRule)
-	r.rulesSeen[ruleID] = struct{}{} // Add to cache
-	return ruleID
+	r.rulesByFingerprint[fingerprint] = finalRuleID // Map fingerprint to the final ID
+	return finalRuleID
 }
 
 // createLocations converts finding details into SARIF location objects.
