@@ -61,3 +61,4 @@ Thumbs.db
 .envrc
 scalpel
 node_modules/
+config.yaml
