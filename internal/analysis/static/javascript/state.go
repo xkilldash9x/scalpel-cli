@@ -241,6 +241,8 @@ func (t *ObjectTaint) GetPropertyTaint(propName string) TaintState {
 	}
 	// If the specific property isn't tracked, but the structure is generally tainted, return a generic taint.
 	if t.StructureTainted {
+		// Check if any property has a tracked source, use that for approximation if possible
+		// For now, fallback to SourceUnknown is acceptable, but if we stored the structure source, we could use it.
 		// Line 0 indicates unknown origin line within the structure.
 		return NewSimpleTaint(core.SourceUnknown, 0)
 	}
