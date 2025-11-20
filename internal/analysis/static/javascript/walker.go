@@ -326,9 +326,14 @@ func (w *astWalker) finalizeSummary() {
 		sources := strings.Split(string(finding.Source), "|")
 		for _, source := range sources {
 			if strings.HasPrefix(source, "param:") {
+				// Before calling extractParamIndex, ensure we only pass the parameter part.
+				// E.g. "param:3|unknown_source" split by "|" gives "param:3".
+				// extractParamIndex expects "param:N" or "param:N.prop".
 				paramIndex, ok := w.extractParamIndex(core.TaintSource(source))
 				if ok {
 					summary.TaintedParams[paramIndex] = true
+				} else {
+					w.logger.Debug("Failed to extract param index", zap.String("source", source))
 				}
 			}
 		}
@@ -371,10 +376,13 @@ func (w *astWalker) extractParamIndex(source core.TaintSource) (int, bool) {
 		return 0, false
 	}
 	s = strings.TrimPrefix(s, "param:")
-	// Find the end of the number (either end of string or '.')
+	// Find the end of the number (either end of string, '.', or '|')
 	end := len(s)
-	if dotIndex := strings.Index(s, "."); dotIndex != -1 {
+	if dotIndex := strings.Index(s, "."); dotIndex != -1 && dotIndex < end {
 		end = dotIndex
+	}
+	if pipeIndex := strings.Index(s, "|"); pipeIndex != -1 && pipeIndex < end {
+		end = pipeIndex
 	}
 
 	// Use strconv.Atoi for robust integer parsing.
@@ -466,7 +474,10 @@ func (w *astWalker) evaluateTaint(node *sitter.Node) TaintState {
 		return w.evaluateTaint(expr)
 
 	// Literals
-	case "string", "number", "true", "false", "null", "undefined", "array":
+	case "array":
+		return w.evaluateArrayLiteralTaint(node)
+
+	case "string", "number", "true", "false", "null", "undefined":
 		return nil
 
 	default:
@@ -546,6 +557,9 @@ func (w *astWalker) determinePropertyName(node *sitter.Node) (string, bool) {
 		raw := propertyOrIndex.Content(w.source)
 		propName := strings.Trim(raw, "\"'`")
 		return propName, true
+	case "number":
+		// obj[0] (array access)
+		return propertyOrIndex.Content(w.source), true
 	default:
 		// Computed property (e.g., obj[getPropName()] or arr[0])
 		return "", false
@@ -567,6 +581,54 @@ func (w *astWalker) extractStaticKeyName(key *sitter.Node) (string, bool) {
 		// Computed property name or other complex types (e.g. "computed_property_name").
 		return "", false
 	}
+}
+
+// evaluateArrayLiteralTaint handles array creation [a, b, ...c]
+func (w *astWalker) evaluateArrayLiteralTaint(node *sitter.Node) TaintState {
+	objState := NewObjectTaint()
+	elementIndex := 0
+
+	for i := 0; i < int(node.ChildCount()); i++ {
+		child := node.Child(i)
+		if child.Type() == "[" || child.Type() == "]" || child.Type() == "," {
+			continue
+		}
+
+		if child.Type() == "spread_element" {
+			spreadExpr := child.ChildByFieldName("argument")
+			if spreadExpr == nil && child.ChildCount() > 1 {
+				spreadExpr = child.Child(1)
+			}
+			spreadTaint := w.evaluateTaint(spreadExpr)
+			if spreadTaint != nil && spreadTaint.IsTainted() {
+				// Merge spread taint into the structure.
+				// Since arrays are numerically indexed, spreading an object or array
+				// makes specific indices unpredictable in this simple model,
+				// so we taint the structure.
+				objState.StructureTainted = true
+				// We also merge any known properties just in case.
+				if spreadObj, ok := spreadTaint.(*ObjectTaint); ok {
+					for k, v := range spreadObj.Properties {
+						// Try to parse key as int?
+						// For now, just merge structure taint.
+						_ = k
+						_ = v
+					}
+				}
+			}
+		} else {
+			valTaint := w.evaluateTaint(child)
+			if valTaint != nil && valTaint.IsTainted() {
+				objState.SetPropertyTaint(strconv.Itoa(elementIndex), valTaint)
+			}
+			elementIndex++
+		}
+	}
+
+	if objState.IsTainted() {
+		return objState
+	}
+	return nil
 }
 
 // evaluateObjectLiteralTaint handles object creation, including modern syntax like spread and shorthand properties.
@@ -785,7 +847,34 @@ func (w *astWalker) evaluateCallWithSummary(callNode, argsNode *sitter.Node, sum
 	for i, arg := range args {
 		paramIndex := i // Approximation: assumes argument index matches parameter index.
 
+		// If call uses rest argument or spread, index matching is tricky.
+		// But here we are checking if the specific argument 'i' flows to return.
+		// For rest parameters in the CALLEE definition (e.g. ...rest), they capture remaining args.
+		// Our FunctionSummary stores TaintedParams by index of the CALLEE.
+
+		// If callee has ...rest at index 3.
+		// Caller: test(a,b,c,d,e).
+		// args[3], args[4] -> param 3.
+
+		// We need a better mapping if we want to support rest params in CALLEE summaries fully.
+		// Current approximation: direct index mapping.
+
+		// However, for rest parameter at the END, all subsequent args map to it.
+		// We don't know the callee signature here easily (tree-sitter node doesn't link to def).
+		// We rely on summary.ParamToReturn having keys.
+
+		// If paramIndex is greater than max key in ParamToReturn, check if max key was a rest param?
+		// We don't know if it was rest.
+		// But if we have a key '3' and caller has args 3, 4, 5. They likely all map to 3 if 3 is rest.
+
+		// Workaround: Check exact match.
 		flowsToReturn := summary.ParamToReturn[paramIndex]
+
+		// Fallback: if not found, check if there is a higher index in summary? No.
+		// Check if the last param in summary is a rest param? We don't store that info in Summary struct.
+		// We only store TaintedParams map[int]bool.
+
+		// Let's check TaintedParams logic in checkCallWithSummary too.
 
 		// Handle spread approximation.
 		if arg.Type() == "spread_element" {
@@ -897,7 +986,16 @@ func (w *astWalker) handleObjectDestructuring(pattern *sitter.Node, state TaintS
 			if isObject {
 				propTaint = objTaint.GetPropertyTaint(propName)
 			} else if state != nil && state.IsTainted() {
-				propTaint = NewSimpleTaint(core.SourceUnknown, int(child.StartPoint().Row))
+				// FIX: If state is simple taint (e.g. param:0), propagate it but path sensitive
+				if simple, ok := state.(SimpleTaint); ok {
+					// Get the source string, e.g. "param:0"
+					src := simple.GetSource()
+					// Create new source "param:0.prop"
+					newSrc := core.TaintSource(fmt.Sprintf("%s.%s", src, propName))
+					propTaint = NewSimpleTaint(newSrc, simple.Line)
+				} else {
+					propTaint = NewSimpleTaint(core.SourceUnknown, int(child.StartPoint().Row))
+				}
 			}
 			w.handleDestructuring(child, propTaint)
 		}
@@ -1095,9 +1193,24 @@ func (w *astWalker) checkArgsAgainstSink(sinkDef StaticSinkDefinition, argsNode 
 func (w *astWalker) checkCallWithSummary(argsNode *sitter.Node, fullNode *sitter.Node, summary *FunctionSummary) {
 	args := w.extractArguments(argsNode)
 
+	// Find the max index in summary.TaintedParams to handle Rest parameters
+	maxParamIndex := -1
+	for idx := range summary.TaintedParams {
+		if idx > maxParamIndex {
+			maxParamIndex = idx
+		}
+	}
+
 	// We iterate through the actual arguments provided.
 	for i, arg := range args {
 		paramIndex := i // Approximation: assumes argument index matches parameter index.
+
+		// If the current argument index exceeds the defined parameters, it might belong to a rest parameter.
+		// We check if the max known parameter (likely the rest param) is tainted.
+		// This is heuristic: we assume if there are more args than params, the last param is a rest param.
+		if i > maxParamIndex && maxParamIndex >= 0 {
+			paramIndex = maxParamIndex
+		}
 
 		flowsToSink := summary.TaintedParams[paramIndex]
 
@@ -1138,7 +1251,7 @@ func (w *astWalker) checkCallWithSummary(argsNode *sitter.Node, fullNode *sitter
 					// CanonicalType is unknown here for summarized functions.
 				}
 				w.reportFinding(argTaint.GetSource(), sinkDef, fullNode)
-				return
+				// Continue to ensure all tainted arguments are reported.
 			}
 		}
 	}
