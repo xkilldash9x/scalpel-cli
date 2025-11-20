@@ -17,8 +17,12 @@ function detectCaptcha() {
 
     for (const selector of captchaSelectors) {
         try {
-            const element = document.querySelector(selector);
-            if (element) {
+            // FIX: Use querySelectorAll to find all matches, not just the first one.
+            // The first match might be hidden (e.g., invisible reCAPTCHA container),
+            // while a subsequent match is the visible one we care about.
+            const elements = document.querySelectorAll(selector);
+
+            for (const element of elements) {
                 // Basic visibility check heuristic
                 const rect = element.getBoundingClientRect();
                 const isVisible = (

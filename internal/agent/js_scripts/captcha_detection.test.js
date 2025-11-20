@@ -253,11 +253,39 @@ describe('detectCaptcha', () => {
         expect(detectCaptcha()).toBe('.g-recaptcha');
     });
 
+    test('should correctly find a visible CAPTCHA when preceded by a hidden one of the same type', () => {
+        const selector = '.g-recaptcha';
+        setDocumentBody(`
+            <div>
+                <div class="g-recaptcha" id="hidden" style="display:none;"></div>
+                <div class="g-recaptcha" id="visible"></div>
+            </div>
+        `);
+
+        // Mock the first one as hidden
+        const hiddenEl = document.getElementById('hidden');
+        mockVisibility('#hidden', false);
+        // Mock the second one as visible
+        const visibleEl = document.getElementById('visible');
+        // We need to mock visibility on the element itself since our mock helper works on selector or finding element
+        // but let's use a custom approach here since IDs are unique
+        Object.defineProperty(hiddenEl, 'offsetWidth', { value: 0 });
+        Object.defineProperty(hiddenEl, 'offsetHeight', { value: 0 });
+        hiddenEl.getBoundingClientRect = () => ({ width: 0, height: 0 });
+
+        Object.defineProperty(visibleEl, 'offsetWidth', { value: 100 });
+        Object.defineProperty(visibleEl, 'offsetHeight', { value: 100 });
+        visibleEl.getBoundingClientRect = () => ({ width: 100, height: 100 });
+
+        // The script should iterate past the first hidden one and return the selector because the second one is visible
+        expect(detectCaptcha()).toBe(selector);
+    });
+
     // --- REFACTORED TEST ---
     // Test for line 45 (non-module environment)
     test('should execute detectCaptcha directly in non-module (browser) environment', () => {
         // 1. Spy on the document method *before* the script runs
-        const querySelectorSpy = jest.spyOn(document, 'querySelector').mockImplementation(() => null);
+        const querySelectorAllSpy = jest.spyOn(document, 'querySelectorAll').mockImplementation(() => []);
         
         // 2. Save original module
         const originalModule = global.module;
@@ -275,12 +303,12 @@ describe('detectCaptcha', () => {
             eval(scriptContent);
             
             // 6. Check that the spy was called by the 'else' block's execution
-            expect(querySelectorSpy).toHaveBeenCalledWith('iframe[src*="recaptcha/api"]');
+            expect(querySelectorAllSpy).toHaveBeenCalledWith('iframe[src*="recaptcha/api"]');
             
         } finally {
             // 7. Restore
             global.module = originalModule; // Restore global
-            querySelectorSpy.mockRestore();
+            querySelectorAllSpy.mockRestore();
             jest.resetModules(); // Clean up
         }
     });
