@@ -26,7 +26,7 @@ logs/
 .credentials.json
 .env
 .env.*
-
+config.yaml
 # Corrected path based on project structure
 internal/browser/testing/
 test_imports.go
@@ -61,4 +61,3 @@ Thumbs.db
 .envrc
 scalpel
 node_modules/
-config.yaml
