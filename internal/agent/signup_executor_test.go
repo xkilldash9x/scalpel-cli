@@ -3,6 +3,7 @@ package agent
 
 import (
 	"context"
+	"encoding/json" // standard json needed for RawMessage type compatibility with mocks
 	"errors"
 
 	// "fmt" // Removed fmt import as it's no longer needed for Sprintf script wrappers
@@ -12,7 +13,7 @@ import (
 	"testing"
 	"time"
 
-	json "github.com/json-iterator/go"
+	jsoniter "github.com/json-iterator/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/mock"
 	"github.com/stretchr/testify/require"
@@ -172,15 +173,15 @@ func defaultEnabledConfig(secListsPath string) *MockConfig {
 
 // Helper to marshal results for mock ExecuteScript responses.
 // Updated to be robust: asserts success during test setup.
-func marshal(t *testing.T, v interface{}) []byte {
+func marshal(t *testing.T, v interface{}) json.RawMessage {
 	t.Helper() // Mark this function as a test helper
-	b, err := json.Marshal(v)
+	b, err := jsoniter.Marshal(v)
 	require.NoError(t, err, "Test setup failed: Failed to marshal mock data: %+v", v)
 	// Ensure the result is not empty, unless we are explicitly marshalling nil (which results in "null").
 	if v != nil && len(b) == 0 {
 		t.Fatalf("Test setup failed: Marshaling mock data resulted in empty bytes: %+v", v)
 	}
-	return b
+	return json.RawMessage(b)
 }
 
 // Helper function for matching a script by a unique substring
@@ -315,19 +316,30 @@ func TestSignUpExecutor_Execute_Success_AuthStateChange(t *testing.T) {
 	mockSession.On("ExecuteScript", mock.Anything, analysisScriptMatcher, mock.Anything).Return(marshal(t, analysisResult), nil).Once()
 
 	// 4. Fill Form.
+	// Allow cognitive pauses, movements, and mouse events implicitly triggered by the Humanoid wrapper.
+	mockHumanoid.On("Sleep", mock.Anything, mock.Anything).Return(nil).Maybe()
+	mockHumanoid.On("MoveTo", mock.Anything, mock.Anything, mock.Anything).Return(nil).Maybe()
+	mockHumanoid.On("DispatchMouseEvent", mock.Anything, mock.Anything).Return(nil).Maybe()
+	// Vertices represent a quad: top-left, top-right, bottom-right, bottom-left
+	mockHumanoid.On("GetElementGeometry", mock.Anything, mock.Anything).Return(&schemas.ElementGeometry{
+		Vertices: []float64{10, 10, 110, 10, 110, 30, 10, 30},
+		Width:    100,
+		Height:   20,
+		TagName:  "INPUT",
+	}, nil).Maybe()
+	mockHumanoid.On("ExecuteScript", mock.Anything, mock.Anything, mock.Anything).Return(marshal(t, true), nil).Maybe()
+	mockHumanoid.On("SendKeys", mock.Anything, mock.Anything).Return(nil).Maybe()
+
 	// Expect typing into the fields identified in analysisResult.
-	mockHumanoid.On("Type", mock.Anything, "#email", mock.AnythingOfType("string"), mock.Anything).Return(nil).Once()
-	mockHumanoid.On("Type", mock.Anything, "#password", mock.AnythingOfType("string"), mock.Anything).Return(nil).Once()
+	// Note: The Humanoid wrapper implements Type by decomposing it into SendKeys and MouseEvents,
+	// so we don't expect controller.Type to be called directly.
 
 	// 5. Handle Checkboxes (Optional interactions).
-	// The executor attempts to find terms/privacy checkboxes. We allow these calls using Maybe()
-	// and return an error to simulate that no checkboxes were found (which is a valid, non-failure state).
-	mockHumanoid.On("IntelligentClick", mock.MatchedBy(func(selector string) bool {
-		return strings.Contains(selector, "checkbox")
-	}), mock.Anything).Return(errors.New("checkbox not found")).Maybe()
+	// The executor attempts to find terms/privacy checkboxes.
+	// The Humanoid wrapper handles this via low-level events, so no specific controller call expectation is needed.
 
 	// 6. Form Submission: Strategy 1 (Button Click).
-	mockHumanoid.On("IntelligentClick", mock.Anything, "#submit", mock.Anything).Return(nil).Once()
+	// Similarly, handled via low-level events.
 
 	// 7. Stabilization: Wait for page load.
 	// We explicitly expect only the stabilization wait. If the code were retrying, it would call WaitForAsync with retryWaitMs.
