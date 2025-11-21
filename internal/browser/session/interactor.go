@@ -90,6 +90,7 @@ type interactiveElement struct {
 //
 // Parameters:
 //   - logger: The logger for the Interactor to use.
+//   - rng: The random number generator to use for element shuffling.
 //   - h: An optional `humanoid.Humanoid` instance for realistic interactions. If nil,
 //     the Interactor will fall back to direct CDP actions.
 //   - stabilizeFn: A function that will be called to wait for the page to stabilize
@@ -97,8 +98,14 @@ type interactiveElement struct {
 //   - executor: An `ActionExecutor` (typically the Session) used to run browser actions.
 //   - sessionCtx: The master context for the browser session, used for cleanup tasks
 //     that must outlive specific interaction operations.
-func NewInteractor(logger *zap.Logger, h *humanoid.Humanoid, stabilizeFn StabilizationFunc, executor ActionExecutor, sessionCtx context.Context) *Interactor {
-	source := rand.NewSource(time.Now().UnixNano())
+func NewInteractor(
+	logger *zap.Logger,
+	rng *rand.Rand, // FIX: Inject RNG
+	h *humanoid.Humanoid,
+	stabilizeFn StabilizationFunc,
+	executor ActionExecutor,
+	sessionCtx context.Context,
+) *Interactor {
 	// Fallback stabilization function if none provided.
 	if stabilizeFn == nil {
 		stabilizeFn = func(ctx context.Context) error {
@@ -118,11 +125,18 @@ func NewInteractor(logger *zap.Logger, h *humanoid.Humanoid, stabilizeFn Stabili
 	if sessionCtx == nil {
 		panic("Interactor created with nil session context reference")
 	}
+
+	// Ensure RNG is not nil
+	if rng == nil {
+		source := rand.NewSource(time.Now().UnixNano())
+		rng = rand.New(source)
+	}
+
 	return &Interactor{
 		logger:      logger.Named("interactor"),
 		humanoid:    h,
 		stabilizeFn: stabilizeFn,
-		rng:         rand.New(source),
+		rng:         rng,
 		executor:    executor,
 		sessionCtx:  sessionCtx,
 	}
@@ -1021,10 +1035,8 @@ func (i *Interactor) typeIntoElement(ctx context.Context, selector string, text 
 	defer opCancel()
 
 	// Strategy: Clear field before typing, whether humanoid or fallback.
-	// This ensures idempotency and mirrors the logic in session.Type.
-
-	// : Use JS evaluation instead of chromedp.SetValue/Clear for robust clearing.
-	// SetValue can fail with "could not set value on node X" if the element is transiently non-interactable.
+	
+	// FIX: Add el.focus() here as well.
 	jsClear := fmt.Sprintf(`(function(selector) {
 		const el = document.querySelector(selector);
 		// If element not found, WaitVisible should ideally catch it, but we check here too.
@@ -1038,6 +1050,7 @@ func (i *Interactor) typeIntoElement(ctx context.Context, selector string, text 
 			 return false; // Cannot clear
 		}
         try {
+            el.focus(); // <--- CRITICAL FIX: Ensure element has focus
 		    el.value = "";
 		    // Dispatch events to ensure reactivity frameworks update
 		    el.dispatchEvent(new Event('input', { bubbles: true }));

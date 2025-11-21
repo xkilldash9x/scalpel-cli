@@ -204,8 +204,7 @@ func (s *Session) Type(ctx context.Context, selector string, text string) error 
 	// 2. Clear the existing value.
 	// 3. Type the new value (Humanoid or SendKeys).
 
-	// FIX: Use JS evaluation instead of chromedp.SetValue/Clear for robust clearing.
-	// SetValue can fail with "could not set value on node X" if the element is transiently non-interactable.
+	// FIX: Add el.focus() to ensure Humanoid keystrokes target this element.
 	jsClear := fmt.Sprintf(`(function(selector) {
 		const el = document.querySelector(selector);
 		// If element not found, WaitVisible should ideally catch it, but we check here too.
@@ -219,6 +218,7 @@ func (s *Session) Type(ctx context.Context, selector string, text string) error 
 			 return false; // Cannot clear
 		}
         try {
+            el.focus(); // <--- CRITICAL FIX: Ensure element has focus before typing
 		    el.value = "";
 		    // Dispatch events to ensure reactivity frameworks update
 		    el.dispatchEvent(new Event('input', { bubbles: true }));

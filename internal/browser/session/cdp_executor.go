@@ -301,15 +301,6 @@ func (e *cdpExecutor) GetElementGeometry(ctx context.Context, selector string) (
 // `json.RawMessage`. The script is configured to be asynchronous and to automatically
 // await promises.
 func (e *cdpExecutor) ExecuteScript(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
-	// Note: chromedp.Evaluate doesn't directly support passing arguments like Playwright.
-	// If args are needed, they must be embedded into the script string carefully,
-	// or set via bindings/window properties beforehand. This implementation assumes args are not used directly.
-	if len(args) > 0 {
-		e.logger.Warn("cdpExecutor.ExecuteScript received arguments, but they are not directly passed to Evaluate.", zap.Int("num_args", len(args)))
-		// Consider erroring out if args are essential:
-		// return nil, fmt.Errorf("passing arguments to ExecuteScript via cdpExecutor is not directly supported")
-	}
-
 	var res json.RawMessage
 
 	// Apply a suitable timeout for script execution to the operational context.
@@ -318,13 +309,27 @@ func (e *cdpExecutor) ExecuteScript(ctx context.Context, script string, args []i
 	opCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
-	// Use the session's runActionsFunc (RunActions).
-	err := e.runActionsFunc(opCtx,
-		chromedp.Evaluate(script, &res, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
-			// Ensure we get the actual result, await promises, handle exceptions silently in JS
-			return p.WithReturnByValue(true).WithAwaitPromise(true).WithSilent(true)
-		}),
-	)
+	var err error
+	if len(args) > 0 {
+		// Use CallFunctionOn to support arguments.
+		// Note: functionDeclaration string, res interface{}, opt CallOption, args ...interface{}
+		err = e.runActionsFunc(opCtx, chromedp.CallFunctionOn(
+			fmt.Sprintf("function() { %s }", script),
+			&res,
+			func(p *runtime.CallFunctionOnParams) *runtime.CallFunctionOnParams {
+				return p.WithAwaitPromise(true).WithSilent(true).WithReturnByValue(true)
+			},
+			args...,
+		))
+	} else {
+		// Use the session's runActionsFunc (RunActions).
+		err = e.runActionsFunc(opCtx,
+			chromedp.Evaluate(script, &res, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+				// Ensure we get the actual result, await promises, handle exceptions silently in JS
+				return p.WithReturnByValue(true).WithAwaitPromise(true).WithSilent(true)
+			}),
+		)
+	}
 
 	if err != nil {
 		// Check for specific timeout error

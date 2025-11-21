@@ -201,6 +201,28 @@ func TestSession(t *testing.T) {
 		assert.True(t, test2, "Second persistent script did not execute on navigation")
 	})
 
+	t.Run("ExecuteScript_WithArgs", func(t *testing.T) {
+		fixture := newTestFixture(t)
+		server := createStaticTestServer(t, `<html><body>Test</body></html>`)
+		session := fixture.Session
+
+		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+		defer cancel()
+
+		require.NoError(t, session.Navigate(ctx, server.URL))
+
+		// Test passing arguments (string, int, boolean)
+		script := `return arguments[0] + "_" + arguments[1] + "_" + arguments[2]`
+		args := []interface{}{"hello", 123, true}
+
+		res, err := session.ExecuteScript(ctx, script, args)
+		require.NoError(t, err)
+
+		var result string
+		require.NoError(t, json.Unmarshal(res, &result))
+		assert.Equal(t, "hello_123_true", result)
+	})
+
 	t.Run("Interaction_BasicClickAndType", func(t *testing.T) {
 		fixture := newTestFixture(t)
 		require.NotNil(t, fixture.Session.humanoid, "Humanoid should be initialized for this test")
@@ -337,6 +359,81 @@ func TestSession(t *testing.T) {
 		}
 	})
 
+	t.Run("ExposeFunctionIntegration_SliceSignature", func(t *testing.T) {
+		fixture := newTestFixture(t)
+		server := createStaticTestServer(t, `<html><body>Test</body></html>`)
+		session := fixture.Session
+
+		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+		defer cancel()
+
+		// Channel to receive the slice from the Go function
+		callbackChan := make(chan []string, 1)
+
+		// Go function expecting a slice of strings
+		myFunc := func(tags []string) {
+			fixture.Logger.Debug("Go slice function called from JS", zap.Strings("tags", tags))
+			select {
+			case callbackChan <- tags:
+			default:
+				t.Log("Warning: Callback channel full or blocked (slice signature)")
+			}
+		}
+
+		require.NoError(t, session.ExposeFunction(ctx, "mySliceFunc", myFunc))
+		require.NoError(t, session.Navigate(ctx, server.URL))
+
+		// Call from JS with an array
+		// This previously failed because convertJSToGoType couldn't handle []interface{} -> []string
+		_, err := session.ExecuteScript(ctx, `setTimeout(() => window.mySliceFunc(["tag1", "tag2", "tag3"]), 50)`, nil)
+		require.NoError(t, err)
+
+		select {
+		case res := <-callbackChan:
+			// Verify the slice was converted correctly
+			assert.Equal(t, []string{"tag1", "tag2", "tag3"}, res)
+		case <-time.After(10 * time.Second):
+			t.Fatal("Timed out waiting for exposed function (slice signature)")
+		}
+	})
+
+	t.Run("ExposeFunctionIntegration_ArraySignature", func(t *testing.T) {
+		fixture := newTestFixture(t)
+		server := createStaticTestServer(t, `<html><body>Test</body></html>`)
+		session := fixture.Session
+
+		ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+		defer cancel()
+
+		// Channel to receive the array from the Go function
+		callbackChan := make(chan [3]string, 1)
+
+		// Go function expecting an array of 3 strings
+		myFunc := func(tags [3]string) {
+			fixture.Logger.Debug("Go array function called from JS", zap.Any("tags", tags))
+			select {
+			case callbackChan <- tags:
+			default:
+				t.Log("Warning: Callback channel full or blocked (array signature)")
+			}
+		}
+
+		require.NoError(t, session.ExposeFunction(ctx, "myArrayFunc", myFunc))
+		require.NoError(t, session.Navigate(ctx, server.URL))
+
+		// Call from JS with an array
+		_, err := session.ExecuteScript(ctx, `setTimeout(() => window.myArrayFunc(["tag1", "tag2", "tag3"]), 50)`, nil)
+		require.NoError(t, err)
+
+		select {
+		case res := <-callbackChan:
+			// Verify the array was converted correctly
+			assert.Equal(t, [3]string{"tag1", "tag2", "tag3"}, res)
+		case <-time.After(10 * time.Second):
+			t.Fatal("Timed out waiting for exposed function (array signature)")
+		}
+	})
+
 	t.Run("NavigateTimeout", func(t *testing.T) {
 		fixture := newTestFixture(t, func(cfg *config.Config) {
 			cfg.SetNetworkNavigationTimeout(200 * time.Millisecond) // Use interface setter
@@ -397,7 +494,7 @@ func TestSession(t *testing.T) {
 			// FIX: Removed assertions for Metadata as the field does not exist in schemas.Finding (MissingFieldOrMethod error).
 			// require.NotNil(t, receivedFinding.Metadata, "Metadata should not be nil")
 			// assert.Equal(t, session.ID(), receivedFinding.Metadata["session_id"], "Session ID should be added to finding metadata")
-			
+
 			// REFACTOR: Check for ObservedAt instead of Timestamp
 			assert.False(t, receivedFinding.ObservedAt.IsZero(), "ObservedAt should be added")
 		case <-time.After(2 * time.Second):
@@ -765,19 +862,31 @@ func TestSession(t *testing.T) {
 			// R4: Reduced timeout from 45s to 30s to prevent racing the global test timeout.
 		}, 30*time.Second, 100*time.Millisecond, "Timed out waiting for IAST Shim Loaded log ("+expectedLogMessage+")")
 
-		// 2. Trigger the event from JS. The handler (__scalpel_sink_event) is exposed during Initialize.
+		// 2. Trigger the event from JS. The handler is exposed during Initialize with a randomized name.
+		// We need to find the exposed function (starts with __scalpel_sink_event_) and call it.
 		jsTrigger := `
-            window.__scalpel_sink_event({
-                "type": "TestXSS",
-                "detail": {
-                    "source": "location.hash",
-                    "value": "<script>alert(1)</script>",
-                    "sink": "element.innerHTML"
-                }
-            });
+			(function() {
+				const callbackName = Object.keys(window).find(k => k.startsWith("__scalpel_sink_event_"));
+				if (callbackName && typeof window[callbackName] === 'function') {
+					window[callbackName]({
+						"type": "TestXSS",
+						"detail": {
+							"source": "location.hash",
+							"value": "<script>alert(1)</script>",
+							"sink": "element.innerHTML"
+						}
+					});
+					return "triggered";
+				}
+				return "callback_not_found";
+			})()
         `
-		_, err := session.ExecuteScript(ctx, jsTrigger, nil)
+		res, err := session.ExecuteScript(ctx, jsTrigger, nil)
 		require.NoError(t, err)
+
+		var result string
+		json.Unmarshal(res, &result)
+		assert.Equal(t, "triggered", result, "Failed to trigger IAST callback via JS")
 
 		// 3. Wait for the finding to appear in the channel
 		select {

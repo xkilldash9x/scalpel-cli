@@ -17,6 +17,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"math"
+	"math/rand"
 	"reflect"
 	"runtime/debug"
 	"sync"
@@ -216,7 +217,9 @@ func (s *Session) Initialize(ctx context.Context, taintTemplate, taintConfig str
 						runActionsFunc: s.RunActions,
 					}
 				}
-				s.interactor = NewInteractor(s.logger.Named("interactor_fallback"), nil, stabilizeFn, s, s.ctx)
+				// Use non-deterministic RNG for fallback
+				rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+				s.interactor = NewInteractor(s.logger.Named("interactor_fallback"), rng, nil, stabilizeFn, s, s.ctx)
 			}
 		}
 	} else {
@@ -495,8 +498,12 @@ func (s *Session) initializeControllers() error {
 		// in stabilize() addresses race conditions related to delayed JS execution.
 		return s.stabilize(stabCtx, 500*time.Millisecond)
 	}
+
+	// FIX: Initialize RNG for production use (non-deterministic)
+	rng := rand.New(rand.NewSource(time.Now().UnixNano()))
+
 	//  Pass 's' (as ActionExecutor) and s.ctx to NewInteractor.
-	s.interactor = NewInteractor(s.logger.Named("interactor"), s.humanoid, stabilizeFn, s, s.ctx)
+	s.interactor = NewInteractor(s.logger.Named("interactor"), rng, s.humanoid, stabilizeFn, s, s.ctx)
 	s.logger.Debug("Interactor initialized.")
 	return nil
 }
@@ -1241,7 +1248,33 @@ func (s *Session) convertJSToGoType(jsArg interface{}, goType reflect.Type) (ref
 		return reflect.Value{}, fmt.Errorf("JS argument was map-like but not map[string]interface{}")
 	}
 
-	// TODO: Add case for []interface{} from JS to Go slice/array if needed.
+	// Handle Slice/Array conversion (JS Array -> Go Slice/Array)
+	if (goType.Kind() == reflect.Slice || goType.Kind() == reflect.Array) && jsType.Kind() == reflect.Slice {
+		s.logger.Debug("Attempting slice/array conversion.", zap.String("from", jsType.String()), zap.String("to", goType.String()))
+		jsLength := jsVal.Len()
+		var newCollection reflect.Value
+
+		if goType.Kind() == reflect.Slice {
+			newCollection = reflect.MakeSlice(goType, jsLength, jsLength)
+		} else { // It's an array
+			goLength := goType.Len()
+			if jsLength != goLength {
+				return reflect.Value{}, fmt.Errorf("cannot convert JS array of length %d to Go array of fixed size %d", jsLength, goLength)
+			}
+			newCollection = reflect.New(goType).Elem()
+		}
+
+		elemType := goType.Elem()
+		for i := 0; i < jsLength; i++ {
+			elemVal := jsVal.Index(i).Interface()
+			convElem, err := s.convertJSToGoType(elemVal, elemType)
+			if err != nil {
+				return reflect.Value{}, fmt.Errorf("failed to convert collection element at index %d: %w", i, err)
+			}
+			newCollection.Index(i).Set(convElem)
+		}
+		return newCollection, nil
+	}
 
 	return reflect.Value{}, fmt.Errorf("incompatible type: cannot convert JS type %s to Go type %s", jsType.String(), goType.String())
 }
@@ -1273,18 +1306,34 @@ func (s *Session) InjectScriptPersistently(ctx context.Context, script string) e
 //
 //	Updated signature to match schemas.SessionContext interface (InvalidIfaceAssign error).
 func (s *Session) ExecuteScript(ctx context.Context, script string, args []interface{}) (json.RawMessage, error) {
-	// Chromedp's Evaluate does not directly support passing arguments easily.
-	if len(args) > 0 {
-		// Log a warning as implementing robust argument passing requires complex IIFE wrapping and JSON handling.
-		s.logger.Warn("Session.ExecuteScript: passing arguments via 'args' parameter is not fully supported with current chromedp backend implementation.")
-	}
-
 	var res json.RawMessage
+
 	// Use RunActions for context safety.
-	err := s.RunActions(ctx, chromedp.Evaluate(script, &res, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
-		// Ensure promises are awaited and actual value is returned, suppress exceptions in JS
-		return p.WithAwaitPromise(true).WithReturnByValue(true).WithSilent(true)
-	}))
+	// Session delegates to runActions directly, no internal timeout logic like cdp_executor here (relies on ctx).
+	var err error
+	if len(args) > 0 {
+		// FIX: Use Evaluate with JSON injection instead of CallFunctionOn.
+		// CallFunctionOn requires an ObjectId (target), which we don't have here.
+		// We marshal the args to JSON and apply them to the function.
+		jsonArgs, marshalErr := json.Marshal(args)
+		if marshalErr != nil {
+			return nil, fmt.Errorf("failed to marshal args for script execution: %w", marshalErr)
+		}
+
+		// Construct a script that executes the user's function with the provided arguments.
+		// We use .apply(null, args) to pass the array of arguments as individual parameters.
+		// The user's script is wrapped in a function to ensure 'arguments' is available if they use it.
+		wrappedScript := fmt.Sprintf(`(function() { %s }).apply(null, %s)`, script, string(jsonArgs))
+
+		err = s.RunActions(ctx, chromedp.Evaluate(wrappedScript, &res, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+			return p.WithAwaitPromise(true).WithReturnByValue(true).WithSilent(true)
+		}))
+	} else {
+		err = s.RunActions(ctx, chromedp.Evaluate(script, &res, func(p *runtime.EvaluateParams) *runtime.EvaluateParams {
+			// Ensure promises are awaited and actual value is returned, suppress exceptions in JS
+			return p.WithAwaitPromise(true).WithReturnByValue(true).WithSilent(true)
+		}))
+	}
 
 	return res, err
 }

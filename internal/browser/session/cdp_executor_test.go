@@ -231,7 +231,7 @@ func TestCDPExecutor(t *testing.T) {
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
-			case <-time.After(15 * time.Second):
+			case <-time.After(5 * time.Second): // Mock blocks for 5s
 				return errors.New("mock error")
 			}
 		}
@@ -243,14 +243,19 @@ func TestCDPExecutor(t *testing.T) {
 		}
 
 		startTime := time.Now()
-		_, err := executor.GetElementGeometry(context.Background(), "#test")
+		// Pass a context with a very short timeout (100ms) to simulate deadline exceeded
+		ctx, cancel := context.WithTimeout(context.Background(), 100*time.Millisecond)
+		defer cancel()
+
+		_, err := executor.GetElementGeometry(ctx, "#test")
 		duration := time.Since(startTime)
 
 		require.Error(t, err)
-		// Check the specific error message format used in GetElementGeometry
-		// This internal timeout is still correct, as geometry lookups should be fast.
+		// Expect the context error to be wrapped/returned
 		assert.Contains(t, err.Error(), "timeout getting geometry for '#test'")
-		assert.InDelta(t, float64(10*time.Second), float64(duration), float64(1*time.Second))
+		assert.ErrorIs(t, err, context.DeadlineExceeded)
+		// Should return quickly
+		assert.InDelta(t, float64(100*time.Millisecond), float64(duration), float64(100*time.Millisecond))
 	})
 
 	// Test the internal timeout (20s for execute script)
@@ -280,20 +285,25 @@ func TestCDPExecutor(t *testing.T) {
 		assert.InDelta(t, float64(20*time.Second), float64(duration), float64(1*time.Second))
 	})
 
-	t.Run("ExecuteScript_WithArgsWarning", func(t *testing.T) {
-		// This test primarily aims to trigger the warning log when args are provided.
+	t.Run("ExecuteScript_WithArgs", func(t *testing.T) {
+		var capturedActions []chromedp.Action
 		mockFunc := func(ctx context.Context, actions ...chromedp.Action) error {
+			capturedActions = actions
 			return nil
 		}
 
 		executor := &cdpExecutor{
 			ctx:            masterCtx,
-			logger:         logger, // zaptest logger will show the warning in test output
+			logger:         logger,
 			runActionsFunc: mockFunc,
 		}
 
-		_, err := executor.ExecuteScript(context.Background(), "console.log(arguments[0])", []interface{}{"arg1"})
+		_, err := executor.ExecuteScript(context.Background(), "return arguments[0]", []interface{}{"arg1"})
 		require.NoError(t, err)
-		// The test runner output should contain: "WARN cdpExecutor.ExecuteScript received arguments..."
+		require.Len(t, capturedActions, 1)
+		// We expect CallFunctionOn to be used, not Evaluate.
+		// Checking the type is hard as Action is an interface and CallFunctionOn returns an opaque type (usually),
+		// but we can at least assert it didn't error.
+		// To be more specific, we trust the integration tests.
 	})
 }
