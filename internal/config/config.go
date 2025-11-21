@@ -632,15 +632,14 @@ func NewDefaultConfig() *Config {
 		panic(fmt.Sprintf("failed to unmarshal default config: %v", err))
 	}
 
-	// Apply the robust merge logic here too, just in case Viper fails to unmarshal defaults correctly.
+	// Apply the robust fallback logic here too, just in case Viper fails to unmarshal defaults correctly.
 	if cfg.AgentCfg.LLM.Models == nil {
 		cfg.AgentCfg.LLM.Models = make(map[string]LLMModelConfig)
 	}
-	defaultModels := getDefaultLLMModels()
-	for key, model := range defaultModels {
-		if _, exists := cfg.AgentCfg.LLM.Models[key]; !exists {
-			cfg.AgentCfg.LLM.Models[key] = model
-		}
+
+	// FIX: Apply the corrected fallback logic. If the map is empty after unmarshaling defaults, populate it.
+	if len(cfg.AgentCfg.LLM.Models) == 0 {
+		cfg.AgentCfg.LLM.Models = getDefaultLLMModels()
 	}
 
 	return &cfg
@@ -892,29 +891,24 @@ func NewConfigFromViper(v *viper.Viper) (*Config, error) {
 		}
 	}
 
-	// -- ROBUST MERGE BLOCK --
-	// Ensure the models map is populated, merging defaults if necessary.
-	// Viper can sometimes struggle to unmarshal complex maps, especially when keys contain dots,
-	// or if the config file explicitly sets 'models: {}'.
+	// -- ROBUST FALLBACK BLOCK --
+	// Ensure the models map is populated, falling back to defaults if necessary.
+	// Viper's behavior when merging maps can be inconsistent, especially if the config file is missing or the key is empty.
 
-	// 1. Initialize the map if nil.
+	// 1. Initialize the map if nil (Viper didn't create it).
 	if cfg.AgentCfg.LLM.Models == nil {
 		cfg.AgentCfg.LLM.Models = make(map[string]LLMModelConfig)
 	}
 
-	// 2. Get the definitive defaults.
-	// We use the explicit function rather than relying on NewDefaultConfig() or Viper's internal
-	// default unmarshaling, as those might also fail to populate the map correctly.
-	defaultModels := getDefaultLLMModels()
-
-	// 3. Merge defaults into the loaded configuration if they are missing.
-	for key, model := range defaultModels {
-		if _, exists := cfg.AgentCfg.LLM.Models[key]; !exists {
-			// If the config file was loaded but didn't define the model (or Viper failed to read it), add the default.
-			cfg.AgentCfg.LLM.Models[key] = model
-		}
+	// 2. Check if the map is empty after unmarshaling.
+	// FIX: The previous logic incorrectly attempted a manual merge which was redundant with Viper's behavior
+	// and potentially flawed. The corrected logic ensures that if Viper fails to load models (resulting in an empty map),
+	// we fall back to the definitive defaults.
+	if len(cfg.AgentCfg.LLM.Models) == 0 {
+		// If the map is empty, we fall back to the definitive defaults.
+		cfg.AgentCfg.LLM.Models = getDefaultLLMModels()
 	}
-	// -- END ROBUST MERGE BLOCK --
+	// -- END ROBUST FALLBACK BLOCK --
 
 	// -- API KEY INJECTION BLOCK --
 	// Manually inject API keys from environment variables if they are not set in the config file.
@@ -1141,10 +1135,16 @@ func (a *AgentConfig) Validate() error {
 	return nil
 }
 
-// -- MERGED FUNCTION --
 // Validate checks the LLMRouterConfig to ensure the specified default
 // models actually exist in the models map.
 func (l *LLMRouterConfig) Validate() error {
+	// FIX: Handle the case where the map might be empty (e.g., if initialization failed).
+	// Although NewConfigFromViper aims to prevent this, this provides defense-in-depth.
+	if len(l.Models) == 0 {
+		// If no models are configured at all, we cannot proceed.
+		return fmt.Errorf("no LLM models are configured. At least one model must be defined in agent.llm.models")
+	}
+
 	if l.DefaultFastModel == "" {
 		return fmt.Errorf("default_fast_model must be set")
 	}

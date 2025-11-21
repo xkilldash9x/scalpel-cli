@@ -1,3 +1,4 @@
+// File: cmd/scalpel/main.go
 /*
 Copyright © 2025 Kyle McAllister (xkilldash9x@proton.me)
 */
@@ -7,6 +8,7 @@ package main
 import (
 	"bufio"
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"os/exec"
@@ -43,7 +45,8 @@ var (
 	// Allows mocking os.Exit in tests.
 	osExit = os.Exit
 	// Allows overriding the timeout in tests.
-	selfHealTimeout = 30 * time.Minute
+	// FIX: Reduced default timeout from 30m to 5m for better responsiveness if self-heal fails.
+	selfHealTimeout = 5 * time.Minute
 	// Allows mocking the trigger function within handlePanic for isolation.
 	triggerSelfHeal = triggerMetalyst
 )
@@ -60,7 +63,13 @@ func main() {
 	// If arguments are passed, execute the command directly and exit.
 	if len(os.Args) > 1 {
 		if err := cmd.Execute(ctx); err != nil {
-			osExit(1)
+			// Check if the error is context.Canceled (e.g., graceful shutdown during scan initiated by Ctrl+C)
+			// cmd.Execute handles the logging, we just handle the exit code.
+			if errors.Is(err, context.Canceled) {
+				osExit(0) // Exit cleanly on graceful shutdown
+			} else {
+				osExit(1) // Exit with error code on failure
+			}
 		}
 		return
 	}
@@ -115,7 +124,12 @@ func executeInteractiveCommand(ctx context.Context, line string) {
 			}
 		}()
 		if err := rootCmd.ExecuteContext(ctx); err != nil {
-			fmt.Fprintln(os.Stderr, err)
+			// In interactive mode, we print the error but do not exit the shell.
+			// Errors logged by cmd.Execute (including context.Canceled) are sufficient.
+			// If we wanted cleaner output for Ctrl+C during an interactive scan:
+			// if errors.Is(err, context.Canceled) {
+			// 	 fmt.Fprintln(os.Stderr, "\nCommand aborted.")
+			// }
 		}
 	}()
 }

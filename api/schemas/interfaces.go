@@ -199,3 +199,13 @@ type OASTInteraction struct {
 }
 
 func (OASTInteraction) isEvent() {}
+
+// Event is a marker interface for event types.
+// It is used to create a sum type of events that can be passed to the javascript package.
+type Event interface {
+	isEvent()
+}
+
+var _ Event = OASTInteraction{}
+
+

@@ -69,6 +69,9 @@ func setupTestServer() *httptest.Server {
                     locale: Intl.DateTimeFormat().resolvedOptions().locale,
                     screenWidth: screen.width,
                     screenHeight: screen.height,
+                    // Added window dimensions (For Bug 3)
+                    innerWidth: window.innerWidth,
+                    innerHeight: window.innerHeight,
                     colorDepth: screen.colorDepth,
                     devicePixelRatio: window.devicePixelRatio,
                     hasChrome: window.chrome !== undefined,
@@ -154,10 +157,58 @@ func TestApplyStealthEvasions_Integration(t *testing.T) {
 		assert.Equal(t, float64(testPersona.Height), fingerprint["screenHeight"], "Screen Height mismatch")
 		assert.Equal(t, float64(testPersona.ColorDepth), fingerprint["colorDepth"], "Color Depth mismatch")
 
+		// Check window dimensions (Test for Bug 3)
+		assert.Equal(t, float64(testPersona.Width), fingerprint["innerWidth"], "Inner Width mismatch")
+		assert.Equal(t, float64(testPersona.Height), fingerprint["innerHeight"], "Inner Height mismatch")
+
 		// Check DPR (Device Pixel Ratio)
 		expectedDPR := float64(testPersona.PixelDepth)
 		assert.Equal(t, expectedDPR, fingerprint["devicePixelRatio"], "Device Pixel Ratio mismatch")
 	})
+}
+
+// TestApply_SafeJSONInjection (Integration Test) verifies Bug 8.
+// It ensures the JSON injection mechanism correctly handles characters (U+2028/U+2029).
+func TestApply_SafeJSONInjection(t *testing.T) {
+	ctx, cancel := setupBrowserContext(t)
+	defer cancel()
+
+	// Create a UserAgent containing the problematic characters.
+	// U+2028 (LINE SEPARATOR) and U+2029 (PARAGRAPH SEPARATOR)
+	problematicUA := "Mozilla/5.0 (Test\u2028Injection\u2029Test) Chrome/99.0.0.0"
+
+	testPersona := schemas.Persona{
+		UserAgent: problematicUA,
+		Platform:  "SafePlatform", // Explicitly set platform
+	}
+
+	// Apply the evasions. If the bug exists, the injection script will have a syntax error.
+	err := ApplyStealthEvasions(ctx, testPersona, zap.NewNop())
+	require.NoError(t, err, "Applying stealth evasions with problematic characters should not fail")
+
+	// Navigate and check if the persona was applied correctly.
+	var result struct {
+		UA         string `json:"ua"`
+		Platform   string `json:"platform"`
+		HasPersona bool   `json:"hasPersona"`
+	}
+
+	err = chromedp.Run(ctx,
+		chromedp.Navigate("about:blank"),
+		// Evaluate script to check navigator properties AND the existence of SCALPEL_PERSONA.
+		// If the injection script failed to parse, SCALPEL_PERSONA won't exist, and evasions won't run.
+		chromedp.Evaluate(`({
+			ua: navigator.userAgent,
+			platform: navigator.platform,
+			hasPersona: window.SCALPEL_PERSONA !== undefined
+		})`, &result),
+	)
+
+	require.NoError(t, err, "Chromedp run should succeed without script errors")
+
+	assert.True(t, result.HasPersona, "window.SCALPEL_PERSONA should be defined (injection script parsed successfully)")
+	assert.Equal(t, problematicUA, result.UA, "UserAgent containing U+2028/U+2029 was not spoofed correctly")
+	assert.Equal(t, "SafePlatform", result.Platform, "Platform was not spoofed correctly")
 }
 
 // TestUnit_CreateDeviceMetricsAction (Unit Test) verifies the orientation and DPR logic, including clamping.
@@ -257,7 +308,9 @@ func TestApply_EmptyPersona(t *testing.T) {
 	ua := fingerprint["ua"].(string)
 	assert.NotEmpty(t, ua)
 	assert.NotContains(t, ua, "HeadlessChrome", "UserAgent should be overridden from the headless default")
-	assert.Equal(t, DefaultPlatform, fingerprint["platform"], "Platform should use default")
+
+	// (Test for Bug 5): When UserAgent is default (Windows), the platform should also be the default (Win32).
+	assert.Equal(t, DefaultPlatform, fingerprint["platform"], "Platform should use default when UA is default")
 
 	// Check languages default
 	langSlice := fingerprint["langs"].([]interface{})
@@ -275,4 +328,39 @@ func TestApply_NilLogger(t *testing.T) {
 		tasks := Apply(persona, nil)
 		assert.NotEmpty(t, tasks, "Tasks should be generated even with nil logger")
 	})
+}
+
+// TestApply_PlatformDerivation (Integration Test) verifies that if Platform is omitted,
+// it is correctly derived from the UserAgent by the browser. (Test for Bug 5)
+func TestApply_PlatformDerivation(t *testing.T) {
+	ctx, cancel := setupBrowserContext(t)
+	defer cancel()
+
+	// 1. Define a persona with a specific UA (macOS) but NO platform.
+	macUA := "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
+	testPersona := schemas.Persona{
+		UserAgent: macUA,
+		// Platform: "", // Intentionally left empty
+	}
+
+	// 2. Apply the stealth evasions.
+	err := ApplyStealthEvasions(ctx, testPersona, nil)
+	require.NoError(t, err, "Applying stealth evasions should not fail")
+
+	// 3. Navigate and evaluate the results.
+	var result struct {
+		UA       string `json:"ua"`
+		Platform string `json:"platform"`
+	}
+	err = chromedp.Run(ctx,
+		chromedp.Navigate("about:blank"),
+		chromedp.Evaluate(`({ua: navigator.userAgent, platform: navigator.platform})`, &result),
+	)
+	require.NoError(t, err, "Chromedp run failed")
+
+	// 4. Assertions
+	assert.Equal(t, macUA, result.UA, "UserAgent mismatch")
+	// The platform should be derived as "MacIntel", NOT the DefaultPlatform ("Win32").
+	assert.Equal(t, "MacIntel", result.Platform, "Platform was not derived correctly from UserAgent")
+	assert.NotEqual(t, DefaultPlatform, result.Platform, "Should not use DefaultPlatform when UA is provided")
 }

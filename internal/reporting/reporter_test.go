@@ -122,7 +122,7 @@ func TestNopWriteCloser_Concept(t *testing.T) {
 		io.Writer
 	}
 	// The key behavior: Close is a no-op returning nil.
-	var closeFunc = func(nwc *testNopWriteCloser) error {
+	var closeFunc = func(_ *testNopWriteCloser) error {
 		return nil
 	}
 

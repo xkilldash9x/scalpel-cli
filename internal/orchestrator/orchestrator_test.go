@@ -324,7 +324,10 @@ func TestOrchestrator_StartScan(t *testing.T) {
 		discoveryChan := fixture.DiscoveryEngine.taskChan
 		fixture.DiscoveryEngine.mu.Unlock()
 
+		// FIX: Acquire the lock before reading TaskEngine state
+		fixture.TaskEngine.mu.Lock()
 		assert.True(t, fixture.TaskEngine.startCalled, "TaskEngine.Start should have been called")
+		fixture.TaskEngine.mu.Unlock()
 
 		// -- simulate a discovered task --
 		if discoveryChan == nil {

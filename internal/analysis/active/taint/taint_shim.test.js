@@ -39,13 +39,24 @@ function loadShim(sinksConfig) {
 }
 
 // --- Mocks for Fetch API ---
+// VULN-FIX: Use WeakMap to simulate internal slots. 
+// Real Request objects store data in internal slots, not own properties. 
+// This ensures Reflect.ownKeys(req) is empty, accurately matching browser behavior for taint checking.
+const _reqPrivates = new WeakMap();
+
 class MockRequest {
     constructor(url, options) {
-        this.url = url;
-        this.method = (options && options.method) || 'GET';
-        this.body = (options && options.body) || null;
+        _reqPrivates.set(this, {
+            url: url,
+            method: (options && options.method) || 'GET',
+            body: (options && options.body) || null
+        });
     }
+    get url() { return _reqPrivates.get(this).url; }
+    get method() { return _reqPrivates.get(this).method; }
+    get body() { return _reqPrivates.get(this).body; }
 }
+
 class MockResponse {
     constructor(body = '{}', init = { status: 200 }) {
         this.body = body;
@@ -172,11 +183,6 @@ describe('Scalpel Taint Shim (Robustness Suite)', () => {
             // Should verify reporting of shim error, but mainly ensure it returns null and doesn't crash shim
             const result = resolvePath("RestrictedProp.sub");
             expect(result).toBeNull();
-            
-            // Verify internal error reporting (async)
-            // We access the internal reporter via the mocked callback
-            // Note: resolvePath might log to console or reportShimError depending on implementation. 
-            // Based on code: reportShimError(e, ...)
         });
     });
 
@@ -202,14 +208,8 @@ describe('Scalpel Taint Shim (Robustness Suite)', () => {
         });
 
         it('should detect taint in Maps (Keys) - if iterated', () => {
-            // The implementation iterates values(). If it iterates entries or the object itself, it might catch keys.
-            // Based on: `const iterator = (typeof value.values === 'function') ? value.values() : value;`
-            // Map.values() only returns values. So keys are NOT checked by default logic.
-            // This test documents that behavior (or failure).
-            
             const m = new Map();
             m.set(TAINTED_STRING, "value");
-            
             // Expected: False, because we only check values() for iterables
             expect(isTainted(m)).toBe(false); 
         });
@@ -222,10 +222,18 @@ describe('Scalpel Taint Shim (Robustness Suite)', () => {
             
             expect(isTainted(complex)).toBe(true);
         });
+
+        // FIX VERIFICATION TEST
+        it('should detect taint in Request objects (Prototype Accessors)', () => {
+            // This test validates that isTainted correctly accesses properties that are not "own" properties
+            // but are exposed via getters on the prototype (simulating Web API objects like Request).
+            const req = new window.Request(TAINTED_STRING);
+            
+            // Ensure our Mock is behaving like a browser object (hidden internal slot)
+            expect(Reflect.ownKeys(req)).not.toContain('url');
+            expect(req.url).toBe(TAINTED_STRING);
+
+            expect(isTainted(req)).toBe(true);
+        });
     });
-
-    // --- Existing Suites (Preserved for Regression) ---
-    // (Keep your existing suites for Loading, Function Instrumentation, Setter, Prototype Pollution here)
-    // ... [Previous tests omitted for brevity, assume included] ...
-
 });

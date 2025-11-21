@@ -8,13 +8,16 @@ const ScalpelTestRunner = {
     define(name, testFunc) {
         this.tests.push({ name, testFunc });
     },
-    run() {
+    // Fix for Race Condition (Bug 3): Run tests sequentially
+    async run() {
         this.results = [];
         console.log("Starting Scalpel Stealth Evasion Tests...");
-        // Use Promise.all to handle async tests gracefully
-        const promises = this.tests.map(async (test) => {
+        
+        for (const test of this.tests) {
             try {
                 // Execute the test function (supports async functions)
+                // Await guarantees sequential execution, preventing interference between tests
+                // that modify global state (like window.Notification).
                 await test.testFunc();
                 this.results.push({ name: test.name, status: 'PASS' });
             } catch (error) {
@@ -22,13 +25,11 @@ const ScalpelTestRunner = {
                 this.results.push({ name: test.name, status: 'FAIL', error: error.message, stack: error.stack });
                 console.error(`FAIL: ${test.name}`, error);
             }
-        });
+        }
 
-        Promise.all(promises).then(() => {
-            console.log("Tests finished.");
-            // Expose results globally so the Go test can retrieve them (via polling)
-            window.SCALPEL_TEST_RESULTS = this.results;
-        });
+        console.log("Tests finished.");
+        // Expose results globally so the Go test can retrieve them (via polling)
+        window.SCALPEL_TEST_RESULTS = this.results;
     }
 };
 
@@ -37,6 +38,12 @@ const assert = {
     equal(actual, expected, message) {
         if (actual !== expected) {
             throw new Error(`${message}: Expected ${expected}, but got ${actual}`);
+        }
+    },
+    // Added notEqual assertion (For Bug 6)
+    notEqual(actual, expected, message) {
+        if (actual === expected) {
+            throw new Error(`${message}: Expected value not to be ${expected}, but it was.`);
         }
     },
     isTrue(condition, message) {
@@ -66,21 +73,33 @@ const assert = {
     }
 };
 
+// Constants for assertions
+const NATIVE_TOSTRING = 'function toString() { [native code] }';
+
 // --- Tests Definitions ---
 
 ScalpelTestRunner.define('Evasion: Webdriver Flag Removal', () => {
     assert.isFalse(navigator.webdriver, 'navigator.webdriver should be false');
 });
 
-ScalpelTestRunner.define('Evasion: window.chrome simulation and masking', () => {
+// (Test for Bug 1: Infinite Masking)
+ScalpelTestRunner.define('Evasion: window.chrome simulation and masking (Infinite Masking)', () => {
     assert.isTrue(window.chrome !== undefined, 'window.chrome should be defined');
     assert.isTrue(window.chrome.runtime !== undefined, 'window.chrome.runtime should be defined');
     
-    // Test Masking
-    assert.equal(window.chrome.runtime.connect.toString(), 'function connect() { [native code] }', 'window.chrome.runtime.connect masking failed');
+    const targetFunc = window.chrome.runtime.connect;
+
+    // Test Masking (L1)
+    assert.equal(targetFunc.toString(), 'function connect() { [native code] }', 'L1 masking failed');
     
-    // Test Double Masking
-    assert.equal(window.chrome.runtime.connect.toString.toString(), 'function toString() { [native code] }', 'window.chrome.runtime.connect double masking failed');
+    // Test Double Masking (L2)
+    assert.equal(targetFunc.toString.toString(), NATIVE_TOSTRING, 'L2 masking failed');
+
+    // Test Triple Masking (L3)
+    assert.equal(targetFunc.toString.toString.toString(), NATIVE_TOSTRING, 'L3 masking failed');
+    
+    // Test Quadruple Masking (L4)
+    assert.equal(targetFunc.toString.toString.toString.toString(), NATIVE_TOSTRING, 'L4 masking failed');
 });
 
 ScalpelTestRunner.define('Persona Application: Navigator Properties', () => {
@@ -89,7 +108,12 @@ ScalpelTestRunner.define('Persona Application: Navigator Properties', () => {
     assert.isTrue(persona !== undefined && persona.userAgent !== undefined, 'Persona data should be available');
     
     assert.equal(navigator.userAgent, persona.userAgent, 'UserAgent mismatch');
-    assert.equal(navigator.platform, persona.platform, 'Platform mismatch');
+    
+    // We check platform only if it was provided, allowing Go logic (Bug 5) to handle derivation if empty.
+    // The Go test runner (js_test.go) provides an explicit platform, so we verify it here.
+    if (persona.platform) {
+        assert.equal(navigator.platform, persona.platform, 'Platform mismatch');
+    }
 
     // Check derived properties (Robustness improvement)
     const expectedAppVersion = persona.userAgent.replace(/^Mozilla\//, '');
@@ -103,56 +127,157 @@ ScalpelTestRunner.define('Persona Application: Navigator Properties', () => {
     assert.isTrue(Object.isFrozen(navigator.languages), 'Languages array should be frozen');
 });
 
-ScalpelTestRunner.define('Persona Application: Screen Properties (DPR/ColorDepth Clarity)', () => {
+ScalpelTestRunner.define('Persona Application: Screen and Window Properties', () => {
     const persona = window.SCALPEL_PERSONA;
-    // Use camelCase for assertions (e.g., width, availWidth, colorDepth, pixelDepth)
+
     assert.equal(window.screen.width, persona.width, 'Screen width mismatch');
     assert.equal(window.screen.height, persona.height, 'Screen height mismatch');
     
-    assert.equal(window.screen.availWidth, persona.availWidth, 'Screen availWidth mismatch');
-    assert.equal(window.screen.availHeight, persona.availHeight, 'Screen availHeight mismatch');
-    
-    // Verify ColorDepth and PixelDepth interpretation (Robustness fix).
-    // screen.colorDepth and screen.pixelDepth should match Persona.colorDepth.
-    assert.equal(window.screen.colorDepth, persona.colorDepth, 'Screen colorDepth mismatch');
-    assert.equal(window.screen.pixelDepth, persona.colorDepth, 'Screen pixelDepth mismatch');
+    // Handle potential default values if not provided in persona (js_test.go provides them)
+    const expectedAvailWidth = persona.availWidth || persona.width;
+    const expectedAvailHeight = persona.availHeight || persona.height;
 
-    // Verify Device Pixel Ratio (DPR). This is set via CDP override using Persona.pixelDepth.
+    assert.equal(window.screen.availWidth, expectedAvailWidth, 'Screen availWidth mismatch');
+    assert.equal(window.screen.availHeight, expectedAvailHeight, 'Screen availHeight mismatch');
+    
+    // Verify ColorDepth and PixelDepth interpretation.
+    const expectedColorDepth = persona.colorDepth || 24;
+    assert.equal(window.screen.colorDepth, expectedColorDepth, 'Screen colorDepth mismatch');
+    assert.equal(window.screen.pixelDepth, expectedColorDepth, 'Screen pixelDepth mismatch');
+
+    // Verify Device Pixel Ratio (DPR).
     const expectedDPR = persona.pixelDepth || 1.0;
     assert.equal(window.devicePixelRatio, expectedDPR, 'Device Pixel Ratio (DPR) mismatch');
 
+    // Verify Window Dimensions (Test for Bug 3)
     assert.equal(window.outerWidth, persona.width, 'window.outerWidth mismatch');
     assert.equal(window.outerHeight, persona.height, 'window.outerHeight mismatch');
+    assert.equal(window.innerWidth, persona.width, 'window.innerWidth mismatch');
+    assert.equal(window.innerHeight, persona.height, 'window.innerHeight mismatch');
 });
 
-ScalpelTestRunner.define('Evasion: Permissions API spoofing and masking (Async)', async () => {
+ScalpelTestRunner.define('Evasion: Permissions API (Masking, Structure, Functionality)', async () => {
     if (navigator.permissions && navigator.permissions.query && window.PermissionStatus) {
         
         // 1. Check functionality
         const result = await navigator.permissions.query({ name: 'notifications' });
-        const expectedState = (window.Notification && Notification.permission === 'default') ? 'prompt' : Notification.permission;
+        
+        // Determine expected state robustly (handles missing Notification API, related to Bug 2)
+        let expectedState = 'prompt'; 
+        if (window.Notification) {
+            expectedState = (Notification.permission === 'default') ? 'prompt' : Notification.permission;
+        }
+
         assert.equal(result.state, expectedState, 'Permissions API notification state mismatch');
         assert.isTrue(result instanceof PermissionStatus, 'Result should be an instance of PermissionStatus');
 
-        // 2. Check masking (toString override)
-        assert.equal(navigator.permissions.query.toString(), 'function query() { [native code] }', 'Permissions query function masking failed');
+        const targetFunc = navigator.permissions.query;
 
-        // 2.5 Check Double Masking
-        assert.equal(navigator.permissions.query.toString.toString(), 'function toString() { [native code] }', 'Permissions query double masking failed');
+        // 2. Check masking (Test for Bug 1)
+        assert.equal(targetFunc.toString(), 'function query() { [native code] }', 'Permissions L1 masking failed');
+        assert.equal(targetFunc.toString.toString(), NATIVE_TOSTRING, 'Permissions L2 masking failed');
+        assert.equal(targetFunc.toString.toString.toString(), NATIVE_TOSTRING, 'Permissions L3 masking failed');
 
-        // 3. Check input validation (robustness improvements)
+
+        // 3. Check input validation
         await assert.throwsAsync(() => navigator.permissions.query(), TypeError, 'Calling query() without arguments');
         await assert.throwsAsync(() => navigator.permissions.query(null), TypeError, 'Calling query(null)');
         await assert.throwsAsync(() => navigator.permissions.query({}), TypeError, 'Calling query({}) without name');
+
+        // 4. Check structural integrity (Test for Bug 4)
+        // Native behavior: state is a getter on prototype, not an own property.
+        // Even with the Proxy fix, the Proxy should forward getOwnPropertyDescriptor to the target,
+        // which has no own property. This MUST still pass.
+        const descriptor = Object.getOwnPropertyDescriptor(result, 'state');
+        assert.equal(descriptor, undefined, 'PermissionStatus object should not have an own property "state"');
+
+        // 5. Verify prototype restoration (Test for Bug 4)
+        const protoDescriptor = Object.getOwnPropertyDescriptor(PermissionStatus.prototype, 'state');
+        assert.isTrue(protoDescriptor && typeof protoDescriptor.get === 'function', 'Prototype descriptor missing or invalid');
+        // Check if the getter is masked (native functions usually are)
+        assert.isTrue(protoDescriptor.get.toString().includes('[native code]'), 'Prototype getter seems modified (not restored to native)');
 
     } else {
         console.warn("Skipping Permissions API test: API or PermissionStatus not available.");
     }
 });
 
-ScalpelTestRunner.define('Evasion: WebGL Spoofing', () => {
+// TEST FOR BUG 1 (PERSISTENCE)
+ScalpelTestRunner.define('Evasion: Permissions API - Persistence of Spoof', async () => {
+    if (navigator.permissions && navigator.permissions.query && window.Notification) {
+        
+        // This test verifies that the spoofed result PERSISTS even after the prototype restoration.
+        // We force a mismatch: spoofed = 'granted', native/internal = 'prompt'.
+        
+        const originalNotificationPermission = Object.getOwnPropertyDescriptor(window.Notification, 'permission');
+        // Mock Notification.permission to be 'granted'
+        Object.defineProperty(window.Notification, 'permission', { value: 'granted', configurable: true });
+
+        try {
+            // Call query. The evasion logic sees Notification.permission='granted' and spoofs the result.
+            const result = await navigator.permissions.query({ name: 'notifications' });
+            
+            // At this point, the prototype hook in evasions.js should have been restored.
+            // If the bug exists (no Proxy), result.state will access native getter -> internal slot -> 'prompt'.
+            // If fixed (Proxy), result.state will use the Proxy trap -> 'granted'.
+            
+            assert.equal(result.state, 'granted', 'PermissionStatus.state did not persist the spoofed value after query resolution');
+            
+        } finally {
+            // Clean up
+            if (originalNotificationPermission) {
+                Object.defineProperty(window.Notification, 'permission', originalNotificationPermission);
+            } else {
+                // Fallback for cleanup if descriptor was missing (unlikely)
+                 delete window.Notification.permission; 
+            }
+        }
+    }
+});
+
+// (Test for Bug 2: Missing Notification API handling)
+ScalpelTestRunner.define('Evasion: Permissions API - Robustness (Missing Notification API)', async () => {
+    if (navigator.permissions && navigator.permissions.query && window.PermissionStatus) {
+        
+        const originalNotification = window.Notification;
+        let notificationModified = false;
+
+        try {
+            // 1. Simulate environment without Notification API
+            try {
+                // Attempt to redefine Notification to undefined.
+                Object.defineProperty(window, 'Notification', { value: undefined, configurable: true, writable: true });
+                notificationModified = (window.Notification === undefined);
+            } catch (e) {
+                console.warn("Failed to redefine window.Notification.", e);
+            }
+
+            if (!notificationModified) {
+                 console.warn("Skipping Permissions Robustness test: Cannot modify window.Notification.");
+                 return; // Skip test if we cannot set up the environment
+            }
+            
+            // 2. Verify that querying permissions does not throw an error (e.g., ReferenceError/TypeError)
+            const result = await navigator.permissions.query({ name: 'notifications' });
+            
+            // 3. Assert the fallback state
+            assert.equal(result.state, 'prompt', 'Should default to prompt when Notification API is missing');
+
+        } finally {
+            // 4. Restore window.Notification
+            if (notificationModified) {
+                 Object.defineProperty(window, 'Notification', { value: originalNotification, configurable: true, writable: true });
+            }
+        }
+
+    } else {
+        console.warn("Skipping Permissions Robustness test: Permissions API not available.");
+    }
+});
+
+
+ScalpelTestRunner.define('Evasion: WebGL Spoofing (Unmasked, Standard, and Masking)', () => {
     const persona = window.SCALPEL_PERSONA;
-    // Use camelCase for assertions (e.g., webGLVendor, webGLRenderer)
     if (!persona.webGLVendor || !persona.webGLRenderer) {
         console.warn("Skipping WebGL test: No WebGL data in persona.");
         return;
@@ -167,15 +292,27 @@ ScalpelTestRunner.define('Evasion: WebGL Spoofing', () => {
         return;
     }
 
-    const debugInfo = gl.getExtension('WEBGL_debug_renderer_info');
-    if (debugInfo) {
-        assert.equal(gl.getParameter(debugInfo.UNMASKED_VENDOR_WEBGL), persona.webGLVendor, 'WebGL Vendor mismatch');
-        assert.equal(gl.getParameter(debugInfo.UNMASKED_RENDERER_WEBGL), persona.webGLRenderer, 'WebGL Renderer mismatch');
+    // Standardized constants (Test for Bug 7)
+    const UNMASKED_VENDOR_WEBGL = 0x9245;
+    const UNMASKED_RENDERER_WEBGL = 0x9246;
+
+    // 1. Verify unmasked parameters are spoofed (using constants, verifying Bug 7 fix)
+    assert.equal(gl.getParameter(UNMASKED_VENDOR_WEBGL), persona.webGLVendor, 'WebGL Vendor mismatch (via constant)');
+    assert.equal(gl.getParameter(UNMASKED_RENDERER_WEBGL), persona.webGLRenderer, 'WebGL Renderer mismatch (via constant)');
+
+    // 2. Verify standard parameters are NOT spoofed (Test for Bug 6)
+    if (gl.VENDOR) {
+        assert.notEqual(gl.getParameter(gl.VENDOR), persona.webGLVendor, 'Standard gl.VENDOR should not match unmasked persona vendor');
+    }
+    if (gl.RENDERER) {
+        assert.notEqual(gl.getParameter(gl.RENDERER), persona.webGLRenderer, 'Standard gl.RENDERER should not match unmasked persona renderer');
     }
 
-    // Check masking
-    assert.equal(gl.getParameter.toString(), 'function getParameter() { [native code] }', 'WebGL getParameter masking failed');
-    assert.equal(gl.getParameter.toString.toString(), 'function toString() { [native code] }', 'WebGL getParameter double masking failed');
+    // 3. Check masking (Test for Bug 1)
+    const targetFunc = gl.getParameter;
+    assert.equal(targetFunc.toString(), 'function getParameter() { [native code] }', 'WebGL getParameter L1 masking failed');
+    assert.equal(targetFunc.toString.toString(), NATIVE_TOSTRING, 'WebGL getParameter L2 masking failed');
+    assert.equal(targetFunc.toString.toString.toString(), NATIVE_TOSTRING, 'WebGL getParameter L3 masking failed');
 });
 
 

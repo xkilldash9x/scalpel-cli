@@ -43,7 +43,7 @@ func (m *MockWriteCloser) Close() error {
 	return nil
 }
 
-func setupSARIFTest(t *testing.T) (*reporting.SARIFReporter, *MockWriteCloser) {
+func setupSARIFTest(_ *testing.T) (*reporting.SARIFReporter, *MockWriteCloser) {
 	mockWriter := &MockWriteCloser{Buffer: new(bytes.Buffer)}
 	// Test the dependency injection of the version string
 	reporter := reporting.NewSARIFReporter(mockWriter, "v1.2.3-test")

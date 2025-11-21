@@ -88,12 +88,12 @@ func NewMonolithicWorker(
 		}
 	}
 
-	// NEW: Ensure the GlobalContext reflects the initialized adapters.
-	// This makes the registry available to the AgentAdapter (and thus the Agent).
-	if w.globalCtx.Adapters == nil {
-		w.globalCtx.Adapters = w.adapterRegistry
-		logger.Debug("Shared adapter registry with GlobalContext.")
-	}
+	// FIX (Bug 1: Adapter Sync): Ensure the GlobalContext reflects the initialized adapters.
+	// Go maps cannot be compared directly with !=. We unconditionally synchronize
+	// here to ensure the GlobalContext points to the authoritative registry instance
+	// managed by this worker.
+	w.globalCtx.Adapters = w.adapterRegistry
+	w.logger.Debug("Synchronized adapter registry with GlobalContext")
 
 	return w, nil
 }
@@ -168,6 +168,11 @@ func (w *MonolithicWorker) processHumanoidTask(ctx context.Context, analysisCtx 
 		return nil
 	}
 
+	// FIX (Bug 2: Missing TargetURL): Validate that TargetURL is present if steps are provided.
+	if task.TargetURL == "" {
+		return fmt.Errorf("TargetURL is required for HUMANOID_SEQUENCE when steps are provided")
+	}
+
 	persona := schemas.DefaultPersona
 	if params.Persona != nil {
 		persona = *params.Persona
@@ -179,17 +184,22 @@ func (w *MonolithicWorker) processHumanoidTask(ctx context.Context, analysisCtx 
 		return fmt.Errorf("browser manager is not available in global context")
 	}
 
+	// FIX (Bug 3: Taint Config Ignored): Pass the TaintTemplate and TaintConfig from the parameters.
 	sessionCtx, err := browserManager.NewAnalysisContext(
 		ctx,
 		w.cfg,
 		persona,
-		"", // taintTemplate
-		"", // taintConfig
+		params.TaintTemplate, // Use template from params
+		params.TaintConfig,   // Use config from params
 		w.globalCtx.FindingsChan,
 	)
 	if err != nil {
 		return fmt.Errorf("failed to create browser session for humanoid task: %w", err)
 	}
+
+	// FIX (Bug 4: Missing Session Assignment): Ensure the analysis context reflects the newly created session.
+	analysisCtx.Session = sessionCtx
+
 	defer func() {
 		cleanupCtx, cancel := context.WithTimeout(context.Background(), 15*time.Second)
 		defer cancel()
@@ -198,11 +208,10 @@ func (w *MonolithicWorker) processHumanoidTask(ctx context.Context, analysisCtx 
 		}
 	}()
 
-	if task.TargetURL != "" {
-		logger.Debug("Navigating to initial TargetURL", zap.String("url", task.TargetURL))
-		if err := sessionCtx.Navigate(ctx, task.TargetURL); err != nil {
-			return fmt.Errorf("failed to navigate to initial TargetURL %s: %w", task.TargetURL, err)
-		}
+	// Navigation is unconditional now due to the validation (Bug 2).
+	logger.Debug("Navigating to initial TargetURL", zap.String("url", task.TargetURL))
+	if err := sessionCtx.Navigate(ctx, task.TargetURL); err != nil {
+		return fmt.Errorf("failed to navigate to initial TargetURL %s: %w", task.TargetURL, err)
 	}
 
 	h := humanoid.New(w.cfg.Browser().Humanoid, logger.With(zap.String("component", "humanoid")), sessionCtx)

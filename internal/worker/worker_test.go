@@ -8,6 +8,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"testing"
 
 	"github.com/google/uuid"
@@ -20,8 +21,23 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 	"github.com/xkilldash9x/scalpel-cli/internal/worker"
 )
+
+func TestMain(m *testing.M) {
+	// Initialize the global logger for all tests in this package.
+	// This prevents the fallback logger from being used, which can be noisy.
+	cfg := config.NewDefaultConfig()
+	observability.InitializeLogger(cfg.Logger())
+
+	// Run all the tests.
+	exitCode := m.Run()
+
+	// Clean up and flush the logger.
+	observability.Sync()
+	os.Exit(exitCode)
+}
 
 // setupTestEnvironment prepares the basic components needed for worker tests.
 func setupTestEnvironment(t testing.TB) (*config.Config, *zap.Logger, *core.GlobalContext) {
@@ -29,8 +45,8 @@ func setupTestEnvironment(t testing.TB) (*config.Config, *zap.Logger, *core.Glob
 
 	// Initialize config with default values.
 	cfg := config.NewDefaultConfig()
+	logger := observability.GetLogger()
 
-	logger := zap.NewNop()
 	// As the refactor progresses, other components like GlobalContext might
 	// still expect the concrete *config.Config type.
 	globalCtx := &core.GlobalContext{Config: cfg}
@@ -62,8 +78,8 @@ func TestNewMonolithicWorker_Registration(t *testing.T) {
 		t.Run(string(taskType), func(t *testing.T) {
 			analysisCtx := &core.AnalysisContext{
 				Task:   schemas.Task{Type: taskType},
-				Logger: logger,
 				Global: w.GlobalCtx(),
+				Logger: logger,
 			}
 
 			// For this registration test, we don't care about the outcome, just that it doesn't panic
@@ -72,7 +88,7 @@ func TestNewMonolithicWorker_Registration(t *testing.T) {
 
 			// The primary goal of this test is to confirm an adapter is registered.
 			// The most direct way to test this is to ensure we do NOT get the
-			// "no adapter or direct handler registered" error.
+			// "no adapter" error.
 			if err != nil {
 				assert.NotContains(t, err.Error(), "no adapter or direct handler registered for task type",
 					"The adapter should be registered, but an unexpected error occurred.")
@@ -168,9 +184,9 @@ func TestMonolithicWorker_TimeslipAdapter_Success(t *testing.T) {
 
 	analysisCtx := &core.AnalysisContext{
 		Task:      task,
-		Logger:    logger,
 		Global:    globalCtx,
 		TargetURL: parsedURL,
+		Logger:    logger,
 	}
 
 	// 4. Process the task

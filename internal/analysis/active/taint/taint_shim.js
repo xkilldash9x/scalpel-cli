@@ -179,11 +179,13 @@
         if (seen.has(value)) return false;
         seen.add(value);
 
-        // Handle Arrays and specialized iterable objects (URLSearchParams, FormData)
+        // Handle Arrays and specialized iterable objects (URLSearchParams, FormData, Set, Map)
         // ROBUSTNESS: Use scope.* to ensure we use the correct global objects in both Window/Worker contexts and test environments.
         if (Array.isArray(value) ||
             (typeof scope.URLSearchParams !== 'undefined' && value instanceof scope.URLSearchParams) ||
-            (typeof scope.FormData !== 'undefined' && value instanceof scope.FormData)) {
+            (typeof scope.FormData !== 'undefined' && value instanceof scope.FormData) ||
+            (typeof scope.Set !== 'undefined' && value instanceof scope.Set) ||
+            (typeof scope.Map !== 'undefined' && value instanceof scope.Map)) {
 
             const iterator = (typeof value.values === 'function') ? value.values() : value;
             for (const val of iterator) {
@@ -192,6 +194,15 @@
                 }
             }
             return false;
+        }
+
+        // BUG-FIX: Explicitly check Request objects.
+        // Standard traversal via Reflect.ownKeys fails for Request objects because 'url' is an accessor on the prototype,
+        // and the data is stored in an internal slot. We must explicitly check the public API property.
+        if (typeof scope.Request !== 'undefined' && value instanceof scope.Request) {
+            if (isTainted(value.url, depth + 1, seen)) {
+                return true;
+            }
         }
 
         // Handle generic objects

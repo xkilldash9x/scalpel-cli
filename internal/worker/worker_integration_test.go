@@ -70,8 +70,12 @@ func TestMonolithicWorker_Integration_ProcessTask_HumanoidSequence(t *testing.T)
 	w, err := NewMonolithicWorker(cfg, logger, globalCtx)
 	require.NoError(t, err)
 
+	// Define a target URL required for the sequence
+	targetURL := "http://example.com"
+
 	task := schemas.Task{
-		Type: schemas.TaskHumanoidSequence,
+		Type:      schemas.TaskHumanoidSequence,
+		TargetURL: targetURL,
 		Parameters: schemas.HumanoidSequenceParams{
 			Steps: []schemas.HumanoidStep{
 				{Action: schemas.HumanoidMove, Selector: "#test"},
@@ -84,7 +88,13 @@ func TestMonolithicWorker_Integration_ProcessTask_HumanoidSequence(t *testing.T)
 		Logger: logger,
 	}
 
+	// Expect session creation
 	mockBrowserManager.On("NewAnalysisContext", mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything, mock.Anything).Return(mockSessionContext, nil)
+
+	// Expect navigation to the target URL (Required by worker implementation)
+	mockSessionContext.On("Navigate", mock.Anything, targetURL).Return(nil)
+
+	// Expect interactions defined in steps
 	mockSessionContext.On("GetElementGeometry", mock.Anything, "#test").Return(&schemas.ElementGeometry{
 		Vertices: []float64{0, 0, 10, 0, 10, 10, 0, 10},
 		Width:    10,

@@ -47,8 +47,6 @@ type HumanoidProvider interface {
 	GetHumanoid() *humanoid.Humanoid
 }
 
-// REFACTOR: Removed BrowserContextProvider interface as GetContext() is deprecated and anti-pattern.
-
 // Analyzer orchestrates the Hybrid IAST process. It manages dynamic probe injection,
 // event collection, static analysis of loaded scripts, and correlation.
 type Analyzer struct {
@@ -68,12 +66,12 @@ type Analyzer struct {
 	backgroundCtx    context.Context
 	backgroundCancel context.CancelFunc
 
-	// VULN-FIX: Store session-specific, randomized callback names.
+	// Store session-specific, randomized callback names.
 	jsCallbackSinkEventName      string
 	jsCallbackExecutionProofName string
 	jsCallbackShimErrorName      string
 
-	// Hybrid IAST Integration (Step 2/3)
+	// Hybrid IAST Integration
 	jsFingerprinter *javascript.Fingerprinter
 	// staticFindings stores results from SAST engine. Key is filename/URL.
 	staticFindings map[string][]javascript.StaticFinding
@@ -95,7 +93,7 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 	// Apply robust defaults for performance and stability.
 	config = applyConfigDefaults(config)
 
-	// FIX: Create a local copy of the global taint flow rules.
+	// Create a local copy of the global taint flow rules.
 	localValidTaintFlows := make(map[TaintFlowPath]bool, len(ValidTaintFlows))
 	for k, v := range ValidTaintFlows {
 		localValidTaintFlows[k] = v
@@ -107,7 +105,7 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 		taskLogger.Info("No OAST provider configured; out-of-band tests will be skipped.")
 	}
 
-	// VULN-FIX: Generate unique callback names for this analysis session.
+	// Generate unique callback names for this analysis session.
 	shortID := uuid.New().String()[:8]
 	sinkCallbackName := fmt.Sprintf("%s_%s", JSCallbackSinkEvent, shortID)
 	proofCallbackName := fmt.Sprintf("%s_%s", JSCallbackExecutionProof, shortID)
@@ -127,7 +125,7 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 		shimTemplate:    templateContent,
 		validTaintFlows: localValidTaintFlows,
 
-		// VULN-FIX: Store the generated unique names.
+		// Store the generated unique names.
 		jsCallbackSinkEventName:      sinkCallbackName,
 		jsCallbackExecutionProofName: proofCallbackName,
 		jsCallbackShimErrorName:      errorCallbackName,
@@ -138,7 +136,7 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 	}, nil
 }
 
-// --- Hybrid IAST: Static Analysis Execution (Step 3.1) ---
+// -- Hybrid IAST: Static Analysis Execution --
 
 // HandleScriptLoaded (New Method) is the entry point for the SAST engine when a script is loaded.
 // This method is expected to be called by the infrastructure managing the SessionContext
@@ -192,7 +190,7 @@ func (a *Analyzer) runStaticAnalysis(filename, content string) ([]javascript.Sta
 	return findings, nil
 }
 
-// --- End Hybrid IAST: Static Analysis Execution ---
+// -- End Hybrid IAST: Static Analysis Execution --
 
 // UpdateTaintFlowRuleForTesting provides a thread-safe mechanism to modify the
 // taint flow validation rules during tests.
@@ -274,7 +272,7 @@ func (a *Analyzer) Analyze(ctx context.Context, session SessionContext) error {
 		h = provider.GetHumanoid()
 	}
 
-	// NOTE: We rely on the session implementation (browser controller) to intercept scripts
+	// We rely on the session implementation (browser controller) to intercept scripts
 	// and notify the analyzer (e.g., by calling HandleScriptLoaded).
 
 	if err := a.instrument(analysisCtx, session); err != nil {
@@ -470,7 +468,7 @@ func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h 
 		return err
 	}
 
-	// REFACTOR: Pass Humanoid and context down.
+	// Pass Humanoid and context down.
 	if err := a.probePersistentSources(ctx, session, h); err != nil {
 		// Check if the context was cancelled before logging the error.
 		if ctx.Err() == nil {
@@ -478,12 +476,12 @@ func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h 
 		}
 	}
 
-	// REFACTOR: Pause between probing phases.
+	// Pause between probing phases.
 	if err := a.executePause(ctx, h, 400, 150); err != nil {
 		return err
 	}
 
-	// REFACTOR: Pass Humanoid and context down.
+	// Pass Humanoid and context down.
 	if err := a.probeURLSources(ctx, session, h); err != nil {
 		// Check if the context was cancelled before logging the error.
 		if ctx.Err() == nil {
@@ -511,7 +509,7 @@ func (a *Analyzer) executeProbes(ctx context.Context, session SessionContext, h 
 		}
 	}
 
-	// REFACTOR: Pause after interaction phase concludes.
+	// Pause after interaction phase concludes.
 	if err := a.executePause(ctx, h, 1000, 400); err != nil {
 		// We don't return error here as probing is done, we just log if the final pause failed.
 		if ctx.Err() == nil {
@@ -602,7 +600,7 @@ func (a *Analyzer) generateAndExecuteSmartProbes(ctx context.Context, session Se
 	}
 }
 
-// probeSpecificURLParams (New Method) injects probes into specific URL query parameters or hash fragments.
+// injects probes into specific URL query parameters or hash fragments.
 // It iterates one parameter at a time for better isolation and detection.
 func (a *Analyzer) probeSpecificURLParams(ctx context.Context, session SessionContext, h *humanoid.Humanoid, params map[string]bool, useHash bool) error {
 	// Create a safe copy of the target URL to modify it.

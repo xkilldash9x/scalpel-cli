@@ -20,12 +20,18 @@ func TestNewDefaultConfig(t *testing.T) {
 	assert.Equal(t, "info", cfg.Logger().Level)
 	assert.Equal(t, 10, cfg.Engine().WorkerConcurrency)
 	assert.True(t, cfg.Browser().Headless)
-	assert.Equal(t, 30*time.Second, cfg.Network().Timeout)
+	// FIX: The default network timeout is 2m, not 30s.
+	assert.Equal(t, 2*time.Minute, cfg.Network().Timeout)
 	assert.Equal(t, "postgres", cfg.Agent().KnowledgeGraph.Type)
-	assert.Equal(t, "gemini-2.5-pro", cfg.Agent().LLM.DefaultPowerfulModel)
+	// FIX: The default powerful model is gemini-3-pro, not gemini-2.5-pro.
+	assert.Equal(t, "gemini-3-pro", cfg.Agent().LLM.DefaultPowerfulModel)
 	assert.False(t, cfg.Autofix().Enabled)
 	assert.Equal(t, 0.75, cfg.Autofix().MinConfidenceThreshold)
 	assert.Equal(t, "scalpel-autofix-bot", cfg.Autofix().Git.AuthorName)
+
+	// FIX: Verify that the defaults are correctly populated by the fallback logic.
+	assert.NotEmpty(t, cfg.Agent().LLM.Models, "Default models map should not be empty")
+	assert.Contains(t, cfg.Agent().LLM.Models, "gemini-2.5-flash")
 }
 
 // -- Validation Logic Tests --
@@ -140,6 +146,47 @@ func TestConfigValidation(t *testing.T) {
 		assert.Error(t, err)
 		assert.Contains(t, err.Error(), "agent.ltm.cache_janitor_interval_seconds must be a positive integer")
 	})
+
+	// FIX: Added LLM Validation tests
+	t.Run("LLM Validation", func(t *testing.T) {
+		validLLM := NewDefaultConfig().AgentCfg.LLM
+		assert.NoError(t, validLLM.Validate())
+
+		// Case: Missing Default Fast Model
+		missingFast := validLLM
+		missingFast.DefaultFastModel = ""
+		err := missingFast.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "default_fast_model must be set")
+
+		// Case: Default Fast Model Not In Map
+		invalidFast := validLLM
+		invalidFast.DefaultFastModel = "non-existent-model"
+		err = invalidFast.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "default_fast_model 'non-existent-model' not found")
+
+		// Case: Missing Provider in a model
+		missingProvider := validLLM
+		// Create a copy of the map to avoid modifying the original validLLM
+		missingProvider.Models = make(map[string]LLMModelConfig)
+		for k, v := range validLLM.Models {
+			missingProvider.Models[k] = v
+		}
+		model := missingProvider.Models["gemini-2.5-flash"]
+		model.Provider = ""
+		missingProvider.Models["gemini-2.5-flash"] = model
+		err = missingProvider.Validate()
+		assert.Error(t, err)
+		assert.Contains(t, err.Error(), "has no provider")
+
+		// Case: Empty Models Map (Testing the validation safeguard)
+		emptyModels := validLLM
+		emptyModels.Models = map[string]LLMModelConfig{}
+		err = emptyModels.Validate()
+		assert.Error(t, err, "Validation should fail if the models map is empty")
+		assert.Contains(t, err.Error(), "no LLM models are configured")
+	})
 }
 
 // -- Factory Function Tests --
@@ -235,6 +282,107 @@ database:
 		assert.Equal(t, testKGPassword, cfg.Agent().KnowledgeGraph.Postgres.Password)
 		// CRITICAL: Check that the env var *overrode* the value from the config buffer
 		assert.Equal(t, testDBURL, cfg.Database().URL)
+	})
+
+	// FIX: Added this test to verify the complex LLM model merging/fallback logic.
+	t.Run("LLM Model Loading - Partial Override (Viper Merge Behavior)", func(t *testing.T) {
+		// Simulate a user config that overrides one default model and adds a new one.
+		// This tests how Viper merges maps by default when SetDefaults is used.
+		yamlBytes := []byte(`
+agent:
+  llm:
+    default_fast_model: "custom-fast"
+    models:
+      gemini-2.5-flash: # Overriding a default
+        temperature: 0.5
+        api_timeout: "5m"
+      custom-fast: # Adding a new model
+        provider: "ollama"
+        model: "llama3-8b"
+        api_timeout: "1m"
+`)
+		v := viper.New()
+		SetDefaults(v) // 1. Set defaults (includes all Gemini models)
+		v.SetConfigType("yaml")
+		err := v.ReadConfig(bytes.NewBuffer(yamlBytes)) // 2. Load user config
+		require.NoError(t, err)
+
+		// 3. Call the function that performs the merge and validation
+		cfg, err := NewConfigFromViper(v)
+		require.NoError(t, err)
+		require.NotNil(t, cfg)
+
+		llmConfig := cfg.Agent().LLM
+
+		// Assert: Check the overridden default model
+		flashModel, ok := llmConfig.Models["gemini-2.5-flash"]
+		require.True(t, ok, "gemini-2.5-flash should exist")
+		assert.Equal(t, 0.5, flashModel.Temperature, "Temperature should be overridden by YAML")
+		assert.Equal(t, 5*time.Minute, flashModel.APITimeout, "APITimeout should be overridden by YAML")
+		assert.Equal(t, ProviderGemini, flashModel.Provider, "Provider should remain the default") // Default not overridden in YAML
+
+		// Assert: Check the new custom model
+		customModel, ok := llmConfig.Models["custom-fast"]
+		require.True(t, ok, "custom-fast should exist")
+		assert.Equal(t, ProviderOllama, customModel.Provider)
+		assert.Equal(t, "llama3-8b", customModel.Model)
+
+		// Assert: Check that defaults *not* mentioned in YAML still exist (Viper default merge behavior)
+		proModel, ok := llmConfig.Models["gemini-3-pro"]
+		require.True(t, ok, "gemini-3-pro should still exist from defaults")
+		assert.Equal(t, "gemini-3-pro-preview", proModel.Model, "Model name should be the default")
+
+		// Assert: Check the default fast model override
+		assert.Equal(t, "custom-fast", llmConfig.DefaultFastModel)
+	})
+
+	// FIX: This test verifies that the fallback still works if the config file is missing the models section entirely.
+	t.Run("LLM Model Loading - Fallback to Defaults", func(t *testing.T) {
+		// Arrange: A minimal YAML config without the agent.llm.models section.
+		yamlBytes := []byte(`
+engine:
+  worker_concurrency: 5
+`)
+		v := viper.New()
+		SetDefaults(v) // Defaults are set, including LLM models.
+		v.SetConfigType("yaml")
+		err := v.ReadConfig(bytes.NewBuffer(yamlBytes))
+		require.NoError(t, err)
+
+		// Act
+		cfg, err := NewConfigFromViper(v)
+		require.NoError(t, err)
+
+		// Assert
+		// The configuration should contain the default models provided by SetDefaults/Robust Fallback.
+		assert.NotEmpty(t, cfg.Agent().LLM.Models)
+		assert.Contains(t, cfg.Agent().LLM.Models, "gemini-2.5-flash")
+		assert.Equal(t, "gemini-2.5-flash", cfg.Agent().LLM.DefaultFastModel)
+	})
+
+	// FIX: This test verifies the behavior when the user explicitly provides an empty map.
+	t.Run("LLM Model Loading - Explicitly Empty", func(t *testing.T) {
+		// Arrange: YAML config explicitly setting models to empty.
+		yamlBytes := []byte(`
+agent:
+  llm:
+    models: {}
+`)
+		v := viper.New()
+		SetDefaults(v)
+		v.SetConfigType("yaml")
+		err := v.ReadConfig(bytes.NewBuffer(yamlBytes))
+		require.NoError(t, err)
+
+		// Act
+		// The Robust Fallback logic should detect the map is empty (Viper unmarshals {} as an empty map)
+		// and repopulate it with defaults.
+		cfg, err := NewConfigFromViper(v)
+
+		// Assert
+		require.NoError(t, err)
+		assert.NotEmpty(t, cfg.Agent().LLM.Models, "Robust fallback should ensure models are populated if empty in config")
+		assert.Contains(t, cfg.Agent().LLM.Models, "gemini-2.5-flash")
 	})
 }
 

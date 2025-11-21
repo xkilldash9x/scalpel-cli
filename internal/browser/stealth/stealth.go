@@ -1,3 +1,4 @@
+// internal/browser/stealth/stealth.go
 // package stealth provides functionality to apply various browser fingerprinting
 // evasions. It works by injecting a sophisticated JavaScript payload (`evasions.js`)
 // into every new document created in a browser session. This script runs before
@@ -46,11 +47,11 @@ var DefaultLanguages = []string{"en-US", "en"}
 // It combines JavaScript injection with direct CDP command overrides.
 //
 // The process includes:
-// 1. Marshalling the `Persona` into a JSON object.
-// 2. Creating a JavaScript payload that injects the persona and the main evasion script.
-// 3. Adding a CDP action to inject this script on all new documents.
-// 4. Adding CDP actions to override the User-Agent, platform, languages, timezone,
-//    locale, and device metrics.
+//  1. Marshalling the `Persona` into a JSON object.
+//  2. Creating a JavaScript payload that injects the persona and the main evasion script.
+//  3. Adding a CDP action to inject this script on all new documents.
+//  4. Adding CDP actions to override the User-Agent, platform, languages, timezone,
+//     locale, and device metrics.
 //
 // Note: This function returns a `chromedp.Tasks` object, which is a slice of
 // `chromedp.Action`. It must be executed using `chromedp.Run`, as it contains
@@ -73,9 +74,12 @@ func Apply(persona schemas.Persona, logger *zap.Logger) chromedp.Tasks {
 	}
 
 	// 2. Construct the full injection script
-	// Inject the persona data into window.SCALPEL_PERSONA and make it immutable.
+	// Inject the persona data safely using JSON.parse() to prevent script breakage
+	// from characters like U+2028/U+2029. We use %q to safely quote the JSON string
+	// as a Go string literal, ensuring it is correctly interpreted as a JavaScript string literal.
 	injectionScript := fmt.Sprintf(
-		"Object.defineProperty(window, 'SCALPEL_PERSONA', {value: %s, writable: false, configurable: false});\n",
+		"const personaJson = %q;\n"+
+			"Object.defineProperty(window, 'SCALPEL_PERSONA', {value: JSON.parse(personaJson), writable: false, configurable: false});\n",
 		string(jsPersona),
 	)
 
@@ -99,25 +103,39 @@ func Apply(persona schemas.Persona, logger *zap.Logger) chromedp.Tasks {
 	}
 
 	// 4. Apply CDP Overrides (Defense in depth)
-	// Merge persona with defaults.
+
+	// Determine UserAgent
 	userAgent := persona.UserAgent
 	if userAgent == "" {
 		userAgent = DefaultUserAgent
 	}
-	platform := persona.Platform
-	if platform == "" {
-		platform = DefaultPlatform
-	}
+
+	// Determine Languages
 	languages := persona.Languages
 	if len(languages) == 0 {
 		languages = DefaultLanguages
 	}
 
-	tasks = append(tasks,
-		emulation.SetUserAgentOverride(userAgent).
-			WithAcceptLanguage(strings.Join(languages, ",")).
-			WithPlatform(platform),
-	)
+	// Determine Platform (Fix for Bug 5: Inconsistent Platform Defaulting)
+	platform := persona.Platform
+	if platform == "" {
+		if userAgent == DefaultUserAgent {
+			platform = DefaultPlatform
+		} else {
+			// FIX: Manually derive platform from UA because CDP won't do it automatically.
+			platform = derivePlatformFromUA(userAgent)
+		}
+	}
+
+	uaOverride := emulation.SetUserAgentOverride(userAgent).
+		WithAcceptLanguage(strings.Join(languages, ","))
+
+	// Always set the platform if we have one (which we now always should)
+	if platform != "" {
+		uaOverride = uaOverride.WithPlatform(platform)
+	}
+
+	tasks = append(tasks, uaOverride)
 
 	// 5. Apply environment overrides (Timezone, Locale, Device Metrics)
 	if persona.Timezone != "" {
@@ -139,6 +157,34 @@ func Apply(persona schemas.Persona, logger *zap.Logger) chromedp.Tasks {
 	}
 
 	return tasks
+}
+
+// Helper function to derive platform from User Agent string
+func derivePlatformFromUA(ua string) string {
+	lowerUA := strings.ToLower(ua)
+	if strings.Contains(lowerUA, "windows") || strings.Contains(lowerUA, "win32") || strings.Contains(lowerUA, "win64") {
+		return "Win32"
+	}
+	// FIX for Bug 2: Check for iPhone/iPad BEFORE checking for Macintosh.
+	// iPad and iPhone UA strings often contain "like Mac OS X", so they would match
+	// "mac os x" if checked later, resulting in incorrect "MacIntel" platform.
+	if strings.Contains(lowerUA, "iphone") {
+		return "iPhone"
+	}
+	if strings.Contains(lowerUA, "ipad") {
+		return "iPad"
+	}
+	if strings.Contains(lowerUA, "macintosh") || strings.Contains(lowerUA, "mac os x") {
+		return "MacIntel"
+	}
+	if strings.Contains(lowerUA, "android") {
+		return "Linux armv8l" // Common default, though variable
+	}
+	if strings.Contains(lowerUA, "linux") {
+		return "Linux x86_64"
+	}
+	// Fallback
+	return "Win32"
 }
 
 // createDeviceMetricsAction creates the appropriate emulation action for device metrics.

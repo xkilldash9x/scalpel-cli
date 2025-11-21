@@ -46,12 +46,12 @@ func newScanCmd(factory ComponentFactory) *cobra.Command {
 			// Get the original context from the command.
 			ctx := cmd.Context()
 
-			// Retrieve the value of the verbose flag.
+			// Determine the effective verbosity level.
+			// The root command handles the PersistentPreRunE logic which initializes the logger based on the --verbose flag.
+			// We retrieve the final state of the verbose flag (checking both local and persistent if necessary, though typically managed by root).
 			verbose, _ := cmd.Flags().GetBool("verbose")
 
-			// Add the verbose flag's value to the context. This makes it accessible
-			// to downstream functions like runScan without needing to pass it as an
-			// explicit argument. This is a clean way to provide request-scoped values.
+			// Add the verbose flag's value to the context for potential downstream use.
 			ctx = context.WithValue(ctx, "verbose", verbose)
 
 			cfg, err := getConfigFromContext(ctx)
@@ -77,8 +77,10 @@ func newScanCmd(factory ComponentFactory) *cobra.Command {
 	scanCmd.Flags().StringP("format", "f", "sarif", "Format for the output report (e.g., 'sarif', 'json').")
 	scanCmd.Flags().IntP("depth", "d", 0, "Maximum crawl depth. (Overrides config/env)")
 	scanCmd.Flags().IntP("concurrency", "j", 0, "Number of concurrent engine workers. (Overrides config/env)")
-	scanCmd.Flags().String("scope", "strict", "Scan scope strategy ('strict' or 'subdomain'). (Overrides config/env)")
-	scanCmd.Flags().BoolP("verbose", "v", false, "Enable verbose (DEBUG) logging.")
+	// Changed default value of scope to "" so we can detect if the user provided it or not.
+	scanCmd.Flags().String("scope", "", "Scan scope strategy ('strict' or 'subdomain'). (Overrides config/env)")
+
+	// Note: --verbose is defined as a PersistentFlag on the root command. We do not redefine it here.
 
 	return scanCmd
 }
@@ -87,6 +89,7 @@ func newScanCmd(factory ComponentFactory) *cobra.Command {
 func applyScanFlagOverrides(cmd *cobra.Command, cfg config.Interface) {
 	logger := observability.GetLogger()
 
+	// Check if the flag was explicitly changed by the user on the command line.
 	if cmd.Flags().Changed("depth") {
 		depth, _ := cmd.Flags().GetInt("depth")
 		cfg.SetDiscoveryMaxDepth(depth)
@@ -107,14 +110,17 @@ func applyScanFlagOverrides(cmd *cobra.Command, cfg config.Interface) {
 			cfg.SetDiscoveryIncludeSubdomains(false)
 			logger.Debug("Applied --scope flag override.", zap.String("value", "strict"))
 		default:
-			logger.Warn("Invalid --scope value provided, defaulting to 'strict'.", zap.String("provided_scope", scope))
-			cfg.SetDiscoveryIncludeSubdomains(false)
+			// If the user provided an invalid, non-empty value.
+			if scope != "" {
+				logger.Warn("Invalid --scope value provided, using configuration default.", zap.String("provided_scope", scope))
+			}
+			// If the value is invalid or empty, we do not override the config, relying on the config's default.
 		}
 	}
 }
 
-// FIX: This new helper function correctly normalizes all target URLs.
-// It loops through every target, adds a default scheme if missing, and validates the result.
+// normalizeTargets correctly normalizes all target URLs.
+// It loops through every target, validates the scheme, adds a default scheme if missing, and validates the result.
 func normalizeTargets(targets []string) ([]string, error) {
 	normalized := make([]string, 0, len(targets))
 	for _, target := range targets {
@@ -122,9 +128,17 @@ func normalizeTargets(targets []string) ([]string, error) {
 			continue
 		}
 
-		// Trim and then check for a scheme
+		// Trim whitespace
 		t := strings.TrimSpace(target)
-		if !strings.HasPrefix(t, "http://") && !strings.HasPrefix(t, "https://") {
+
+		// FIX: Explicitly check for unsupported schemes before normalization.
+		// If "://" is present, it must start with http:// or https://.
+		if strings.Contains(t, "://") {
+			if !strings.HasPrefix(t, "http://") && !strings.HasPrefix(t, "https://") {
+				return nil, fmt.Errorf("unsupported URL scheme in target '%s'. Only http:// and https:// are supported", t)
+			}
+		} else {
+			// If no scheme is present, default to https.
 			t = "https://" + t
 		}
 
@@ -133,7 +147,9 @@ func normalizeTargets(targets []string) ([]string, error) {
 		if err != nil {
 			return nil, fmt.Errorf("invalid target URL '%s': %w", target, err)
 		}
-		if u.Scheme == "" || u.Host == "" {
+
+		// Final validation: Ensure Scheme is correct (should be redundant but safe) and Host is present.
+		if (u.Scheme != "http" && u.Scheme != "https") || u.Host == "" {
 			return nil, fmt.Errorf("malformed target URL after normalization: '%s'", t)
 		}
 
@@ -152,7 +168,9 @@ func runScan(
 	output, format string,
 	factory ComponentFactory,
 ) error {
+	// Get the logger instance initialized by the root command.
 	logger := observability.GetLogger()
+
 	// --- Graceful Shutdown Setup ---
 	// Create a context that can be canceled manually. This will be the main context for the scan.
 	scanCtx, cancelScan := context.WithCancel(ctx)
@@ -161,30 +179,28 @@ func runScan(
 	// Set up a channel to listen for OS signals (SIGINT, SIGTERM).
 	sigChan := make(chan os.Signal, 1)
 	signal.Notify(sigChan, syscall.SIGINT, syscall.SIGTERM)
+	// FIX: Ensure signal notifications are stopped when the function exits to prevent leaks.
+	defer signal.Stop(sigChan)
 
 	// Launch a goroutine to handle signal notifications.
 	go func() {
-		// Block until a signal is received.
-		sig := <-sigChan
-		logger.Warn("Received shutdown signal, initiating graceful shutdown.", zap.String("signal", sig.String()))
-
-		// Trigger the cancellation of the scan context.
-		cancelScan()
+		// FIX: Use select to prevent the goroutine from leaking if the scan finishes normally.
+		select {
+		case sig := <-sigChan:
+			// A signal was received.
+			logger.Warn("Received shutdown signal, initiating graceful shutdown.", zap.String("signal", sig.String()))
+			// Trigger the cancellation of the scan context.
+			cancelScan()
+		case <-scanCtx.Done():
+			// The scan context was canceled (likely because the scan finished), so we exit the goroutine.
+			return
+		}
 	}()
 
-	// --- Logger Re-initialization ---
-	// Re-initialize the logger based on the final, flag-overridden config.
-	// This ensures that all subsequent logs (including component initialization)
-	// respect the verbosity level set by the user.
-	// We get the verbose flag directly from the command context.
-	verbose, _ := ctx.Value("verbose").(bool)
-	if verbose {
-		loggerCfg := cfg.Logger()
-		loggerCfg.Level = "debug"
-		observability.ResetForTest()                                // Reset to allow re-initialization
-		observability.InitializeLogger(loggerCfg)                   // Re-initialize with new level
-		logger = observability.GetLogger()                          // Get the new logger instance
-		logger.Debug("Verbose logging enabled via --verbose flag.") // First debug message
+	// Log verbosity status if enabled.
+	if verbose, ok := ctx.Value("verbose").(bool); ok && verbose {
+		// This log message confirms that the verbose setting was correctly applied by the root command.
+		logger.Debug("Verbose logging active for this scan.")
 	}
 
 	// --- Target Validation ---
@@ -201,6 +217,7 @@ func runScan(
 	}
 	components, ok := rawComponents.(*service.Components)
 	if !ok {
+		// This is a programmatic error, indicating a mismatch between the factory interface and implementation.
 		return fmt.Errorf("component factory returned an invalid type; expected *service.Components but got %T", rawComponents)
 	}
 	// Use a deferred function to ensure Shutdown is always called, even on panic.
@@ -225,8 +242,9 @@ func runScan(
 	if err := components.Orchestrator.StartScan(scanCtx, scanTargets, scanID); err != nil {
 		// If the error is due to context cancellation, it's a graceful shutdown.
 		if errors.Is(err, context.Canceled) {
-			logger.Warn("Scan aborted by user signal.", zap.String("scanID", scanID))
-			return nil // Return nil for a clean exit.
+			logger.Warn("Scan aborted by user signal or timeout.", zap.String("scanID", scanID))
+			// Return the error so the main function can determine the exit code (e.g., exit 0 on graceful shutdown).
+			return err
 		}
 		// Otherwise, it's an unexpected error during the scan.
 		logger.Error("Scan failed during orchestration.", zap.Error(err), zap.String("scanID", scanID))
@@ -234,37 +252,47 @@ func runScan(
 	}
 
 	// --- Report Generation ---
-	// Check if the scan was canceled before generating the report.
-	if scanCtx.Err() == context.Canceled {
-		logger.Info("Skipping report generation due to scan cancellation.", zap.String("scanID", scanID))
+	// Check the scan context status for logging purposes.
+	if scanCtx.Err() != nil {
+		logger.Info("Scan execution finished (context done).", zap.String("scanID", scanID), zap.Error(scanCtx.Err()))
 	} else {
 		logger.Info("Scan execution completed successfully.", zap.String("scanID", scanID))
-		if output != "" {
-			if err := generateReport(ctx, components.Store, scanID, format, output); err != nil {
-				return err
-			}
+	}
+
+	// Proceed to generate a report if requested, even if the scan was canceled (partial results).
+	if output != "" {
+		// Pass the original context (ctx), not the scanCtx, to generateReport,
+		// as generateReport manages its own timeout and should complete.
+		if err := generateReport(ctx, components.Store, scanID, format, output); err != nil {
+			return err
 		}
-		fmt.Printf("\nScan Complete. Scan ID: %s\n", scanID)
-		if output == "" {
-			fmt.Printf("To generate a report, run: scalpel-cli report --scan-id %s\n", scanID)
-		}
+	}
+
+	// User-friendly output summarizing the scan completion.
+	fmt.Printf("\nScan Complete. Scan ID: %s\n", scanID)
+	if output == "" {
+		fmt.Printf("To generate a report, run: scalpel-cli report --scan-id %s -o report.sarif\n", scanID)
 	}
 
 	return nil
 }
 
-// startFindingsConsumer has been moved to internal/service/initializers.go
-// and significantly improved with batching and robust shutdown handling.
-
 // generateReport handles result processing and report writing.
-func generateReport(_ context.Context, dbStore schemas.Store, scanID, format, outputPath string) error {
+// It takes the parent context but manages its own timeout to ensure completion.
+func generateReport(parentCtx context.Context, dbStore schemas.Store, scanID, format, outputPath string) error {
 	logger := observability.GetLogger()
 	logger.Info("Generating scan report...", zap.String("format", format), zap.String("output_path", outputPath))
 
-	// Use a background context for report generation to ensure it completes
-	// even if the main scan context was canceled (e.g., by Ctrl+C after the scan finished).
+	// Use a background context with a timeout for report generation.
+	// This ensures it attempts to complete even if the parent context (e.g., from main) is closing down,
+	// but also prevents it from hanging indefinitely.
 	reportCtx, cancel := context.WithTimeout(context.Background(), 5*time.Minute)
 	defer cancel()
+
+	// Check if the parent context is already done, but proceed anyway with the reportCtx timeout.
+	if parentCtx.Err() != nil {
+		logger.Warn("Parent context canceled before report generation started; proceeding with timeout.", zap.Error(parentCtx.Err()))
+	}
 
 	reporter, err := reporting.New(format, outputPath, Version)
 	if err != nil {
@@ -272,7 +300,7 @@ func generateReport(_ context.Context, dbStore schemas.Store, scanID, format, ou
 	}
 	defer func() {
 		if closeErr := reporter.Close(); closeErr != nil {
-			logger.Error("Failed to close reporter.", zap.Error(closeErr))
+			logger.Error("Failed to close reporter cleanly.", zap.Error(closeErr))
 		}
 	}()
 
@@ -292,6 +320,6 @@ func generateReport(_ context.Context, dbStore schemas.Store, scanID, format, ou
 		return fmt.Errorf("failed to write report: %w", err)
 	}
 
-	logger.Info("Report generated successfully.", zap.String("path", outputPath))
+	logger.Info("Report generated successfully.", zap.String("path", outputPath), zap.Int("findings_count", len(processedResults.Findings)))
 	return nil
 }

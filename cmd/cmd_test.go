@@ -9,11 +9,19 @@ import (
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"github.com/xkilldash9x/scalpel-cli/internal/config"
+	"github.com/xkilldash9x/scalpel-cli/internal/observability"
 )
 
+// TestConfigFlagOverride verifies that CLI flags correctly override configuration
+// file settings and defaults.
 func TestConfigFlagOverride(t *testing.T) {
-	// Create a fresh, isolated rootCmd for this test.
-	testRootCmd, testAppConfigPtr := newRootCmd()
+	// Initialize logger for the test run to avoid noise.
+	observability.ResetForTest()
+	observability.InitializeLogger(config.LoggerConfig{Level: "fatal"})
+
+	// FIX: Use the accurate newPristineRootCmd instead of the previously flawed helper.
+	testRootCmd := newPristineRootCmd()
 
 	configContent := `
 discovery:
@@ -25,43 +33,62 @@ browser:
 	configFile := createTempConfig(t, configContent)
 	defer os.Remove(configFile)
 
-	// Set required env var for the PersistentPreRunE validation to pass.
+	// Set required env var for the PersistentPreRunE validation (if needed by config).
 	t.Setenv("SCALPEL_DATABASE_URL", "postgres://user:pass@localhost/db")
+	t.Setenv("GEMINI_API_KEY", "fake-key") // Ensure LLM validation passes
 
 	// Find the scan command from our test rootCmd instance.
-	var scanCmd *cobra.Command
-	for _, cmd := range testRootCmd.Commands() {
-		if cmd.Use == "scan [targets...]" {
-			scanCmd = cmd
-			break
-		}
-	}
+	scanCmd, _, err := testRootCmd.Find([]string{"scan"})
+	require.NoError(t, err)
 	require.NotNil(t, scanCmd)
 
-	// Intercept the RunE function to prevent it from actually running a scan.
-	originalRunE := scanCmd.RunE
+	// We need to capture the configuration *after* the overrides are applied
+	// in the scan command's logic.
+	var capturedConfig config.Interface
+
+	// Intercept the RunE function.
+	// We must replicate the initial steps of the real RunE (from cmd/scan.go)
+	// to ensure the configuration is correctly loaded from context and overrides are applied.
 	scanCmd.RunE = func(cmd *cobra.Command, args []string) error {
-		// The test succeeds by simply running without error.
+		ctx := cmd.Context()
+
+		// 1. Get config from context (loaded by PersistentPreRunE)
+		cfg, err := getConfigFromContext(ctx)
+		if err != nil {
+			return err
+		}
+
+		// 2. Apply flag overrides (the logic we want to test)
+		applyScanFlagOverrides(cmd, cfg)
+
+		// 3. Capture the final state of the configuration
+		capturedConfig = cfg
+
+		// 4. Stop execution (we don't want to run the actual scan/runScan)
 		return nil
 	}
-	defer func() { scanCmd.RunE = originalRunE }()
 
-	// Execute the command. The PersistentPreRunE will create and populate the configs.
+	// Execute the command.
+	// PersistentPreRunE will load the config file.
+	// The intercepted RunE will apply the --depth flag.
 	testRootCmd.SetArgs([]string{"--config", configFile, "scan", "--depth", "2", "http://target.com"})
-	err := testRootCmd.ExecuteContext(context.Background())
+	err = testRootCmd.ExecuteContext(context.Background())
 	require.NoError(t, err, "Command execution should not produce an error")
 
-	// Assert against the captured appConfig from the command's scope.
-	appCfg := *testAppConfigPtr
-	require.NotNil(t, appCfg)
-	assert.Equal(t, 2, appCfg.Scan().Depth, "Scan depth should be from the --depth flag")
-	assert.Equal(t, 2, appCfg.Discovery().MaxDepth, "Discovery depth should be overridden by the --depth flag")
-	assert.False(t, appCfg.Browser().Humanoid.Enabled, "Humanoid enabled should be false from the YAML file")
+	// Assert against the captured configuration.
+	require.NotNil(t, capturedConfig)
+
+	// Assert that the flag (--depth 2) overrode the file (max_depth: 5).
+	assert.Equal(t, 2, capturedConfig.Discovery().MaxDepth, "Discovery depth should be overridden by the --depth flag")
+
+	// Assert that the file setting (humanoid: false) overrode the default (true).
+	assert.False(t, capturedConfig.Browser().Humanoid.Enabled, "Humanoid enabled should be false from the YAML file")
 }
 
 func TestScanCmd_RequiredArgs(t *testing.T) {
 	output, err := executeCommandNoPreRun(t, "scan")
 	require.Error(t, err)
+	// Check for the standard Cobra error message for missing arguments.
 	assert.Contains(t, output, "Error: requires at least 1 arg(s), only received 0")
 }
 

@@ -1,3 +1,4 @@
+// File: api/schemas/tasks.go
 package schemas
 
 // -- Task Schemas --
@@ -123,4 +124,10 @@ type HumanoidSequenceParams struct {
 	// Persona allows overriding the default browser fingerprint for this sequence,
 	// enabling more flexible and realistic emulation.
 	Persona *Persona `json:"persona,omitempty"`
+
+	// --- ADDED FIELDS ---
+	// TaintTemplate specifies which IAST taint tracking template to use (e.g., "strict", "permissive").
+	TaintTemplate string `json:"taint_template,omitempty"`
+	// TaintConfig allows passing a custom JSON configuration string for fine-grained control over taint sources and sinks.
+	TaintConfig string `json:"taint_config,omitempty"`
 }

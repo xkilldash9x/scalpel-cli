@@ -1,3 +1,4 @@
+// internal/analysis/active/taint/taint_analyzer_test.go
 package taint
 
 import (
@@ -86,6 +87,23 @@ func setupAnalyzer(t *testing.T, configMod func(*Config), oastEnabled bool) (*An
 	analyzer, err := NewAnalyzer(config, reporter, oastProviderIface, logger)
 	require.NoError(t, err, "NewAnalyzer should not return an error")
 	return analyzer, reporter, oastProvider
+}
+
+// --- NEW TEST: Verify Default Probes use Protocol-Relative OAST ---
+func TestDefaultProbes_OASTScheme(t *testing.T) {
+	probes := DefaultProbes()
+	oastProbeFound := false
+
+	for _, probe := range probes {
+		// Check for Blind XSS/OAST probes that use fetch
+		if strings.Contains(probe.Payload, "fetch") && strings.Contains(probe.Payload, "{{.OASTServer}}") {
+			oastProbeFound = true
+			// Assert that it uses '//' (protocol-relative) instead of 'http://'
+			assert.Contains(t, probe.Payload, "fetch('//", "OAST payload should be protocol-relative")
+			assert.NotContains(t, probe.Payload, "fetch('http://", "OAST payload should not force HTTP")
+		}
+	}
+	assert.True(t, oastProbeFound, "DefaultProbes should contain an OAST fetch probe")
 }
 
 // --- NEW SUITE: Hybrid IAST (Smart Probing & Correlation) ---
@@ -222,9 +240,9 @@ func TestHybrid_Correlation_NoMatch(t *testing.T) {
 
 	// 2. Dynamic Finding (Source: URL Param) - Mismatch!
 	dynamicFinding := CorrelatedFinding{
-		Sink:             schemas.SinkInnerHTML,
-		Probe:            ActiveProbe{Source: schemas.SourceURLParam}, // Mismatch
-		StackTrace:       "at func (http://example.com/main.js:50:10)",
+		Sink:       schemas.SinkInnerHTML,
+		Probe:      ActiveProbe{Source: schemas.SourceURLParam}, // Mismatch
+		StackTrace: "at func (http://example.com/main.js:50:10)",
 	}
 
 	// 3. Run Correlation

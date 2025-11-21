@@ -77,7 +77,8 @@ func DefaultProbes() []ProbeDefinition {
 
 	// OAST Integration: Define the OAST callback formats.
 	// {{.OASTServer}} is replaced by the Analyzer if an OAST provider is configured.
-	oastFetch := `fetch('http://{{.OASTServer}}/{{.Canary}}')`
+	// BUG-FIX: Use protocol-relative URL (//) instead of http:// to avoid Mixed Content blocking on HTTPS sites.
+	oastFetch := `fetch('//{{.OASTServer}}/{{.Canary}}')`
 	oastImage := `new Image().src='//{{.OASTServer}}/i/{{.Canary}}'`
 
 	return []ProbeDefinition{
