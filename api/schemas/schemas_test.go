@@ -357,8 +357,8 @@ func TestHARInitialization(t *testing.T) {
 	if har.Log.Version != "1.2" {
 		t.Errorf("Expected HAR version 1.2, got %s", har.Log.Version)
 	}
-	if har.Log.Creator.Name != "Scalpel-CLI" || har.Log.Creator.Version != "2.0" {
-		t.Errorf("Expected Creator Scalpel-CLI v2.0, got %s v%s", har.Log.Creator.Name, har.Log.Creator.Version)
+	if har.Log.Creator.Name != "Scalpel-CLI" || har.Log.Creator.Version != "1.0" {
+		t.Errorf("Expected Creator Scalpel-CLI v1.0, got %s v%s", har.Log.Creator.Name, har.Log.Creator.Version)
 	}
 	// Entries should be initialized as an empty slice, not nil, to ensure JSON output is [] not null.
 	if har.Log.Entries == nil {
