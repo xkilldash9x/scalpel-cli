@@ -4,6 +4,7 @@ package session
 import (
 	"context"
 	"fmt"
+	"math/rand" // Import rand
 	"net/http"
 	"net/http/httptest"
 	"sync"
@@ -208,8 +209,13 @@ func newTestFixture(t *testing.T, opts ...configOption) *testFixture {
 		// R8/R9 stabilization parameters (500ms quiet period + settle delay in stabilize())
 		return session.stabilize(stabCtx, 500*time.Millisecond)
 	}
+
+	// FIX: Inject deterministic RNG with fixed seed (42)
+	rng := rand.New(rand.NewSource(42))
+
 	session.interactor = NewInteractor(
 		logger.Named("interactor"),
+		rng,              // Pass deterministic RNG
 		session.humanoid, // Pass the (potentially deterministic) humanoid
 		stabilizeFn,
 		session,     // Pass the session itself (ActionExecutor)
