@@ -1,4 +1,5 @@
-// internal/analysis/active/timeslip/analyzer.go
+// internal/analysis/active/timeslip/timeslip_analyzer.go
+
 package timeslip
 
 import (
@@ -255,7 +256,8 @@ func (a *Analyzer) reportFinding(candidate *RaceCandidate, analysis *AnalysisRes
 		// Informational findings (e.g., timing anomalies, Confidence >= 0.3 but Vulnerable=false)
 		severity = schemas.SeverityInfo
 		title = fmt.Sprintf("Informational: Concurrency Anomaly Detected (%s)", analysis.Strategy)
-		description = "Observed behavior suggests potential resource contention or sequential locking under load, but a direct security vulnerability was not confirmed."
+		// FIX: Include the specific analysis details in the description.
+		description = fmt.Sprintf("Observed behavior suggests potential resource contention or sequential locking under load, but a direct security vulnerability was not confirmed. Details: %s", analysis.Details)
 		cwes = append(cwes, "CWE-362") // Contextual CWE
 	}
 

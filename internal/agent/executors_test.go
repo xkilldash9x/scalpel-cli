@@ -165,6 +165,35 @@ func TestBrowserExecutor_HandleWaitForAsync(t *testing.T) {
 		}
 	})
 
+	// NEW TEST: Test Int64 Capping
+	t.Run("Int64_CappedToMax", func(t *testing.T) {
+		// Use fresh mocks for this specific test
+		executor, mockSession := setupBrowserExecutorTest(t)
+		// A value larger than MaxInt32 (2147483647) and larger than the cap
+		largeValue := int64(3000000000)
+		// The expected maximum cap defined in the fix (60000ms)
+		expectedCap := 60000
+
+		action := Action{Type: ActionWaitForAsync, Metadata: map[string]interface{}{"duration_ms": largeValue}}
+		mockSession.On("WaitForAsync", mock.Anything, expectedCap).Return(nil).Once()
+		err := executor.handleWaitForAsync(context.Background(), mockSession, action)
+		assert.NoError(t, err)
+		mockSession.AssertExpectations(t)
+	})
+
+	// NEW TEST: Test Float64 Capping
+	t.Run("Float64_CappedToMax", func(t *testing.T) {
+		executor, mockSession := setupBrowserExecutorTest(t)
+		largeValue := float64(3000000000.0)
+		expectedCap := 60000
+
+		action := Action{Type: ActionWaitForAsync, Metadata: map[string]interface{}{"duration_ms": largeValue}}
+		mockSession.On("WaitForAsync", mock.Anything, expectedCap).Return(nil).Once()
+		err := executor.handleWaitForAsync(context.Background(), mockSession, action)
+		assert.NoError(t, err)
+		mockSession.AssertExpectations(t)
+	})
+
 	t.Run("InvalidType", func(t *testing.T) {
 		action := Action{Type: ActionWaitForAsync, Metadata: map[string]interface{}{"duration_ms": "not-a-number"}}
 		mockSession.On("WaitForAsync", mock.Anything, 1000).Return(nil).Once()
@@ -288,6 +317,37 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "failed", result.Status)
 		assert.Equal(t, ErrCodeUnknownAction, result.ErrorCode)
+		// Ensure the error comes from the Registry itself
+		assert.Contains(t, result.ErrorDetails["message"], "No executor registered")
+	})
+
+	// NEW TEST: Test that complex actions are now registered and routed to BrowserExecutor
+	t.Run("RegisteredComplexActions_RoutedToBrowserExecutor", func(t *testing.T) {
+		// Note: Since the handlers are not implemented in BrowserExecutor in this codebase snapshot,
+		// we expect the BrowserExecutor to return ErrCodeUnknownAction. This confirms the Registry routed it correctly.
+
+		actions := []ActionType{
+			ActionExecuteLoginSequence,
+			ActionExploreApplication,
+			ActionFuzzEndpoint,
+		}
+
+		// We need an active session for the BrowserExecutor to attempt execution.
+		// The registry already has the mockSession provider configured in the setup.
+
+		for _, actionType := range actions {
+			t.Run(string(actionType), func(t *testing.T) {
+				action := Action{Type: actionType}
+				result, err := registry.Execute(context.Background(), action)
+
+				require.NoError(t, err)
+				require.NotNil(t, result)
+				assert.Equal(t, "failed", result.Status)
+				// The key assertion: The error message should come from the BrowserExecutor, not the Registry.
+				assert.Equal(t, ErrCodeUnknownAction, result.ErrorCode)
+				assert.Contains(t, result.ErrorDetails["message"], "BrowserExecutor handler not found")
+			})
+		}
 	})
 
 	// NEW: Test actions that should be handled by the Agent loop

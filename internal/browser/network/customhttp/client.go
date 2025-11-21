@@ -3,6 +3,7 @@ package customhttp
 import (
 	"bytes"
 	"context"
+	"errors" // Added import
 	"encoding/base64"
 	"fmt"
 	"io"
@@ -17,8 +18,13 @@ import (
 	"time"
 
 	"github.com/xkilldash9x/scalpel-cli/internal/observability" // Added import
+	"golang.org/x/net/http2"                                    // Added import
 	"go.uber.org/zap"
 )
+
+// Define a reasonable limit for buffering request bodies in memory for replayability.
+// This prevents excessive memory usage when handling large uploads that might need retries/redirects.
+const MaxReplayableBodyBytes = 2 * 1024 * 1024 // 2 MB
 
 // ConnectionPool defines a minimal interface for a connection pool, used by the
 // CustomClient's connection evictor to manage and close idle connections.
@@ -48,6 +54,10 @@ type CustomClient struct {
 	h1Clients map[string]*H1Client // key: "host:port"
 	h2Clients map[string]*H2Client // key: "host:port"
 
+	// h2Unsupported tracks hosts known not to support H2 (e.g., due to ALPN negotiation failure).
+	// Protected by mu.
+	h2Unsupported map[string]bool // key: "host:port"
+
 	// MaxRedirects specifies the maximum number of redirects to follow for a single request.
 	MaxRedirects int
 
@@ -72,6 +82,7 @@ func NewCustomClient(config *ClientConfig, logger *zap.Logger) *CustomClient {
 		Logger:       logger.Named("customhttp_client"),
 		h1Clients:    make(map[string]*H1Client),
 		h2Clients:    make(map[string]*H2Client),
+		h2Unsupported: make(map[string]bool),
 		MaxRedirects: 10, // Default maximum redirects
 		closeChan:    make(chan struct{}),
 	}
@@ -221,6 +232,12 @@ func (c *CustomClient) executeWithRetries(ctx context.Context, req *http.Request
 					strings.Contains(attemptErr.Error(), "tls: no application protocol")
 
 				if isNegotiationFailure {
+					// Mark host as unsupported for H2 to optimize future requests/retries.
+					c.mu.Lock()
+					c.h2Unsupported[req.URL.Host] = true
+					c.mu.Unlock()
+
+					c.Logger.Info("H2 negotiation failed, falling back to H1 and marking host as H2 unsupported", zap.String("host", req.URL.Host), zap.Error(attemptErr))
 					c.Logger.Info("H2 negotiation failed, falling back to H1", zap.String("url", req.URL.String()), zap.Error(attemptErr))
 					useH2 = false
 					// Crucial: Clear the attempt error. We successfully detected the need to fallback,
@@ -307,6 +324,18 @@ func (c *CustomClient) shouldRetry(ctx context.Context, req *http.Request, resp 
 
 	// 2. Check network errors and connection issues.
 	if err != nil {
+		// Check for H2 REFUSED_STREAM, indicating temporary overload on server concurrency.
+		var h2ResetErr H2StreamResetError
+		// We must use the specific H2StreamResetError defined in this package (imported via h2client.go).
+		if errors.As(err, &h2ResetErr) {
+			if h2ResetErr.ErrCode == http2.ErrCodeRefusedStream {
+				// If the stream was refused before processing started, it's safe to retry.
+				return true, 0
+			}
+			// Other H2 reset errors (e.g., PROTOCOL_ERROR, INTERNAL_ERROR) are generally not retryable.
+			return false, 0
+		}
+
 		// Retry transient network errors (timeouts).
 		if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 			return true, 0
@@ -333,12 +362,9 @@ func (c *CustomClient) shouldRetry(ctx context.Context, req *http.Request, resp 
 		req.Method == http.MethodOptions || req.Method == http.MethodTrace ||
 		req.Method == http.MethodPut || req.Method == http.MethodDelete
 
-	// Allow retry on status code if method is idempotent
-	// OR if it's not (like POST) but has a replayable body.
+	// Only allow retry on status code if method is idempotent.
+	// Retrying non-idempotent methods (like POST) on server errors (5xx) is unsafe.
 	canRetryStatus := isIdempotent
-	if !canRetryStatus && req.GetBody != nil {
-		canRetryStatus = true
-	}
 
 	if canRetryStatus && policy.RetryableStatusCodes[resp.StatusCode] {
 		// Handle 429 Too Many Requests or 503 Service Unavailable with Retry-After header.
@@ -404,8 +430,17 @@ func (c *CustomClient) shouldAttemptH2(targetURL *url.URL) bool {
 	if targetURL.Scheme != "https" {
 		return false
 	}
-	// TODO: Implement protocol prediction or caching based on previous successful connections (e.g., Alt-Svc).
-	// For now, default behavior: always attempt H2 for HTTPS.
+
+	// Check if the host is known not to support H2.
+	c.mu.RLock()
+	isUnsupported := c.h2Unsupported[targetURL.Host]
+	c.mu.RUnlock()
+
+	if isUnsupported {
+		return false
+	}
+
+	// Default behavior: attempt H2 for HTTPS if not marked unsupported.
 	return true
 }
 
@@ -542,27 +577,69 @@ func (c *CustomClient) connectionEvictor() {
 
 // evictIdleConnections iterates over all clients and closes those that are idle.
 func (c *CustomClient) evictIdleConnections(timeout time.Duration) {
-	c.mu.Lock()
-	// Identify idle clients while holding the lock and remove them from the map.
-	var toClose []ConnectionPool
 
+	// 1. Collect all client references under RLock.
+	c.mu.RLock()
+	type clientRef struct {
+		key    string
+		client ConnectionPool
+		isH2   bool
+	}
+	var allClients []clientRef
 	for key, client := range c.h1Clients {
-		// IsIdle acquires its own internal lock to check the state safely.
-		if client.IsIdle(timeout) {
-			toClose = append(toClose, client)
-			delete(c.h1Clients, key)
+		// Check for nil required because some tests (TestCustomClient_ConnectionEviction) might inject nil mocks.
+		if client != nil {
+			allClients = append(allClients, clientRef{key, client, false})
+		}
+	}
+	for key, client := range c.h2Clients {
+		if client != nil {
+			allClients = append(allClients, clientRef{key, client, true})
+		}
+	}
+	c.mu.RUnlock()
+
+	// 2. Check for idleness outside the global lock to prevent contention.
+	// IsIdle acquires the individual client's lock.
+	var idleClients []clientRef
+	for _, ref := range allClients {
+		if ref.client.IsIdle(timeout) {
+			idleClients = append(idleClients, ref)
 		}
 	}
 
-	for key, client := range c.h2Clients {
-		if client.IsIdle(timeout) {
-			toClose = append(toClose, client)
-			delete(c.h2Clients, key)
+	if len(idleClients) == 0 {
+		return
+	}
+
+	// 3. Acquire Lock to remove idle clients from the map.
+	c.mu.Lock()
+	var toClose []ConnectionPool
+	for _, ref := range idleClients {
+		// Double-check that the client instance is still the one present in the map.
+		// It might have been replaced (e.g., due to an error) between step 1 and now.
+		var currentClient ConnectionPool
+		var exists bool
+
+		if ref.isH2 {
+			currentClient, exists = c.h2Clients[ref.key]
+		} else {
+			currentClient, exists = c.h1Clients[ref.key]
+		}
+
+		if exists && currentClient == ref.client {
+			// Client is still present and confirmed idle, remove it.
+			if ref.isH2 {
+				delete(c.h2Clients, ref.key)
+			} else {
+				delete(c.h1Clients, ref.key)
+			}
+			toClose = append(toClose, ref.client)
 		}
 	}
 	c.mu.Unlock()
 
-	// Close the connections outside the main lock to allow other operations to proceed.
+	// 4. Close the connections outside the global lock.
 	if len(toClose) > 0 {
 		c.Logger.Debug("Evicting idle connections", zap.Int("count", len(toClose)))
 		for _, client := range toClose {
@@ -762,6 +839,32 @@ func (c *CustomClient) handleRedirect(ctx context.Context, req *http.Request, re
 	return c.doInternal(ctx, nextReq, redirectCount+1, currentVia, false)
 }
 
+// isSameOrigin checks if two URLs share the same scheme, host, and effective port.
+func isSameOrigin(u1, u2 *url.URL) bool {
+	if u1 == nil || u2 == nil {
+		return false
+	}
+	// We consider the effective port if the standard port is used implicitly.
+	p1 := u1.Port()
+	if p1 == "" {
+		if u1.Scheme == "https" {
+			p1 = "443"
+		} else if u1.Scheme == "http" {
+			p1 = "80"
+		}
+	}
+	p2 := u2.Port()
+	if p2 == "" {
+		if u2.Scheme == "https" {
+			p2 = "443"
+		} else if u2.Scheme == "http" {
+			p2 = "80"
+		}
+	}
+
+	return u1.Scheme == u2.Scheme && u1.Hostname() == u2.Hostname() && p1 == p2
+}
+
 // prepareNextRequest constructs the subsequent request, handling method changes and body replayability robustly.
 func (c *CustomClient) prepareNextRequest(ctx context.Context, originalReq *http.Request, nextURL *url.URL, statusCode int) (*http.Request, error) {
 	method := originalReq.Method
@@ -805,6 +908,9 @@ func (c *CustomClient) prepareNextRequest(ctx context.Context, originalReq *http
 	nextReq.GetBody = getBody
 	nextReq.Host = nextURL.Host
 
+	// Determine if this is a cross-origin redirect.
+	crossOrigin := !isSameOrigin(originalReq.URL, nextURL)
+
 	// Copy headers, skipping those that should be reset or managed elsewhere.
 	for k, vv := range originalReq.Header {
 		kLower := strings.ToLower(k)
@@ -816,8 +922,8 @@ func (c *CustomClient) prepareNextRequest(ctx context.Context, originalReq *http
 		if kLower == "content-type" && (method == http.MethodGet && getBody == nil) {
 			continue
 		}
-		// Authorization headers are removed. They will be re-added by handleAuthentication if needed on the new origin.
-		if kLower == "authorization" || kLower == "proxy-authorization" {
+		// Authorization headers are removed only if it's a cross-origin redirect.
+		if crossOrigin && (kLower == "authorization" || kLower == "proxy-authorization") {
 			continue
 		}
 
@@ -847,13 +953,31 @@ func ensureBodyReplayable(req *http.Request) error {
 		return nil
 	}
 
+	// Check Content-Length if available against the limit.
+	// Only check if limit is positive.
+	if MaxReplayableBodyBytes > 0 && req.ContentLength > MaxReplayableBodyBytes {
+		return fmt.Errorf("request body too large (%d bytes) to make replayable (limit %d bytes)", req.ContentLength, MaxReplayableBodyBytes)
+	}
+
 	// Body is not replayable (e.g., a one-time reader like a stream). We must read it entirely into memory.
-	// WARNING: This can consume significant memory for large uploads. A production client might use disk buffering or limit upload size.
-	bodyBytes, err := io.ReadAll(req.Body)
+
+	// Use io.LimitReader to prevent reading more than the limit if Content-Length was unknown (-1).
+	// We read up to limit+1 to detect if the body exceeds the limit.
+	var limitedReader io.Reader = req.Body
+	if MaxReplayableBodyBytes > 0 {
+		limitedReader = io.LimitReader(req.Body, MaxReplayableBodyBytes+1)
+	}
+
+	bodyBytes, err := io.ReadAll(limitedReader)
 	if err != nil {
 		return err
 	}
 	req.Body.Close()
+
+	// Check if the read exceeded the limit.
+	if MaxReplayableBodyBytes > 0 && int64(len(bodyBytes)) > MaxReplayableBodyBytes {
+		return fmt.Errorf("request body exceeded limit (%d bytes) while trying to make replayable", MaxReplayableBodyBytes)
+	}
 
 	// Replace the body with an in-memory reader and set GetBody.
 	req.Body = io.NopCloser(bytes.NewReader(bodyBytes))

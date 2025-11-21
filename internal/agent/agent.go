@@ -132,6 +132,7 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 		// If initialization fails (e.g., cannot determine project root), log the error
 		// but allow the agent to continue without evolution capabilities.
 		logger.Error("Failed to initialize Evolution system (ImprovementAnalyst). Proceeding without it.", zap.Error(err))
+		evoAnalyst = nil // FIX: Explicitly set to nil for consistency and clarity.
 	}
 
 	agent := &Agent{
@@ -254,6 +255,8 @@ func (a *Agent) RunMission(ctx context.Context) (*MissionResult, error) {
 	}
 }
 
+// actionLoop is the primary consumer of actions posted to the CognitiveBus.
+// It dispatches actions to the appropriate handlers (executors or internal methods).
 func (a *Agent) actionLoop(ctx context.Context, actionChan <-chan CognitiveMessage) {
 	defer a.wg.Done()
 
@@ -264,73 +267,108 @@ func (a *Agent) actionLoop(ctx context.Context, actionChan <-chan CognitiveMessa
 				return
 			}
 
-			action, ok := msg.Payload.(Action)
-			if !ok {
-				a.logger.Error("Received invalid payload for ACTION message", zap.Any("payload", msg.Payload))
-				a.bus.Acknowledge(msg)
-				continue
+			// FIX: Refactor processing into a separate function to handle panic recovery and acknowledgment robustly.
+			// Process the message and check if we should stop the loop (e.g., after CONCLUDE).
+			if stop := a.processActionMessage(ctx, msg); stop {
+				return
 			}
-
-			var execResult *ExecutionResult
-			var execErr error
-
-			switch action.Type {
-			case ActionConclude:
-				a.logger.Info("Mind decided to conclude mission.", zap.String("rationale", action.Rationale))
-				result, err := a.concludeMission(ctx)
-				if err != nil {
-					a.logger.Error("Failed to generate final mission result", zap.Error(err))
-					a.bus.Acknowledge(msg)
-					continue
-				}
-				if result != nil {
-					// CRITICAL: Acknowledge BEFORE calling finish().
-					// finish() calls bus.Shutdown(), which waits for this acknowledgment.
-					a.bus.Acknowledge(msg)
-					a.finish(ctx, *result)
-				}
-				return // End the action loop.
-
-			case ActionEvolveCodebase:
-				a.logger.Info("Agent decided to initiate self-improvement (Evolution).", zap.String("rationale", action.Rationale))
-				execResult = a.executeEvolution(ctx, action)
-
-			}
-
-			// If execResult is not yet set, it means the action should be handled by the ExecutorRegistry.
-			if execResult == nil {
-				a.logger.Debug("Dispatching action to ExecutorRegistry", zap.String("type", string(action.Type)))
-				execResult, execErr = a.executors.Execute(ctx, action)
-			}
-
-			// Centralized error and nil-result handling.
-			if execErr != nil {
-				a.logger.Error("Action execution failed with a raw error", zap.String("action_type", string(action.Type)), zap.Error(execErr))
-				execResult = &ExecutionResult{
-					Status:          "failed",
-					ObservationType: ObservedSystemState,
-					ErrorCode:       ErrCodeExecutionFailure,
-					ErrorDetails:    map[string]interface{}{"message": execErr.Error()},
-				}
-			} else if execResult == nil {
-				// This is a safeguard against a logic error where an action handler returns (nil, nil).
-				a.logger.Error("CRITICAL: Action handler returned nil result and nil error.", zap.String("action_type", string(action.Type)))
-				// Create a fallback result to prevent nil pointer in postObservation
-				execResult = &ExecutionResult{
-					Status:          "failed",
-					ObservationType: ObservedSystemState,
-					ErrorCode:       ErrCodeExecutionFailure,
-					ErrorDetails:    map[string]interface{}{"message": "Internal Error: Action handler returned nil result."},
-				}
-			}
-
-			a.postObservation(ctx, action, execResult)
-			a.bus.Acknowledge(msg)
 
 		case <-ctx.Done():
 			return
 		}
 	}
+}
+
+// processActionMessage handles a single action message, including panic recovery and acknowledgment.
+// It returns true if the action loop should stop (e.g., after ActionConclude), false otherwise.
+func (a *Agent) processActionMessage(ctx context.Context, msg CognitiveMessage) (stopLoop bool) {
+	// CRITICAL FIX: Ensure the message is always acknowledged, even if processing panics.
+	// This prevents deadlocks during CognitiveBus.Shutdown().
+	acknowledged := false
+	defer func() {
+		if r := recover(); r != nil {
+			a.logger.Error("Panic recovered in actionLoop processing. Acknowledging message to prevent deadlock.",
+				zap.Any("panic_value", r),
+				zap.String("message_id", msg.ID),
+				zap.Stack("stack"),
+			)
+			// Ensure acknowledgment happens if it hasn't already.
+			if !acknowledged {
+				a.bus.Acknowledge(msg)
+			}
+		}
+	}()
+
+	// --- Start of message processing ---
+
+	action, ok := msg.Payload.(Action)
+	if !ok {
+		a.logger.Error("Received invalid payload for ACTION message", zap.Any("payload", msg.Payload))
+		a.bus.Acknowledge(msg)
+		acknowledged = true
+		return false // Continue loop
+	}
+
+	var execResult *ExecutionResult
+	var execErr error
+
+	switch action.Type {
+	case ActionConclude:
+		a.logger.Info("Mind decided to conclude mission.", zap.String("rationale", action.Rationale))
+		result, err := a.concludeMission(ctx)
+		if err != nil {
+			a.logger.Error("Failed to generate final mission result", zap.Error(err))
+			a.bus.Acknowledge(msg)
+			acknowledged = true
+			return false // Continue loop, let mind potentially retry conclusion or do something else
+		}
+		if result != nil {
+			// CRITICAL: Acknowledge BEFORE calling finish().
+			// FIX: Updated comment to be accurate.
+			// finish() sends the result; RunMission waits for result then calls bus.Shutdown().
+			a.bus.Acknowledge(msg)
+			acknowledged = true
+			// FIX: Pass context to finish to prevent goroutine leak.
+			a.finish(ctx, *result)
+		}
+		return true // Stop the loop.
+
+	case ActionEvolveCodebase:
+		a.logger.Info("Agent decided to initiate self-improvement (Evolution).", zap.String("rationale", action.Rationale))
+		execResult = a.executeEvolution(ctx, action)
+	}
+
+	// If execResult is not yet set, it means the action should be handled by the ExecutorRegistry.
+	if execResult == nil {
+		a.logger.Debug("Dispatching action to ExecutorRegistry", zap.String("type", string(action.Type)))
+		execResult, execErr = a.executors.Execute(ctx, action)
+	}
+
+	// Centralized error and nil-result handling.
+	if execErr != nil {
+		a.logger.Error("Action execution failed with a raw error", zap.String("action_type", string(action.Type)), zap.Error(execErr))
+		execResult = &ExecutionResult{
+			Status:          "failed",
+			ObservationType: ObservedSystemState,
+			ErrorCode:       ErrCodeExecutionFailure,
+			ErrorDetails:    map[string]interface{}{"message": execErr.Error()},
+		}
+	} else if execResult == nil {
+		// This is a safeguard against a logic error where an action handler returns (nil, nil).
+		a.logger.Error("CRITICAL: Action handler returned nil result and nil error.", zap.String("action_type", string(action.Type)))
+		// Create a fallback result to prevent nil pointer in postObservation
+		execResult = &ExecutionResult{
+			Status:          "failed",
+			ObservationType: ObservedSystemState,
+			ErrorCode:       ErrCodeExecutionFailure,
+			ErrorDetails:    map[string]interface{}{"message": "Internal Error: Action handler returned nil result."},
+		}
+	}
+
+	a.postObservation(ctx, action, execResult)
+	a.bus.Acknowledge(msg)
+	acknowledged = true
+	return false // Continue loop
 }
 
 // executeEvolution handles the EVOLVE_CODEBASE action by invoking the EvolutionEngine.
@@ -472,6 +510,7 @@ func (a *Agent) concludeMission(ctx context.Context) (*MissionResult, error) {
 		return nil, fmt.Errorf("failed to gather final context for summary: %w", err)
 	}
 
+	// FIX: Use MarshalIndent for better readability and debugging.
 	subgraphJSON, err := json.MarshalIndent(subgraph, "", "  ")
 	if err != nil {
 		return nil, fmt.Errorf("failed to marshal subgraph for summary prompt: %w", err)
@@ -566,6 +605,7 @@ func (a *Agent) finish(ctx context.Context, result MissionResult) {
 	a.mind.Stop()
 	// Bus shutdown is handled in RunMission after the result is successfully received.
 
+	// FIX: Use select to send result, preventing blocking forever if the runner (RunMission)
 	// Use select to send result, preventing blocking forever if the runner (RunMission)
 	// has already exited (e.g., due to timeout/cancellation).
 	select {

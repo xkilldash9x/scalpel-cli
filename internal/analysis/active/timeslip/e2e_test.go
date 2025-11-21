@@ -1,3 +1,4 @@
+// internal/analysis/active/timeslip/e2e_test.go
 package timeslip_test
 
 import (
@@ -51,6 +52,10 @@ type VulnerableServer struct {
 	processDelay time.Duration
 }
 
+// FIX: Corrected the HTTP protocol violation (Content-Length mismatch).
+// The original implementation used fmt.Fprintln, which appends a newline (\n),
+// causing the actual bytes written (len(body) + 1) to exceed the Content-Length header (len(body)).
+// Switched to fmt.Fprint to write the exact body content.
 func (vs *VulnerableServer) handler(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Connection", "keep-alive")
 	if vs.useLocking {
@@ -84,13 +89,13 @@ func (vs *VulnerableServer) handler(w http.ResponseWriter, r *http.Request) {
 				body := `{"status":"success", "message":"Voucher redeemed!"}`
 				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 				w.WriteHeader(http.StatusOK)
-				fmt.Fprintln(w, body)
+				fmt.Fprint(w, body)
 			} else {
 				// Another thread beat us between the initial check and this lock acquisition.
 				body := `{"status":"error", "message":"Voucher used during processing."}`
 				w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 				w.WriteHeader(http.StatusConflict)
-				fmt.Fprintln(w, body)
+				fmt.Fprint(w, body)
 			}
 			vs.mu.Unlock()
 		} else {
@@ -99,14 +104,14 @@ func (vs *VulnerableServer) handler(w http.ResponseWriter, r *http.Request) {
 			body := `{"status":"success", "message":"Voucher redeemed!"}`
 			w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 			w.WriteHeader(http.StatusOK)
-			fmt.Fprintln(w, body)
+			fmt.Fprint(w, body)
 		}
 
 	} else {
 		body := `{"status":"error", "message":"Voucher already used."}`
 		w.Header().Set("Content-Length", fmt.Sprintf("%d", len(body)))
 		w.WriteHeader(http.StatusConflict)
-		fmt.Fprintln(w, body)
+		fmt.Fprint(w, body)
 	}
 }
 
@@ -123,11 +128,15 @@ func setupE2EAnalyzer(reporter core.Reporter, insecure bool) (*timeslip.Analyzer
 		Success: timeslip.SuccessCondition{
 			BodyRegex: `"status":"success"`,
 		},
-	} // FIX: Removed logger from NewAnalyzer call as it's now embedded in the Analyzer struct.
+	}
 	return timeslip.NewAnalyzer(uuid.New(), config, reporter)
 }
 
 // --- IV. End-to-End System Tests ---
+
+// Note: The Analyze calls below previously resulted in "Strategy failed due to target being unreachable..."
+// because the client received unexpected EOF due to the Content-Length mismatch in the server handler.
+// With the fix in the handler, these tests should now pass without errors from the analyzer.
 
 func TestE2E_TOCTOU_Vulnerable(t *testing.T) {
 	observability.ResetForTest()
@@ -149,7 +158,9 @@ func TestE2E_TOCTOU_Vulnerable(t *testing.T) {
 	reporter := &E2EMockReporter{}
 	analyzer, err := setupE2EAnalyzer(reporter, true)
 	require.NoError(t, err)
-	analyzer.UseHTTP1OnlyForTests() // Force fallback to H1 for this specific vulnerable server simulation
+	// We keep H1 forced here to ensure the test reliably targets the specific synchronization issues
+	// related to the server implementation, rather than relying on H2's multiplexing behavior.
+	analyzer.UseHTTP1OnlyForTests()
 
 	candidate := &timeslip.RaceCandidate{
 		Method: "POST",
@@ -234,7 +245,6 @@ func TestE2E_Patched_WithLocking(t *testing.T) {
 	// We should NOT find any Critical/High/Medium vulnerabilities.
 	for _, f := range findings {
 		if f.Severity != schemas.SeverityInfo && f.Severity != schemas.SeverityLow {
-			// FIX: This is where the failure occurred previously (Severity HIGH was reported).
 			t.Errorf("Found unexpected vulnerability (%s) in a patched server: %s", f.Severity, f.Description)
 		}
 	}
@@ -250,7 +260,6 @@ func TestE2E_Patched_WithLocking(t *testing.T) {
 			isTimingAnomaly := strings.Contains(f.Description, "Significant timing delta detected") ||
 				strings.Contains(f.Description, "Significant timing anomaly (Lock-Wait pattern) detected")
 
-			// FIX: Check for the new "State transition detected" message from the refined checkDifferentialState heuristic.
 			isStateTransition := strings.Contains(f.Description, "State transition detected")
 
 			assert.True(t, isTimingAnomaly || isStateTransition,

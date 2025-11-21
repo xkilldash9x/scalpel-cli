@@ -236,7 +236,8 @@ func TestCustomClient_Do_RequestBodyRetry(t *testing.T) {
 	defer client.CloseAll()
 
 	body := "request body"
-	req, err := http.NewRequest("POST", server.URL, strings.NewReader(body))
+	// Use PUT instead of POST because POST (non-idempotent) is no longer retried on status 503.
+	req, err := http.NewRequest("PUT", server.URL, strings.NewReader(body))
 	require.NoError(t, err)
 
 	resp, err := client.Do(context.Background(), req)
@@ -246,6 +247,158 @@ func TestCustomClient_Do_RequestBodyRetry(t *testing.T) {
 	assert.Equal(t, http.StatusOK, resp.StatusCode)
 	assert.Equal(t, body, receivedBody)
 	assert.Equal(t, 1, attempt)
+}
+
+func TestCustomClient_Do_Retry_NonIdempotent_Status(t *testing.T) {
+	attempt := 0
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		if r.Method != http.MethodPost {
+			t.Errorf("Expected POST method, got %s", r.Method)
+		}
+		// Always return 503 (Retryable status)
+		w.WriteHeader(http.StatusServiceUnavailable)
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	logger := zaptest.NewLogger(t)
+	config := NewBrowserClientConfig()
+	config.RetryPolicy.MaxRetries = 3
+	config.RetryPolicy.InitialBackoff = 1 * time.Millisecond
+	client := NewCustomClient(config, logger)
+	defer client.CloseAll()
+
+	body := "data"
+	req, err := http.NewRequest("POST", server.URL, strings.NewReader(body))
+	require.NoError(t, err)
+
+	resp, err := client.Do(context.Background(), req)
+	require.NoError(t, err) // We expect a response (the 503), not an error
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusServiceUnavailable, resp.StatusCode)
+	// POST (non-idempotent) should NOT be retried on 503 status.
+	assert.Equal(t, 1, attempt)
+}
+
+// TestCustomClient_Do_Retry_NonIdempotent_NetworkError verifies that non-idempotent requests ARE retried on network errors.
+func TestCustomClient_Do_Retry_NonIdempotent_NetworkError(t *testing.T) {
+	attempt := 0
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		attempt++
+		if attempt == 1 {
+			// Close the connection immediately on the first attempt (network error)
+			if hijacker, ok := w.(http.Hijacker); ok {
+				conn, _, _ := hijacker.Hijack()
+				conn.Close()
+			}
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	logger := zaptest.NewLogger(t)
+	config := NewBrowserClientConfig()
+	config.RetryPolicy.MaxRetries = 3
+	config.RetryPolicy.InitialBackoff = 1 * time.Millisecond
+	client := NewCustomClient(config, logger)
+	defer client.CloseAll()
+
+	body := "data"
+	req, err := http.NewRequest("POST", server.URL, strings.NewReader(body))
+	require.NoError(t, err)
+
+	resp, err := client.Do(context.Background(), req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, 2, attempt, "POST request should be retried on network error")
+}
+
+func TestCustomClient_Do_Redirect_PreserveAuthSameOrigin(t *testing.T) {
+	var finalAuthHeader string
+
+	// Single server instance handles both paths.
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.URL.Path == "/start" {
+			// Redirect to /end on the same server
+			w.Header().Set("Location", "/end")
+			w.WriteHeader(http.StatusFound)
+			return
+		}
+		if r.URL.Path == "/end" {
+			finalAuthHeader = r.Header.Get("Authorization")
+			w.WriteHeader(http.StatusOK)
+			return
+		}
+		w.WriteHeader(http.StatusNotFound)
+	})
+	server := httptest.NewServer(handler)
+	defer server.Close()
+
+	logger := zaptest.NewLogger(t)
+	client := NewCustomClient(NewBrowserClientConfig(), logger)
+	defer client.CloseAll()
+
+	startURL := server.URL + "/start"
+	req, err := http.NewRequest("GET", startURL, nil)
+	require.NoError(t, err)
+
+	// Set the authorization header manually
+	authValue := "Bearer testtoken123"
+	req.Header.Set("Authorization", authValue)
+
+	resp, err := client.Do(context.Background(), req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	// Authorization header should be preserved on same-origin redirect.
+	assert.Equal(t, authValue, finalAuthHeader)
+}
+
+func TestCustomClient_Do_Redirect_StripAuthCrossOrigin(t *testing.T) {
+	var finalAuthHeader string
+
+	// Server 2 (Cross-origin target)
+	handler2 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		finalAuthHeader = r.Header.Get("Authorization")
+		w.WriteHeader(http.StatusOK)
+	})
+	server2 := httptest.NewServer(handler2)
+	defer server2.Close()
+
+	// Server 1 (Origin)
+	handler1 := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		// Redirect to Server 2
+		w.Header().Set("Location", server2.URL)
+		w.WriteHeader(http.StatusFound)
+	})
+	server1 := httptest.NewServer(handler1)
+	defer server1.Close()
+
+	logger := zaptest.NewLogger(t)
+	client := NewCustomClient(NewBrowserClientConfig(), logger)
+	defer client.CloseAll()
+
+	req, err := http.NewRequest("GET", server1.URL, nil)
+	require.NoError(t, err)
+
+	// Set the authorization header
+	authValue := "Bearer testtoken123"
+	req.Header.Set("Authorization", authValue)
+
+	resp, err := client.Do(context.Background(), req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	// Authorization header should be stripped on cross-origin redirect.
+	assert.Empty(t, finalAuthHeader)
 }
 
 func TestCustomClient_Do_RequestTimeout(t *testing.T) {
@@ -355,4 +508,115 @@ func TestCustomClient_H2_Fallback(t *testing.T) {
 
 	// We primarily care that the final result was a successful H1 connection.
 	assert.Equal(t, 1, resp.ProtoMajor)
+}
+
+// TestCustomClient_H2_Fallback_Persistence verifies that once H2 negotiation fails,
+// the client remembers this and does not attempt H2 on subsequent retries or requests.
+func TestCustomClient_H2_Fallback_Persistence(t *testing.T) {
+	attempt := 0
+	handler := http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.ProtoMajor == 2 {
+			t.Error("Received H2 request, which should have been prevented by fallback persistence.")
+			http.Error(w, "H2 not allowed", http.StatusInternalServerError)
+			return
+		}
+
+		// Fail the first H1 attempt to trigger a retry.
+		if attempt == 0 {
+			attempt++
+			w.WriteHeader(http.StatusServiceUnavailable) // Retryable error
+			return
+		}
+		// Succeed on the second H1 attempt.
+		w.WriteHeader(http.StatusOK)
+		w.Write([]byte("h1 success"))
+	})
+
+	// Create a TLS server that explicitly only supports H1 (forcing H2 negotiation failure).
+	server := httptest.NewUnstartedServer(handler)
+	if server.TLS == nil {
+		server.TLS = &tls.Config{}
+	}
+	server.TLS.NextProtos = []string{"http/1.1"}
+	server.StartTLS()
+	defer server.Close()
+
+	logger := zaptest.NewLogger(t)
+	config := NewBrowserClientConfig()
+	config.InsecureSkipVerify = true
+	config.RetryPolicy.MaxRetries = 1
+	config.RetryPolicy.InitialBackoff = 1 * time.Millisecond
+
+	client := NewCustomClient(config, logger)
+	defer client.CloseAll()
+
+	req, err := http.NewRequest("GET", server.URL, nil)
+	require.NoError(t, err)
+
+	// Execute the request. Logic: H2 fail -> H1 (503) -> Retry -> Direct H1 (200).
+	resp, err := client.Do(context.Background(), req)
+	require.NoError(t, err)
+	defer resp.Body.Close()
+
+	assert.Equal(t, http.StatusOK, resp.StatusCode)
+	assert.Equal(t, 1, resp.ProtoMajor)
+
+	// Verify internal state: the host should be marked as H2 unsupported.
+	serverURL, _ := url.Parse(server.URL)
+	client.mu.RLock()
+	isUnsupported := client.h2Unsupported[serverURL.Host]
+	client.mu.RUnlock()
+	assert.True(t, isUnsupported, "Host should be marked as H2 unsupported after negotiation failure.")
+
+	// Verify subsequent requests also skip H2.
+	req2, _ := http.NewRequest("GET", server.URL, nil)
+	resp2, err := client.Do(context.Background(), req2)
+	require.NoError(t, err)
+	defer resp2.Body.Close()
+	assert.Equal(t, 1, resp2.ProtoMajor, "Subsequent request should directly use H1")
+}
+
+func TestEnsureBodyReplayable_Limit(t *testing.T) {
+	// Define the limit (assuming MaxReplayableBodyBytes is 2MB in client.go)
+	const limit = 2 * 1024 * 1024
+
+	t.Run("Content-Length exceeds limit", func(t *testing.T) {
+		// Use io.NopCloser to prevent http.NewRequest from automatically setting GetBody,
+		// which would bypass the logic we are testing.
+		body := io.NopCloser(strings.NewReader("small body"))
+		req, _ := http.NewRequest("POST", "http://example.com", body)
+		req.ContentLength = limit + 1
+
+		err := ensureBodyReplayable(req)
+		assert.Error(t, err)
+		if err != nil {
+			assert.Contains(t, err.Error(), "request body too large")
+		}
+	})
+
+	t.Run("Body read exceeds limit (unknown Content-Length)", func(t *testing.T) {
+		// Create a reader that generates data exceeding the limit.
+		largeBody := strings.Repeat("a", limit+10)
+		// Use io.NopCloser to prevent http.NewRequest from automatically setting GetBody.
+		body := io.NopCloser(strings.NewReader(largeBody))
+		req, _ := http.NewRequest("POST", "http://example.com", body)
+		// Content-Length is unknown (-1)
+		req.ContentLength = -1
+
+		err := ensureBodyReplayable(req)
+		assert.Error(t, err)
+		if err != nil {
+			assert.Contains(t, err.Error(), "request body exceeded limit")
+		}
+	})
+
+	t.Run("Body within limit", func(t *testing.T) {
+		bodyStr := strings.Repeat("a", limit)
+		body := strings.NewReader(bodyStr)
+		req, _ := http.NewRequest("POST", "http://example.com", body)
+
+		err := ensureBodyReplayable(req)
+		require.NoError(t, err)
+		assert.NotNil(t, req.GetBody)
+	})
 }

@@ -1,3 +1,4 @@
+// h1client.go
 package customhttp
 
 import (
@@ -37,6 +38,7 @@ type H1Client struct {
 	mu          sync.Mutex // Protects connection state and serializes access.
 	isConnected bool
 	lastUsed    time.Time // Tracks the last time the connection was used for eviction.
+	inUse       bool      // Tracks if the connection is currently handling a request/response cycle.
 }
 
 // NewH1Client creates a new, un-connected H1Client for a given target URL and
@@ -126,6 +128,7 @@ func (c *H1Client) Close() error {
 }
 
 // closeInternal handles the connection closure logic without acquiring the lock.
+// Must be called with c.mu locked.
 func (c *H1Client) closeInternal() error {
 	if c.isConnected && c.Conn != nil {
 		c.Logger.Debug("Closing H1 connection")
@@ -145,9 +148,11 @@ func (c *H1Client) IsIdle(timeout time.Duration) bool {
 	if !c.isConnected {
 		return true
 	}
-	// In H1, we rely on the time since the last completed operation. If the client is currently locked
-	// (processing a request), it is technically not idle, but the eviction logic in CustomClient
-	// runs independently. If the time exceeds the timeout, we consider it idle.
+	// If the connection is currently being used for a request/response cycle, it is not idle.
+	if c.inUse {
+		return false
+	}
+	// Otherwise, idleness is determined by the time since the last completed operation.
 	return time.Since(c.lastUsed) > timeout
 }
 
@@ -157,15 +162,34 @@ func (c *H1Client) IsIdle(timeout time.Duration) bool {
 // respecting HTTP/1.1 Keep-Alive semantics.
 //
 // This method handles the entire request-response cycle, including serializing
-// the request, writing it to the wire, and parsing the response.
+// the request, writing it to the wire, parsing the response, and handling
+// context cancellation during I/O operations.
 func (c *H1Client) Do(ctx context.Context, req *http.Request) (*http.Response, error) {
 	if err := c.Connect(ctx); err != nil {
 		return nil, err
 	}
 
+	// Use a channel to signal the context monitor to stop.
+	var monitorStop chan struct{}
+
 	// Lock the connection for the entire request/response cycle to ensure atomicity and sequential access.
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() {
+		// Stop the context monitor if it was started.
+		if monitorStop != nil {
+			close(monitorStop)
+		}
+
+		// FIX: Clear the deadline if the connection remains open (for keep-alive).
+		// This prevents the next request from inheriting a stale deadline (especially the forced one from cancellation).
+		// Check c.Conn != nil as closeInternal might have nilled it.
+		if c.isConnected && c.Conn != nil {
+			c.Conn.SetDeadline(time.Time{})
+		}
+
+		c.inUse = false
+		c.mu.Unlock()
+	}()
 
 	// Update lastUsed at the start of the operation.
 	c.lastUsed = time.Now()
@@ -177,15 +201,47 @@ func (c *H1Client) Do(ctx context.Context, req *http.Request) (*http.Response, e
 		return nil, fmt.Errorf("connection closed unexpectedly (likely due to server closure or idle eviction)")
 	}
 
-	// Apply timeout for the entire cycle.
+	// Mark the connection as in use.
+	c.inUse = true
+
+	// Apply timeout for the entire cycle (Initial Deadline).
 	deadline := time.Now().Add(c.Config.RequestTimeout)
 	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(deadline) {
 		deadline = ctxDeadline
 	}
+
+	// Ensure c.Conn is not nil before setting the deadline.
+	if c.Conn == nil {
+		// This should be caught by !c.isConnected, but defensive check added.
+		c.isConnected = false
+		return nil, fmt.Errorf("connection is nil")
+	}
+
 	if err := c.Conn.SetDeadline(deadline); err != nil {
 		// If setting the deadline fails, the connection is likely broken.
+		// We hold the lock c.mu, so we must use closeInternal().
 		c.closeInternal()
 		return nil, fmt.Errorf("failed to set deadline: %w", err)
+	}
+
+	// FIX: Start context cancellation monitor.
+	// If the context is cancelled while blocked on I/O (Read/Write), this goroutine updates the connection deadline
+	// immediately (by setting it to the past), forcing the I/O operation to unblock with a timeout error.
+	if ctx.Done() != nil {
+		monitorStop = make(chan struct{})
+		// We pass the connection reference explicitly.
+		go func(conn net.Conn) {
+			select {
+			case <-ctx.Done():
+				// Context cancelled. Force deadline immediately to interrupt I/O.
+				// This relies on net.Conn.SetDeadline being thread-safe.
+				// Using time.Now() or a time clearly in the past achieves this.
+				conn.SetDeadline(time.Now())
+			case <-monitorStop:
+				// Request completed normally.
+			}
+		}(c.Conn)
+		// The defer function above handles closing monitorStop.
 	}
 
 	// Serialize request
@@ -197,6 +253,15 @@ func (c *H1Client) Do(ctx context.Context, req *http.Request) (*http.Response, e
 
 	// Send request
 	if _, err := c.Conn.Write(reqBytes); err != nil {
+		// FIX: Check if the error was likely caused by the context cancellation updating the deadline (resulting in a timeout).
+		if ctx.Err() != nil {
+			// If the context is done, return the context error as the primary cause.
+			// The connection state is unreliable after an interrupted write, so we close it internally.
+			c.closeInternal()
+			return nil, ctx.Err()
+		}
+
+		// Genuine write error.
 		c.closeInternal() // Connection is likely broken
 		return nil, fmt.Errorf("failed to write request: %w", err)
 	}
@@ -205,11 +270,22 @@ func (c *H1Client) Do(ctx context.Context, req *http.Request) (*http.Response, e
 	// The parser reads sequentially from the bufReader associated with the connection.
 	responses, err := c.parser.ParsePipelinedResponses(c.bufReader, 1)
 	if err != nil {
+		// FIX: Check if the error was likely caused by the context cancellation updating the deadline.
+		if ctx.Err() != nil {
+			c.closeInternal()
+			return nil, ctx.Err()
+		}
+
 		c.closeInternal() // Connection state is uncertain after parse failure
 		return nil, fmt.Errorf("failed to parse response: %w", err)
 	}
 
 	if len(responses) == 0 {
+		// FIX: Check context before assuming server closed connection unexpectedly.
+		if ctx.Err() != nil {
+			c.closeInternal()
+			return nil, ctx.Err()
+		}
 		c.closeInternal()
 		return nil, fmt.Errorf("no response received (connection closed by server)")
 	}
@@ -233,13 +309,22 @@ func (c *H1Client) Do(ctx context.Context, req *http.Request) (*http.Response, e
 //
 // The caller is responsible for ensuring the data is a valid sequence of HTTP
 // requests. Access to the connection is serialized.
+// NOTE: SendRaw/ReadPipelinedResponses rely on the deadlines set based on the context/config
+// and do not implement the active context cancellation monitoring used in Do().
 func (c *H1Client) SendRaw(ctx context.Context, data []byte) error {
 	if err := c.Connect(ctx); err != nil {
 		return err
 	}
 
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() {
+		// Clear deadline on completion for raw operations too
+		if c.isConnected && c.Conn != nil {
+			c.Conn.SetDeadline(time.Time{})
+		}
+		c.inUse = false
+		c.mu.Unlock()
+	}()
 
 	c.lastUsed = time.Now()
 
@@ -247,8 +332,15 @@ func (c *H1Client) SendRaw(ctx context.Context, data []byte) error {
 		return fmt.Errorf("connection closed before raw write")
 	}
 
+	c.inUse = true
+
 	// Set write deadline
 	writeDeadline := time.Now().Add(c.Config.RequestTimeout)
+	// Check context deadline as well
+	if ctxDeadline, ok := ctx.Deadline(); ok && ctxDeadline.Before(writeDeadline) {
+		writeDeadline = ctxDeadline
+	}
+
 	if err := c.Conn.SetWriteDeadline(writeDeadline); err != nil {
 		c.closeInternal()
 		return fmt.Errorf("failed to set write deadline: %w", err)
@@ -275,13 +367,22 @@ func (c *H1Client) SendRaw(ctx context.Context, data []byte) error {
 // fails or the connection is closed prematurely.
 func (c *H1Client) ReadPipelinedResponses(ctx context.Context, expectedCount int) ([]*http.Response, error) {
 	c.mu.Lock()
-	defer c.mu.Unlock()
+	defer func() {
+		// Clear deadline on completion
+		if c.isConnected && c.Conn != nil {
+			c.Conn.SetDeadline(time.Time{})
+		}
+		c.inUse = false
+		c.mu.Unlock()
+	}()
 
 	c.lastUsed = time.Now()
 
 	if !c.isConnected {
 		return nil, fmt.Errorf("not connected")
 	}
+
+	c.inUse = true
 
 	// Set read deadline for the entire operation
 	readDeadline := time.Now().Add(c.Config.RequestTimeout)

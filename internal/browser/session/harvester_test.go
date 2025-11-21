@@ -334,3 +334,43 @@ func TestHarvesterHelpers(t *testing.T) {
 		assert.Equal(t, -1.0, harTimingsNegative.Connect)
 	})
 }
+
+// TestHarvesterReceiveTiming verifies that HAR entries include the time taken to receive the body.
+func TestHarvesterReceiveTiming(t *testing.T) {
+	fixture := newTestFixture(t)
+	session := fixture.Session
+
+	// Server that sends headers immediately but delays the body
+	server := createTestServer(t, http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		w.WriteHeader(http.StatusOK)
+		if f, ok := w.(http.Flusher); ok {
+			f.Flush()
+		}
+		time.Sleep(500 * time.Millisecond)
+		fmt.Fprint(w, "delayed body")
+	}))
+
+	const testTimeout = 10 * time.Second
+	ctx, cancel := context.WithTimeout(context.Background(), testTimeout)
+	defer cancel()
+
+	err := session.Navigate(ctx, server.URL)
+	require.NoError(t, err)
+
+	artifacts, err := session.CollectArtifacts(ctx)
+	require.NoError(t, err)
+	require.NotNil(t, artifacts.HAR)
+
+	var harData schemas.HAR
+	err = json.Unmarshal(*artifacts.HAR, &harData)
+	require.NoError(t, err)
+
+	entry := findHAREntry(&harData, server.URL)
+	require.NotNil(t, entry, "HAR entry not found")
+
+	// Check Receive timing (should be approx 500ms)
+	assert.Greater(t, entry.Timings.Receive, 400.0, "Receive time should account for body delay")
+
+	// Check Total Time (should include the 500ms delay)
+	assert.Greater(t, entry.Time, 500.0, "Total time should include receive time")
+}

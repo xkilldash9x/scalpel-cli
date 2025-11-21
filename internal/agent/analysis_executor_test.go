@@ -223,6 +223,37 @@ func TestAnalysisExecutor_Execute_ArtifactCollectionFailure(t *testing.T) {
 	mockAnalyzer.AssertExpectations(t)
 }
 
+// NEW TEST: TestAnalysisExecutor_Execute_InvalidURLInActionValue verifies that an invalid URL string
+// results in a nil TargetURL for the analyzer, rather than a partially parsed one.
+func TestAnalysisExecutor_Execute_InvalidURLInActionValue(t *testing.T) {
+	executor, mockSession, _, mockAnalyzer := setupAnalysisExecutorTest(t)
+	ctx := context.Background()
+
+	// Action with an invalid URL (contains a space)
+	action := Action{
+		Type:  ActionAnalyzeTaint,
+		Value: "http://invalid url.com",
+	}
+
+	mockAnalyzer.On("Name").Return("TestTaintAnalyzer").Maybe()
+	mockAnalyzer.On("Type").Return(core.TypeActive).Maybe()
+	mockSession.On("CollectArtifacts", mock.Anything).Return(nil, nil).Once()
+
+	// Expect Analyze to be called, but with a nil TargetURL because parsing should fail.
+	mockAnalyzer.On("Analyze", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		analysisCtx := args.Get(1).(*core.AnalysisContext)
+		assert.Nil(t, analysisCtx.TargetURL, "TargetURL should be nil when parsing fails")
+	}).Return(nil).Once()
+
+	// Act
+	result, err := executor.Execute(ctx, action)
+
+	// Assert
+	require.NoError(t, err)
+	assert.Equal(t, "success", result.Status) // Analysis proceeds even if URL is invalid
+	mockAnalyzer.AssertExpectations(t)
+}
+
 // NEW: TestAnalysisExecutor_MapActionToTaskType verifies the mapping logic and error handling.
 func TestAnalysisExecutor_MapActionToTaskType(t *testing.T) {
 	executor, _, _, _ := setupAnalysisExecutorTest(t)
@@ -249,4 +280,108 @@ func TestAnalysisExecutor_MapActionToTaskType(t *testing.T) {
 			}
 		})
 	}
+}
+
+// NEW TEST: TestAnalysisExecutor_Execute_PassiveAnalyzerNoSessionNoValue verifies that a passive analyzer
+// does not panic when both the session is nil AND the Action.Value is empty.
+func TestAnalysisExecutor_Execute_PassiveAnalyzerNoSessionNoValue(t *testing.T) {
+	// This tests the fix for the nil pointer dereference when trying to get the URL from a nil session.
+
+	executor, _, globalCtx, mockAnalyzer := setupAnalysisExecutorTest(t)
+	ctx := context.Background()
+
+	// Register the mock analyzer as Passive for a specific task type (e.g., Headers).
+	// The setup function registers Taint by default, let's add Headers too.
+	globalCtx.Adapters[schemas.TaskAnalyzeHeaders] = mockAnalyzer
+
+	// Configure the executor with a nil session provider
+	executor.sessionProvider = func() schemas.SessionContext { return nil }
+
+	// Action with NO Value
+	action := Action{Type: ActionAnalyzeHeaders, Value: ""}
+
+	// Configure the analyzer as Passive
+	mockAnalyzer.On("Name").Return("TestHeaderAnalyzer").Maybe()
+	mockAnalyzer.On("Type").Return(core.TypePassive).Once()
+
+	// Expect Analyze to be called, even with nil session and nil TargetURL
+	mockAnalyzer.On("Analyze", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+		analysisCtx := args.Get(1).(*core.AnalysisContext)
+		assert.Nil(t, analysisCtx.Session)
+		assert.Nil(t, analysisCtx.TargetURL, "TargetURL should be nil if Action.Value is empty and Session is nil")
+	}).Return(nil).Once()
+
+	// Act: This should not panic
+	_, err := executor.Execute(ctx, action)
+
+	// Assert
+	require.NoError(t, err)
+	mockAnalyzer.AssertExpectations(t)
+}
+
+// NEW TEST: TestAnalysisExecutor_Execute_DetermineTargetURL verifies the logic for setting the TargetURL in the context.
+func TestAnalysisExecutor_Execute_DetermineTargetURL(t *testing.T) {
+	// We need separate setups for each subtest to ensure clean mocks.
+	ctx := context.Background()
+
+	setupTest := func() (*AnalysisExecutor, *mocks.MockSessionContext, *mocks.MockAnalyzer) {
+		executor, mockSession, _, mockAnalyzer := setupAnalysisExecutorTest(t)
+		// Common expectations for the analyzer (it must run to check the context)
+		mockAnalyzer.On("Name").Return("TestAnalyzer").Maybe()
+		mockAnalyzer.On("Type").Return(core.TypeActive).Maybe()
+		mockSession.On("CollectArtifacts", mock.Anything).Return(nil, nil).Maybe()
+		return executor, mockSession, mockAnalyzer
+	}
+
+	t.Run("URLFromActionValue", func(t *testing.T) {
+		executor, mockSession, mockAnalyzer := setupTest()
+		action := Action{Type: ActionAnalyzeTaint, Value: "http://action.com/page"}
+
+		// Ensure ExecuteScript is NOT called when Value is present
+		mockSession.On("ExecuteScript", mock.Anything, mock.Anything, mock.Anything).Return(json.RawMessage(`""`), nil).Maybe()
+
+		mockAnalyzer.On("Analyze", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+			analysisCtx := args.Get(1).(*core.AnalysisContext)
+			require.NotNil(t, analysisCtx.TargetURL)
+			assert.Equal(t, "http://action.com/page", analysisCtx.TargetURL.String())
+		}).Return(nil).Once()
+
+		_, err := executor.Execute(ctx, action)
+		require.NoError(t, err)
+	})
+
+	t.Run("URLFromSessionSuccess", func(t *testing.T) {
+		executor, mockSession, mockAnalyzer := setupTest()
+		action := Action{Type: ActionAnalyzeTaint, Value: ""} // Empty value
+		expectedURL := "http://session.com/current"
+		// Mock the JavaScript execution to return the URL (JSON encoded string)
+		mockSession.On("ExecuteScript", mock.Anything, "return window.location.href", mock.Anything).
+			Return(json.RawMessage(`"`+expectedURL+`"`), nil).Once()
+
+		mockAnalyzer.On("Analyze", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+			analysisCtx := args.Get(1).(*core.AnalysisContext)
+			require.NotNil(t, analysisCtx.TargetURL)
+			assert.Equal(t, expectedURL, analysisCtx.TargetURL.String())
+		}).Return(nil).Once()
+
+		_, err := executor.Execute(ctx, action)
+		require.NoError(t, err)
+	})
+
+	t.Run("URLFromSessionScriptFails", func(t *testing.T) {
+		executor, mockSession, mockAnalyzer := setupTest()
+		action := Action{Type: ActionAnalyzeTaint, Value: ""}
+		// Mock script execution failure
+		mockSession.On("ExecuteScript", mock.Anything, mock.Anything, mock.Anything).
+			Return(nil, errors.New("browser disconnected")).Once()
+
+		mockAnalyzer.On("Analyze", mock.Anything, mock.Anything).Run(func(args mock.Arguments) {
+			analysisCtx := args.Get(1).(*core.AnalysisContext)
+			// Should proceed with nil URL
+			assert.Nil(t, analysisCtx.TargetURL)
+		}).Return(nil).Once()
+
+		_, err := executor.Execute(ctx, action)
+		require.NoError(t, err)
+	})
 }

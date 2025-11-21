@@ -14,28 +14,6 @@ import (
 
 // -- Test Helpers --
 
-// waitTimeout is a helper that waits for a WaitGroup to finish but with a specified timeout.
-// It's a handy way to prevent tests from hanging indefinitely.
-// Returns true if the wait group finishes in time, false otherwise.
-func waitTimeout(wg *sync.WaitGroup, timeout time.Duration) bool {
-	// Channel to signal completion.
-	completionChannel := make(chan struct{})
-
-	// Fire off a goroutine to wait on the WaitGroup.
-	go func() {
-		defer close(completionChannel)
-		wg.Wait()
-	}()
-
-	// Wait for either the completion signal or the timeout.
-	select {
-	case <-completionChannel:
-		return true // Nailed it, completed in time.
-	case <-time.After(timeout):
-		return false // Whoops, timed out.
-	}
-}
-
 // Creates a standard CognitiveBus instance for testing.
 func setupCognitiveBus(t *testing.T, bufferSize int) *CognitiveBus {
 	t.Helper()
@@ -250,6 +228,44 @@ func TestCognitiveBus_Unsubscribe(t *testing.T) {
 	_, exists := bus.subscribers[MessageTypeAction]
 	assert.False(t, exists, "Map entry should be deleted when subscriber list is empty")
 	bus.mu.RUnlock()
+}
+
+// NEW TEST: Verifies that the unsubscribe function is idempotent and safe to call multiple times.
+func TestCognitiveBus_UnsubscribeIdempotent(t *testing.T) {
+	bus := setupCognitiveBus(t, 10)
+
+	_, unsub := bus.Subscribe(MessageTypeAction)
+
+	// Verify it is subscribed initially (requires RLock for internal inspection)
+	bus.mu.RLock()
+	initialCount := 0
+	if subs, ok := bus.subscribers[MessageTypeAction]; ok {
+		initialCount = len(subs)
+	}
+	bus.mu.RUnlock()
+	require.Equal(t, 1, initialCount, "Should have 1 subscriber initially")
+
+	// Call unsubscribe multiple times concurrently
+	var wg sync.WaitGroup
+	const numCalls = 10
+	for i := 0; i < numCalls; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			unsub()
+		}()
+	}
+
+	// Wait for all calls to complete. This primarily checks for deadlocks.
+	if !waitTimeout(&wg, 2*time.Second) {
+		t.Fatal("Timeout waiting for concurrent unsubscribe calls; potential deadlock.")
+	}
+
+	// Verify internal state (requires RLock): it should be completely cleaned up.
+	bus.mu.RLock()
+	_, exists := bus.subscribers[MessageTypeAction]
+	bus.mu.RUnlock()
+	assert.False(t, exists, "Map entry should be deleted after unsubscribe, regardless of call count.")
 }
 
 // -- Test Cases: Robustness and Backpressure --
@@ -526,5 +542,45 @@ func TestCognitiveBus_ConcurrentPostersAndSubscribers(t *testing.T) {
 			return true
 		})
 		assert.Equal(t, totalMessages, count, "Subscriber %d did not receive all messages.", i)
+	}
+}
+
+// NEW TEST: Verifies that there is no race condition between Post and Shutdown
+// regarding the activePostsWg (WaitGroup misuse: Add called concurrently with Wait).
+func TestCognitiveBus_PostShutdownRace(t *testing.T) {
+	// This test is designed to be run with the race detector (-race).
+	// It attempts to trigger a panic if Add() is called on activePostsWg while Wait() is active.
+	logger := zaptest.NewLogger(t)
+
+	// We need to run this in a loop because a single iteration might not hit the race condition.
+	for i := 0; i < 100; i++ {
+		// Initialize a fresh bus for each iteration.
+		bus := NewCognitiveBus(logger, 10)
+		ctx := context.Background()
+
+		var iterationWg sync.WaitGroup
+
+		// Use a channel to synchronize the start of Post and Shutdown.
+		startChan := make(chan struct{})
+
+		// Goroutine 1: Call Post
+		iterationWg.Add(1)
+		go func() {
+			defer iterationWg.Done()
+			<-startChan
+			// If the bus shuts down first, this will return an error, which is expected.
+			_ = bus.Post(ctx, CognitiveMessage{Type: MessageTypeAction})
+		}()
+
+		// Goroutine 2: Call Shutdown
+		iterationWg.Add(1)
+		go func() {
+			defer iterationWg.Done()
+			<-startChan
+			bus.Shutdown() // This calls activePostsWg.Wait()
+		}()
+
+		close(startChan) // Start both concurrently
+		iterationWg.Wait()
 	}
 }

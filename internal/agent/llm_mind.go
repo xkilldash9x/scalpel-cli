@@ -119,13 +119,10 @@ func (m *LLMMind) Start(ctx context.Context) error {
 		return nil
 	}
 
-	m.mu.RLock()
-	initialState := m.currentState
-	m.mu.RUnlock()
-
-	if initialState == StateInitializing {
-		m.updateState(StateObserving)
-	}
+	// Ensure the state transitions to Observing if it hasn't already (e.g., via SetMission).
+	// FIX: We rely on updateState's internal locking and idempotency checks. This avoids
+	// the race condition present in the previous implementation (Read-Unlock-Decide-Write).
+	m.updateState(StateObserving)
 
 	for {
 		select {
@@ -261,6 +258,8 @@ func (m *LLMMind) executeDecisionCycle(ctx context.Context) {
 		return
 	}
 
+	// FIX: Use a local variable to track conclusion status to avoid logical races
+	// when checking shared state later.
 	isConcluding := action.Type == ActionConclude
 
 	if isConcluding {
@@ -269,7 +268,7 @@ func (m *LLMMind) executeDecisionCycle(ctx context.Context) {
 	}
 
 	// -- ACT --
-	// Use the local variable 'isConcluding' instead of checking the shared 'm.currentState' to prevent a data/logical race.
+	// FIX: Use the local variable 'isConcluding'.
 	if !isConcluding {
 		m.updateState(StateActing)
 	}
@@ -532,7 +531,8 @@ func (m *LLMMind) getClosingPrompt() string {
 
 // Constructs the user facing part of the prompt, including the mission and KG state.
 func (m *LLMMind) generateUserPrompt(contextSnapshot *schemas.Subgraph) (string, error) {
-	contextJSON, err := json.Marshal(contextSnapshot)
+	// FIX: Use MarshalIndent for better readability when debugging prompts.
+	contextJSON, err := json.MarshalIndent(contextSnapshot, "", "  ")
 	if err != nil {
 		return "", fmt.Errorf("failed to marshal context snapshot: %w", err)
 	}

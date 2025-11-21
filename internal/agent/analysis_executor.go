@@ -98,6 +98,7 @@ func (e *AnalysisExecutor) Execute(ctx context.Context, action Action) (*Executi
 	var parsedURL *url.URL
 	// Use the current session URL as a fallback if Action.Value is empty.
 	targetURLStr := action.Value
+	// FIX: CRITICAL: Must check if session is not nil before attempting to use it.
 	if targetURLStr == "" && session != nil {
 		urlJSON, err := session.ExecuteScript(ctx, "return window.location.href", nil)
 		if err == nil && len(urlJSON) > 0 {
@@ -114,7 +115,13 @@ func (e *AnalysisExecutor) Execute(ctx context.Context, action Action) (*Executi
 	}
 
 	if targetURLStr != "" {
-		parsedURL, _ = url.Parse(targetURLStr) // Best effort parsing.
+		// FIX: Handle parsing errors instead of ignoring them.
+		var parseErr error
+		parsedURL, parseErr = url.Parse(targetURLStr)
+		if parseErr != nil {
+			e.logger.Warn("Failed to parse target URL for analysis. Proceeding with nil URL.", zap.String("url", targetURLStr), zap.Error(parseErr))
+			parsedURL = nil // Ensure URL is nil if parsing fails
+		}
 	}
 
 	analysisCtx := &core.AnalysisContext{

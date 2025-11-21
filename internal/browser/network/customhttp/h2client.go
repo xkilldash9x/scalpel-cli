@@ -25,6 +25,17 @@ import (
 	"golang.org/x/net/http2/hpack"
 )
 
+// H2StreamResetError is returned when an H2 stream is reset by the server.
+// This allows higher-level clients (like CustomClient) to inspect the error code
+// and determine if the request is retryable (e.g., REFUSED_STREAM).
+type H2StreamResetError struct {
+	ErrCode http2.ErrCode
+}
+
+func (e H2StreamResetError) Error() string {
+	return fmt.Sprintf("stream reset by server (Error Code: %v)", e.ErrCode)
+}
+
 const (
 	// MaxResponseBodyBytes defines a reasonable limit for response bodies.
 	MaxResponseBodyBytes = 32 * 1024 * 1024 // 32 MB
@@ -38,6 +49,16 @@ const (
 	TargetH2ConnWindowSize   = 8 * 1024 * 1024 // 8 MB
 	TargetH2StreamWindowSize = 4 * 1024 * 1024 // 4 MB
 )
+
+// h2WriteRequest is an interface for items that can be sent to the writeLoop.
+type h2WriteRequest interface {
+	// writeFrame executes the write operation using the provided framer.
+	// It returns an error if the write fails.
+	writeFrame(f *http2.Framer) error
+	// handleError notifies the sender if the write failed or the connection closed.
+	// This is typically used to signal completion via a channel.
+	handleError(err error)
+}
 
 // H2Client manages a single, persistent HTTP/2 connection to a specific host.
 // It is a low level client that provides full control over the HTTP/2 framing layer,
@@ -75,6 +96,9 @@ type H2Client struct {
 	connRecvWindowMax int64
 
 	pingAcks map[uint64]chan struct{}
+
+	// writeChan is the queue for outgoing frames, processed by writeLoop.
+	writeChan chan h2WriteRequest
 
 	doneChan   chan struct{}
 	loopWG     sync.WaitGroup
@@ -154,6 +178,9 @@ func NewH2Client(targetURL *url.URL, config *ClientConfig, logger *zap.Logger) (
 
 		pingAcks: make(map[uint64]chan struct{}),
 	}
+
+	// Initialize the write channel with a buffer to handle bursts of frames.
+	client.writeChan = make(chan h2WriteRequest, 64)
 
 	return client, nil
 }
@@ -239,12 +266,13 @@ func (c *H2Client) Connect(ctx context.Context) error {
 	c.isConnected = true
 	c.lastUsed = time.Now()
 
-	loopsToStart := 1 // readLoop
+	loopsToStart := 2 // readLoop and writeLoop
 	if c.Config.H2Config.PingInterval > 0 {
 		loopsToStart++ // pingLoop
 	}
 	c.loopWG.Add(loopsToStart)
 	go c.readLoop()
+	go c.writeLoop()
 	if c.Config.H2Config.PingInterval > 0 {
 		go c.pingLoop()
 	}
@@ -299,11 +327,16 @@ func (c *H2Client) dialH2Connection(ctx context.Context) (net.Conn, error) {
 // network connection, and waits for the loops to exit. It implements the
 // `ConnectionPool` interface.
 func (c *H2Client) Close() error {
-	return c.closeWithError(http2.ErrCodeNo, nil)
+	err := c.shutdown(http2.ErrCodeNo, nil)
+	// Wait for background loops to finish.
+	c.loopWG.Wait()
+	c.Logger.Debug("H2 connection closed fully.")
+	return err
 }
 
-// closeWithError shuts down the connection, optionally sending a GOAWAY frame with a specific error code.
-func (c *H2Client) closeWithError(code http2.ErrCode, err error) error {
+// shutdown initiates the connection shutdown process but does not wait for background loops.
+// It is safe to call from background loops (readLoop, pingLoop, writeLoop).
+func (c *H2Client) shutdown(code http2.ErrCode, err error) error {
 	c.mu.Lock()
 	if !c.isConnected {
 		c.mu.Unlock()
@@ -314,16 +347,15 @@ func (c *H2Client) closeWithError(code http2.ErrCode, err error) error {
 		c.fatalError = err // Store the reason for closure.
 	}
 
-	// Send GOAWAY frame (best effort) while holding the lock.
-	if c.Framer != nil {
-		// Last successful stream ID. For a client closing, this is typically the highest stream ID we initiated.
-		lastStreamID := c.nextStreamID - 2
-		if lastStreamID < 1 {
-			lastStreamID = 0
-		}
-		// We ignore the write error here as the connection might already be broken if we are closing due to an error.
-		c.Framer.WriteGoAway(uint32(lastStreamID), code, nil)
+	// Calculate lastStreamID
+	lastStreamID := c.nextStreamID - 2
+	if lastStreamID < 1 {
+		lastStreamID = 0
 	}
+
+	// Note: We previously attempted to send a GOAWAY frame here via writeLoop to be polite.
+	// However, this caused race conditions (if sent directly) or protocol errors (if queued while server is closing).
+	// Since we are closing the connection anyway, relying on TCP FIN is sufficient and safer.
 
 	// Wake up any goroutines blocked on flow control windows.
 	for _, stream := range c.streams {
@@ -345,9 +377,6 @@ func (c *H2Client) closeWithError(code http2.ErrCode, err error) error {
 		closeErr = c.Conn.Close()
 	}
 
-	// Wait for background loops to finish
-	c.loopWG.Wait()
-
 	// Terminate any pending streams with an error.
 	c.mu.Lock()
 	if err == nil {
@@ -363,7 +392,7 @@ func (c *H2Client) closeWithError(code http2.ErrCode, err error) error {
 	c.streams = nil
 	c.mu.Unlock()
 
-	c.Logger.Debug("H2 connection closed", zap.Error(err))
+	c.Logger.Debug("H2 connection shutdown initiated", zap.Error(err))
 	return closeErr
 }
 
@@ -428,7 +457,15 @@ func (c *H2Client) Do(ctx context.Context, req *http.Request) (*http.Response, e
 			// Send RST_STREAM (best effort) to notify the server.
 			c.mu.Lock()
 			if c.isConnected {
-				c.Framer.WriteRSTStream(stream.ID, http2.ErrCodeCancel)
+				// Queue RST_STREAM non-blocking.
+				wrst := &writeRSTStream{streamID: stream.ID, errCode: http2.ErrCodeCancel}
+				wrst.init()
+				select {
+				case c.writeChan <- wrst:
+					// Queued successfully.
+				default:
+					c.Logger.Warn("Failed to queue RST_STREAM on cancel (write buffer full)", zap.Uint32("streamID", stream.ID))
+				}
 			}
 			c.mu.Unlock()
 			c.cleanupStream(stream.ID, ctx.Err())
@@ -539,21 +576,37 @@ func (c *H2Client) sendRequest(stream *h2StreamState) error {
 		return fmt.Errorf("failed to encode headers: %w", err)
 	}
 
-	// Write HEADERS frame.
+	// Queue HEADERS frame.
 	endStream := len(bodyBytes) == 0
-	// Assuming headers fit in one frame (EndHeaders=true). A robust implementation must handle CONTINUATION frames for large headers.
-	if err := c.Framer.WriteHeaders(http2.HeadersFrameParam{
-		StreamID:      stream.ID,
-		BlockFragment: headerBlock,
-		EndStream:     endStream,
-		EndHeaders:    true,
-	}); err != nil {
+
+	// Handle splitting into CONTINUATION frames if necessary.
+	wh := &writeHeaders{
+		streamID:     stream.ID,
+		headerBlock:  headerBlock,
+		endStream:    endStream,
+		maxFrameSize: c.maxFrameSize, // Pass current maxFrameSize for splitting logic
+	}
+	wh.init()
+	// Ensure maxFrameSize is at least the default if it hasn't been set (e.g. 0).
+	// Although NewH2Client sets it to DefaultH2MaxFrameSize, testing or reset might change it.
+	if wh.maxFrameSize == 0 {
+		wh.maxFrameSize = DefaultH2MaxFrameSize
+	}
+
+	select {
+	case c.writeChan <- wh:
+		// Frame queued successfully.
+	case <-c.doneChan:
 		c.mu.Unlock()
-		// Treat write failures as fatal connection errors.
-		c.closeWithError(http2.ErrCodeInternal, fmt.Errorf("failed to write HEADERS frame: %w", err))
-		return err
+		return fmt.Errorf("connection closed while queuing HEADERS")
 	}
 	c.mu.Unlock()
+
+	// Wait for HEADERS (and any CONTINUATIONs) to be written before proceeding to DATA.
+	if err := wh.wait(); err != nil {
+		// writeLoop handles closing the connection on error.
+		return fmt.Errorf("failed to write HEADERS frame: %w", err)
+	}
 
 	if endStream {
 		return nil
@@ -609,15 +662,27 @@ func (c *H2Client) sendData(stream *h2StreamState, data []byte) error {
 		c.connSendWindow -= int64(chunkSize)
 		stream.sendWindow -= int64(chunkSize)
 
-		// 4. Write DATA frame.
-		if err := c.Framer.WriteData(stream.ID, isLastChunk, chunk); err != nil {
-			c.mu.Unlock()
-			// Treat write failures as fatal connection errors.
-			c.closeWithError(http2.ErrCodeInternal, fmt.Errorf("failed to write DATA frame: %w", err))
-			return err
+		// 4. Queue DATA frame.
+		wd := &writeData{
+			streamID:  stream.ID,
+			data:      chunk,
+			endStream: isLastChunk,
 		}
+		wd.init()
 
+		select {
+		case c.writeChan <- wd:
+			// Frame queued successfully.
+		case <-c.doneChan:
+			c.mu.Unlock()
+			return fmt.Errorf("connection closed while queuing DATA")
+		}
 		c.mu.Unlock()
+
+		// Wait for the DATA frame to be written before looping to ensure ordering.
+		if err := wd.wait(); err != nil {
+			return fmt.Errorf("failed to write DATA frame: %w", err)
+		}
 	}
 	return nil
 }
@@ -689,6 +754,64 @@ func (c *H2Client) encodeHeaders(req *http.Request, body []byte) ([]byte, error)
 
 // -- Background Loops --
 
+// writeLoop runs in the background and serializes all outgoing frames.
+func (c *H2Client) writeLoop() {
+	defer c.loopWG.Done()
+
+	// Use a reasonable deadline for writing a single frame.
+	const writeTimeout = 15 * time.Second
+
+	for {
+		select {
+		case <-c.doneChan:
+			// Connection is closing. Drain the channel and notify senders.
+			c.drainWriteQueue(fmt.Errorf("connection closed"))
+			return
+		case req := <-c.writeChan:
+			// Set write deadline.
+			if c.Conn != nil {
+				c.Conn.SetWriteDeadline(time.Now().Add(writeTimeout))
+			}
+
+			// Write the frame.
+			err := req.writeFrame(c.Framer)
+
+			// Clear deadline.
+			if c.Conn != nil {
+				c.Conn.SetWriteDeadline(time.Time{})
+			}
+
+			if err != nil {
+				// Treat write failures as fatal connection errors.
+				c.Logger.Error("Error writing frame, closing connection", zap.Error(err))
+
+				// shutdown handles the cleanup and signaling doneChan.
+				c.shutdown(http2.ErrCodeInternal, fmt.Errorf("frame write error: %w", err))
+
+				// Notify the specific request that failed.
+				req.handleError(err)
+				// Drain the rest of the queue as the connection is now closed.
+				c.drainWriteQueue(err)
+				return
+			}
+			// Notify the sender that the write succeeded (err=nil).
+			req.handleError(nil)
+		}
+	}
+}
+
+func (c *H2Client) drainWriteQueue(err error) {
+	// Drain the channel until it's empty.
+	for {
+		select {
+		case req := <-c.writeChan:
+			req.handleError(err)
+		default:
+			return
+		}
+	}
+}
+
 // pingLoop periodically sends PING frames to keep the connection alive and detect failures (NAT timeouts, half-open connections).
 func (c *H2Client) pingLoop() {
 	defer c.loopWG.Done()
@@ -720,7 +843,7 @@ func (c *H2Client) pingLoop() {
 			case <-time.After(timeout):
 				// Timeout waiting for ACK.
 				c.Logger.Error("H2 PING timeout, closing connection")
-				c.closeWithError(http2.ErrCodeNo, fmt.Errorf("PING timeout"))
+				c.shutdown(http2.ErrCodeNo, fmt.Errorf("PING timeout"))
 				return
 			case <-c.doneChan:
 				return
@@ -751,11 +874,16 @@ func (c *H2Client) sendPing() (<-chan struct{}, error) {
 	// Register the channel to wait for the ACK.
 	c.pingAcks[payloadInt] = ackChan
 
-	if err := c.Framer.WritePing(false, payload); err != nil {
+	// Queue PING frame.
+	wp := &writePing{data: payload, ack: false}
+	wp.init()
+
+	select {
+	case c.writeChan <- wp:
+		// PING queued. We don't wait here; pingLoop handles connection closure if write fails later.
+	case <-c.doneChan:
 		delete(c.pingAcks, payloadInt)
-		// Treat write failures as fatal connection errors.
-		c.closeWithError(http2.ErrCodeInternal, fmt.Errorf("failed to write PING frame: %w", err))
-		return nil, err
+		return nil, fmt.Errorf("connection closed while queuing PING")
 	}
 
 	return ackChan, nil
@@ -763,8 +891,8 @@ func (c *H2Client) sendPing() (<-chan struct{}, error) {
 
 // readLoop runs in the background and processes all incoming frames sequentially.
 func (c *H2Client) readLoop() {
-	defer c.loopWG.Done()
 	// Ensure connection is closed if the loop exits unexpectedly.
+	// This defer runs LAST (LIFO order).
 	defer func() {
 		// Check if the connection is still considered active.
 		c.mu.Lock()
@@ -773,11 +901,14 @@ func (c *H2Client) readLoop() {
 
 		if isConn {
 			// If the loop exits but the connection wasn't
-			// cleanly shut down (e.g., by c.Close()),
-			// we must trigger the close to clean up resources.
-			c.Close()
+			// cleanly shut down, initiate shutdown to clean up resources.
+			// We use shutdown() instead of Close() to avoid waiting for ourselves.
+			c.shutdown(http2.ErrCodeInternal, fmt.Errorf("readLoop exited unexpectedly"))
 		}
 	}()
+
+	// This defer runs FIRST when the function exits.
+	defer c.loopWG.Done()
 
 	// Use a long read timeout if PINGs are enabled, as PINGs verify connectivity.
 	// If PINGs are disabled, use the IdleConnTimeout to detect inactive connections.
@@ -812,7 +943,7 @@ func (c *H2Client) readLoop() {
 			if netErr, ok := err.(net.Error); ok && netErr.Timeout() {
 				// Read timeout occurred.
 				c.Logger.Info("H2 connection read timeout reached, closing.")
-				c.closeWithError(http2.ErrCodeNo, fmt.Errorf("read timeout"))
+				c.shutdown(http2.ErrCodeNo, fmt.Errorf("read timeout"))
 				return
 			}
 			// Treat other read errors as fatal.
@@ -827,7 +958,7 @@ func (c *H2Client) readLoop() {
 				errCode = http2.ErrCode(ce)
 			}
 
-			c.closeWithError(errCode, fmt.Errorf("frame read error: %w", err))
+			c.shutdown(errCode, fmt.Errorf("frame read error: %w", err))
 			return
 		}
 
@@ -843,7 +974,7 @@ func (c *H2Client) readLoop() {
 			} else if errors.As(err, &ce) {
 				errCode = http2.ErrCode(ce)
 			}
-			c.closeWithError(errCode, err)
+			c.shutdown(errCode, err)
 			return
 		}
 	}
@@ -890,7 +1021,7 @@ func (c *H2Client) processFrame(frame http2.Frame) error {
 	case *http2.DataFrame:
 		streamEnded, streamErr = c.processDataFrame(stream, f)
 	case *http2.RSTStreamFrame:
-		streamErr = fmt.Errorf("stream reset by server (Error Code: %v)", f.ErrCode)
+		streamErr = H2StreamResetError{ErrCode: f.ErrCode}
 		streamEnded = true
 	case *http2.WindowUpdateFrame:
 		streamErr = c.processWindowUpdateFrame(stream, f)
@@ -921,7 +1052,15 @@ func (c *H2Client) processFrame(frame http2.Frame) error {
 		if !streamEnded {
 			c.mu.Lock()
 			if c.isConnected {
-				c.Framer.WriteRSTStream(streamID, errCode)
+				// Queue RST_STREAM non-blocking.
+				wrst := &writeRSTStream{streamID: streamID, errCode: errCode}
+				wrst.init()
+				select {
+				case c.writeChan <- wrst:
+					// Queued successfully.
+				default:
+					c.Logger.Warn("Failed to queue RST_STREAM (write buffer full)", zap.Uint32("streamID", streamID), zap.Error(streamErr))
+				}
 			}
 			c.mu.Unlock()
 		}
@@ -941,7 +1080,7 @@ func (c *H2Client) processControlFrame(frame http2.Frame) error {
 		return c.processPingFrame(f)
 	case *http2.GoAwayFrame:
 		// Server is shutting down the connection.
-		c.closeWithError(f.ErrCode, fmt.Errorf("received GOAWAY from server (Error Code: %v)", f.ErrCode))
+		c.shutdown(f.ErrCode, fmt.Errorf("received GOAWAY from server (Error Code: %v)", f.ErrCode))
 		return nil // Connection closure is handled by closeWithError.
 	case *http2.WindowUpdateFrame:
 		return c.processWindowUpdateFrame(nil, f)
@@ -1002,9 +1141,16 @@ func (c *H2Client) processSettingsFrame(f *http2.SettingsFrame) error {
 
 	// Acknowledge the server's settings (RFC 7540 Section 6.5.3).
 	if c.isConnected {
-		if err := c.Framer.WriteSettingsAck(); err != nil {
-			// Failure to write ACK is treated as a connection error.
-			return fmt.Errorf("failed to write SETTINGS ACK: %w", err)
+		// Queue SETTINGS ACK non-blocking.
+		ws := &writeSettings{isAck: true}
+		ws.init()
+		select {
+		case c.writeChan <- ws:
+			// ACK queued.
+		default:
+			// writeChan is full. This indicates severe congestion.
+			// While failing to send ACK promptly is bad, blocking the readLoop is worse.
+			c.Logger.Warn("Failed to queue SETTINGS ACK (write buffer full)")
 		}
 	}
 	return nil
@@ -1026,9 +1172,14 @@ func (c *H2Client) processPingFrame(f *http2.PingFrame) error {
 		c.mu.Lock()
 		defer c.mu.Unlock()
 		if c.isConnected {
-			if err := c.Framer.WritePing(true, f.Data); err != nil {
-				// Failure to write PING ACK is usually not fatal immediately, but log it.
-				c.Logger.Warn("Failed to write PING ACK", zap.Error(err))
+			// Queue PING ACK (PONG) non-blocking.
+			wp := &writePing{data: f.Data, ack: true}
+			wp.init()
+			select {
+			case c.writeChan <- wp:
+				// PONG queued.
+			default:
+				c.Logger.Warn("Failed to queue PING ACK (write buffer full)")
 			}
 		}
 	}
@@ -1168,8 +1319,9 @@ func (c *H2Client) processDataFrame(stream *h2StreamState, f *http2.DataFrame) (
 
 	// Enforce response body size limit.
 	if stream.BodyBuffer.Len()+dataLen > MaxResponseBodyBytes {
-		// This is a stream error (cancel the stream).
-		return true, fmt.Errorf("response body exceeded limit (%d bytes)", MaxResponseBodyBytes)
+		// This is a stream error. Return false for streamEnded so the caller (processFrame) sends RST_STREAM.
+		// We use ErrCodeCancel as we are refusing the data.
+		return false, http2.StreamError{StreamID: stream.ID, Code: http2.ErrCodeCancel, Cause: fmt.Errorf("response body exceeded limit (%d bytes)", MaxResponseBodyBytes)}
 	}
 
 	// Write data to the stream buffer.
@@ -1184,12 +1336,16 @@ func (c *H2Client) maybeSendWindowUpdate(streamID uint32, currentWindow, maxWind
 	if currentWindow <= threshold {
 		increment := uint32(maxWindow - currentWindow)
 		if increment > 0 && c.isConnected {
-			if err := c.Framer.WriteWindowUpdate(streamID, increment); err != nil {
-				// Failure to write WINDOW_UPDATE is usually not fatal immediately, but log it.
-				c.Logger.Warn("Failed to write WINDOW_UPDATE", zap.Uint32("streamID", streamID), zap.Error(err))
+			// Queue WINDOW_UPDATE non-blocking.
+			wwu := &writeWindowUpdate{streamID: streamID, increment: increment}
+			wwu.init()
+			select {
+			case c.writeChan <- wwu:
+				return increment
+			default:
+				c.Logger.Warn("Failed to queue WINDOW_UPDATE (write buffer full)", zap.Uint32("streamID", streamID))
 				return 0
 			}
-			return increment
 		}
 	}
 	return 0
@@ -1235,4 +1391,161 @@ func (c *H2Client) finalizeStream(stream *h2StreamState) {
 	}
 	delete(c.streams, stream.ID)
 	c.lastUsed = time.Now() // Update activity tracker
+}
+
+// -- Write Request Implementations --
+
+// waitableWriteRequest is an interface for writes that can be waited upon.
+type waitableWriteRequest interface {
+	h2WriteRequest
+	wait() error
+}
+
+// baseWriteRequest provides common functionality for waitable write requests.
+type baseWriteRequest struct {
+	// doneChan is buffered and receives the result of the write operation (nil on success).
+	doneChan chan error
+}
+
+func (b *baseWriteRequest) init() {
+	// Buffered channel allows writeLoop to signal completion without blocking.
+	b.doneChan = make(chan error, 1)
+}
+
+func (b *baseWriteRequest) handleError(err error) {
+	// Non-blocking send to the channel.
+	select {
+	case b.doneChan <- err:
+	default:
+		// Should not happen if initialized correctly.
+	}
+}
+
+func (b *baseWriteRequest) wait() error {
+	return <-b.doneChan
+}
+
+// Specific frame types implementing waitableWriteRequest:
+
+type writeSettings struct {
+	baseWriteRequest
+	settings []http2.Setting
+	isAck    bool
+}
+
+func (w *writeSettings) writeFrame(f *http2.Framer) error {
+	if w.isAck {
+		return f.WriteSettingsAck()
+	}
+	return f.WriteSettings(w.settings...)
+}
+
+type writeWindowUpdate struct {
+	baseWriteRequest
+	streamID  uint32
+	increment uint32
+}
+
+func (w *writeWindowUpdate) writeFrame(f *http2.Framer) error {
+	return f.WriteWindowUpdate(w.streamID, w.increment)
+}
+
+type writePing struct {
+	baseWriteRequest
+	data [8]byte
+	ack  bool
+}
+
+func (w *writePing) writeFrame(f *http2.Framer) error {
+	return f.WritePing(w.ack, w.data)
+}
+
+type writeRSTStream struct {
+	baseWriteRequest
+	streamID uint32
+	errCode  http2.ErrCode
+}
+
+func (w *writeRSTStream) writeFrame(f *http2.Framer) error {
+	return f.WriteRSTStream(w.streamID, w.errCode)
+}
+
+type writeHeaders struct {
+	baseWriteRequest
+	streamID     uint32
+	headerBlock  []byte
+	endStream    bool
+	maxFrameSize uint32
+}
+
+func (w *writeHeaders) writeFrame(f *http2.Framer) error {
+	// Handle fragmentation (CONTINUATION frames).
+
+	if uint32(len(w.headerBlock)) <= w.maxFrameSize {
+		// Fits in a single HEADERS frame.
+		return f.WriteHeaders(http2.HeadersFrameParam{
+			StreamID:      w.streamID,
+			BlockFragment: w.headerBlock,
+			EndStream:     w.endStream,
+			EndHeaders:    true,
+		})
+	}
+
+	// Needs CONTINUATION frames.
+	// 1. Send initial HEADERS frame.
+	chunk := w.headerBlock[:w.maxFrameSize]
+	w.headerBlock = w.headerBlock[w.maxFrameSize:]
+
+	err := f.WriteHeaders(http2.HeadersFrameParam{
+		StreamID:      w.streamID,
+		BlockFragment: chunk,
+		EndStream:     w.endStream, // END_STREAM flag is only on the initial HEADERS frame.
+		EndHeaders:    false,
+	})
+	if err != nil {
+		return err
+	}
+
+	// 2. Send CONTINUATION frames.
+	for len(w.headerBlock) > 0 {
+		chunkSize := uint32(len(w.headerBlock))
+		endHeaders := false
+		if chunkSize > w.maxFrameSize {
+			chunkSize = w.maxFrameSize
+		} else {
+			endHeaders = true
+		}
+
+		chunk := w.headerBlock[:chunkSize]
+		w.headerBlock = w.headerBlock[chunkSize:]
+
+		err := f.WriteContinuation(w.streamID, endHeaders, chunk)
+		if err != nil {
+			return err
+		}
+	}
+
+	return nil
+}
+
+type writeData struct {
+	baseWriteRequest
+	streamID  uint32
+	data      []byte
+	endStream bool
+}
+
+func (w *writeData) writeFrame(f *http2.Framer) error {
+	return f.WriteData(w.streamID, w.endStream, w.data)
+}
+
+type writeGoAway struct {
+	baseWriteRequest
+	maxStreamID uint32
+	code        http2.ErrCode
+	debugData   []byte
+}
+
+func (w *writeGoAway) writeFrame(f *http2.Framer) error {
+	return f.WriteGoAway(w.maxStreamID, w.code, w.debugData)
 }

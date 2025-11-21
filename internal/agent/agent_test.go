@@ -273,6 +273,70 @@ func TestAgent_RunMission_Success(t *testing.T) {
 	mockLTM.AssertExpectations(t) // Verify LTM mock expectations
 }
 
+// NEW TEST: TestAgent_ActionLoop_PanicRecovery verifies that the action loop recovers from panics
+// during message processing and acknowledges the message to prevent shutdown deadlocks.
+func TestAgent_ActionLoop_PanicRecovery(t *testing.T) {
+	// 1. Setup
+	// We need a short timeout for the overall test execution to detect deadlocks.
+	testCtx, cancelTest := context.WithTimeout(context.Background(), 5*time.Second)
+	defer cancelTest()
+
+	// Initialize the agent and its dependencies.
+	agent, _, bus, mockExecutors, _, _, _, _, _, _ := setupAgentTest(t)
+
+	// Use a separate context for the actionLoop itself, which we won't cancel until the end.
+	loopCtx, cancelLoop := context.WithCancel(context.Background())
+
+	// Subscribe to the action channel that the loop will consume from.
+	actionChan, unsubscribeActions := bus.Subscribe(MessageTypeAction)
+	defer unsubscribeActions()
+
+	// 2. Configure the mock executor to panic when a specific action is executed.
+	panickingAction := Action{Type: ActionClick, ID: "panic-action"}
+	mockExecutors.On("Execute", mock.Anything, panickingAction).Run(func(args mock.Arguments) {
+		panic("Simulated executor panic!")
+	}).Return(nil, errors.New("this error is ignored because of panic")).Once()
+
+	// 3. Start the action loop in a separate goroutine.
+	agent.wg.Add(1)
+	loopFinishedChan := make(chan struct{})
+	go func() {
+		// Catch any panic propagating out of the loop just in case the internal recovery fails.
+		defer func() {
+			if r := recover(); r != nil {
+				t.Logf("Test caught panic propagating out of actionLoop (unexpected): %v", r)
+			}
+			close(loopFinishedChan)
+		}()
+		agent.actionLoop(loopCtx, actionChan)
+	}()
+
+	// 4. Post the message that will cause the panic.
+	err := bus.Post(testCtx, CognitiveMessage{ID: "test-msg-panic", Type: MessageTypeAction, Payload: panickingAction})
+	require.NoError(t, err)
+
+	// 5. Verify Acknowledgment by attempting to shut down the bus.
+	// If the message wasn't acknowledged (because the loop crashed before recovery), bus.Shutdown() will hang.
+	shutdownDone := make(chan struct{})
+	go func() {
+		// Shutdown waits for all in-flight messages to be acknowledged.
+		bus.Shutdown()
+		close(shutdownDone)
+	}()
+
+	select {
+	case <-shutdownDone:
+		// Success: Bus shut down cleanly, meaning the message was acknowledged despite the panic.
+	case <-testCtx.Done():
+		t.Fatal("Timeout waiting for bus shutdown. Message likely unacknowledged due to panic in actionLoop.")
+	}
+
+	// 6. Clean up the running loop.
+	cancelLoop()
+	// Wait for the loop goroutine to finish (safe because we know it didn't deadlock).
+	<-loopFinishedChan
+}
+
 // TestAgent_RunMission_MindFailure verifies the agent fails fast if the Mind fails to start.
 func TestAgent_RunMission_MindFailure(t *testing.T) {
 	// Arrange
@@ -351,6 +415,58 @@ func TestAgent_RunMission_ContextCancellation(t *testing.T) {
 	mockLTM.AssertExpectations(t)
 	mockKG.AssertExpectations(t)
 	mockLLM.AssertExpectations(t)
+}
+
+// NEW TEST: TestAgent_RunMission_CancellationBeforeFinish verifies that the actionLoop
+// does not leak if the context is cancelled right when the agent tries to finish.
+func TestAgent_RunMission_CancellationBeforeFinish(t *testing.T) {
+	// This tests the fix where finish() now accepts a context and uses select{} when sending the result.
+
+	agent, mockMind, _, _, _, mockKG, mockLLM, mockLTM, _, _ := setupAgentTest(t)
+	// Create a context that we can cancel.
+	ctx, cancel := context.WithCancel(context.Background())
+
+	// Set expectations for the initial startup
+	mockMind.On("SetMission", agent.mission).Return().Once()
+	// Mind.Start should run until the context passed to it (missionCtx) is cancelled.
+	mockMind.On("Start", mock.Anything).Run(func(args mock.Arguments) {
+		startCtx := args.Get(0).(context.Context)
+		<-startCtx.Done() // Block until cancelled
+	}).Return(context.Canceled).Once()
+	mockMind.On("Stop").Return().Once()
+	mockLTM.On("Start").Return().Once()
+
+	// Set expectations for the conclusion (which will happen after cancellation in RunMission)
+	// These mocks are needed because RunMission calls concludeMission upon cancellation.
+	mockKG.On("GetNode", mock.Anything, mock.Anything).Return(schemas.Node{}, nil).Maybe()
+	mockKG.On("GetEdges", mock.Anything, mock.Anything).Return([]schemas.Edge{}, nil).Maybe()
+	mockLLM.On("Generate", mock.Anything, mock.Anything).Return("Cancelled summary.", nil).Maybe()
+
+	// Act
+	var runMissionWg sync.WaitGroup
+	runMissionWg.Add(1)
+	go func() {
+		defer runMissionWg.Done()
+		// RunMission will block until cancelled.
+		_, _ = agent.RunMission(ctx)
+	}()
+
+	// Allow the agent and its actionLoop to start up.
+	time.Sleep(100 * time.Millisecond)
+
+	// We need to ensure the actionLoop attempts to process the message *after* we cancel the context.
+	// This simulates the race condition where RunMission exits due to cancellation
+	// before the actionLoop finishes sending the result via finish().
+	cancel() // Cancel the context, causing RunMission to start shutting down.
+
+	// Wait for RunMission to return. This confirms the receiver (RunMission) is gone.
+	runMissionWg.Wait()
+
+	// Crucial Assertion: Wait for the agent's internal WaitGroup (which includes the actionLoop).
+	// If the actionLoop leaks (because finish() blocks), this will time out.
+	assert.True(t, waitTimeout(&agent.wg, 2*time.Second), "Agent WaitGroup did not complete, potential goroutine leak in actionLoop/finish.")
+
+	mockMind.AssertExpectations(t)
 }
 
 // TestAgent_ActionLoop verifies the correct dispatching of various action types.
@@ -561,54 +677,8 @@ func TestAgent_ActionLoop(t *testing.T) {
 		}
 	})
 
-	// NEW: Test for complex actions being dispatched to the executor
-	t.Run("ExecuteLoginSequenceAction_DispatchedToExecutor", func(t *testing.T) {
-		agent, bus, cancelRoot, _ := setupActionLoop(t)
-		defer cancelRoot()
-		mockExecutors := agent.executors.(*MockExecutorRegistry)
-
-		action := Action{Type: ActionExecuteLoginSequence, Rationale: "Attempting login"}
-		obsChan, unsub := bus.Subscribe(MessageTypeObservation)
-		defer unsub()
-
-		execResult := &ExecutionResult{Status: "success", ObservationType: ObservedAuthResult}
-		mockExecutors.On("Execute", mock.Anything, action).Return(execResult, nil).Once()
-
-		err := bus.Post(context.Background(), CognitiveMessage{ID: "login-msg", Type: MessageTypeAction, Payload: action})
-		require.NoError(t, err)
-
-		select {
-		case msg := <-obsChan:
-			bus.Acknowledge(msg)
-			mockExecutors.AssertExpectations(t)
-		case <-time.After(2 * time.Second):
-			t.Fatal("Timeout waiting for ActionExecuteLoginSequence to be dispatched")
-		}
-	})
-
-	t.Run("ExploreApplicationAction_DispatchedToExecutor", func(t *testing.T) {
-		agent, bus, cancelRoot, _ := setupActionLoop(t)
-		defer cancelRoot()
-		mockExecutors := agent.executors.(*MockExecutorRegistry)
-
-		action := Action{Type: ActionExploreApplication, Rationale: "Exploring the app"}
-		obsChan, unsub := bus.Subscribe(MessageTypeObservation)
-		defer unsub()
-
-		execResult := &ExecutionResult{Status: "success", ObservationType: ObservedDOMChange}
-		mockExecutors.On("Execute", mock.Anything, action).Return(execResult, nil).Once()
-
-		err := bus.Post(context.Background(), CognitiveMessage{ID: "explore-msg", Type: MessageTypeAction, Payload: action})
-		require.NoError(t, err)
-
-		select {
-		case msg := <-obsChan:
-			bus.Acknowledge(msg)
-			mockExecutors.AssertExpectations(t)
-		case <-time.After(2 * time.Second):
-			t.Fatal("Timeout waiting for ActionExploreApplication to be dispatched")
-		}
-	})
+	// REMOVED: ExecuteLoginSequenceAction and ExploreApplicationAction tests are removed here
+	// because they are now explicitly covered by the ExecutorRegistry tests (TestExecutorRegistry_Execute/RegisteredComplexActions_RoutedToBrowserExecutor).
 
 	t.Run("FuzzEndpointAction_DispatchedToExecutor", func(t *testing.T) {
 		agent, bus, cancelRoot, _ := setupActionLoop(t)

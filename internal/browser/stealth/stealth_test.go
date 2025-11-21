@@ -284,6 +284,24 @@ func TestUnit_CreateDeviceMetricsAction(t *testing.T) {
 	}
 }
 
+// TestUnit_CreateDeviceMetricsAction_NilLogger (Unit Test) verifies Fix 8.
+// Ensures no panic occurs if a nil logger is passed during DPR clamping.
+func TestUnit_CreateDeviceMetricsAction_NilLogger(t *testing.T) {
+	persona := schemas.Persona{
+		Width:      800,
+		Height:     600,
+		PixelDepth: MaxDPR + 1, // Force DPR clamping
+	}
+
+	assert.NotPanics(t, func() {
+		action := createDeviceMetricsAction(persona, nil)
+		require.NotNil(t, action)
+		metrics, ok := action.(*emulation.SetDeviceMetricsOverrideParams)
+		require.True(t, ok)
+		assert.Equal(t, MaxDPR, metrics.DeviceScaleFactor, "DPR should be clamped even with nil logger")
+	})
+}
+
 // TestApply_EmptyPersona (Integration Test) ensures that Apply handles an empty persona and applies defaults.
 func TestApply_EmptyPersona(t *testing.T) {
 	ctx, cancel := setupBrowserContext(t)
@@ -330,37 +348,70 @@ func TestApply_NilLogger(t *testing.T) {
 	})
 }
 
-// TestApply_PlatformDerivation (Integration Test) verifies that if Platform is omitted,
-// it is correctly derived from the UserAgent by the browser. (Test for Bug 5)
-func TestApply_PlatformDerivation(t *testing.T) {
+// TestApply_PlatformDerivationAndInjection (Integration Test) verifies that if Platform is omitted,
+// it is correctly derived AND injected into the JS environment. (Test for Fix 3)
+func TestApply_PlatformDerivationAndInjection(t *testing.T) {
 	ctx, cancel := setupBrowserContext(t)
 	defer cancel()
 
 	// 1. Define a persona with a specific UA (macOS) but NO platform.
 	macUA := "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36"
-	testPersona := schemas.Persona{
-		UserAgent: macUA,
-		// Platform: "", // Intentionally left empty
-	}
+	testPersona := schemas.Persona{UserAgent: macUA} // Platform intentionally empty
 
 	// 2. Apply the stealth evasions.
 	err := ApplyStealthEvasions(ctx, testPersona, nil)
 	require.NoError(t, err, "Applying stealth evasions should not fail")
 
 	// 3. Navigate and evaluate the results.
-	var result struct {
-		UA       string `json:"ua"`
-		Platform string `json:"platform"`
-	}
+	var result map[string]interface{}
 	err = chromedp.Run(ctx,
 		chromedp.Navigate("about:blank"),
-		chromedp.Evaluate(`({ua: navigator.userAgent, platform: navigator.platform})`, &result),
+		// Check navigator properties AND the injected persona data.
+		chromedp.Evaluate(`({
+			ua: navigator.userAgent,
+			platform: navigator.platform,
+			injectedPlatform: window.SCALPEL_PERSONA ? window.SCALPEL_PERSONA.platform : 'N/A',
+			injectedUA: window.SCALPEL_PERSONA ? window.SCALPEL_PERSONA.userAgent : 'N/A'
+		})`, &result),
 	)
 	require.NoError(t, err, "Chromedp run failed")
 
 	// 4. Assertions
-	assert.Equal(t, macUA, result.UA, "UserAgent mismatch")
+	expectedPlatform := "MacIntel"
+	assert.Equal(t, macUA, result["ua"], "UserAgent mismatch (navigator)")
+	assert.Equal(t, macUA, result["injectedUA"], "UserAgent mismatch (injected)")
+
 	// The platform should be derived as "MacIntel", NOT the DefaultPlatform ("Win32").
-	assert.Equal(t, "MacIntel", result.Platform, "Platform was not derived correctly from UserAgent")
-	assert.NotEqual(t, DefaultPlatform, result.Platform, "Should not use DefaultPlatform when UA is provided")
+	assert.Equal(t, expectedPlatform, result["platform"], "Platform (navigator.platform) was not derived/applied correctly")
+	// (Test for Fix 3): The injected persona must also contain the derived platform.
+	assert.Equal(t, expectedPlatform, result["injectedPlatform"], "Injected persona platform mismatch (Fix 3 failed)")
+	assert.NotEqual(t, DefaultPlatform, result["platform"], "Should not use DefaultPlatform when UA is provided")
+}
+
+// TestUnit_DerivePlatformFromUA (Unit Test) verifies the platform derivation logic (Improvement 7).
+func TestUnit_DerivePlatformFromUA(t *testing.T) {
+	tests := []struct {
+		name     string
+		ua       string
+		expected string
+	}{
+		// Windows
+		{"Windows 10", DefaultUserAgent, DefaultPlatform},
+
+		// macOS / iOS (Verification of priority)
+		{"Mac OS X", "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Safari/605.1.15", "MacIntel"},
+		{"iPhone (Priority)", "Mozilla/5.0 (iPhone; CPU iPhone OS 14_4 like Mac OS X) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/14.0.3 Mobile/15E148 Safari/604.1", "iPhone"},
+
+		// Linux / Android (Verification of 32-bit and Modernization)
+		{"Linux (x86_64)", "Mozilla/5.0 (X11; Linux x86_64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.51 Safari/537.36", "Linux x86_64"},
+		{"Linux (i686)", "Mozilla/5.0 (X11; Linux i686) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.51 Safari/537.36", "Linux i686"},
+		{"Android (Modernization)", "Mozilla/5.0 (Linux; Android 11; Pixel 5) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/99.0.4844.51 Mobile Safari/537.36", "Linux aarch64"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual := derivePlatformFromUA(tt.ua)
+			assert.Equal(t, tt.expected, actual, "Platform derivation mismatch")
+		})
+	}
 }

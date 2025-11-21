@@ -40,10 +40,10 @@ func mockUUIDGenerator(t *testing.T, ids ...string) {
 	uuidNewString = func() string {
 		id, ok := <-idChan
 		if !ok {
-			// Fail the test if we run out of IDs, as this indicates a mismatch in the test setup.
+			// FIX: Fail the test if we run out of IDs. Using t.Fatalf in a goroutine causes issues.
+			// We log the error and panic instead, which allows the Mind's recovery mechanisms (or the test runner) to handle it gracefully.
 			t.Logf("CRITICAL: mockUUIDGenerator ran out of IDs. Stack:\n%s", debug.Stack())
-			t.Fatalf("mockUUIDGenerator ran out of IDs. Please provide the correct sequence of IDs for the test.")
-			return "ERROR-UUID" // Should not happen due to Fatalf
+			panic("mockUUIDGenerator ran out of IDs.")
 		}
 		return id
 	}
@@ -177,6 +177,47 @@ func TestLLMMind_SetMission_KGFailure(t *testing.T) {
 	// Assert
 	assert.Equal(t, StateFailed, mind.currentState, "Mind should transition to FAILED if mission node cannot be created")
 	mockKG.AssertExpectations(t)
+}
+
+// NEW TEST: TestLLMMind_Start_StateInitializationRace attempts to detect race conditions
+// during the initialization phase when Start and SetMission are called concurrently.
+func TestLLMMind_Start_StateInitializationRace(t *testing.T) {
+	// This test is primarily useful when run with the race detector (go test -race).
+	mind, _, mockKG, _, _ := setupLLMMind(t)
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	defer cancel()
+
+	missionID := "mission-race-init"
+
+	// Mock KG calls needed for SetMission
+	mockMissionInitialization(t, mockKG, missionID)
+
+	// We want Start() and SetMission() to run concurrently.
+	var wg sync.WaitGroup
+	wg.Add(2)
+
+	go func() {
+		defer wg.Done()
+		// Start will initialize and wait for the observer loop, then check/update the state.
+		mind.Start(ctx)
+	}()
+
+	go func() {
+		defer wg.Done()
+		// SetMission will update the state and signal readiness.
+		mind.SetMission(Mission{ID: missionID})
+	}()
+
+	// Wait for the observer loop to be ready (which happens during Start)
+	select {
+	case <-mind.observerReadyChan:
+		// Good
+	case <-time.After(2 * time.Second):
+		t.Fatal("Timeout waiting for observer loop to start")
+	}
+
+	// The state assertions are implicitly handled by the race detector and the fact that the loops proceed.
+	cancel()
 }
 
 // -- Test Cases: Prompt Generation and Parsing (Coverage Increase) --

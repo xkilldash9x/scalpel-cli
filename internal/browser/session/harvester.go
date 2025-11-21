@@ -50,6 +50,7 @@ type requestState struct {
 	postBody            []byte // <-- ADDED: This is for the REQUEST body
 	err                 error
 	finished            bool
+	finishedTime        cdp.MonotonicTime
 	isDataURL           bool
 	wallTime            time.Time
 	monotonicTime       cdp.MonotonicTime
@@ -317,6 +318,9 @@ func (h *Harvester) handleLoadingFinished(ev *network.EventLoadingFinished) {
 
 	if req, ok := h.requests[ev.RequestID]; ok {
 		req.finished = true
+		if ev.Timestamp != nil {
+			req.finishedTime = *ev.Timestamp
+		}
 		// Try fetching body again if not already fetched, in progress, or a data URL.
 		if h.captureBodies && len(req.responses) > 0 && req.body == nil && !req.isDataURL && !req.bodyFetchInProgress {
 			req.bodyFetchInProgress = true // Mark fetch as started
@@ -594,7 +598,27 @@ func (h *Harvester) generateHAR() *schemas.HAR {
 		}
 		finalResp := reqState.responses[len(reqState.responses)-1]
 
-		totalTime := finalResp.Timestamp.Time().Sub(reqState.monotonicTime.Time()).Seconds() * 1000
+		// FIX: Calculate proper end time including body download
+		var endTime time.Time
+		// Check if finished and the finishedTime is valid (not zero)
+		if reqState.finished && !reqState.finishedTime.Time().IsZero() {
+			endTime = reqState.finishedTime.Time()
+		} else {
+			endTime = finalResp.Timestamp.Time() // Fallback to headers received
+		}
+
+		totalTime := endTime.Sub(reqState.monotonicTime.Time()).Seconds() * 1000
+
+		timings := ConvertCDPTimings(finalResp.Response.Timing)
+
+		// FIX: Calculate Receive time (Body download duration)
+		if reqState.finished && !reqState.finishedTime.Time().IsZero() {
+			receiveDuration := reqState.finishedTime.Time().Sub(finalResp.Timestamp.Time()).Seconds() * 1000
+			if receiveDuration < 0 {
+				receiveDuration = 0
+			}
+			timings.Receive = receiveDuration
+		}
 
 		entry := schemas.Entry{
 			Pageref:         h.pageID,
@@ -604,7 +628,7 @@ func (h *Harvester) generateHAR() *schemas.HAR {
 			Request:  h.buildHARRequest(reqState.request, reqState.postBody),
 			Response: h.buildHARResponse(finalResp, reqState.body),
 			Cache:    struct{}{},
-			Timings:  ConvertCDPTimings(finalResp.Response.Timing),
+			Timings:  timings,
 		}
 		har.Log.Entries = append(har.Log.Entries, entry)
 	}

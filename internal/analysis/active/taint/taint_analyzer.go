@@ -1338,8 +1338,17 @@ func (a *Analyzer) isContextValid(event SinkEvent, probe ActiveProbe) bool {
 		return false
 	}
 
-	if event.Type == schemas.SinkNavigation && !strings.HasPrefix(event.Value, "javascript:") {
-		return false
+	// FIX: Expanded check to include data: and vbscript: schemes as flagged by CodeQL.
+	// This ensures we don't suppress valid XSS vectors that use these schemes.
+	if event.Type == schemas.SinkNavigation {
+		val := strings.ToLower(event.Value)
+		isExecutableScheme := strings.HasPrefix(val, "javascript:") ||
+			strings.HasPrefix(val, "data:") ||
+			strings.HasPrefix(val, "vbscript:")
+
+		if !isExecutableScheme {
+			return false
+		}
 	}
 
 	return true

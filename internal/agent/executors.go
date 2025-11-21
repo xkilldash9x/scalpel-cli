@@ -61,7 +61,16 @@ func NewExecutorRegistry(projectRoot string, globalCtx *core.GlobalContext) *Exe
 	}
 
 	// Register browser actions.
-	r.register(browserExec, ActionNavigate, ActionSubmitForm, ActionScroll, ActionWaitForAsync)
+	// FIX: Register complex actions that were missing.
+	r.register(browserExec,
+		ActionNavigate,
+		ActionSubmitForm,
+		ActionScroll,
+		ActionWaitForAsync,
+		ActionExecuteLoginSequence, // Complex workflow
+		ActionExploreApplication,   // Complex workflow
+		ActionFuzzEndpoint,         // Complex workflow
+	)
 
 	// Register complex, interactive browser actions (Humanoid).
 	r.register(humanoidExec, ActionClick, ActionInputText, ActionHumanoidDragAndDrop)
@@ -269,6 +278,8 @@ func (e *BrowserExecutor) handleScroll(ctx context.Context, session schemas.Sess
 // handleWaitForAsync executes a wait/sleep action.
 func (e *BrowserExecutor) handleWaitForAsync(ctx context.Context, session schemas.SessionContext, action Action) error {
 	defaultDurationMs := 1000
+	// FIX: Define a maximum reasonable duration to prevent excessively long waits or integer overflows on 32-bit systems.
+	maxDurationMs := 60000 // 60 seconds
 	durationMs := defaultDurationMs
 
 	val, exists := action.Metadata["duration_ms"]
@@ -276,20 +287,39 @@ func (e *BrowserExecutor) handleWaitForAsync(ctx context.Context, session schema
 		// Handle various numeric types resulting from JSON unmarshaling.
 		switch v := val.(type) {
 		case float64:
-			durationMs = int(v)
+			if v > float64(maxDurationMs) {
+				durationMs = maxDurationMs
+			} else {
+				durationMs = int(v)
+			}
 		case float32:
-			durationMs = int(v)
+			if v > float32(maxDurationMs) {
+				durationMs = maxDurationMs
+			} else {
+				durationMs = int(v)
+			}
 		case int:
-			durationMs = v
+			// Although 'int' might be 64-bit, we still enforce the cap.
+			if v > maxDurationMs {
+				durationMs = maxDurationMs
+			} else {
+				durationMs = v
+			}
 		case int64:
-			durationMs = int(v)
+			if v > int64(maxDurationMs) {
+				durationMs = maxDurationMs
+			} else {
+				// Safe cast as it's now within 'int' range if maxDurationMs fits in 'int'.
+				durationMs = int(v)
+			}
 		default:
 			e.logger.Warn("Invalid type for 'duration_ms' metadata. Using default.", zap.Any("value", val))
 			durationMs = defaultDurationMs
 		}
 	}
 
-	if durationMs <= 0 {
+	// Check if duration is non-positive, but only reset if it wasn't capped (to handle if default was negative).
+	if durationMs <= 0 && durationMs != maxDurationMs {
 		durationMs = defaultDurationMs
 	}
 

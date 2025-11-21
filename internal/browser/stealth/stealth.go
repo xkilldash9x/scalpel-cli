@@ -63,13 +63,36 @@ func Apply(persona schemas.Persona, logger *zap.Logger) chromedp.Tasks {
 	}
 	logger.Debug("Applying stealth persona and evasions.")
 
+	// (Fix 3: Ensure derived properties are injected consistently into JS)
+	// We determine effective properties (handling defaults/derivation) and update the persona
+	// object BEFORE marshalling it for injection.
+
+	// 1. Determine effective properties
+
+	// UserAgent
+	if persona.UserAgent == "" {
+		persona.UserAgent = DefaultUserAgent
+	}
+
+	// Languages
+	if len(persona.Languages) == 0 {
+		persona.Languages = DefaultLanguages
+	}
+
+	// Platform (Fix for Bug 5: Inconsistent Platform Defaulting)
+	// If platform is not provided, derive it from the UserAgent.
+	if persona.Platform == "" {
+		persona.Platform = derivePlatformFromUA(persona.UserAgent)
+	}
+	// (End Fix 3)
+
 	// 1. Prepare Persona data for injection
 	jsPersona, err := json.Marshal(persona)
 	if err != nil {
 		logger.Error("failed to marshal persona for stealth injection", zap.Error(err))
 		// Return an error action if critical data preparation fails
 		return chromedp.Tasks{chromedp.ActionFunc(func(ctx context.Context) error {
-			return fmt.Errorf("failed to marshal persona: %w", err)
+			return err
 		})}
 	}
 
@@ -103,37 +126,11 @@ func Apply(persona schemas.Persona, logger *zap.Logger) chromedp.Tasks {
 	}
 
 	// 4. Apply CDP Overrides (Defense in depth)
-
-	// Determine UserAgent
-	userAgent := persona.UserAgent
-	if userAgent == "" {
-		userAgent = DefaultUserAgent
-	}
-
-	// Determine Languages
-	languages := persona.Languages
-	if len(languages) == 0 {
-		languages = DefaultLanguages
-	}
-
-	// Determine Platform (Fix for Bug 5: Inconsistent Platform Defaulting)
-	platform := persona.Platform
-	if platform == "" {
-		if userAgent == DefaultUserAgent {
-			platform = DefaultPlatform
-		} else {
-			// FIX: Manually derive platform from UA because CDP won't do it automatically.
-			platform = derivePlatformFromUA(userAgent)
-		}
-	}
-
-	uaOverride := emulation.SetUserAgentOverride(userAgent).
-		WithAcceptLanguage(strings.Join(languages, ","))
-
-	// Always set the platform if we have one (which we now always should)
-	if platform != "" {
-		uaOverride = uaOverride.WithPlatform(platform)
-	}
+	
+	// Use the finalized persona properties.
+	uaOverride := emulation.SetUserAgentOverride(persona.UserAgent).
+		WithAcceptLanguage(strings.Join(persona.Languages, ",")).
+		WithPlatform(persona.Platform) // Platform is now guaranteed to be set.
 
 	tasks = append(tasks, uaOverride)
 
@@ -144,8 +141,8 @@ func Apply(persona schemas.Persona, logger *zap.Logger) chromedp.Tasks {
 
 	// Locale handling: Use persona locale, fallback to primary language if locale is empty.
 	locale := persona.Locale
-	if locale == "" && len(languages) > 0 {
-		locale = languages[0]
+	if locale == "" && len(persona.Languages) > 0 {
+		locale = persona.Languages[0]
 	}
 	if locale != "" {
 		tasks = append(tasks, emulation.SetLocaleOverride().WithLocale(locale))
@@ -159,28 +156,37 @@ func Apply(persona schemas.Persona, logger *zap.Logger) chromedp.Tasks {
 	return tasks
 }
 
-// Helper function to derive platform from User Agent string
+// Helper function to derive platform from User Agent string (Improvement 7)
 func derivePlatformFromUA(ua string) string {
 	lowerUA := strings.ToLower(ua)
-	if strings.Contains(lowerUA, "windows") || strings.Contains(lowerUA, "win32") || strings.Contains(lowerUA, "win64") {
-		return "Win32"
-	}
-	// FIX for Bug 2: Check for iPhone/iPad BEFORE checking for Macintosh.
-	// iPad and iPhone UA strings often contain "like Mac OS X", so they would match
-	// "mac os x" if checked later, resulting in incorrect "MacIntel" platform.
+
+	// 1. Check for specific mobile platforms first (Crucial for iOS priority).
 	if strings.Contains(lowerUA, "iphone") {
 		return "iPhone"
 	}
 	if strings.Contains(lowerUA, "ipad") {
 		return "iPad"
 	}
+	if strings.Contains(lowerUA, "android") {
+		// Modernization: Use "Linux aarch64" for modern 64-bit Android.
+		return "Linux aarch64"
+	}
+
+	// 2. Check desktop platforms.
+	if strings.Contains(lowerUA, "windows") || strings.Contains(lowerUA, "win32") || strings.Contains(lowerUA, "win64") {
+		return "Win32"
+	}
+
+	// Check Mac (after iPhone/iPad, as iOS UAs often contain "like Mac OS X").
 	if strings.Contains(lowerUA, "macintosh") || strings.Contains(lowerUA, "mac os x") {
 		return "MacIntel"
 	}
-	if strings.Contains(lowerUA, "android") {
-		return "Linux armv8l" // Common default, though variable
-	}
+
 	if strings.Contains(lowerUA, "linux") {
+		// Detect 32-bit Linux (Check for 32-bit indicators AND absence of 64-bit indicators).
+		if (strings.Contains(lowerUA, "i686") || strings.Contains(lowerUA, "i386")) && !strings.Contains(lowerUA, "x86_64") && !strings.Contains(lowerUA, "wow64") {
+			return "Linux i686"
+		}
 		return "Linux x86_64"
 	}
 	// Fallback
@@ -205,6 +211,7 @@ func createDeviceMetricsAction(persona schemas.Persona, logger *zap.Logger) chro
 
 	// Robustness: Clamp DPR to a reasonable range.
 	if dpr > MaxDPR {
+		// (Fix 8: Ensure logger is not nil before use)
 		if logger != nil {
 			logger.Warn("Persona DPR (PixelDepth) exceeds maximum. Clamping.",
 				zap.Float64("provided_dpr", dpr),
