@@ -847,6 +847,29 @@ describe('Scalpel Taint Shim V2 (Unabridged Compliance Suite)', () => {
                 // Handler should be called exactly once.
                 expect(handler).toHaveBeenCalledTimes(1);
             });
+
+            it('Object Listener: Should report vulnerability when listener is an object with handleEvent', async () => {
+                let handlerExecuted = false;
+                const unsafeHandler = {
+                    handleEvent: function(e) {
+                        handlerExecuted = true;
+                        const val = e.data; // Taint sink access
+                    }
+                };
+                window.addEventListener('message', unsafeHandler);
+
+                window.dispatchEvent(new MessageEvent('message', {
+                    data: TAINTED_STRING,
+                    origin: "http://evil.com"
+                }));
+
+                await wait();
+
+                expect(handlerExecuted).toBe(true);
+                expect(mockSinkCallback).toHaveBeenCalled();
+                const report = mockSinkCallback.mock.calls[0][0];
+                expect(report.type).toBe("POSTMESSAGE_MISSING_ORIGIN_CHECK");
+            });
         });
 
         describe('2. Storage Inspector (Local & Session)', () => {
