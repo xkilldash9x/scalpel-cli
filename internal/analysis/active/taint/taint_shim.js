@@ -10,7 +10,11 @@
         Sinks: {{.SinksJSON}},
         // VULN-FIX: These names are randomized per session by the Go backend.
         SinkCallbackName: "{{.SinkCallbackName}}",
+        
+        // VULN-FIX (Timing): Separate names for the JS wrapper (payload target) and the Go backend handle.
         ProofCallbackName: "{{.ProofCallbackName}}",
+        BackendProofCallbackName: "{{.BackendProofCallbackName}}",
+
         ErrorCallbackName: "{{.ErrorCallbackName}}",
         CanaryPrefix: "SCALPEL",
         // Property name used for Prototype Pollution probes (Write detection, Access trap, and DOM Clobbering).
@@ -125,10 +129,12 @@
 
     // --- VULN-FIX START: Capture Callbacks in Closure ---
     const SinkCallback = scope[CONFIG.SinkCallbackName];
-    const ProofCallback = scope[CONFIG.ProofCallbackName];
+    // VULN-FIX (Timing): Capture the backend handle, not the JS wrapper name.
+    const BackendProofCallback = scope[CONFIG.BackendProofCallbackName];
     const ErrorCallback = scope[CONFIG.ErrorCallbackName];
 
-    if (typeof SinkCallback !== 'function' || typeof ProofCallback !== 'function' || typeof ErrorCallback !== 'function') {
+    // VULN-FIX (Timing): Check the BackendProofCallback handle.
+    if (typeof SinkCallback !== 'function' || typeof BackendProofCallback !== 'function' || typeof ErrorCallback !== 'function') {
         scope.console.error("[Scalpel] Critical Error: Backend callbacks not exposed correctly or were clobbered before shim initialization. Analysis may be ineffective.");
         // Allow continuation in test mode even if callbacks are mocked/missing, but stop in production.
         if (!CONFIG.IsTesting) {
@@ -155,7 +161,48 @@
     // #                                     Heuristics and Utilities                                  #
     // #################################################################################################
 
-    // --- 2. Sensitive Data Patterns ---
+    // --- 1. Luhn Algorithm Validator (NEW) ---
+
+    /**
+     * Checks if a potential credit card number passes the Luhn algorithm (Mod 10).
+     * This filters out pattern matches that are mathematically invalid, reducing false positives.
+     */
+    function isValidLuhn(value) {
+        // Remove all non-digits (spaces, dashes)
+        const clean = value.replace(/\D/g, '');
+        
+        // Basic length check (PANs are typically 13-19 digits).
+        if (clean.length < 13 || clean.length > 19) {
+            return false;
+        }
+
+        let sum = 0;
+        let shouldDouble = false;
+
+        // Loop backwards through the digits
+        for (let i = clean.length - 1; i >= 0; i--) {
+            let digit = parseInt(clean.charAt(i), 10);
+
+            if (shouldDouble) {
+                // Double the digit
+                digit *= 2;
+                // If the result is > 9, subtract 9 (equivalent to summing the digits of the result)
+                if (digit > 9) {
+                    digit -= 9;
+                }
+            }
+
+            sum += digit;
+            // Toggle the flag for the next digit
+            shouldDouble = !shouldDouble;
+        }
+
+        // The number is valid if the sum is divisible by 10.
+        return (sum % 10) === 0;
+    }
+
+
+    // --- 2. Sensitive Data Patterns (UPDATED) ---
     const SECRET_PATTERNS = [
         // JWT/Bearer tokens
         /Bearer\s+ey[a-zA-Z0-9\-_]+\.ey[a-zA-Z0-9\-_]+\.[a-zA-Z0-9\-_]+/i,
@@ -165,18 +212,50 @@
         /AKIA[0-9A-Z]{16}/,
         // Slack Tokens
         /xox[pbaors]-[0-9]{12}-[0-9]{12}-[0-9]{12}-[a-f0-9]{32}/,
-        // PII (Credit Cards - simple detection)
-        /\b(4[0-9]{12}(?:[0-9]{3})?|5[1-5][0-9]{14}|3[47][0-9]{13})\b/,
+        // Note: Credit Card regex removed from here to be handled separately with Luhn validation
     ];
 
+    // The modernized and comprehensive regex for detection (Visa, Master, Amex, Discover, Diners Club).
+    // Handles spaces and dashes as separators. Must be kept in sync with scanner.go.
+    // Global flag (/g) is essential for checking all matches in the input using matchAll or exec loop.
+    const CC_REGEX = /\b(?:4[0-9]{3}(?:[- ]?[0-9]{4}){2}(?:[- ]?[0-9]{1,4})?|(?:5[1-5][0-9]{2}|222[1-9]|22[3-9][0-9]|2[3-6][0-9]{2}|27[01][0-9]|2720)(?:[- ]?[0-9]{4}){3}|3[47][0-9]{2}(?:[- ]?[0-9]{6})[- ]?[0-9]{5}|6(?:011|5[0-9]{2}|4[4-9][0-9])(?:[- ]?[0-9]{4}){3}|3(?:0[0-5]|[68][0-9])[0-9](?:[- ]?[0-9]{6})[- ]?[0-9]{4})\b/g;
+
+
+    /**
+     * Checks if a string contains sensitive information (API keys, tokens, or validated Credit Cards).
+     */
     function isSensitive(data) {
         if (typeof data !== 'string' || data.length < 10) return false;
         try {
+            // 1. Check generic secret patterns
             for (const pattern of SECRET_PATTERNS) {
                 if (pattern.test(data)) {
                     return true;
                 }
             }
+
+            // 2. Check Credit Card with Luhn Validation
+            // We use matchAll (if available) or exec loop to handle potential multiple CCs in a single string.
+
+            if (typeof data.matchAll === 'function') {
+                const ccMatches = data.matchAll(CC_REGEX);
+                for (const match of ccMatches) {
+                      // The regex ensures the format is correct, isValidLuhn ensures the math is correct
+                    if (isValidLuhn(match[0])) {
+                        return true;
+                    }
+                }
+            } else {
+                // Fallback for older environments
+                CC_REGEX.lastIndex = 0; // Reset regex state before starting the search
+                let match;
+                while ((match = CC_REGEX.exec(data)) !== null) {
+                    if (isValidLuhn(match[0])) {
+                        return true;
+                    }
+                }
+            }
+
         } catch (e) {
              reportShimError(e, "isSensitive execution failure");
         }
@@ -185,7 +264,7 @@
 
     // --- 3. CSTI Patterns ---
     const TEMPLATE_PATTERNS = [
-        /{{.*}}/, // Angular, Vue, Mustache, etc.
+        /\{\{.*\}\}/, // Angular, Vue, Mustache, etc.
         // Add more framework syntax if needed (e.g., <%= ... %>)
     ];
 
@@ -442,18 +521,22 @@
     }
 
     /**
-     * Overrides the execution proof callback.
+     * VULN-FIX (Timing): Initializes the JavaScript wrapper function that payloads will call.
+     * This wrapper captures the context (stack/URL) and then calls the actual Go backend handle.
      */
     function initializeExecutionProofCallback() {
-        const originalCallback = ProofCallback;
-        if (typeof originalCallback !== 'function') {
+        // VULN-FIX (Timing): Use the BackendProofCallback captured in the closure.
+        const backendCallback = BackendProofCallback;
+        
+        if (typeof backendCallback !== 'function') {
             // Don't log error if in testing mode and callback is missing (might be intentional)
             if (!CONFIG.IsTesting) {
-                 logger.error("Backend execution proof callback not exposed correctly.");
+                 logger.error("Backend execution proof callback handle not exposed correctly.");
             }
             return;
         }
 
+        // Define the JS wrapper on the global scope using the name payloads expect (CONFIG.ProofCallbackName).
         scope[CONFIG.ProofCallbackName] = function(canary) {
             const stack = getStackTrace();
             const context = getPageContext();
@@ -470,7 +553,8 @@
                 proof.page_url = context.url;
                 proof.page_title = context.title;
 
-                originalCallback(proof);
+                // Call the actual Go backend handle.
+                backendCallback(proof);
             } catch (e) {
                 reportShimError(e, "initializeExecutionProofCallback wrapper execution");
             } finally {
@@ -871,7 +955,8 @@ function instrumentPostMessage() {
         scope.instrumentedCache.add(originalAddEventListener);
         scope.instrumentedCache.add(originalRemoveEventListener);
     }
-    // --- 2. Sensitive Data Leaking (Storage Inspector) ---
+    
+    // --- 2. Sensitive Data Leaking (Storage Inspector) (UPDATED) ---
     function instrumentStorage() {
         // Storage APIs are generally not available in Service Workers.
         if (IS_WORKER || !scope.Storage || !scope.Storage.prototype.setItem) return;
@@ -888,7 +973,9 @@ function instrumentPostMessage() {
                 const strKey = String(key);
                 const strValue = String(value);
 
+                // Check for sensitive data using the updated isSensitive (includes Luhn validation for CCs)
                 if (isSensitive(strKey)) {
+                    // The type SENSITIVE_STORAGE_WRITE is handled specifically by the backend analyzer.
                     reportSink("SENSITIVE_STORAGE_WRITE", strKey, "Sensitive pattern detected in storage key");
                     sensitiveFoundInKey = true;
                 }
@@ -1273,7 +1360,7 @@ function instrumentPostMessage() {
             // --- Prototype Pollution Check (Existing Logic) ---
             return originalFetch.apply(this, args).then(response => {
                 // TEST-FIX: Ensure context is still valid during async processing
-                if (!scope.__SCALPEL_TAINT_INSTRUMENTED__) return response;
+                if (!scope.__SCALPEL_TAINT_INSTRUMENTED__) return;
 
                 try {
                     if (typeof scope.Response !== 'undefined' && response instanceof scope.Response) {
@@ -1697,6 +1784,8 @@ function instrumentPostMessage() {
         internals.PP_TRAP_IDENTIFIER = PP_TRAP_IDENTIFIER;
         // NEW: Expose utilities for testing
         internals.isSensitive = isSensitive;
+        internals.isValidLuhn = isValidLuhn; // Expose the new validator
+        internals.CC_REGEX = CC_REGEX;       // Expose the comprehensive regex
         internals.containsTemplateSyntax = containsTemplateSyntax;
         internals.looksLikeHTML = looksLikeHTML;
         // TEST-FIX: Expose the cleanup function

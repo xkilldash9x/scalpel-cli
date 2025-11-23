@@ -978,6 +978,8 @@ func TestAnalyze_HappyPath(t *testing.T) {
 	mockSession.On("Navigate", mock.Anything, mock.Anything).Return(nil).Times(4)
 	mockSession.On("ExecuteScript", mock.Anything, mock.Anything, mock.Anything).Return(json.RawMessage("null"), nil).Once()
 	mockSession.On("CollectArtifacts", mock.Anything).Return(&schemas.Artifacts{}, nil).Maybe()
+
+	// RACE CONDITION FIX: Expectations must be set before the action that triggers them.
 	mockSession.On("Interact", mock.Anything, mock.Anything).Return(nil).Once().Run(func(args mock.Arguments) {
 		analyzer.probesMutex.RLock()
 		var activeCanary string
@@ -989,12 +991,16 @@ func TestAnalyze_HappyPath(t *testing.T) {
 		}
 		analyzer.probesMutex.RUnlock()
 		require.NotEmpty(t, activeCanary)
-		// VULN-FIX: Use the dynamic callback name from the analyzer instance.
-		simulateCallback(t, mockSession, analyzer.jsCallbackSinkEventName, SinkEvent{Type: schemas.SinkFetchURL, Value: "http://oast.example.com/" + activeCanary})
+
+		// 1. Register the expectation FIRST
 		reporter.On("Report", mock.MatchedBy(func(f CorrelatedFinding) bool {
 			return f.Canary == activeCanary && f.Sink == schemas.SinkFetchURL
 		})).Once()
+
+		// 2. Then trigger the event that will fulfill it
+		simulateCallback(t, mockSession, analyzer.jsCallbackSinkEventName, SinkEvent{Type: schemas.SinkFetchURL, Value: "http://oast.example.com/" + activeCanary})
 	})
+
 	mockOAST.On("GetInteractions", mock.Anything, mock.Anything).Return([]schemas.OASTInteraction{}, nil).Maybe()
 	err := analyzer.Analyze(ctx, mockSession)
 	assert.NoError(t, err)

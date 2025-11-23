@@ -35,6 +35,7 @@ var taintShimFS embed.FS
 const taintShimFilename = "taint_shim.js"
 
 // Canary format: SCALPEL_{Prefix}_{Type}_{UUID_Short}
+// The regex requires the Type segment to be uppercase.
 var canaryRegex = regexp.MustCompile(`SCALPEL_[A-Z0-9]+_[A-Z_]+_[a-f0-9]{8}`)
 
 // Regex for extracting file/line/col from a JavaScript stack trace line (Heuristic for correlation).
@@ -68,7 +69,8 @@ type Analyzer struct {
 
 	// Store session-specific, randomized callback names.
 	jsCallbackSinkEventName      string
-	jsCallbackExecutionProofName string
+	jsCallbackExecutionProofName string // VULN-FIX (Timing): Name used in the payloads (JS wrapper).
+	jsBackendExecutionProofName  string // VULN-FIX (Timing): Name used for the actual Go backend callback.
 	jsCallbackShimErrorName      string
 
 	// Hybrid IAST Integration
@@ -76,6 +78,9 @@ type Analyzer struct {
 	// staticFindings stores results from SAST engine. Key is filename/URL.
 	staticFindings map[string][]javascript.StaticFinding
 	findingsMutex  sync.RWMutex
+
+	// Helper for validating sensitive data reports (e.g., Credit Cards)
+	panScanner *PANScanner
 }
 
 // NewAnalyzer creates and initializes a new taint Analyzer instance.
@@ -108,11 +113,19 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 	// Generate unique callback names for this analysis session.
 	shortID := uuid.New().String()[:8]
 	sinkCallbackName := fmt.Sprintf("%s_%s", JSCallbackSinkEvent, shortID)
+
+	// VULN-FIX (Timing): Use distinct names for the payload target (JS Wrapper) and the Go Backend callback.
 	proofCallbackName := fmt.Sprintf("%s_%s", JSCallbackExecutionProof, shortID)
+	// We append a distinct suffix to the backend name to differentiate it.
+	backendProofCallbackName := fmt.Sprintf("%s_BACKEND_%s", JSCallbackExecutionProof, shortID)
+
 	errorCallbackName := fmt.Sprintf("%s_%s", JSCallbackShimError, shortID)
 
 	// Initialize the JavaScript fingerprinter (SAST engine)
 	jsFingerprinter := javascript.NewFingerprinter(taskLogger)
+
+	// Initialize the PAN Scanner
+	panScanner := NewPANScanner()
 
 	return &Analyzer{
 		config:          config,
@@ -128,11 +141,15 @@ func NewAnalyzer(config Config, reporter ResultsReporter, oastProvider OASTProvi
 		// Store the generated unique names.
 		jsCallbackSinkEventName:      sinkCallbackName,
 		jsCallbackExecutionProofName: proofCallbackName,
+		jsBackendExecutionProofName:  backendProofCallbackName, // VULN-FIX (Timing): Store the backend name.
 		jsCallbackShimErrorName:      errorCallbackName,
 
 		// Hybrid IAST Initialization
 		jsFingerprinter: jsFingerprinter,
 		staticFindings:  make(map[string][]javascript.StaticFinding),
+		
+		// Sensitive Data Scanner Initialization
+		panScanner: panScanner,
 	}, nil
 }
 
@@ -202,7 +219,8 @@ func (a *Analyzer) UpdateTaintFlowRuleForTesting(flow TaintFlowPath, isValid boo
 
 // BuildTaintShim is an exported utility function that constructs the final
 // JavaScript instrumentation shim.
-func BuildTaintShim(templateContent string, configJSON string, sinkCallback, proofCallback, errorCallback string) (string, error) {
+// VULN-FIX (Timing): Updated signature to include the backend proof callback name.
+func BuildTaintShim(templateContent string, configJSON string, sinkCallback, proofCallback, backendProofCallback, errorCallback string) (string, error) {
 	// 1. Parse the template content passed as an argument.
 	tmpl, err := template.New("shim").Parse(templateContent)
 	if err != nil {
@@ -211,15 +229,17 @@ func BuildTaintShim(templateContent string, configJSON string, sinkCallback, pro
 
 	// 2. Define the data structure for template execution.
 	data := struct {
-		SinksJSON         string
-		SinkCallbackName  string
-		ProofCallbackName string
-		ErrorCallbackName string
+		SinksJSON                string
+		SinkCallbackName         string
+		ProofCallbackName        string // The JS wrapper name (payload target).
+		BackendProofCallbackName string // The Go backend handle name.
+		ErrorCallbackName        string
 	}{
-		SinksJSON:         configJSON,
-		SinkCallbackName:  sinkCallback,
-		ProofCallbackName: proofCallback,
-		ErrorCallbackName: errorCallback,
+		SinksJSON:                configJSON,
+		SinkCallbackName:         sinkCallback,
+		ProofCallbackName:        proofCallback,
+		BackendProofCallbackName: backendProofCallback, // VULN-FIX (Timing): Pass backend name to template.
+		ErrorCallbackName:        errorCallback,
 	}
 
 	// 3. Execute the template into a buffer.
@@ -351,9 +371,12 @@ func (a *Analyzer) instrument(ctx context.Context, session SessionContext) error
 	if err := session.ExposeFunction(ctx, a.jsCallbackSinkEventName, a.handleSinkEvent); err != nil {
 		return fmt.Errorf("failed to expose sink event callback: %w", err)
 	}
-	if err := session.ExposeFunction(ctx, a.jsCallbackExecutionProofName, a.handleExecutionProof); err != nil {
-		return fmt.Errorf("failed to expose execution proof callback: %w", err)
+
+	// VULN-FIX (Timing): Expose the Go backend handle using its specific name. The JS shim will define the wrapper.
+	if err := session.ExposeFunction(ctx, a.jsBackendExecutionProofName, a.handleExecutionProof); err != nil {
+		return fmt.Errorf("failed to expose execution proof backend callback: %w", err)
 	}
+
 	if err := session.ExposeFunction(ctx, a.jsCallbackShimErrorName, a.handleShimError); err != nil {
 		return fmt.Errorf("failed to expose shim error callback: %w", err)
 	}
@@ -379,8 +402,15 @@ func (a *Analyzer) generateShim() (string, error) {
 	}
 
 	// 2. Call the exported BuildTaintShim function with the pre-loaded template string.
-	// VULN-FIX: Pass the session-specific randomized callback names.
-	return BuildTaintShim(a.shimTemplate, string(sinksJSON), a.jsCallbackSinkEventName, a.jsCallbackExecutionProofName, a.jsCallbackShimErrorName)
+	// VULN-FIX (Timing): Pass all required callback names, including the distinct backend proof name.
+	return BuildTaintShim(
+		a.shimTemplate,
+		string(sinksJSON),
+		a.jsCallbackSinkEventName,
+		a.jsCallbackExecutionProofName,
+		a.jsBackendExecutionProofName,
+		a.jsCallbackShimErrorName,
+	)
 }
 
 // enqueueEvent provides a safe, non blocking mechanism for sending an event to the correlation engine.
@@ -698,7 +728,9 @@ func (a *Analyzer) probeSpecificURLParams(ctx context.Context, session SessionCo
 
 // generateCanary creates a unique canary string for tracking a probe.
 func (a *Analyzer) generateCanary(prefix string, probeType schemas.ProbeType) string {
-	return fmt.Sprintf("SCALPEL_%s_%s_%s", prefix, probeType, uuid.New().String()[:8])
+	// VULN-FIX (Regex Case Sensitivity): Ensure the probe type segment is uppercase to match the canaryRegex definition (`[A-Z_]+`).
+	upperProbeType := strings.ToUpper(string(probeType))
+	return fmt.Sprintf("SCALPEL_%s_%s_%s", prefix, upperProbeType, uuid.New().String()[:8])
 }
 
 // preparePayload replaces placeholders in a probe definition.
@@ -961,9 +993,14 @@ func (a *Analyzer) fetchAndEnqueueOAST() {
 func (a *Analyzer) processEvent(event Event) {
 	switch e := event.(type) {
 	case SinkEvent:
+		// Refactor: Handle specific sink types explicitly.
 		if e.Type == schemas.SinkPrototypePollution {
 			a.processPrototypePollutionConfirmation(e)
+		// Check for sensitive data events. We use string comparison as the constant might not be defined in the provided schemas context.
+		} else if string(e.Type) == "SENSITIVE_STORAGE_WRITE" { 
+			a.processSensitiveDataEvent(e)
 		} else {
+			// Standard canary-based taint flow.
 			a.processSinkEvent(e)
 		}
 	case ExecutionProofEvent:
@@ -1084,7 +1121,95 @@ func (a *Analyzer) processExecutionProof(proof ExecutionProofEvent) {
 	a.reporter.Report(finding)
 }
 
+// processSensitiveDataEvent (NEW) handles events related to sensitive data detection (PII/Secrets).
+// It performs backend verification (Luhn check) to confirm validity and reports findings.
+func (a *Analyzer) processSensitiveDataEvent(event SinkEvent) {
+	// The shim performs initial detection (regex + Luhn). The backend verifies this.
+
+	// 1. Verify Credit Card PANs
+	if a.panScanner.HasValidPAN(event.Value) {
+		
+		// Helper for safe snippet logging (PCI DSS compliant masking: first 6, last 4)
+		snippet := event.Value
+		// Clean before masking to ensure accurate masking of digits only
+		cleanSnippet := stripSeparators(snippet)
+		if len(cleanSnippet) > 10 {
+			snippet = cleanSnippet[:6] + strings.Repeat("*", len(cleanSnippet)-10) + cleanSnippet[len(cleanSnippet)-4:]
+		} else {
+			// Fallback if length is unusual
+			if len(snippet) > 15 {
+				snippet = snippet[:15] + "..."
+			}
+		}
+
+
+		a.logger.Warn("CONFIRMED: Credit Card Leak detected via IAST (Backend Verified)",
+			zap.String("location", event.PageURL),
+			zap.String("detail", event.Detail),
+			zap.String("value_masked", snippet))
+
+		// Report this as a high-confidence finding.
+		finding := CorrelatedFinding{
+			TaskID:            a.config.TaskID,
+			TargetURL:         a.config.Target.String(),
+			OccurrenceURL:     event.PageURL,
+			OccurrenceTitle:   event.PageTitle,
+			Sink:              event.Type,
+			// Define a specific origin for data originating within the client application logic/heuristics.
+			// We use a string cast as the constant might not be in the schemas package.
+			Origin:            schemas.TaintSource("HEURISTIC_CLIENT_DATA"), 
+			Value:             event.Value,
+			Canary:            "N/A (Sensitive Data)",
+			// Probe remains empty as this is not probe-based.
+			Detail:            "High Confidence: Verified Credit Card PAN leaked. " + event.Detail,
+			IsConfirmed:       true, // Confirmed by backend verification (Luhn check).
+			SanitizationLevel: SanitizationNone,
+			StackTrace:        event.StackTrace,
+			ConfirmedDynamic:  true,
+			ConfirmedStatic:   false,
+		}
+		a.reporter.Report(finding)
+		return
+	}
+
+	// 2. Handle other sensitive data (API keys, JWTs, etc.)
+	// These rely on the shim's regex detection without specific backend validators (for now).
+
+	// We check if the detail message provided by the shim indicates a pattern match.
+	if strings.Contains(event.Detail, "Sensitive pattern detected") {
+
+		// Check if it matched the PAN regex but failed the Luhn check (handled above).
+		// We suppress this to avoid false positives from generic numbers matching the format but failing validation.
+		// Accessing the unexported 'matcher' field is allowed as we are in the same 'taint' package.
+		if a.panScanner.matcher.MatchString(event.Value) {
+			// It looked like a CC but wasn't valid (failed Luhn), so we ignore it.
+			return
+		}
+
+		// Report other patterns (Keys, Tokens) based on the shim's detection.
+		finding := CorrelatedFinding{
+			TaskID:            a.config.TaskID,
+			TargetURL:         a.config.Target.String(),
+			OccurrenceURL:     event.PageURL,
+			OccurrenceTitle:   event.PageTitle,
+			Sink:              event.Type,
+			Origin:            schemas.TaintSource("HEURISTIC_CLIENT_DATA"),
+			Value:             event.Value,
+			Canary:            "N/A (Sensitive Data)",
+			Detail:            "Potential Secret/Key Leak: " + event.Detail,
+			IsConfirmed:       false, // Relying on pattern matching heuristics.
+			SanitizationLevel: SanitizationNone,
+			StackTrace:        event.StackTrace,
+			ConfirmedDynamic:  true,
+			ConfirmedStatic:   false,
+		}
+		a.reporter.Report(finding)
+	}
+}
+
+
 // processSinkEvent checks a sink event for our canaries and, if found, reports a potential finding.
+// This function now strictly handles canary-based taint flows.
 func (a *Analyzer) processSinkEvent(event SinkEvent) {
 	matchedCanaries := canaryRegex.FindAllString(event.Value, -1)
 	if len(matchedCanaries) == 0 {
@@ -1338,15 +1463,20 @@ func (a *Analyzer) isContextValid(event SinkEvent, probe ActiveProbe) bool {
 		return false
 	}
 
-	// FIX: Expanded check to include data: and vbscript: schemes as flagged by CodeQL.
-	// This ensures we don't suppress valid XSS vectors that use these schemes.
-	if event.Type == schemas.SinkNavigation {
+	// VULN-FIX (Navigation Sink Logic): The executable scheme check (javascript:, data:, vbscript:) is flawed
+	// when applied universally to SinkNavigation. It prevents detection of Open Redirects or data exfiltration
+	// if the probe type is Generic/OAST, as the resulting URL might be a standard http(s) URL.
+	// We restrict this check: It is only relevant when an XSS probe reaches a navigation sink.
+	if event.Type == schemas.SinkNavigation && probe.Type == schemas.ProbeTypeXSS {
 		val := strings.ToLower(event.Value)
+		// Check if the URL starts with an executable scheme.
 		isExecutableScheme := strings.HasPrefix(val, "javascript:") ||
 			strings.HasPrefix(val, "data:") ||
 			strings.HasPrefix(val, "vbscript:")
 
 		if !isExecutableScheme {
+			// If an XSS probe leads to navigation, but the URL is not immediately executable (e.g. http://),
+			// we suppress it here to reduce noise. If XSS occurs on the destination page, other sinks will catch it.
 			return false
 		}
 	}

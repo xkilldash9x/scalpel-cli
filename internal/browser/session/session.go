@@ -581,10 +581,12 @@ func (s *Session) initializeTaintShim(ctx context.Context, template, configJSON 
 	// VULN-FIX: Generate unique callback names for this analysis session to prevent DOM Clobbering.
 	shortID := uuid.New().String()[:8]
 	sinkCallbackName := fmt.Sprintf("%s_%s", taint.JSCallbackSinkEvent, shortID)
+	// VULN-FIX (Timing): Use distinct names for the payload target (JS Wrapper) and the Go Backend callback.
 	proofCallbackName := fmt.Sprintf("%s_%s", taint.JSCallbackExecutionProof, shortID)
+	backendProofCallbackName := fmt.Sprintf("%s_BACKEND_%s", taint.JSCallbackExecutionProof, shortID)
 	errorCallbackName := fmt.Sprintf("%s_%s", taint.JSCallbackShimError, shortID)
 
-	script, err := taint.BuildTaintShim(template, configJSON, sinkCallbackName, proofCallbackName, errorCallbackName)
+	script, err := taint.BuildTaintShim(template, configJSON, sinkCallbackName, proofCallbackName, backendProofCallbackName, errorCallbackName)
 	if err != nil {
 		return fmt.Errorf("failed to build shim script: %w", err)
 	}
@@ -596,7 +598,8 @@ func (s *Session) initializeTaintShim(ctx context.Context, template, configJSON 
 	// Expose dummy handlers for proof and error events to match the new shim's expectations.
 	// A proper implementation would require these handlers to be passed in or the session
 	// to have a more direct connection to the taint analyzer.
-	if err := s.ExposeFunction(ctx, proofCallbackName, s.handleExecutionProofEvent); err != nil {
+	// VULN-FIX (Timing): Expose the Go backend handle using its specific name.
+	if err := s.ExposeFunction(ctx, backendProofCallbackName, s.handleExecutionProofEvent); err != nil {
 		s.logger.Warn("Failed to expose dummy execution proof handler. This may affect some taint probes.", zap.Error(err))
 	}
 	if err := s.ExposeFunction(ctx, errorCallbackName, s.handleShimErrorEvent); err != nil {
