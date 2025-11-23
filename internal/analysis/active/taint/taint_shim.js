@@ -98,6 +98,10 @@
         // 5. Reset instrumentation flag - MUST BE LAST
         // This flag is used by async callbacks (setTimeout, Promises, Observers) to check if the context is still valid.
         scope.__SCALPEL_TAINT_INSTRUMENTED__ = false;
+
+        // Clear shared caches to allow re-instrumentation in tests
+        if (scope.instrumentedCache) scope.instrumentedCache.clear();
+        if (scope.listenerWrapperMap) scope.listenerWrapperMap = new WeakMap();
     }
 
     // Cleanup previous shim instances if re-initializing (e.g. in tests)
@@ -731,8 +735,11 @@ function instrumentPostMessage() {
 
         // --- 3. Add Event Listener Wrapper ---
         const addWrapper = function(type, listener, options) {
-            // Filter: Must be 'message' event, must be a function, must be on the Window
-            if (type !== 'message' || typeof listener !== 'function' || !isGlobalWindow(this)) {
+            const isFunction = typeof listener === 'function';
+            const isObjectHandler = typeof listener === 'object' && listener !== null && typeof listener.handleEvent === 'function';
+
+            // Filter: Must be 'message' event, must be a function or object handler, must be on the Window
+            if (type !== 'message' || (!isFunction && !isObjectHandler) || !isGlobalWindow(this)) {
                 return originalAddEventListener.call(this, type, listener, options);
             }
 
@@ -755,7 +762,11 @@ function instrumentPostMessage() {
 
                 try {
                     // Execute the original listener with the proxied event
-                    listener.call(this, eventProxy);
+                    if (isFunction) {
+                        listener.call(this, eventProxy);
+                    } else {
+                        listener.handleEvent(eventProxy);
+                    }
                 } catch (e) {
                     throw e;
                 } finally {
@@ -780,7 +791,10 @@ function instrumentPostMessage() {
 
         // --- 4. Remove Event Listener Wrapper ---
         const removeWrapper = function(type, listener, options) {
-            if (type === 'message' && typeof listener === 'function' && isGlobalWindow(this)) {
+            const isFunction = typeof listener === 'function';
+            const isObjectHandler = typeof listener === 'object' && listener !== null && typeof listener.handleEvent === 'function';
+
+            if (type === 'message' && (isFunction || isObjectHandler) && isGlobalWindow(this)) {
                 if (scope.listenerWrapperMap.has(listener)) {
                     const wrappedListener = scope.listenerWrapperMap.get(listener);
                     return originalRemoveEventListener.call(this, type, wrappedListener, options);
@@ -793,6 +807,65 @@ function instrumentPostMessage() {
         // We modify the prototype so all future instances (and current ones) are affected
         scope.EventTarget.prototype.addEventListener = addWrapper;
         scope.EventTarget.prototype.removeEventListener = removeWrapper;
+
+        // Register cleanup for EventTarget.prototype modifications
+        cleanupFunctions.push(() => {
+             try {
+                if (scope.EventTarget.prototype.addEventListener === addWrapper) {
+                    scope.EventTarget.prototype.addEventListener = originalAddEventListener;
+                }
+                if (scope.EventTarget.prototype.removeEventListener === removeWrapper) {
+                    scope.EventTarget.prototype.removeEventListener = originalRemoveEventListener;
+                }
+             } catch(e) {
+                 logger.error("Error restoring EventTarget.prototype listeners:", e);
+             }
+        });
+
+        // JSDOM/Environment FIX: Ensure window.addEventListener is also updated if it did not inherit the change.
+        // This check detects if window has its own property that masks the prototype, OR if inheritance failed.
+        if (scope.addEventListener !== addWrapper) {
+            const originalWindowAddEvent = scope.addEventListener;
+            const originalWindowRemoveEvent = scope.removeEventListener;
+
+            try {
+                Object.defineProperty(scope, 'addEventListener', {
+                    value: addWrapper,
+                    writable: true,
+                    configurable: true
+                });
+                Object.defineProperty(scope, 'removeEventListener', {
+                    value: removeWrapper,
+                    writable: true,
+                    configurable: true
+                });
+
+                // Register cleanup to restore window-specific methods
+                cleanupFunctions.push(() => {
+                    try {
+                        if (scope.addEventListener === addWrapper && originalWindowAddEvent) {
+                             Object.defineProperty(scope, 'addEventListener', {
+                                value: originalWindowAddEvent,
+                                writable: true,
+                                configurable: true
+                             });
+                        }
+                        if (scope.removeEventListener === removeWrapper && originalWindowRemoveEvent) {
+                             Object.defineProperty(scope, 'removeEventListener', {
+                                value: originalWindowRemoveEvent,
+                                writable: true,
+                                configurable: true
+                             });
+                        }
+                    } catch (e) {
+                        logger.error("Error restoring window.addEventListener during cleanup:", e);
+                    }
+                });
+
+            } catch (e) {
+                // Ignore if we can't redefine (e.g. non-configurable)
+            }
+        }
 
         // Mark as instrumented
         scope.instrumentedCache.add(originalAddEventListener);
