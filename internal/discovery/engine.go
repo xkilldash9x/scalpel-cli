@@ -329,9 +329,6 @@ func (e *Engine) dispatchTasksForAsset(ctx context.Context, urlString string, ta
 	if scanners.Active.Taint.Enabled {
 		sendTask(schemas.TaskAnalyzeWebPageTaint)
 	}
-	if scanners.Active.ProtoPollution.Enabled {
-		sendTask(schemas.TaskAnalyzeWebPageProtoPP)
-	}
 	if scanners.Passive.Headers.Enabled {
 		sendTask(schemas.TaskAnalyzeHeaders)
 	}

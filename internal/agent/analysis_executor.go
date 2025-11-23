@@ -185,8 +185,6 @@ func (e *AnalysisExecutor) mapActionToTaskType(actionType ActionType) (schemas.T
 	switch actionType {
 	case ActionAnalyzeTaint:
 		return schemas.TaskAnalyzeWebPageTaint, nil
-	case ActionAnalyzeProtoPollution:
-		return schemas.TaskAnalyzeWebPageProtoPP, nil
 	case ActionAnalyzeHeaders:
 		return schemas.TaskAnalyzeHeaders, nil
 	case ActionTestRaceCondition:

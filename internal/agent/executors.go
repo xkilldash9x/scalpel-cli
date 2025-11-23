@@ -81,7 +81,6 @@ func NewExecutorRegistry(projectRoot string, globalCtx *core.GlobalContext) *Exe
 	// Register analysis actions (Updated to include all defined actions).
 	r.register(analysisExec,
 		ActionAnalyzeTaint,
-		ActionAnalyzeProtoPollution,
 		ActionAnalyzeHeaders,
 		ActionAnalyzeJWT,
 		ActionTestRaceCondition,

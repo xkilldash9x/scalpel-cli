@@ -453,10 +453,9 @@ type JWTConfig struct {
 // ActiveScannersConfig holds settings for scanners that actively send malicious
 // or malformed requests to probe for vulnerabilities.
 type ActiveScannersConfig struct {
-	Taint          TaintConfig          `mapstructure:"taint" yaml:"taint"`
-	ProtoPollution ProtoPollutionConfig `mapstructure:"protopollution" yaml:"protopollution"`
-	TimeSlip       TimeSlipConfig       `mapstructure:"timeslip" yaml:"timeslip"`
-	Auth           AuthConfig           `mapstructure:"auth" yaml:"auth"`
+	Taint    TaintConfig    `mapstructure:"taint" yaml:"taint"`
+	TimeSlip TimeSlipConfig `mapstructure:"timeslip" yaml:"timeslip"`
+	Auth     AuthConfig     `mapstructure:"auth" yaml:"auth"`
 }
 
 // TaintConfig configures the active taint analysis scanner.
@@ -464,13 +463,6 @@ type TaintConfig struct {
 	Enabled     bool `mapstructure:"enabled" yaml:"enabled"`
 	Depth       int  `mapstructure:"depth" yaml:"depth"`
 	Concurrency int  `mapstructure:"concurrency" yaml:"concurrency"`
-}
-
-// ProtoPollutionConfig defines settings for the client-side Prototype Pollution
-// active scanner.
-type ProtoPollutionConfig struct {
-	Enabled      bool          `mapstructure:"enabled" yaml:"enabled"`
-	WaitDuration time.Duration `mapstructure:"wait_duration" yaml:"wait_duration"`
 }
 
 // TimeSlipConfig configures the time-based vulnerability scanner, which looks
@@ -701,8 +693,6 @@ func SetDefaults(v *viper.Viper) {
 	v.SetDefault("scanners.active.taint.enabled", true)
 	v.SetDefault("scanners.active.taint.depth", 5)
 	v.SetDefault("scanners.active.taint.concurrency", 10)
-	v.SetDefault("scanners.active.protopollution.enabled", true)
-	v.SetDefault("scanners.active.protopollution.wait_duration", 20*time.Second)
 	v.SetDefault("scanners.active.timeslip.enabled", false)
 	v.SetDefault("scanners.active.auth.ato.enabled", true)
 	v.SetDefault("scanners.active.auth.ato.seclists_path", "~/SecLists")

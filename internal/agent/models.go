@@ -53,9 +53,8 @@ const (
 
 	// -- Security Analysis Actions (Active & IAST) --
 	// These actions involve injecting payloads, manipulating the environment, or analyzing the live state.
-	ActionAnalyzeTaint          ActionType = "ANALYZE_TAINT"           // (IAST/Taint) Taint analysis (XSS, Injection) on the current page state.
-	ActionAnalyzeProtoPollution ActionType = "ANALYZE_PROTO_POLLUTION" // (Active/Proto) Scans for client-side prototype pollution and DOM clobbering.
-	ActionTestRaceCondition     ActionType = "TEST_RACE_CONDITION"     // (Active/TimeSlip) Tests an endpoint for race conditions (TOCTOU).
+	ActionAnalyzeTaint      ActionType = "ANALYZE_TAINT"       // (IAST/Taint) Taint analysis (XSS, Injection) on the current page state.
+	ActionTestRaceCondition ActionType = "TEST_RACE_CONDITION" // (Active/TimeSlip) Tests an endpoint for race conditions (TOCTOU).
 
 	// -- Authentication & Authorization Testing --
 	ActionTestATO  ActionType = "TEST_ATO"  // (Active/ATO) Account Takeover: Tests login endpoints for credential stuffing/enumeration.

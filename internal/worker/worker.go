@@ -111,7 +111,6 @@ func (w *MonolithicWorker) registerAdapters() error {
 
 	// STATELESS ADAPTERS
 	w.adapterRegistry[schemas.TaskAnalyzeWebPageTaint] = adapters.NewTaintAdapter()
-	w.adapterRegistry[schemas.TaskAnalyzeWebPageProtoPP] = adapters.NewProtoAdapter()
 	w.adapterRegistry[schemas.TaskAnalyzeHeaders] = adapters.NewHeadersAdapter()
 	w.adapterRegistry[schemas.TaskAnalyzeJWT] = adapters.NewJWTAdapter()
 	w.adapterRegistry[schemas.TaskTestRaceCondition] = adapters.NewTimeslipAdapter()

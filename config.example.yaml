@@ -88,9 +88,6 @@ scanners:
       enabled: true
       depth: 3
       concurrency: 2
-    protopollution:
-      enabled: true
-      wait_duration: "8s"
     timeslip:
       enabled: true
       request_count: 25

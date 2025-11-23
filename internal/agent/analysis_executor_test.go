@@ -264,7 +264,6 @@ func TestAnalysisExecutor_MapActionToTaskType(t *testing.T) {
 		expectErr  bool
 	}{
 		{ActionAnalyzeTaint, schemas.TaskAnalyzeWebPageTaint, false},
-		{ActionAnalyzeProtoPollution, schemas.TaskAnalyzeWebPageProtoPP, false},
 		{ActionAnalyzeHeaders, schemas.TaskAnalyzeHeaders, false},
 		{ActionClick, "", true}, // Unsupported type
 	}

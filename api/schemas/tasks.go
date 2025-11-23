@@ -8,11 +8,10 @@ package schemas
 type TaskType string
 
 const (
-	TaskAgentMission          TaskType = "AGENT_MISSION"            // A high-level mission for the autonomous agent.
-	TaskAnalyzeWebPageTaint   TaskType = "ANALYZE_WEB_PAGE_TAINT"   // Performs taint analysis on a web page.
-	TaskAnalyzeWebPageProtoPP TaskType = "ANALYZE_WEB_PAGE_PROTOPP" // Checks for prototype pollution vulnerabilities.
-	TaskTestRaceCondition     TaskType = "TEST_RACE_CONDITION"      // Tests for race conditions in web applications.
-	TaskTestAuthATO           TaskType = "TEST_AUTH_ATO"            // Tests for account takeover vulnerabilities.
+	TaskAgentMission          TaskType = "AGENT_MISSION"          // A high-level mission for the autonomous agent.
+	TaskAnalyzeWebPageTaint   TaskType = "ANALYZE_WEB_PAGE_TAINT" // Performs taint analysis on a web page.
+	TaskTestRaceCondition     TaskType = "TEST_RACE_CONDITION"    // Tests for race conditions in web applications.
+	TaskTestAuthATO           TaskType = "TEST_AUTH_ATO"          // Tests for account takeover vulnerabilities.
 	TaskTestAuthIDOR          TaskType = "TEST_AUTH_IDOR"           // Tests for Insecure Direct Object References.
 	TaskAnalyzeHeaders        TaskType = "ANALYZE_HEADERS"          // Analyzes HTTP security headers.
 	TaskAnalyzeJWT            TaskType = "ANALYZE_JWT"              // Analyzes JSON Web Tokens for vulnerabilities.

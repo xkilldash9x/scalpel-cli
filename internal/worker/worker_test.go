@@ -65,7 +65,6 @@ func TestNewMonolithicWorker_Registration(t *testing.T) {
 
 	expectedTasks := []schemas.TaskType{
 		schemas.TaskAnalyzeWebPageTaint,
-		schemas.TaskAnalyzeWebPageProtoPP, // Added this to match the new adapter
 		schemas.TaskTestAuthATO,
 		schemas.TaskTestAuthIDOR,
 		schemas.TaskAnalyzeHeaders,
