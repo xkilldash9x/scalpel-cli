@@ -41,13 +41,15 @@ func TestLuhnCheck(t *testing.T) {
 		isValid bool
 	}{
 		// Valid Numbers (Mathematically verified)
-		{"Valid Visa", "453201511283034", true}, // Corrected: Ends in 34 (Sum 50)
+		{"Valid Visa (15 digit)", "453201511283034", true},  // Sum 50
+		{"Valid Visa (16 digit)", "4532015111283039", true}, // Sum 60 (Corrected for failing tests)
 		{"Valid MasterCard", "5555555555554444", true},
 		{"Valid Amex", "371449635398431", true},
 
 		// Invalid Numbers
-		{"Invalid Checksum (Single Digit Off)", "453201511283035", false}, // Corrected: Ends in 35 (Sum 51)
-		{"Invalid Checksum (Transposition)", "453201511283036", false},
+		{"Invalid Checksum (15 digit)", "453201511283035", false}, // Sum 51
+		// The specific number that was causing test failures (Sum 55)
+		{"Invalid Checksum (16 digit, Failing Case)", "4532015111283034", false},
 		{"Too Short", "123456", false},
 		{"Too Long", "123456789012345678901", false}, // > 19 digits
 		{"Empty", "", false},
@@ -71,8 +73,8 @@ func TestPANScanner_HasValidPAN(t *testing.T) {
 	}{
 		// 1. Positive Matches (Valid Regex + Valid Luhn)
 		{
-			name:        "Simple Visa",
-			input:       "Here is a card: 453201511283034 thanks", // Corrected Check Digit
+			name:        "Simple Visa (15 digit)",
+			input:       "Here is a card: 453201511283034 thanks",
 			expectMatch: true,
 		},
 		{
@@ -86,8 +88,9 @@ func TestPANScanner_HasValidPAN(t *testing.T) {
 			expectMatch: true,
 		},
 		{
-			name:        "Mixed text",
-			input:       "user_id: 1234, cc: 4532-0151-1128-3034, exp: 12/25", // Corrected Check Digit
+			name: "Mixed text (16 digit)",
+			// Updated the check digit from 4 to 9 to ensure Luhn validity (Sum 60).
+			input:       "user_id: 1234, cc: 4532-0151-1128-3039, exp: 12/25",
 			expectMatch: true,
 		},
 
@@ -137,8 +140,8 @@ func TestProcessSensitiveDataEvent_ConfirmedLeak(t *testing.T) {
 	analyzer.wg.Add(1)
 	go analyzer.correlateWorker(0)
 
-	// Valid Visa that passes Luhn
-	validCC := "4532-0151-1128-3034" // Corrected Check Digit
+	// Valid Visa that passes Luhn (Updated check digit from 4 to 9, Sum 60).
+	validCC := "4532-0151-1128-3039"
 
 	// Create a Sensitive Data Event
 	event := SinkEvent{
