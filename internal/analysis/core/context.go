@@ -51,8 +51,31 @@ type AnalysisContext struct {
 // finding. It automatically populates the finding with the scan ID from the
 // current task context before appending it to the list of findings.
 func (ac *AnalysisContext) AddFinding(finding schemas.Finding) {
-	if finding.ScanID == "" && ac.Task.ScanID != "" {
-		finding.ScanID = ac.Task.ScanID
+	// 1. Populate missing ScanID from Task context
+	if finding.ScanID == "" {
+		if ac.Task.ScanID != "" {
+			finding.ScanID = ac.Task.ScanID
+		} else {
+			// Fallback: If no ScanID is available, use Nil UUID to avoid DB error "unable to encode empty string for uuid".
+			finding.ScanID = "00000000-0000-0000-0000-000000000000"
+			if ac.Logger != nil {
+				ac.Logger.Warn("Finding reported without ScanID and no Task context available. Using Nil UUID.", zap.String("finding_id", finding.ID))
+			}
+		}
 	}
+
+	// 2. Populate missing TaskID from Task context
+	if finding.TaskID == "" {
+		if ac.Task.TaskID != "" {
+			finding.TaskID = ac.Task.TaskID
+		} else {
+			// Fallback: If no TaskID is available, use Nil UUID to avoid DB error.
+			finding.TaskID = "00000000-0000-0000-0000-000000000000"
+			if ac.Logger != nil {
+				ac.Logger.Warn("Finding reported without TaskID and no Task context available. Using Nil UUID.", zap.String("finding_id", finding.ID))
+			}
+		}
+	}
+
 	ac.Findings = append(ac.Findings, finding)
 }
