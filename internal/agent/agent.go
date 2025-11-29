@@ -102,7 +102,7 @@ func New(ctx context.Context, mission Mission, globalCtx *core.GlobalContext, se
 
 	// 4. Executors and Humanoid
 	projectRoot, _ := os.Getwd()
-	executors := NewExecutorRegistry(projectRoot, globalCtx)
+	executors := NewExecutorRegistry(projectRoot, globalCtx, kg)
 	executors.UpdateSessionProvider(func() schemas.SessionContext {
 		return session
 	})

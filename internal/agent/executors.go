@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"strings"
 	"sync"
+	"time"
 
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
@@ -26,6 +27,7 @@ type ExecutorRegistry struct {
 	sessionProvider  SessionProvider
 	humanoidProvider HumanoidProvider
 	providerMu       sync.RWMutex
+	kg               GraphStore
 }
 
 // Verify interface compliance.
@@ -33,12 +35,13 @@ var _ ActionExecutor = (*ExecutorRegistry)(nil)
 
 // NewExecutorRegistry creates and initializes a new registry, populating it with
 // all the specialized executors (Browser, Codebase, Analysis, Humanoid).
-func NewExecutorRegistry(projectRoot string, globalCtx *core.GlobalContext) *ExecutorRegistry {
+func NewExecutorRegistry(projectRoot string, globalCtx *core.GlobalContext, kg GraphStore) *ExecutorRegistry {
 	logger := observability.GetLogger()
 	r := &ExecutorRegistry{
 		logger:          logger.Named("executor_registry"),
 		executors:       make(map[ActionType]ActionExecutor),
 		sessionProvider: nil,
+		kg:              kg,
 	}
 
 	// This getter ensures that the latest session provider is used by executors at runtime.
@@ -50,6 +53,9 @@ func NewExecutorRegistry(projectRoot string, globalCtx *core.GlobalContext) *Exe
 	codebaseExec := NewCodebaseExecutor(projectRoot)
 	analysisExec := NewAnalysisExecutor(globalCtx, safeProviderGetter)
 	humanoidExec := NewHumanoidExecutor(safeHumanoidGetter)
+	loginExec := NewLoginExecutor(safeHumanoidGetter, safeProviderGetter, kg)
+	controlExec := NewControlExecutor(globalCtx)
+
 	signUpExec, err := NewSignUpExecutor(safeHumanoidGetter, safeProviderGetter, globalCtx.Config, NewFileSystemSecListsLoader())
 	if err != nil {
 		// Log a warning if initialization fails for any reason (e.g., SecLists path invalid).
@@ -67,10 +73,14 @@ func NewExecutorRegistry(projectRoot string, globalCtx *core.GlobalContext) *Exe
 		ActionSubmitForm,
 		ActionScroll,
 		ActionWaitForAsync,
-		ActionExecuteLoginSequence, // Complex workflow
-		ActionExploreApplication,   // Complex workflow
-		ActionFuzzEndpoint,         // Complex workflow
+		ActionFuzzEndpoint, // Complex workflow stub
 	)
+
+	// Register specialized complex actions.
+	r.register(loginExec, ActionExecuteLoginSequence)
+	r.register(controlExec, ActionDecideNextStep)
+
+	r.register(browserExec, ActionExploreApplication) // Still mapped to browser executor for now, though likely complex.
 
 	// Register complex, interactive browser actions (Humanoid).
 	r.register(humanoidExec, ActionClick, ActionInputText, ActionHumanoidDragAndDrop)
@@ -247,6 +257,7 @@ func (e *BrowserExecutor) registerHandlers() {
 	e.handlers[ActionSubmitForm] = e.handleSubmitForm
 	e.handlers[ActionScroll] = e.handleScroll
 	e.handlers[ActionWaitForAsync] = e.handleWaitForAsync
+	e.handlers[ActionFuzzEndpoint] = e.handleFuzzEndpoint
 }
 
 // handleNavigate executes the navigation action.
@@ -323,6 +334,73 @@ func (e *BrowserExecutor) handleWaitForAsync(ctx context.Context, session schema
 	}
 
 	return session.WaitForAsync(ctx, durationMs)
+}
+
+// handleFuzzEndpoint is a stub implementation for fuzzing endpoints.
+func (e *BrowserExecutor) handleFuzzEndpoint(ctx context.Context, session schemas.SessionContext, action Action) error {
+	e.logger.Info("ActionFuzzEndpoint is a stub. Implementation pending.")
+	return nil
+}
+
+// -- Control Executor --
+
+// ControlExecutor handles high-level control actions like deciding next steps,
+// adjusting tactics, and modifying agent behavior.
+type ControlExecutor struct {
+	logger    *zap.Logger
+	globalCtx *core.GlobalContext
+}
+
+var _ ActionExecutor = (*ControlExecutor)(nil)
+
+func NewControlExecutor(globalCtx *core.GlobalContext) *ControlExecutor {
+	return &ControlExecutor{
+		logger:    observability.GetLogger().Named("control_executor"),
+		globalCtx: globalCtx,
+	}
+}
+
+func (e *ControlExecutor) Execute(ctx context.Context, action Action) (*ExecutionResult, error) {
+	if action.Type == ActionDecideNextStep {
+		return e.handleDecideNextStep(ctx, action)
+	}
+
+	return &ExecutionResult{
+		Status:          "failed",
+		ObservationType: ObservedSystemState,
+		ErrorCode:       ErrCodeUnknownAction,
+		ErrorDetails:    map[string]interface{}{"message": "ControlExecutor received unknown action type"},
+	}, nil
+}
+
+func (e *ControlExecutor) handleDecideNextStep(ctx context.Context, action Action) (*ExecutionResult, error) {
+	// Logic to "tie the scan process into the agents ability to decide, plan, react, replan or reorganize"
+	// This would parse metadata to adjust global configuration if possible, or trigger
+	// complex internal state transitions.
+	// For now, it logs the decision and potentially adjusts some runtime tunable parameters.
+
+	e.logger.Info("Agent is deciding next step / replanning...", zap.String("rationale", action.Rationale))
+
+	if tactics, ok := action.Metadata["tactics"].(map[string]interface{}); ok {
+		if speed, ok := tactics["scan_speed"].(string); ok {
+			e.logger.Info("Adjusting scan speed based on agent decision", zap.String("new_speed", speed))
+			// Implementation would involve adjusting rate limiters or delays in global context/config if exposed.
+		}
+	}
+
+	// Adjusting timing (e.g. sleep)
+	if delay, ok := action.Metadata["delay_ms"].(float64); ok {
+		e.logger.Info("Agent requested tactical delay", zap.Float64("ms", delay))
+		time.Sleep(time.Duration(delay) * time.Millisecond)
+	}
+
+	return &ExecutionResult{
+		Status:          "success",
+		ObservationType: ObservedSystemState,
+		Data: map[string]interface{}{
+			"message": "Plan updated / Decision processed",
+		},
+	}, nil
 }
 
 // -- Shared Error Parsing --

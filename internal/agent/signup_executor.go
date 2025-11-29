@@ -438,7 +438,7 @@ func (e *SignUpExecutor) attemptSignUp(ctx context.Context, action Action) *Exec
 
 	// 8. Verify the result.
 	e.logger.Debug("attemptSignUp: Step 8 - Verifying Result")
-	return e.verifySignUp(ctx, session, userData, initialAuthState, initialURL)
+	return e.verifySignUp(ctx, session, userData, initialAuthState, initialURL, action.MissionID)
 }
 
 // analyzeSignUpForm executes the embedded formAnalysisScript in the browser context.
@@ -852,7 +852,7 @@ func (e *SignUpExecutor) submitForm(ctx context.Context, h humanoid.Controller, 
 }
 
 // verifySignUp checks if the sign-up was successful using a prioritized verification strategy.
-func (e *SignUpExecutor) verifySignUp(ctx context.Context, session schemas.SessionContext, userData *generatedUserData, initialAuthState map[string]interface{}, initialURL string) *ExecutionResult {
+func (e *SignUpExecutor) verifySignUp(ctx context.Context, session schemas.SessionContext, userData *generatedUserData, initialAuthState map[string]interface{}, initialURL string, missionID string) *ExecutionResult {
 	e.logger.Debug("verifySignUp: Started")
 
 	// 1. Check for Authentication State Change (Strongest Indicator)
@@ -860,7 +860,7 @@ func (e *SignUpExecutor) verifySignUp(ctx context.Context, session schemas.Sessi
 	currentAuthState := e.getAuthState(ctx, session)
 	if e.compareAuthStates(initialAuthState, currentAuthState) {
 		e.logger.Info("Sign-up successful: Authentication state changed (new cookies/storage).")
-		return e.success(userData, map[string]interface{}{"verification_method": "auth_state_change"})
+		return e.success(userData, map[string]interface{}{"verification_method": "auth_state_change"}, missionID)
 	}
 
 	// 2. Check for URL Change (Strong indicator)
@@ -871,13 +871,13 @@ func (e *SignUpExecutor) verifySignUp(ctx context.Context, session schemas.Sessi
 		lowerURL := strings.ToLower(currentURL)
 		if !strings.Contains(lowerURL, "error") && !strings.Contains(lowerURL, "fail") && !strings.Contains(lowerURL, "denied") {
 			e.logger.Info("Sign-up likely successful: URL changed.", zap.String("from", initialURL), zap.String("to", currentURL))
-			return e.success(userData, map[string]interface{}{"verification_method": "url_change", "new_url": currentURL})
+			return e.success(userData, map[string]interface{}{"verification_method": "url_change", "new_url": currentURL}, missionID)
 		}
 	}
 
 	// 3. Analyze Network Traffic (HAR) for the submission request.
 	e.logger.Debug("verifySignUp: Checking Network Traffic")
-	if result := e.verifyNetworkTraffic(ctx, session, userData); result != nil {
+	if result := e.verifyNetworkTraffic(ctx, session, userData, missionID); result != nil {
 		e.logger.Debug("verifySignUp: Network verification conclusive.", zap.String("status", result.Status))
 		return result
 	}
@@ -885,11 +885,11 @@ func (e *SignUpExecutor) verifySignUp(ctx context.Context, session schemas.Sessi
 	// 4. Fallback: Check DOM for success/error indicators.
 	e.logger.Info("Auth state, URL change, and Network verification inconclusive. Falling back to DOM analysis.")
 	e.logger.Debug("verifySignUp: Checking DOM")
-	return e.verifySignUpDOM(ctx, session, userData)
+	return e.verifySignUpDOM(ctx, session, userData, missionID)
 }
 
 // verifyNetworkTraffic analyzes recent HAR data for submission status codes.
-func (e *SignUpExecutor) verifyNetworkTraffic(ctx context.Context, session schemas.SessionContext, userData *generatedUserData) *ExecutionResult {
+func (e *SignUpExecutor) verifyNetworkTraffic(ctx context.Context, session schemas.SessionContext, userData *generatedUserData, missionID string) *ExecutionResult {
 	artifactCtx, cancel := context.WithTimeout(ctx, 15*time.Second)
 	defer cancel()
 	artifacts, err := session.CollectArtifacts(artifactCtx)
@@ -926,7 +926,7 @@ func (e *SignUpExecutor) verifyNetworkTraffic(ctx context.Context, session schem
 			// Success codes (200-202, 3xx)
 			if (statusCode >= 200 && statusCode <= 202) || (statusCode >= 300 && statusCode < 400) {
 				e.logger.Info("Sign-up likely successful: Network request indicated success.", zap.Int("status", statusCode))
-				return e.success(userData, map[string]interface{}{"verification_method": "network", "status_code": statusCode})
+				return e.success(userData, map[string]interface{}{"verification_method": "network", "status_code": statusCode}, missionID)
 			}
 
 			// Failure codes (Validation/Conflict)
@@ -947,7 +947,7 @@ func (e *SignUpExecutor) verifyNetworkTraffic(ctx context.Context, session schem
 }
 
 // verifySignUpDOM performs DOM-based verification checks using the embedded JS scripts.
-func (e *SignUpExecutor) verifySignUpDOM(ctx context.Context, session schemas.SessionContext, userData *generatedUserData) *ExecutionResult {
+func (e *SignUpExecutor) verifySignUpDOM(ctx context.Context, session schemas.SessionContext, userData *generatedUserData, missionID string) *ExecutionResult {
 
 	// Check DOM for success indicators. Execute script directly (it is self-executing).
 	// Removed redundant IIFE wrapper.
@@ -959,7 +959,7 @@ func (e *SignUpExecutor) verifySignUpDOM(ctx context.Context, session schemas.Se
 		var successIndicator *string
 		if err := json.Unmarshal(rawSuccessResult, &successIndicator); err == nil && successIndicator != nil {
 			e.logger.Info("Sign-up successful: Found success indicator in DOM.", zap.String("indicator", *successIndicator))
-			return e.success(userData, map[string]interface{}{"verification_method": "dom", "indicator": *successIndicator})
+			return e.success(userData, map[string]interface{}{"verification_method": "dom", "indicator": *successIndicator}, missionID)
 		}
 	} else {
 		e.logger.Warn("Failed to execute success verification script.", zap.Error(err))
@@ -1060,7 +1060,7 @@ func (e *SignUpExecutor) fail(code ErrorCode, message string, details map[string
 
 // success is a helper function to generate a standardized successful ExecutionResult,
 // including KG updates for the new user account.
-func (e *SignUpExecutor) success(userData *generatedUserData, data map[string]interface{}) *ExecutionResult {
+func (e *SignUpExecutor) success(userData *generatedUserData, data map[string]interface{}, missionID string) *ExecutionResult {
 	if data == nil {
 		data = make(map[string]interface{})
 	}
@@ -1095,6 +1095,15 @@ func (e *SignUpExecutor) success(userData *generatedUserData, data map[string]in
 				Label:      fmt.Sprintf("Account: %s (%s)", userData.Username, userData.Email),
 				Status:     schemas.StatusNew,
 				Properties: propsBytes,
+			},
+		},
+		// Link the mission to the new account so subsequent actions can find it.
+		EdgesToAdd: []schemas.EdgeInput{
+			{
+				From:  missionID,
+				To:    accountID,
+				Type:  schemas.RelationshipHas,
+				Label: "Created Account",
 			},
 		},
 	}

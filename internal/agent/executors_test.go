@@ -214,7 +214,7 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 		Adapters: make(map[schemas.TaskType]core.Analyzer),
 	}
 
-	registry := NewExecutorRegistry(".", mockGlobalCtx)
+	registry := NewExecutorRegistry(".", mockGlobalCtx, nil)
 	registry.UpdateSessionProvider(provider)
 
 	t.Run("ValidBrowserAction", func(t *testing.T) {
@@ -342,10 +342,22 @@ func TestExecutorRegistry_Execute(t *testing.T) {
 
 				require.NoError(t, err)
 				require.NotNil(t, result)
-				assert.Equal(t, "failed", result.Status)
-				// The key assertion: The error message should come from the BrowserExecutor, not the Registry.
-				assert.Equal(t, ErrCodeUnknownAction, result.ErrorCode)
-				assert.Contains(t, result.ErrorDetails["message"], "BrowserExecutor handler not found")
+				// The result differs now because I implemented handlers.
+				// For EXECUTE_LOGIN_SEQUENCE, it fails due to invalid parameters (no credentials).
+				// For FUZZ_ENDPOINT, it succeeds (stub).
+				// For EXPLORE_APPLICATION, it is still routed to BrowserExecutor but no handler registered in registerHandlers().
+
+				if actionType == ActionExecuteLoginSequence {
+					assert.Equal(t, "failed", result.Status)
+					assert.Equal(t, ErrCodeInvalidParameters, result.ErrorCode) // Missing credentials
+				} else if actionType == ActionFuzzEndpoint {
+					assert.Equal(t, "success", result.Status)
+				} else {
+					assert.Equal(t, "failed", result.Status)
+					// The key assertion: The error message should come from the BrowserExecutor, not the Registry.
+					assert.Equal(t, ErrCodeUnknownAction, result.ErrorCode)
+					assert.Contains(t, result.ErrorDetails["message"], "BrowserExecutor handler not found")
+				}
 			})
 		}
 	})
@@ -373,7 +385,7 @@ func TestExecutorRegistry_Providers(t *testing.T) {
 	mockGlobalCtx := &core.GlobalContext{
 		Config: &config.Config{},
 	}
-	registry := NewExecutorRegistry(".", mockGlobalCtx)
+	registry := NewExecutorRegistry(".", mockGlobalCtx, nil)
 
 	// 1. Test initial state (should return nil)
 	sessionGetter := registry.GetSessionProvider()

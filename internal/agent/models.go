@@ -77,6 +77,7 @@ const (
 	ActionSignUp               ActionType = "SIGN_UP"                // Executes a sign-up or registration sequence.
 	ActionExploreApplication   ActionType = "EXPLORE_APPLICATION"    // Initiates a comprehensive crawl/exploration of the application scope.
 	ActionFuzzEndpoint         ActionType = "FUZZ_ENDPOINT"          // Performs fuzzing against a specific API endpoint or form inputs.
+	ActionDecideNextStep       ActionType = "DECIDE_NEXT_STEP"       // Ties the scan process into the agents ability to decide, plan, react, replan or reorganize.
 
 	// -- Mission Control --
 	ActionConclude ActionType = "CONCLUDE" // Concludes the current mission.
