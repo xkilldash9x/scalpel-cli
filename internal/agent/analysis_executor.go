@@ -80,9 +80,12 @@ func (e *AnalysisExecutor) Execute(ctx context.Context, action Action) (*Executi
 			// Proceed without artifacts rather than failing the analysis.
 			artifacts = nil
 		}
-	} else if analyzer.Type() == core.TypeActive || analyzer.Type() == core.TypeAgent {
-		// Active analyzers require a session context.
-		return e.fail(ErrCodeExecutionFailure, "No active browser session available for active analysis.", nil), nil
+	} else {
+		analyzerType := analyzer.Type()
+		if analyzerType == core.TypeActive || analyzerType == core.TypeAgent {
+			// Active analyzers require a session context.
+			return e.fail(ErrCodeExecutionFailure, "No active browser session available for active analysis.", nil), nil
+		}
 	}
 
 	// 3. Initialize AnalysisContext
