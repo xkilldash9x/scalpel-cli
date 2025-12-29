@@ -8,7 +8,7 @@ import (
 
 	json "github.com/json-iterator/go"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser/humanoid"
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 	"go.uber.org/zap"
 )
 

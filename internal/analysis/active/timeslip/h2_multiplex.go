@@ -11,7 +11,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/network/customhttp"
+	"github.com/xkilldash9x/scalpel-cli/pkg/customhttp"
 	"go.uber.org/zap"
 )
 
