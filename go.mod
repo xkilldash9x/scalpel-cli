@@ -3,7 +3,6 @@ module github.com/xkilldash9x/scalpel-cli
 go 1.25.4
 
 require (
-	github.com/AdaLogics/go-fuzz-headers v0.0.0-20240806141605-e8a1dd7889d6
 	github.com/andybalholm/brotli v1.2.0
 	github.com/beevik/etree v1.6.0
 	github.com/cespare/xxhash/v2 v2.3.0

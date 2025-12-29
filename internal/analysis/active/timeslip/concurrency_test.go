@@ -17,7 +17,7 @@ import (
 	"golang.org/x/net/http2"
 
 	// -- ADDED --
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 )
 
 // --- III. Concurrency & Reliability Tests ---

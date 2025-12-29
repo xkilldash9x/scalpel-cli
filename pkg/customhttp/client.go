@@ -17,7 +17,7 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/observability" // Added import
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability" // Added import
 	"golang.org/x/net/http2"                                    // Added import
 	"go.uber.org/zap"
 )

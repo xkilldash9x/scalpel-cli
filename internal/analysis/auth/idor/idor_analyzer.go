@@ -7,9 +7,9 @@ import (
 	"log"
 	"runtime"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
+	"github.com/xkilldash9x/scalpel-cli/pkg/network"
 	"github.com/xkilldash9x/scalpel-cli/internal/jsoncompare"
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 )
 
 // IDORAnalyzer is the main orchestrator for the Insecure Direct Object Reference

@@ -16,7 +16,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 
 	// (Fix 4.1: Import centralized networking package)
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
+	"github.com/xkilldash9x/scalpel-cli/pkg/network"
 	"github.com/xkilldash9x/scalpel-cli/internal/jsoncompare"
 	"go.uber.org/zap"
 )
