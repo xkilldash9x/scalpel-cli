@@ -18,7 +18,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/autofix/coroner"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/llmutil"
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 	"go.uber.org/zap"
 )
 

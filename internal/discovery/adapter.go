@@ -7,7 +7,7 @@ import (
 	"net/http"
 
 	// This import is no longer needed since we are using the standard http.Client.
-	// "github.com/xkilldash9x/scalpel-cli/internal/browser/network"
+	// "github.com/xkilldash9x/scalpel-cli/pkg/network"
 )
 
 // HTTPClient interface (defined elsewhere in discovery package, e.g., passive.go):

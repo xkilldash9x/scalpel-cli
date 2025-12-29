@@ -12,7 +12,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
+	"github.com/xkilldash9x/scalpel-cli/pkg/network"
 	"go.uber.org/zap"
 )
 

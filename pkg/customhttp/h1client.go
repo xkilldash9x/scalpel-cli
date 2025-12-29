@@ -14,8 +14,8 @@ import (
 	"sync"
 	"time"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
-	"github.com/xkilldash9x/scalpel-cli/internal/observability" // Added import
+	"github.com/xkilldash9x/scalpel-cli/pkg/network"
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability" // Added import
 	"go.uber.org/zap"
 )
 
