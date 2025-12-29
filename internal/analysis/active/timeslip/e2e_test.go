@@ -18,7 +18,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/active/timeslip"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 )
 
 // MockReporter for E2E tests (Thread-safe).

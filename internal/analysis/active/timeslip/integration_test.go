@@ -22,7 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 
 	// -- ADDED --
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 )
 
 // Helper struct to track requests received by the mock server in a thread-safe manner.

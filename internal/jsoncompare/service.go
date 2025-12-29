@@ -14,7 +14,7 @@ import (
 	"github.com/google/go-cmp/cmp"
 	"github.com/google/go-cmp/cmp/cmpopts"
 	"github.com/google/uuid"
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 	"go.uber.org/zap"
 )
 

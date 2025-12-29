@@ -12,7 +12,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/analysis/core"
 	"github.com/xkilldash9x/scalpel-cli/internal/browser"
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
+	"github.com/xkilldash9x/scalpel-cli/pkg/network"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/discovery"
 	"github.com/xkilldash9x/scalpel-cli/internal/engine"

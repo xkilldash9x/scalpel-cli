@@ -19,7 +19,7 @@ import (
 	"time"
 
 	"github.com/xkilldash9x/scalpel-cli/cmd"
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 )
 
 const panicLogFile = "panic.log"

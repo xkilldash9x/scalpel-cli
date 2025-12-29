@@ -12,7 +12,7 @@ import (
 	"path/filepath"
 	"sort"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 	"go.uber.org/zap"
 	"golang.org/x/tools/go/packages"
 )

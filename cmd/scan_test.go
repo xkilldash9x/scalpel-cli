@@ -16,7 +16,7 @@ import (
 	"github.com/xkilldash9x/scalpel-cli/api/schemas"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/mocks"
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 	"github.com/xkilldash9x/scalpel-cli/internal/service"
 	"go.uber.org/zap/zapcore"
 )

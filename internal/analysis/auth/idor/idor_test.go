@@ -20,7 +20,7 @@ import (
 	"github.com/stretchr/testify/require"
 	"github.com/xkilldash9x/scalpel-cli/internal/config"
 	"github.com/xkilldash9x/scalpel-cli/internal/jsoncompare"
-	"github.com/xkilldash9x/scalpel-cli/internal/observability"
+	"github.com/xkilldash9x/scalpel-cli/pkg/observability"
 	"go.uber.org/goleak"
 )
 

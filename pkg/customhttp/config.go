@@ -7,7 +7,7 @@ import (
 	"net/url"
 	"time"
 
-	"github.com/xkilldash9x/scalpel-cli/internal/browser/network"
+	"github.com/xkilldash9x/scalpel-cli/pkg/network"
 )
 
 // ErrCredentialsNotFound is a sentinel error returned by a CredentialsProvider
