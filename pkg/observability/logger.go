@@ -18,7 +18,8 @@ var (
 	// globalLogger stores the global logger instance safely across goroutines.
 	globalLogger atomic.Pointer[zap.Logger]
 	// once ensures that initialization happens exactly once.
-	once sync.Once
+	// We use an atomic pointer to sync.Once to allow for safe resetting in tests.
+	oncePtr atomic.Pointer[sync.Once]
 )
 
 // ANSI color codes for the terminal.
@@ -46,11 +47,16 @@ var colorMap = map[string]string{
 	"white":   colorWhite,
 }
 
+func init() {
+	oncePtr.Store(new(sync.Once))
+}
+
 // Initialize sets up the global Zap logger based on configuration and a specified output writer.
 // This is the core, flexible initializer.
 func Initialize(cfg config.LoggerConfig, consoleWriter zapcore.WriteSyncer) {
-	// Ensures initialization logic runs only once.
-	once.Do(func() {
+	// Load the current 'Once' instance
+	o := oncePtr.Load()
+	o.Do(func() {
 		level := zap.NewAtomicLevel()
 		if err := level.UnmarshalText([]byte(cfg.Level)); err != nil {
 			level.SetLevel(zap.InfoLevel)
@@ -100,7 +106,8 @@ func InitializeLogger(cfg config.LoggerConfig) {
 // This function should ONLY be used in tests to ensure isolation.
 func ResetForTest() {
 	globalLogger.Store(nil)
-	once = sync.Once{}
+	// Atomically replace the old sync.Once with a fresh one
+	oncePtr.Store(new(sync.Once))
 }
 
 // SetLogger is a test helper that forcibly replaces the global logger instance.
@@ -152,6 +159,7 @@ func newColorizedLevelEncoder(colors config.ColorConfig) zapcore.LevelEncoder {
 func getEncoder(cfg config.LoggerConfig) zapcore.Encoder {
 	// --- Base Configuration ---
 	// Start with production-ready encoder settings.
+	// This includes EncodeCaller = ShortCallerEncoder by default.
 	encoderConfig := zap.NewProductionEncoderConfig()
 	// Use a more human-readable time format.
 	encoderConfig.EncodeTime = zapcore.TimeEncoderOfLayout("2006-01-02T15:04:05.000Z07:00")
@@ -161,6 +169,11 @@ func getEncoder(cfg config.LoggerConfig) zapcore.Encoder {
 	if cfg.Format == "console" {
 		// Enable colorized log levels for better visual distinction.
 		encoderConfig.EncodeLevel = newColorizedLevelEncoder(cfg.Colors)
+
+		// Note: We DO NOT set EncodeCaller to nil here.
+		// If the Entry has a caller (e.g. from zap.AddCaller), we must have an encoder
+		// or jsonEncoder.EncodeEntry will panic.
+		// We rely on the ShortCallerEncoder inherited from NewProductionEncoderConfig.
 
 		// Customize the encoder to create a clean, single-line log message.
 		// This avoids the multi-line, key-value output of the default console encoder.
