@@ -18,6 +18,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"os"
+	"sync"
 	"time"
 
 	"github.com/spf13/viper"
@@ -84,6 +85,7 @@ type Interface interface {
 // the application. It uses `mapstructure` tags to facilitate loading from
 // configuration files (e.g., YAML, JSON) via the Viper library.
 type Config struct {
+	mu           sync.RWMutex    `mapstructure:"-" yaml:"-"`
 	LoggerCfg    LoggerConfig    `mapstructure:"logger" yaml:"logger"`
 	DatabaseCfg  DatabaseConfig  `mapstructure:"database" yaml:"database"`
 	EngineCfg    EngineConfig    `mapstructure:"engine" yaml:"engine"`
@@ -101,72 +103,188 @@ type Config struct {
 
 // -- Interface Method Implementations (Getters) --
 
-func (c *Config) Logger() LoggerConfig       { return c.LoggerCfg }
-func (c *Config) Database() DatabaseConfig   { return c.DatabaseCfg }
-func (c *Config) Engine() EngineConfig       { return c.EngineCfg }
-func (c *Config) Browser() BrowserConfig     { return c.BrowserCfg }
-func (c *Config) Network() NetworkConfig     { return c.NetworkCfg }
-func (c *Config) IAST() IASTConfig           { return c.IASTCfg }
-func (c *Config) Scanners() ScannersConfig   { return c.ScannersCfg }
-func (c *Config) JWT() JWTConfig             { return c.ScannersCfg.Static.JWT }
-func (c *Config) Agent() AgentConfig         { return c.AgentCfg }
-func (c *Config) Discovery() DiscoveryConfig { return c.DiscoveryCfg }
-func (c *Config) Autofix() AutofixConfig     { return c.AutofixCfg }
-func (c *Config) Scan() ScanConfig           { return c.ScanCfg }
+func (c *Config) Logger() LoggerConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.LoggerCfg
+}
+func (c *Config) Database() DatabaseConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.DatabaseCfg
+}
+func (c *Config) Engine() EngineConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.EngineCfg
+}
+func (c *Config) Browser() BrowserConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.BrowserCfg
+}
+func (c *Config) Network() NetworkConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.NetworkCfg
+}
+func (c *Config) IAST() IASTConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.IASTCfg
+}
+func (c *Config) Scanners() ScannersConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.ScannersCfg
+}
+func (c *Config) JWT() JWTConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.ScannersCfg.Static.JWT
+}
+func (c *Config) Agent() AgentConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.AgentCfg
+}
+func (c *Config) Discovery() DiscoveryConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.DiscoveryCfg
+}
+func (c *Config) Autofix() AutofixConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.AutofixCfg
+}
+func (c *Config) Scan() ScanConfig {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+	return c.ScanCfg
+}
 
 // -- Interface Method Implementations (Setters) --
 
-func (c *Config) SetScanConfig(sc ScanConfig) { c.ScanCfg = sc }
+func (c *Config) SetScanConfig(sc ScanConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ScanCfg = sc
+}
 
 // Discovery Setters
-func (c *Config) SetDiscoveryMaxDepth(d int) { c.DiscoveryCfg.MaxDepth = d }
+func (c *Config) SetDiscoveryMaxDepth(d int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.DiscoveryCfg.MaxDepth = d
+}
 func (c *Config) SetDiscoveryIncludeSubdomains(b bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.DiscoveryCfg.IncludeSubdomains = b
 }
 
 // Engine Setters
-func (c *Config) SetEngineWorkerConcurrency(w int) { c.EngineCfg.WorkerConcurrency = w }
+func (c *Config) SetEngineWorkerConcurrency(w int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.EngineCfg.WorkerConcurrency = w
+}
 
 // Browser Setters
-func (c *Config) SetBrowserHeadless(b bool)        { c.BrowserCfg.Headless = b }
-func (c *Config) SetBrowserDisableCache(b bool)    { c.BrowserCfg.DisableCache = b }
-func (c *Config) SetBrowserDisableGPU(b bool)      { c.BrowserCfg.DisableGPU = b }
-func (c *Config) SetBrowserIgnoreTLSErrors(b bool) { c.BrowserCfg.IgnoreTLSErrors = b }
-func (c *Config) SetBrowserDebug(b bool)           { c.BrowserCfg.Debug = b }
+func (c *Config) SetBrowserHeadless(b bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.BrowserCfg.Headless = b
+}
+func (c *Config) SetBrowserDisableCache(b bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.BrowserCfg.DisableCache = b
+}
+func (c *Config) SetBrowserDisableGPU(b bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.BrowserCfg.DisableGPU = b
+}
+func (c *Config) SetBrowserIgnoreTLSErrors(b bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.BrowserCfg.IgnoreTLSErrors = b
+}
+func (c *Config) SetBrowserDebug(b bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.BrowserCfg.Debug = b
+}
 
 // Humanoid Setters
-func (c *Config) SetBrowserHumanoidEnabled(b bool) { c.BrowserCfg.Humanoid.Enabled = b }
+func (c *Config) SetBrowserHumanoidEnabled(b bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.BrowserCfg.Humanoid.Enabled = b
+}
 func (c *Config) SetBrowserHumanoidClickHoldMinMs(ms int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.BrowserCfg.Humanoid.ClickHoldMinMs = ms
 }
 func (c *Config) SetBrowserHumanoidClickHoldMaxMs(ms int) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.BrowserCfg.Humanoid.ClickHoldMaxMs = ms
 }
 func (c *Config) SetBrowserHumanoidKeyHoldMu(ms float64) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.BrowserCfg.Humanoid.KeyHoldMu = ms
 }
 
 // Network Setters
 func (c *Config) SetNetworkCaptureResponseBodies(b bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.NetworkCfg.CaptureResponseBodies = b
 }
 func (c *Config) SetNetworkNavigationTimeout(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.NetworkCfg.NavigationTimeout = d
 }
-func (c *Config) SetNetworkPostLoadWait(d time.Duration) { c.NetworkCfg.PostLoadWait = d }
-func (c *Config) SetNetworkIgnoreTLSErrors(b bool)       { c.NetworkCfg.IgnoreTLSErrors = b }
+func (c *Config) SetNetworkPostLoadWait(d time.Duration) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.NetworkCfg.PostLoadWait = d
+}
+func (c *Config) SetNetworkIgnoreTLSErrors(b bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.NetworkCfg.IgnoreTLSErrors = b
+}
 
 // IAST Setters
-func (c *Config) SetIASTEnabled(b bool) { c.IASTCfg.Enabled = b }
+func (c *Config) SetIASTEnabled(b bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.IASTCfg.Enabled = b
+}
 
 // JWT Setters
-func (c *Config) SetJWTEnabled(b bool) { c.ScannersCfg.Static.JWT.Enabled = b }
+func (c *Config) SetJWTEnabled(b bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	c.ScannersCfg.Static.JWT.Enabled = b
+}
 func (c *Config) SetJWTBruteForceEnabled(b bool) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.ScannersCfg.Static.JWT.BruteForceEnabled = b
 }
 
 // ATO Setter
 func (c *Config) SetATOConfig(atoCfg ATOConfig) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
 	c.ScannersCfg.Active.Auth.ATO = atoCfg
 }
 
