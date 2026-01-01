@@ -5,4 +5,4 @@ package cmd
 // This variable is typically set at build time using ldflags to inject
 // version information dynamically. For example:
 // go build -ldflags "-X github.com/xkilldash9x/scalpel-cli/cmd.Version=1.2.3"
-var Version = "Alpha"
+var Version = "v0.1.6"
