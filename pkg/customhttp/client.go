@@ -106,6 +106,69 @@ func (c *CustomClient) ConnectionCount() int {
 	return len(c.h1Clients) + len(c.h2Clients) + len(c.h3Clients)
 }
 
+// GetH1Connection returns the underlying net.Conn for an H1 connection to the specified host.
+// The host should be in "host:port" format (e.g., "example.com:443").
+// Returns nil if no H1 connection exists for the host or if the client is not connected.
+// This method is thread-safe.
+func (c *CustomClient) GetH1Connection(host string) net.Conn {
+	c.mu.RLock()
+	client, exists := c.h1Clients[host]
+	c.mu.RUnlock()
+
+	if !exists || client == nil {
+		return nil
+	}
+	return client.Conn
+}
+
+// GetH2Connection returns the underlying net.Conn for an H2 connection to the specified host.
+// The host should be in "host:port" format (e.g., "example.com:443").
+// Returns nil if no H2 connection exists for the host or if the client is not connected.
+// This method is thread-safe.
+func (c *CustomClient) GetH2Connection(host string) net.Conn {
+	c.mu.RLock()
+	client, exists := c.h2Clients[host]
+	c.mu.RUnlock()
+
+	if !exists || client == nil {
+		return nil
+	}
+	return client.Conn
+}
+
+// GetH3Connection returns the underlying net.Conn for an H3 connection to the specified host.
+// Note: HTTP/3 uses QUIC which manages connections differently. The underlying QUIC
+// connection is managed by the http3.Transport and is not directly exposed as a net.Conn.
+// This method always returns nil for H3 connections.
+// This method is thread-safe.
+func (c *CustomClient) GetH3Connection(host string) net.Conn {
+	// H3 uses QUIC which doesn't expose a traditional net.Conn.
+	// The connection is managed internally by quic-go's http3.Transport.
+	return nil
+}
+
+// GetConnection returns the underlying net.Conn for any active connection to the specified host.
+// It checks H2 and H1 connections in that order and returns the first one found.
+// The host should be in "host:port" format (e.g., "example.com:443").
+// Returns nil if no connection exists for the host.
+// Note: H3/QUIC connections are not included as they don't expose a traditional net.Conn.
+// This method is thread-safe.
+func (c *CustomClient) GetConnection(host string) net.Conn {
+	c.mu.RLock()
+	defer c.mu.RUnlock()
+
+	// Check H2 first (most common for modern HTTPS)
+	if client, exists := c.h2Clients[host]; exists && client != nil && client.Conn != nil {
+		return client.Conn
+	}
+	// Check H1
+	if client, exists := c.h1Clients[host]; exists && client != nil && client.Conn != nil {
+		return client.Conn
+	}
+	// H3/QUIC connections don't expose a traditional net.Conn
+	return nil
+}
+
 // Do executes a single HTTP request and returns the response. This is the main
 // entry point for the client. It orchestrates the entire request lifecycle,
 // including:
@@ -853,17 +916,19 @@ func isSameOrigin(u1, u2 *url.URL) bool {
 	}
 	p1 := u1.Port()
 	if p1 == "" {
-		if u1.Scheme == "https" {
+		switch u1.Scheme {
+		case "https":
 			p1 = "443"
-		} else if u1.Scheme == "http" {
+		case "http":
 			p1 = "80"
 		}
 	}
 	p2 := u2.Port()
 	if p2 == "" {
-		if u2.Scheme == "https" {
+		switch u2.Scheme {
+		case "https":
 			p2 = "443"
-		} else if u2.Scheme == "http" {
+		case "http":
 			p2 = "80"
 		}
 	}

@@ -14,6 +14,10 @@ import (
 	"time"
 )
 
+// DialContextFunc is a function type that matches the signature of net.Dialer.DialContext.
+// It can be used to provide custom connection establishment logic.
+type DialContextFunc func(ctx context.Context, network, address string) (net.Conn, error)
+
 // DialerConfig holds the complete configuration for establishing network connections,
 // including timeouts, keep-alive settings, TLS parameters, TCP options, custom DNS
 // resolvers, and proxy settings.
@@ -34,6 +38,11 @@ type DialerConfig struct {
 	// ProxyURL specifies the URL of an HTTP/HTTPS proxy server. If set, connections
 	// will be established through the proxy using the CONNECT method.
 	ProxyURL *url.URL
+	// DialContext allows providing a custom dial function for establishing TCP connections.
+	// If set, this function will be used instead of the default net.Dialer for direct connections.
+	// Note: When ProxyURL is set, this function is used to connect to the proxy server.
+	// The function should return a raw TCP connection; TLS wrapping is handled separately.
+	DialContext DialContextFunc
 }
 
 // Clone creates a deep copy of the DialerConfig, ensuring that mutable fields
@@ -54,6 +63,8 @@ func (c *DialerConfig) Clone() *DialerConfig {
 		proxyURLCopy := *c.ProxyURL
 		clone.ProxyURL = &proxyURLCopy
 	}
+	// DialContext is a function, safe to copy by value (shallow copy).
+	// The caller is responsible for ensuring their custom DialContext is thread-safe.
 	return &clone
 }
 
@@ -127,16 +138,23 @@ func DialTCPContext(ctx context.Context, network, address string, config *Dialer
 
 // dialDirect establishes a direct TCP connection to the target address.
 func dialDirect(ctx context.Context, network, address string, config *DialerConfig) (net.Conn, error) {
-	dialer := &net.Dialer{
-		Timeout:   config.Timeout,
-		KeepAlive: config.KeepAlive,
-		// Enable Happy Eyeballs (RFC 8305) for faster IPv4/IPv6 fallback.
-		FallbackDelay: 300 * time.Millisecond,
-		Resolver:      config.Resolver,
-	}
+	var rawConn net.Conn
+	var err error
 
 	// Step 1: Establish the raw TCP connection.
-	rawConn, err := dialer.DialContext(ctx, network, address)
+	// Use custom DialContext if provided, otherwise use the default net.Dialer.
+	if config.DialContext != nil {
+		rawConn, err = config.DialContext(ctx, network, address)
+	} else {
+		dialer := &net.Dialer{
+			Timeout:   config.Timeout,
+			KeepAlive: config.KeepAlive,
+			// Enable Happy Eyeballs (RFC 8305) for faster IPv4/IPv6 fallback.
+			FallbackDelay: 300 * time.Millisecond,
+			Resolver:      config.Resolver,
+		}
+		rawConn, err = dialer.DialContext(ctx, network, address)
+	}
 	if err != nil {
 		return nil, fmt.Errorf("tcp dial failed: %w", err)
 	}
@@ -276,9 +294,9 @@ func (c *prefixedConn) Read(p []byte) (int, error) {
 // both direct and proxied connections transparently.
 //
 // This function orchestrates the entire connection process:
-// 1. Establishes a raw TCP connection (or a proxy tunnel) via DialTCPContext.
-// 2. If `config.TLSConfig` is not nil, it performs a TLS handshake over the
-//    established connection to upgrade it to a secure `tls.Conn`.
+//  1. Establishes a raw TCP connection (or a proxy tunnel) via DialTCPContext.
+//  2. If `config.TLSConfig` is not nil, it performs a TLS handshake over the
+//     established connection to upgrade it to a secure `tls.Conn`.
 //
 // It is suitable for creating connections for protocols that handle their own
 // application layer logic, such as WebSockets.

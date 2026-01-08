@@ -1175,7 +1175,7 @@ func (c *H2Client) processHeadersFrame(stream *h2StreamState, f *http2.MetaHeade
 				stream.StatusCode = status
 			}
 		} else {
-			stream.Headers.Add(http.CanonicalHeaderKey(hf.Name), hf.Value)
+			stream.Headers.Add(hf.Name, hf.Value)
 		}
 	}
 
