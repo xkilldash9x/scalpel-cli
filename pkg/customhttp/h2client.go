@@ -257,6 +257,11 @@ func (c *H2Client) Connect(ctx context.Context) error {
 func (c *H2Client) dialH2Connection(ctx context.Context) (net.Conn, error) {
 	dialerConfig := c.Config.DialerConfig.Clone()
 
+	// Use custom DialContext if provided in ClientConfig
+	if c.Config.DialContext != nil {
+		dialerConfig.DialContext = c.Config.DialContext
+	}
+
 	if dialerConfig.TLSConfig == nil {
 		dialerConfig.TLSConfig = network.NewDialerConfig().TLSConfig.Clone()
 	}

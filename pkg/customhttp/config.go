@@ -1,7 +1,9 @@
 package customhttp
 
 import (
+	"context"
 	"errors"
+	"net"
 	"net/http"
 	"net/http/cookiejar"
 	"net/url"
@@ -131,6 +133,9 @@ type ClientConfig struct {
 	// proxy settings.
 	DialerConfig *network.DialerConfig
 
+	// Optional custom dial context for advanced connection control.
+	DialContext func(ctx context.Context, network, addr string) (net.Conn, error)
+
 	// Specifies the cookie jar for the client. If nil, cookies are not managed.
 	CookieJar http.CookieJar
 
@@ -176,6 +181,7 @@ func NewBrowserClientConfig() *ClientConfig {
 
 	return &ClientConfig{
 		DialerConfig:        network.NewDialerConfig(),
+		DialContext:         nil, // Default to nil; can be set by user
 		CookieJar:           jar,
 		RequestTimeout:      30 * time.Second,
 		IdleConnTimeout:     90 * time.Second, // Standard browser idle timeout

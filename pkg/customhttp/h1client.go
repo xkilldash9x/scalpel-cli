@@ -85,6 +85,12 @@ func (c *H1Client) Connect(ctx context.Context) error {
 
 	// Clone the dialer config to modify it safely.
 	dialerConfig := c.Config.DialerConfig.Clone()
+
+	// Use custom DialContext if provided in ClientConfig
+	if c.Config.DialContext != nil {
+		dialerConfig.DialContext = c.Config.DialContext
+	}
+
 	// Ensure NoDelay is set for responsiveness, crucial for H1.
 	dialerConfig.NoDelay = true
 
